@@ -4,6 +4,7 @@ import { Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import type { RemoteInferenceTransportStatus } from "@/hooks/useRemoteInferenceTransport";
+import type { UseGpuKnobs } from "@/hooks/useGpuLauncher";
 import {
   buildModalRunLine,
   LOCAL_SECRET_PLACEHOLDER,
@@ -39,7 +40,18 @@ const ModalRunLine: React.FC<{
    * workspace the Lab's own Start GPU would. Empty ⇒ the CLI resolves it. */
   profile: string;
   environment: string;
-}> = ({ config, transport, hubIdDefault, task, profile, environment }) => {
+  /** Precision + GPU type, so the pasted line loads the same weights on the
+   * same hardware Start GPU would. */
+  knobs: UseGpuKnobs;
+}> = ({
+  config,
+  transport,
+  hubIdDefault,
+  task,
+  profile,
+  environment,
+  knobs,
+}) => {
   const { t } = useTranslation();
   const { toast } = useToast();
 
@@ -50,6 +62,11 @@ const ModalRunLine: React.FC<{
     // side is the same silent zero-chunk failure a wrong horizon is.
     engine: config.engine,
     task,
+    // The GPU side's own two. The dtype is a flag; the GPU type is an
+    // assignment in front of the command, because the wrapper's decorator is
+    // evaluated at import and no flag could reach it.
+    modelDtype: knobs.modelDtype,
+    gpu: knobs.gpu,
     horizon: config.horizon,
     fps: config.fps,
     videoCodec: config.videoCodec,

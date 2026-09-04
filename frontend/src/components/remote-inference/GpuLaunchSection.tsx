@@ -18,7 +18,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { UseGpuLauncher, UseGpuTargets } from "@/hooks/useGpuLauncher";
+import type {
+  UseGpuKnobs,
+  UseGpuLauncher,
+  UseGpuTargets,
+} from "@/hooks/useGpuLauncher";
 import { MODAL_WRAPPERS } from "./modalCommand";
 import type { RemoteRunConfig } from "./remoteRunConfig";
 
@@ -58,6 +62,10 @@ const GpuLaunchSection: React.FC<{
   /** This machine's Modal profiles + the selected profile's environments, and
    * the remembered selection. */
   targets: UseGpuTargets;
+  /** Precision + GPU type, chosen under Advanced. GPU-side only, which is why
+   * they are not on `config`: the arm neither knows nor cares what dtype the
+   * policy loaded at. */
+  knobs: UseGpuKnobs;
   config: RemoteRunConfig;
   /** The Hub id to launch with when the field is left empty. */
   hubIdDefault: string;
@@ -68,7 +76,15 @@ const GpuLaunchSection: React.FC<{
    * GPU (its server refuses to start, and the failure used to be misread as
    * a tailnet problem). */
   taskRequired: boolean;
-}> = ({ launcher, targets, config, hubIdDefault, task, taskRequired }) => {
+}> = ({
+  launcher,
+  targets,
+  knobs,
+  config,
+  hubIdDefault,
+  task,
+  taskRequired,
+}) => {
   const { t } = useTranslation();
   const { status, pending, error, start, stop, launched } = launcher;
   const {
@@ -99,6 +115,12 @@ const GpuLaunchSection: React.FC<{
     // decides" is for API clients; the panel is explicit about who pays.
     profile,
     environment,
+    // Same rule for the GPU: the picker preselects the wrapper's own pin and
+    // SENDS it, so the launch names the hardware rather than inheriting it.
+    // The precision is the exception — empty is a real answer there ("as the
+    // checkpoint saved it") and it is sent as empty.
+    model_dtype: knobs.modelDtype,
+    gpu: knobs.gpu,
   };
   const launch = () => void start(startBody);
   const taskMissing = taskRequired && task.trim() === "";
@@ -131,6 +153,11 @@ const GpuLaunchSection: React.FC<{
           fps: status.fps,
           video_codec: status.video_codec,
           s_min: status.s_min,
+          // Undefined on a server too old to echo them; "" is a real value
+          // (the checkpoint's dtype, the wrapper's pin) and must not be
+          // confused with it — see the two comparisons below.
+          model_dtype: status.model_dtype ?? null,
+          gpu: status.gpu ?? null,
         }
       : null;
   const reference: {
@@ -141,6 +168,8 @@ const GpuLaunchSection: React.FC<{
     fps: number;
     video_codec: string;
     s_min: number | null;
+    model_dtype: string | null;
+    gpu: string | null;
   } | null = echoed ?? launched;
   const drifted: string[] = [];
   if (reference && up) {
@@ -159,6 +188,19 @@ const GpuLaunchSection: React.FC<{
       reference.s_min !== startBody.s_min
     )
       drifted.push("s_min");
+    // Neither of these two can be changed under a running server either: the
+    // precision is decided while the weights load, and the GPU type when the
+    // container is created. Null is "unknown" (a server too old to echo, or
+    // this tab's own memory of a start that predates the knobs), not "differs".
+    if (
+      reference.model_dtype != null &&
+      reference.model_dtype !== startBody.model_dtype
+    )
+      drifted.push("model_dtype");
+    // The empty echo is unknown too, and only here: a launch that sent no GPU
+    // ran on the wrapper's pin, which is the value this form's default names —
+    // so calling that drift would warn about a GPU that is the same GPU.
+    if (reference.gpu && reference.gpu !== startBody.gpu) drifted.push("gpu");
   }
   const restart = async () => {
     await stop();
@@ -302,6 +344,9 @@ const GpuLaunchSection: React.FC<{
             {taskMissing ? `${t("remoteInference.gpu.taskRequired")} ` : ""}
             {t("remoteInference.gpu.idleHint", {
               wrapper: MODAL_WRAPPERS[config.engine],
+              // The GPU it will actually ask Modal for — data, and no longer
+              // safe to write into the sentence: it is a choice now (S3.8e).
+              gpu: knobs.gpu,
             })}
           </p>
         </>
@@ -394,6 +439,11 @@ const GpuLaunchSection: React.FC<{
                 {reference.engine === "rtc" && reference.s_min != null
                   ? ` · s_min ${reference.s_min}`
                   : ""}
+                {/* The two GPU-side values, when the record has them. The
+                    precision is shown only when one was asked for — an empty
+                    echo means the checkpoint's own, which is not a value. */}
+                {reference.gpu ? ` · ${reference.gpu}` : ""}
+                {reference.model_dtype ? ` · ${reference.model_dtype}` : ""}
               </span>
             </span>
           </p>

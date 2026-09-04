@@ -39,6 +39,15 @@ export interface ModalRunLineInput {
    * there while the robot side has it does not fail, it just makes the policy
    * worse in ways that look like the policy being bad. Empty ⇒ no flag. */
   task: string;
+  /** The precision the checkpoint is loaded at. Empty ⇒ NO flag, which is the
+   * dtype the checkpoint was saved with — not a default this line picks. */
+  modelDtype: string;
+  /** The Modal GPU to run on. It cannot be a flag: `_FN_KWARGS["gpu"]` is
+   * evaluated when `modal run` imports the wrapper, before Click parses
+   * anything — so it is emitted as an env-var ASSIGNMENT prefixing the
+   * command, exactly as the Lab's own launcher passes it. Empty ⇒ omitted,
+   * which leaves the wrapper's own pin. */
+  gpu: string;
   horizon: number;
   fps: number;
   videoCodec: "H264" | "MJPEG";
@@ -114,12 +123,16 @@ export function buildModalRunLine(input: ModalRunLineInput): string {
   const task = input.task.trim();
   const profile = input.profile.trim();
   const environment = input.environment.trim();
+  const modelDtype = input.modelDtype.trim();
+  const gpu = input.gpu.trim();
   const parts = [
-    // The profile is an env-var ASSIGNMENT in front of the command, not a
-    // flag: `modal run` has no --profile, and the CLI reads MODAL_PROFILE per
-    // process — which is exactly what makes this line safe to paste without
-    // re-pointing every other terminal on the machine.
-    `${profile ? `MODAL_PROFILE=${profile} ` : ""}modal run` +
+    // Two env-var ASSIGNMENTS in front of the command, not flags — and for two
+    // different reasons. `modal run` has no --profile, and the CLI reads
+    // MODAL_PROFILE per process, which is what makes this line safe to paste
+    // without re-pointing every other terminal on the machine. DRTC_GPU has no
+    // flag it COULD be: both wrappers build `@app.function(gpu=…)` at import,
+    // before Click parses anything, so the environment is the only channel.
+    `${profile ? `MODAL_PROFILE=${profile} ` : ""}${gpu ? `DRTC_GPU=${gpu} ` : ""}modal run` +
       // `--env` is a `modal run` OPTION, so it goes BEFORE the wrapper path.
       // After it, Click hands it to the wrapper's own local_entrypoint — which
       // has no such parameter — and the command dies on an unknown flag.
@@ -130,6 +143,10 @@ export function buildModalRunLine(input: ModalRunLineInput): string {
     // line reads the same way the function does. `--s-min` sits between --fps
     // and --video-codec there, which is where it goes here.
     ...(task ? [`--task ${shellQuote(task)}`] : []),
+    // Between --task and --horizon, where both wrappers' local_entrypoint
+    // signatures put it. Omitted when unset, like --task: unset is not a
+    // default, it is the dtype the checkpoint was saved with.
+    ...(modelDtype ? [`--model-dtype ${modelDtype}`] : []),
     `--horizon ${input.horizon}`,
     `--fps ${input.fps}`,
     // RTC only. The sync wrapper has no --s-min flag at all, so emitting it

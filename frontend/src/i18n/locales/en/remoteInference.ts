@@ -24,9 +24,13 @@ export default {
     // the codec id is the wire value, the numbers are the ones that go out.
     // Two whole sentences rather than one plus a fragment: `s_min` only
     // reaches the wire for rtc, so it is only claimed there.
-    advancedSummary: "Transport: horizon {{horizon}} · {{fps}} fps · {{codec}}",
+    // {{extra}} is the GPU side's own half of the line — " · A100 · bfloat16",
+    // built from identifiers alone, so there is nothing inside it to translate
+    // and it is appended rather than concatenated with words.
+    advancedSummary:
+      "Transport: horizon {{horizon}} · {{fps}} fps · {{codec}}{{extra}}",
     advancedSummaryRtc:
-      "Transport: horizon {{horizon}} · {{fps}} fps · {{codec}} · minimum budget {{sMin}}",
+      "Transport: horizon {{horizon}} · {{fps}} fps · {{codec}} · minimum budget {{sMin}}{{extra}}",
     transportGroupHint:
       "These must match the GPU side exactly. A mismatch is not an error: the wire schema is fingerprinted, so mismatched packets are dropped silently and the run looks healthy while receiving nothing.",
     horizonLabel: "Horizon",
@@ -43,6 +47,19 @@ export default {
     // identifier in this panel.
     sMinHint:
       "Steps of the plan the arm keeps in hand for the round trip. It must be the same number as --s-min in the command above: the arm works out which part of the next chunk is still fresh from it, and the GPU takes that answer on trust.",
+    // The two GPU-side knobs (S3.8e). Nothing here has to match the arm — they
+    // decide what the container loads and what it loads onto.
+    gpuGroupHint:
+      "These two are the GPU's alone: they decide how fast a chunk comes back, and what the hour costs. Changing either needs the GPU restarted.",
+    precisionLabel: "Precision",
+    // The one option that is prose: it stands for passing no flag at all. The
+    // others are torch dtype names — wire values, never translated.
+    precisionCheckpoint: "Checkpoint default",
+    precisionHint:
+      "float32 is what most checkpoints are saved as, and it runs without autocast — the slowest path, and the one that runs out of memory first. bfloat16 is the lever to pull when a chunk takes too long to come back or the container is out of VRAM. Left at the checkpoint default, nothing is overridden.",
+    gpuLabel: "GPU",
+    gpuHint:
+      "The Modal GPU the policy server runs on. Bigger is faster and dearer per hour; it is the second lever after precision, and it is billed either way.",
   },
   // The per-role camera picker. It appears ONLY for checkpoint cameras that
   // matched nothing by name, so most runs never see it.
@@ -92,9 +109,11 @@ export default {
     retry: "Try again",
     stop: "Stop GPU",
     cancel: "Cancel",
-    // {{wrapper}} is the wrapper's PATH — data, shown verbatim.
+    // {{wrapper}} is the wrapper's PATH and {{gpu}} the Modal GPU spec — both
+    // data, shown verbatim. The GPU is interpolated rather than written into
+    // the sentence because it is a choice now (S3.8e).
     idleHint:
-      "Runs {{wrapper}} on a Modal A100 from this machine. Cold start is usually 1-3 minutes; the room and the credentials are filled in for you.",
+      "Runs {{wrapper}} on a Modal {{gpu}} from this machine. Cold start is usually 1-3 minutes; the room and the credentials are filled in for you.",
     // {{seconds}} is a plain integer, deliberately not i18next's magic `count`.
     elapsed: "{{seconds}}s",
     // Backend phase values. Matched on, never displayed raw — the raw value is
@@ -126,6 +145,9 @@ export default {
     // Drift between the form and the running server. {{fields}} is a list of
     // flag NAMES (engine, horizon, fps, codec, s_min, policy, task) — data.
     // The launched values follow the sentence, verbatim.
+    // (model_dtype and gpu join that list since S3.8e: a running container
+    // cannot change either — the precision is decided while the weights load,
+    // the GPU when the container is created.)
     driftBody:
       "You changed {{fields}} since the GPU was started. A running server keeps the values it was started with, and a mismatch is a run that receives nothing — not an error. It is running:",
     restart: "Restart GPU with these settings",

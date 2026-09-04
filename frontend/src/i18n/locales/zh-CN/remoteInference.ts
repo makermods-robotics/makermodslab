@@ -15,9 +15,12 @@ export default {
     // “高级参数”折叠标题下的摘要行。其中每个取值都是实时数据 —— 编码 id 是
     // 线上取值，数字就是实际发出的数字。写成两句完整的话而不是一句加片段：
     // s_min 只有 rtc 才会真正上线，因此只在那一句里提到它。
-    advancedSummary: "传输：horizon {{horizon}} · {{fps}} fps · {{codec}}",
+    // {{extra}} 是 GPU 侧的那一半（形如 " · A100 · bfloat16"），全部由标识符
+    // 组成，里面没有可翻译的内容，因此整体拼接而不拆成词。
+    advancedSummary:
+      "传输：horizon {{horizon}} · {{fps}} fps · {{codec}}{{extra}}",
     advancedSummaryRtc:
-      "传输：horizon {{horizon}} · {{fps}} fps · {{codec}} · 最小预留 {{sMin}}",
+      "传输：horizon {{horizon}} · {{fps}} fps · {{codec}} · 最小预留 {{sMin}}{{extra}}",
     transportGroupHint:
       "这几项必须与 GPU 侧完全一致。不一致不会报错：线上协议带有 schema 指纹，不匹配的数据包会被静默丢弃，运行看上去正常却收不到任何东西。",
     horizonLabel: "Horizon",
@@ -32,6 +35,19 @@ export default {
     // "--s-min" 是命令行标志名，与本面板中其他标识符一样保留拉丁文写法。
     sMinHint:
       "机械臂为一次往返预留的计划步数。它必须和上面命令里的 --s-min 完全一致：机械臂据此算出下一个动作块中还“新鲜”的部分，而 GPU 会直接采信这个结果。",
+    // GPU 侧的两个参数（S3.8e）。它们不需要与机械臂一致 —— 决定的是容器加载
+    // 什么、跑在什么硬件上。
+    gpuGroupHint:
+      "这两项只属于 GPU 侧：它们决定一个动作块多久返回，以及每小时的花费。修改任一项都需要重启 GPU。",
+    precisionLabel: "精度",
+    // 只有这一个选项是文案：它表示不传任何标志。其余都是 torch dtype 名称，
+    // 属于线上取值，不翻译。
+    precisionCheckpoint: "检查点默认值",
+    precisionHint:
+      "float32 是多数检查点保存时的精度，而且不会走 autocast —— 最慢的一条路，也是最先耗尽显存的一条。当一个动作块返回太慢、或容器显存不足时，bfloat16 就是可以拉的那根杠杆。保持检查点默认值时，不会覆盖任何设置。",
+    gpuLabel: "GPU",
+    gpuHint:
+      "策略服务运行所用的 Modal GPU。越大越快、每小时也越贵；它是继精度之后的第二根杠杆，而且无论如何都在计费。",
   },
   // 按角色绑定摄像头。只有当检查点的某个摄像头在机器人上找不到同名摄像头时才会出现。
   cameraRoles: {
@@ -74,9 +90,10 @@ export default {
     retry: "重试",
     stop: "停止 GPU",
     cancel: "取消",
-    // {{wrapper}} 是包装脚本的路径，属于数据，原样显示。
+    // {{wrapper}} 是包装脚本的路径，{{gpu}} 是 Modal 的 GPU 规格，都属于数据，
+    // 原样显示。GPU 改为插值而不是写死在句子里，因为它现在是可选的（S3.8e）。
     idleHint:
-      "从本机在 Modal A100 上运行 {{wrapper}}。冷启动通常需要 1-3 分钟；房间和凭据会自动填好。",
+      "从本机在 Modal {{gpu}} 上运行 {{wrapper}}。冷启动通常需要 1-3 分钟；房间和凭据会自动填好。",
     // {{seconds}} 是普通整数，刻意不使用 i18next 的 count 机制。
     elapsed: "{{seconds}} 秒",
     // 后端阶段取值。用于匹配，不直接展示 — 原值只作为新版服务端引入新阶段时的兜底。

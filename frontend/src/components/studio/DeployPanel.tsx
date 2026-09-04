@@ -63,7 +63,11 @@ import {
   transportIsReady,
   useRemoteInferenceTransport,
 } from "@/hooks/useRemoteInferenceTransport";
-import { useGpuLauncher, useGpuTargets } from "@/hooks/useGpuLauncher";
+import {
+  useGpuKnobs,
+  useGpuLauncher,
+  useGpuTargets,
+} from "@/hooks/useGpuLauncher";
 import CameraRoleBindings, {
   type CameraRoleOption,
   type CameraRoleSlot,
@@ -465,6 +469,11 @@ const DeployPanel: React.FC = () => {
   // calls), not of the launch, and it must keep answering — and keep being
   // pickable — while a GPU is up.
   const gpuTargets = useGpuTargets(open && remote);
+  // WHAT IT RUNS AS and WHAT IT RUNS ON (S3.8e). Remembered per Lab like the
+  // target above, and owned here for the same reason: the picker lives under
+  // Advanced, the launch reads it from the GPU card, and the generated `modal
+  // run` line has to say the same thing as both.
+  const gpuKnobs = useGpuKnobs();
 
   // Human in the loop is not startable on a remote run: the GPU child has no
   // takeover protocol, so there is no way to hand the arm to the leader
@@ -2051,6 +2060,7 @@ const DeployPanel: React.FC = () => {
                 <GpuLaunchSection
                   launcher={gpu}
                   targets={gpuTargets}
+                  knobs={gpuKnobs}
                   config={remoteConfig}
                   hubIdDefault={hubIdDefault}
                   // The SAME string the start request sends, so the GPU side
@@ -2069,10 +2079,12 @@ const DeployPanel: React.FC = () => {
                   // So the pasted line bills the same workspace Start GPU would.
                   profile={gpuTargets.profile}
                   environment={gpuTargets.environment}
+                  knobs={gpuKnobs}
                 />
                 <RemoteAdvancedSection
                   config={remoteConfig}
                   onChange={setRemoteConfig}
+                  knobs={gpuKnobs}
                   checkpointHorizon={checkpointHorizon}
                   open={transportAdvancedOpen}
                   onOpenChange={setTransportAdvancedOpen}

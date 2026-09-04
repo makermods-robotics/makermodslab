@@ -1564,3 +1564,183 @@ Both tsc projects clean. `npx vitest run` 30 files / 335 tests green.
   the literal `makermodslab --sfu --sfu-external-ip` in a `<pre>` (data,
   verbatim) and the backend's `sfu_install_hint` when it sent one — which
   closes the "one piece of diagnostic prose S3.9 loses" note above.
+
+## S3.8e as built (2026-09-04)
+
+Two knobs, because MolmoAct2 in `float32` measured ~1 s per chunk on an A100 —
+over the 867 ms an rtc run has to spend, with nothing in the UI able to do
+anything about it. `--model-dtype` had existed on both wrappers since S3.7a and
+nothing set it; the GPU type was a pin nobody could reach. Now the panel sets
+both, per launch.
+
+### They travel by different doors, and one of them had no choice
+
+`model_dtype` is a wrapper FLAG. `build_argv` emits `--model-dtype <v>` only
+when set, between `--task` and `--horizon` (where both `local_entrypoint`
+signatures put it), and unset stays unset — that is not a default this side
+picks, it is the dtype the checkpoint was saved with.
+
+The GPU type **cannot** be a flag. `_FN_KWARGS["gpu"]` is evaluated when
+`modal run` IMPORTS the wrapper on the operator's own machine, before Click has
+parsed a single argument, so by the time a flag could be read the Modal function
+is already declared. So it rides the child env: `child_env` exports `DRTC_GPU`
+when set, beside `MODAL_PROFILE`, and both wrappers now read
+`os.environ.get("DRTC_GPU") or "A100"` at import. **Both pins are unchanged** —
+an unset variable is byte-for-byte the old behaviour, which is what every
+hand-typed `modal run` in `docs/drtc/README.md` still gets.
+
+### The allowlist is closed, and it is checked before the spawn
+
+`modal_launcher.GpuChoice` (`"" | A10G | L4 | A100 | A100-80GB | H100 | H200`)
+and `ModelDtypeChoice` (`"" | float32 | bfloat16 | float16`) are the one
+definition: `GpuStartBody` annotates its two fields with those types rather than
+repeating them, and `GPU_TYPES` / `MODEL_DTYPES` (the same sets without the
+empty member) are what a refusal lists. `check_knobs` re-checks both in
+`start()`, first thing after the Hub id and before the PATH lookup, the listing
+and the transport — because `start()` is a plain function and a pydantic field
+cannot guard a caller that never built the model. An off-list value is a
+`gpu.launch_failed` in a millisecond; the alternatives are a Modal error deep in
+a cold-start log (the GPU) or a refusal inside the container after the image has
+come up (the dtype).
+
+Closed rather than free-form on purpose, and this is where it differs from
+`profile` / `environment`: those name THIS MACHINE's own resolvable things and
+are checked against its listings, while a plausible-looking wrong GPU
+("A100-40GB") is an hour billed on hardware nobody chose.
+
+### The status echoes both, on `task`'s convention
+
+`model_dtype` and `gpu` join the launched tuple in `_status_locked` /
+`GpuStatusResponse`, and they follow `_task`'s rule rather than `_profile`'s:
+echoed raw, null only while idle. `""` is a REAL answer for both — "the dtype
+the checkpoint saved" and "the wrapper's own pin" — where an unchosen `profile`
+genuinely means "we did not pick". The launch log line gains the same
+`DRTC_GPU=<v> ` prefix the generated command shows, so the two stay comparable
+character for character.
+
+### The panel
+
+The two selects sit in `RemoteAdvancedSection` under a divider, with their own
+hint: nothing there has to MATCH the arm the way horizon/fps/codec do, which is
+the whole reason the transport group has the warning it has. Their values ride
+the Advanced summary line as a data suffix (`{{extra}}`, " · A100 · bfloat16"),
+so the numbers stay readable unopened.
+
+They are **not** on `RemoteRunConfig`. Everything on that object goes to both
+halves of the run — it exists so the two cannot disagree about the wire schema —
+and these two go only to the GPU. They live in `useGpuKnobs()` beside
+`useGpuTargets()`, remembered per Lab in localStorage under the same rule (a
+remembered value that is no longer in the allowlist falls back silently), and
+the panel threads them to the GPU card, the generated command and the selects
+from one place.
+
+The GPU picker preselects **A100 and SENDS it**: the pin is the default, so
+nothing changes for a run that touches neither knob, but the launch names its
+hardware rather than inheriting a value that could be re-pinned under it. The
+precision defaults to "Checkpoint default", which sends `""` (Radix refuses an
+empty `SelectItem` value, so the option carries a sentinel that never leaves
+the component).
+
+The drift warning covers both. `model_dtype` compares whenever the record has
+one (null = a server too old to echo, "unknown" rather than "differs"); `gpu`
+compares only when the echo is NON-EMPTY, because a launch that sent no GPU ran
+on the pin this form's default already names — warning there would be warning
+about the same GPU. `remoteInference.gpu.idleHint` stopped saying "a Modal A100"
+and interpolates the selected one.
+
+### Localization
+
+en + zh-CN both edited; parity and dynamic-key tests pass. Added
+`remoteInference.form.{gpuGroupHint,precisionLabel,precisionCheckpoint,
+precisionHint,gpuLabel,gpuHint}`; `form.advancedSummary{,Rtc}` and
+`gpu.idleHint` gained an interpolation each. Every option LABEL is a wire value
+(`float32`, `bfloat16`, `A100-80GB`) and is rendered verbatim in both catalogs
+— only the field labels and the help copy are translated.
+
+### Checks
+
+`ruff check` / `ruff format --check` clean; `pytest -q` green (3121) with seven
+new launcher tests — the flag only when set and where the signature puts it,
+`DRTC_GPU` only when set and never otherwise, both off-list refusals before any
+spawn, both knobs reaching the argv/env/status, and the unset echo. `docs/api/openapi.json` regenerated —
+two enum'd request fields and two nullable response fields. Frontend: `npm run
+lint` 38 problems / 4 errors (the unmoved baseline), both tsc projects clean,
+`npx vitest run` 30 files / 343 tests (five new in `modalCommand.test.ts`), `npx vite build` clean to a scratch dir.
+
+## S3.9a as built (2026-09-04) — one tailnet node
+
+21 rows named `modal-policy-1` … `modal-policy-21` in the Tailscale admin
+console, one per `--tailscale` launch. Not a bug in anything: `_tailscale_up`
+ran `tailscaled --state=mem:` on purpose, and the docstring argued for it —
+keep no state, and a dead container leaves nothing behind. The cost was that
+"nothing behind" includes the node's identity.
+
+### The mechanism is the state file, and nothing else
+
+Tailscale identifies a node by its NODE KEY, which lives in tailscaled's state
+file. So "the same node every launch" is not a flag, a hostname or a tag — it
+is one file surviving the container. `tailscale up` has no `--ephemeral` flag
+either; ephemeral-ness lives on the KEY. Both wrappers now run
+`tailscaled --state=/tailscale/tailscaled.state`, where `/tailscale` is a
+DEDICATED Modal Volume (`makermodslab-tailscale-state`, `create_if_missing`)
+mounted beside `/cache` in the shared `_FN_KWARGS`. Dedicated rather than
+hf-cache for one reason with a number on it: a 4 KB state commit must not
+re-commit a 20 GB model cache.
+
+### Login is resume-first, fall-back-always
+
+State file present → `tailscale up --hostname=modal-policy` with **no**
+`--auth-key`, bounded to `_TS_RESUME_TIMEOUT` (20 s). Anything but rc=0 → the
+original `--auth-key` path, which is also what a first-ever run takes. The
+fallback is deliberately undiscriminating: an expired node key and a
+`NeedsLogin` that printed a login URL and then hit `--timeout` both exit
+non-zero, and the answer for both is the same, so the code does not try to tell
+them apart. `subprocess.TimeoutExpired` is folded into the same shape (rc=124)
+rather than raising, so a wedged `tailscale up` degrades to "log in again"
+instead of killing the run. The key is never printed — the resume line has no
+key in it and the fallback line says `--auth-key=<redacted>`, unchanged; the
+`CompletedProcess` the helper returns carries a scrubbed `args` so the key
+cannot reach a traceback either.
+
+Two commits, because a Modal Volume write is container-local until one happens:
+once the backend reports Running (the moment the node key exists), and again in
+a `finally` around `asyncio.run(policy.main())` so a rotated key is kept and an
+exception does not lose it. A commit failure is printed and swallowed — it
+costs one extra console row next launch, not the session. The `hf_cache` Volume
+has never been committed explicitly and still is not: it is written by
+`from_pretrained` and flushed at function exit, and its failure mode is a
+re-download, not a lost identity.
+
+### What the operator has to change, and the collision rule
+
+The `tailscale-auth` key must now be REUSABLE and **NON-ephemeral**, which is
+the opposite of what `docs/drtc/README.md` asked for before. The control plane
+deletes an ephemeral node the moment it goes offline, so a persisted node key
+for it is dead on the next launch and re-registers as a new node. With the
+CURRENT ephemeral key the change still yields ONE node while the GPU stays
+online — and a fresh one after every gap. This is the one manual step:
+`modal secret create tailscale-auth TS_AUTHKEY=tskey-auth-... --force` with a
+key minted with Ephemeral unticked.
+
+The collision is stated plainly rather than engineered around: two containers
+sharing the state log in as the SAME node, and the later `tailscale up`
+displaces the earlier one from the tailnet. The Lab's one-launcher gate and its
+orphan reaper make that rare, and `DRTC_TS_EPHEMERAL=1` restores `--state=mem:`
+plus always-`--auth-key` byte-for-byte for a deliberate parallel run. It rides
+the same channel `LIVEKIT_API_KEY` does — read in `main()` on the operator's
+own machine, forwarded as a `fn.remote` kwarg, re-exported into the container
+env so `_ephemeral_node()` stays the single reader — because Modal does not
+ship the caller's environment. `modal_launcher.child_env` was NOT extended;
+`modal_policy.py`'s `/reset` `modal.Dict` records it so a respawn replays the
+same identity, and a dict written before today reads back as False, the stable
+node.
+
+### Checks
+
+`ruff check` / `ruff format --check` clean. Four new source-level tests in
+`tests/test_drtc_modal_wrappers.py`, in that file's existing regex-over-the-text
+style (these wrappers import `modal` at top level and are not importable in the
+suite): both name the state path and the Volume, `--state=mem:` survives only
+inside the `DRTC_TS_EPHEMERAL` branch, both read the variable, and the whole
+tailscale block is asserted BYTE-IDENTICAL between the two files — which is the
+real guard, given the block is a hand-mirrored duplicate.

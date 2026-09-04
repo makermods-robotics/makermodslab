@@ -57,6 +57,13 @@ export interface GpuStatus {
   fps: number | null;
   video_codec: string | null;
   s_min: number | null;
+  /** WHAT IT RUNS AS and WHAT IT RUNS ON, as launched; null only while idle.
+   * The empty string is a REAL value for both — the dtype the checkpoint was
+   * saved with, and the wrapper's own pinned GPU — which is why they are
+   * echoed as sent rather than as null the way an unchosen profile is. Both
+   * are DATA: a torch dtype name and a Modal GPU spec, never translated. */
+  model_dtype: string | null;
+  gpu: string | null;
   /** Survives an idle transition: after a failure this is the most useful
    * thing left. A path — data. */
   log_path: string | null;
@@ -91,7 +98,39 @@ export interface GpuStartRequest {
    * deliberately explicit instead: it sends whatever is selected, always. */
   profile: string;
   environment: string;
+  /** The precision to load the checkpoint at. Empty ⇒ no `--model-dtype` flag
+   * at all, i.e. the dtype the checkpoint was saved with. Wire values. */
+  model_dtype: ModelDtype;
+  /** Which Modal GPU to run on. Empty ⇒ the wrapper's own pin; the panel sends
+   * `DEFAULT_GPU` instead — which IS that pin today — so the choice is visible
+   * rather than implied. Wire values. */
+  gpu: GpuType | "";
 }
+
+/** The precisions the launcher will pass to `--model-dtype`, mirroring
+ * `modal_launcher.MODEL_DTYPES`. `""` is not one of them: it is the ABSENCE of
+ * the flag, and therefore the checkpoint's own saved dtype. Every value is a
+ * torch dtype name — data, shown verbatim, never translated. */
+export const MODEL_DTYPES = ["float32", "bfloat16", "float16"] as const;
+export type ModelDtype = (typeof MODEL_DTYPES)[number] | "";
+
+/** The GPUs a launch may ask Modal for, mirroring `modal_launcher.GPU_TYPES`
+ * (which is where an off-list value is refused). Modal's own specs — data,
+ * shown verbatim. Ordered small to large, which is also the money order. */
+export const GPU_TYPES = [
+  "A10G",
+  "L4",
+  "A100",
+  "A100-80GB",
+  "H100",
+  "H200",
+] as const;
+export type GpuType = (typeof GPU_TYPES)[number];
+
+/** What both wrappers pin today, and therefore what "unchanged" means: the
+ * panel preselects it and SENDS it, so a run that touches neither knob is the
+ * same run S3.8 launched. */
+export const DEFAULT_GPU: GpuType = "A100";
 
 /** One row of `modal profile list --json`. All three are DATA — a profile name
  * and a workspace name are identifiers, never prose. */
@@ -433,4 +472,67 @@ export function useGpuTargets(enabled: boolean): UseGpuTargets {
   }, []);
 
   return { targets, profile, environment, setProfile, setEnvironment };
+}
+
+/* -------------------------------------------------------------------------
+ * WHAT IT RUNS AS, AND WHAT IT RUNS ON (S3.8e)
+ * ---------------------------------------------------------------------- */
+
+/** Remembered per Lab, exactly as the two target keys above are: a precision
+ * and a GPU are answers about the CHECKPOINTS this machine runs, and carrying
+ * them to another Lab would carry a bill with them. */
+const MODEL_DTYPE_KEY = "makermodslab.gpuModelDtype";
+const GPU_KEY = "makermodslab.gpuType";
+
+export interface UseGpuKnobs {
+  /** Empty means "as the checkpoint saved it" — no flag is sent. */
+  modelDtype: ModelDtype;
+  /** Never empty in the UI: the picker preselects `DEFAULT_GPU`, so the launch
+   * always says which GPU it wants rather than inheriting a pin that could be
+   * re-pinned under it. */
+  gpu: GpuType;
+  setModelDtype: (value: ModelDtype) => void;
+  setGpu: (value: GpuType) => void;
+}
+
+/**
+ * The two GPU-side knobs the panel remembers, held beside the launcher rather
+ * than on `RemoteRunConfig`.
+ *
+ * They are deliberately NOT part of that object: everything on it goes to BOTH
+ * the GPU and the robot (it exists so the two cannot disagree about the wire
+ * schema), and these two go only to the GPU — the arm neither knows nor cares
+ * what precision the policy loaded at. They are also not defaults anyone should
+ * tune casually, which is why they sit behind Advanced with their values on the
+ * summary line.
+ *
+ * A remembered value that is no longer in the allowlist falls back silently,
+ * the same rule `useGpuTargets` applies to a renamed profile: a stale entry
+ * must not leave the panel showing something a launch would refuse.
+ */
+export function useGpuKnobs(): UseGpuKnobs {
+  const [modelDtype, setModelDtypeState] = useState<ModelDtype>(() => {
+    const stored = read(MODEL_DTYPE_KEY);
+    return (MODEL_DTYPES as readonly string[]).includes(stored)
+      ? (stored as ModelDtype)
+      : "";
+  });
+  const [gpu, setGpuState] = useState<GpuType>(() => {
+    const stored = read(GPU_KEY);
+    return (GPU_TYPES as readonly string[]).includes(stored)
+      ? (stored as GpuType)
+      : DEFAULT_GPU;
+  });
+
+  const setModelDtype = useCallback((value: ModelDtype) => {
+    write(MODEL_DTYPE_KEY, value);
+    setModelDtypeState(value);
+  }, []);
+
+  const setGpu = useCallback((value: GpuType) => {
+    write(GPU_KEY, value);
+    setGpuState(value);
+  }, []);
+
+  return { modelDtype, gpu, setModelDtype, setGpu };
 }

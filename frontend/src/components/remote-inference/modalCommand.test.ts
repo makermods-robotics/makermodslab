@@ -33,6 +33,11 @@ const cloud: ModalRunLineInput = {
   // is what every assertion below the target block assumes.
   profile: "",
   environment: "",
+  // Neither GPU-side knob chosen either: no --model-dtype flag (the dtype the
+  // checkpoint was saved with) and no DRTC_GPU assignment (the wrapper's own
+  // pin). That is what keeps every verbatim line below byte-for-byte pre-S3.8e.
+  modelDtype: "",
+  gpu: "",
 };
 
 /** The rtc pairing: the other wrapper, the flow families' full chunk_size, and
@@ -173,6 +178,74 @@ describe("which workspace the pasted line bills", () => {
     expect(line.startsWith("modal run makermodslab/")).toBe(true);
     expect(line).not.toContain("--env");
     expect(line).not.toContain("MODAL_PROFILE");
+  });
+});
+
+describe("what the pasted line runs as, and what it runs on", () => {
+  // The two S3.8e knobs, and the reason they travel differently: one is a flag
+  // the wrapper's local_entrypoint declares, the other is a value the wrapper
+  // reads at IMPORT, before Click has parsed anything. `modal_launcher`'s
+  // build_argv / child_env are the other half of this pair.
+  it("passes the precision as a flag, between --task and --horizon", () => {
+    const line = buildModalRunLine({
+      ...cloud,
+      task: "Put the eraser on the mat",
+      modelDtype: "bfloat16",
+    });
+    expect(line).toBe(
+      "modal run makermodslab/drtc/modal_policy.py " +
+        "--policy-path makermods/pick-place " +
+        '--task "Put the eraser on the mat" ' +
+        "--model-dtype bfloat16 " +
+        "--horizon 16 --fps 30 --video-codec H264 " +
+        "--livekit-room portal-lerobot-inference",
+    );
+  });
+
+  it("omits the precision flag when nothing is chosen", () => {
+    // Unset is not a default this line picks — it is the dtype the checkpoint
+    // was saved with, and `--model-dtype ""` would be a dtype named "".
+    expect(buildModalRunLine({ ...cloud, modelDtype: "  " })).not.toContain(
+      "--model-dtype",
+    );
+  });
+
+  it("puts the GPU type in front as an env-var assignment, never as a flag", () => {
+    // `_FN_KWARGS["gpu"]` is evaluated when `modal run` IMPORTS the wrapper on
+    // the operator's own machine, so by the time a flag could be parsed the
+    // Modal function is already declared. DRTC_GPU is the only channel.
+    const line = buildModalRunLine({ ...cloud, gpu: "H100" });
+    expect(line).toBe(
+      "DRTC_GPU=H100 modal run makermodslab/drtc/modal_policy.py " +
+        "--policy-path makermods/pick-place " +
+        "--horizon 16 --fps 30 --video-codec H264 " +
+        "--livekit-room portal-lerobot-inference",
+    );
+    expect(line).not.toContain("--gpu");
+  });
+
+  it("carries both assignments in the order the launcher exports them", () => {
+    const line = buildModalRunLine({
+      ...rtcCloud,
+      profile: "work-account",
+      gpu: "A100-80GB",
+      modelDtype: "float16",
+    });
+    expect(line).toBe(
+      "MODAL_PROFILE=work-account DRTC_GPU=A100-80GB modal run " +
+        "makermodslab/drtc/modal_policy_rtc.py " +
+        "--policy-path makermods/pick-place " +
+        "--model-dtype float16 " +
+        "--horizon 50 --fps 30 --s-min 4 --video-codec H264 " +
+        "--livekit-room portal-lerobot-inference",
+    );
+  });
+
+  it("emits neither when nothing is chosen", () => {
+    const line = buildModalRunLine({ ...cloud, gpu: " ", modelDtype: " " });
+    expect(line.startsWith("modal run makermodslab/")).toBe(true);
+    expect(line).not.toContain("DRTC_GPU");
+    expect(line).not.toContain("--model-dtype");
   });
 });
 

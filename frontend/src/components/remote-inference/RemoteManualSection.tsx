@@ -7,6 +7,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import type { RemoteInferenceTransportStatus } from "@/hooks/useRemoteInferenceTransport";
+import type { UseGpuKnobs } from "@/hooks/useGpuLauncher";
 import ModalRunLine from "./ModalRunLine";
 import type { RemoteRunConfig } from "./remoteRunConfig";
 
@@ -45,7 +46,19 @@ const RemoteManualSection: React.FC<{
    * SAME workspace Start GPU would. */
   profile: string;
   environment: string;
-}> = ({ config, transport, hubIdDefault, task, profile, environment }) => {
+  /** Precision + GPU type, forwarded to the generated line for the same
+   * reason the target is: the hand-typed route must be able to reproduce
+   * exactly what Start GPU does. */
+  knobs: UseGpuKnobs;
+}> = ({
+  config,
+  transport,
+  hubIdDefault,
+  task,
+  profile,
+  environment,
+  knobs,
+}) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
 
@@ -65,6 +78,7 @@ const RemoteManualSection: React.FC<{
           task={task}
           profile={profile}
           environment={environment}
+          knobs={knobs}
         />
         {transport?.sfu_enabled ? (
           <div className="space-y-1.5 rounded-md border border-border p-2">
