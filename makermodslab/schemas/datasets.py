@@ -83,17 +83,24 @@ class DatasetListItem(BaseModel):
 
 
 class DatasetTaskCount(BaseModel):
-    """One entry of /datasets/info `tasks` (datasets.py get_local_dataset_info);
-    num_episodes is 0 when the per-episode count is unavailable."""
+    """One entry of /datasets/info `tasks` (datasets.py get_local_dataset_info
+    / get_hub_dataset_info).
+
+    num_episodes is null when the count is UNKNOWN — episode metadata that
+    could not be read, or a Hub summary where the per-episode files were not
+    fetched. It is 0 only for a task that really is used by no episode. The two
+    were previously indistinguishable, which let an unreadable file silently
+    decide which task a client ranked first; clients must not sort on null."""
 
     task: str
-    num_episodes: int
+    num_episodes: int | None
 
 
 class DatasetInfoResponse(BaseModel):
     """datasets.py get_local_dataset_info / get_hub_dataset_info — both
-    branches carry every key. The hub summary degrades tasks to [] and
-    size_bytes to null (the repo isn't on disk). fps is `int | float` because
+    branches carry every key. The hub summary carries task STRINGS (one small
+    file next to meta/info.json) with null counts, and degrades size_bytes to
+    null (the repo isn't on disk). fps is `int | float` because
     it passes through from meta/info.json — a whole-number fps must stay the
     integer the file holds, not become 30.0 on the wire."""
 

@@ -19,7 +19,11 @@ import { cn } from "@/lib/utils";
 /**
  * The fullscreen policy studio — slides up over the Launchpad when the
  * "+ New Policy" banner (or any Run-on-robot / Fine-tune action) opens it.
- * Stays mounted so panel state survives close/reopen within a visit.
+ * Stays mounted so panel state survives close/reopen within a visit — the
+ * robot pick, the checkpoint, the camera bindings. DeployPanel opts its two
+ * free-text fields OUT of that (see its reset effects): a task sentence or a
+ * corrections-dataset name left over from yesterday would be sent as though it
+ * had been chosen for whatever policy is selected today.
  */
 const StudioOverlay: React.FC = () => {
   const { open, activePanel, closeStudio } = useStudio();

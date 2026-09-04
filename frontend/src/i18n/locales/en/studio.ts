@@ -331,16 +331,49 @@ export default {
     },
     task: {
       label: "Task description",
-      placeholder: "e.g., pick up the red block",
       // {{policyType}} is the policy identifier (act, smolvla, …) — data.
       hint: "This policy is language-conditioned ({{policyType}}).",
-      // Appended to `hint` when the task was auto-filled from the checkpoint's
-      // own training dataset. Leading space is added by the caller.
-      prefilled: "Filled in from the dataset it was trained on.",
       // Placeholder when the lineage offered no task at all. Never an invented
       // example: a fake task greyed into the slot the REAL inherited one uses
       // is indistinguishable from one.
+      //
+      // The three below are the cases this one used to absorb and misreport.
+      // Only `placeholderNone` may claim the dataset lists no task; a lookup
+      // that failed is not evidence of that.
       placeholderNone: "No task found on the training dataset — type one",
+      // While the lookup is in flight. One of these is on screen at a time,
+      // cycling about once a second, with animated dots appended by the caller
+      // — the dots are punctuation, not prose, so they are not catalog strings.
+      //
+      // "loading" is first and deliberately plain: the field says what it is
+      // doing before it starts having fun. The rest are rummaging-for-something
+      // verbs, which is the actual job — going through a dataset's metadata
+      // looking for the sentence it was recorded under. Translate them for
+      // flavour rather than literally; what matters is that each reads as
+      // "still searching", not as an error.
+      loading: {
+        loading: "Loading",
+        rummaging: "Rummaging",
+        digging: "Digging",
+        foraging: "Foraging",
+        excavating: "Excavating",
+        spelunking: "Spelunking",
+        ferreting: "Ferreting",
+        scrounging: "Scrounging",
+      },
+      // The lookup is STILL running after the animation gives up. Deliberately
+      // does not say the dataset has no task: it has not answered either way,
+      // and if it lands later its answer replaces this.
+      placeholderSlow: "Still loading — type the task if you'd rather not wait",
+      // The dataset could not be found — deleted, renamed, or never downloaded.
+      placeholderMissing:
+        "Can't find the training dataset on this machine — type the task",
+      // The lookup itself failed (offline, server error). Says nothing about
+      // whether the dataset has a task.
+      placeholderUnreadable:
+        "Couldn't read the training dataset — type the task",
+      // Several tasks and no defensible guess between them.
+      placeholderChoose: "Pick which task you're running, below",
       // Shown for a policy that does NOT read the task. Coaching still saves it.
       hintCoach:
         "Saved with every correction, so you can tell later what this session was teaching.",
@@ -440,6 +473,8 @@ export default {
         "Coaching needs a leader arm — add its port and calibration in Robot settings.",
       coachTaskRequired:
         "Describe the task first — it's saved with every correction.",
+      taskAmbiguous:
+        "Its training dataset has several tasks — pick the one you're running.",
     },
     actions: {
       start: "Start inference",

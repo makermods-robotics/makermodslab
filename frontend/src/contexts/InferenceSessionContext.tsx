@@ -9,8 +9,8 @@ import InferenceSessionDialog from "@/components/inference/InferenceSessionDialo
 
 /**
  * Hosts the live-inference session dialog above the router — /inference is no
- * longer a route. Both launch flows (the studio Deploy panel and the legacy
- * InferenceModal) call `openInferenceSession(sessionId)` right after POST
+ * longer a route. The launch flow (the studio's Deploy panel) calls
+ * `openInferenceSession(sessionId)` right after POST
  * /api/v1/sessions succeeds; the dialog then owns status polling, the lease
  * heartbeat, and the stop flow, and closing it lands back on whatever surface
  * launched the run.

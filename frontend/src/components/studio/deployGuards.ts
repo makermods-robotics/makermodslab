@@ -34,6 +34,11 @@ export interface DeployGuardContext {
   requiresTask: boolean;
   /** The task string as typed. */
   task: string;
+  /** The training dataset lists SEVERAL tasks and the operator has not picked
+   * one. There is no defensible guess between them — the datasets this was
+   * measured against separate near-identical task strings by a single episode —
+   * so the panel asks instead of choosing. */
+  taskAmbiguous?: boolean;
 }
 
 export function deployBlockedReason(
@@ -56,6 +61,19 @@ export function deployBlockedReason(
   // `mode === "coach"`, so a Hub checkpoint (or any whose prefill lookup
   // failed) could be launched for a plain run or a scored eval with the field
   // blank, and the resulting success rate was measuring the wrong thing.
+  // Ambiguity is refused wherever the task is actually used — the same two
+  // cases that put the field on screen. A merged dataset carries several task
+  // strings and nothing distinguishes them well enough to pick one: leaving the
+  // box empty used to send whichever had one more episode than the rest, which
+  // for a coaching run is then stamped into every recorded frame. The chips
+  // below the field are the way out.
+  //
+  // BEFORE taskRequired, which is also true here and is the less useful of the
+  // two: "describe the task" tells an operator to type a sentence when the
+  // dataset is offering them a list to choose from.
+  if (ctx.taskAmbiguous && (ctx.requiresTask || mode === "coach"))
+    return "studio.deploy.blocked.taskAmbiguous";
+
   if (ctx.requiresTask && ctx.task.trim() === "")
     return "studio.deploy.blocked.taskRequired";
 

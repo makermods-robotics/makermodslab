@@ -40,6 +40,17 @@ export interface PolicyConfigSummary {
    * untagged one. The fine-tune panel normalises it with armTypeFromRobotType
    * and warns when it disagrees with the selected dataset's arm. */
   trained_on_robot_type?: string | null;
+  /** The dataset this checkpoint was trained on, from its OWN
+   * train_config.json. null when the lineage offers no real id (an imported
+   * flat model repo with no train_config; the "(imported)" placeholder is
+   * never reported as one).
+   *
+   * Prefer this over the owning job's `config.dataset_repo_id`, which is the
+   * wrong source twice over: an import's record carries the placeholder, and
+   * on a resume chain the tip's record does not describe a checkpoint owned by
+   * an ancestor. Absent from an older backend's response — read it as
+   * `?? job.config?.dataset_repo_id`, never as a bare value. */
+  dataset_repo_id?: string | null;
 }
 
 /** Collapse checkpoint entries that point at the same underlying checkpoint.

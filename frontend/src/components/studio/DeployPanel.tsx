@@ -49,6 +49,19 @@ import { SkillItem } from "@/lib/modelsApi";
 import { useSkills } from "@/hooks/useSkills";
 import { importSourceForModel } from "@/lib/inferenceLaunch";
 import { deployBlockedReason } from "./deployGuards";
+import {
+  classifyTaskLookup,
+  defaultTaskFrom,
+  effectiveTaskFor,
+  loadingDots,
+  loadingWordKey,
+  TASK_LOADING_DOT_MS,
+  TASK_LOADING_MAX_MS,
+  taskFieldVisible,
+  taskIsAmbiguous,
+  tasksFrom,
+  type TaskPrefillState,
+} from "./deployTaskPrefill";
 import DisplayName from "@/components/library/DisplayName";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import ModelsLibrary from "@/components/jobs/ModelsLibrary";
@@ -79,14 +92,15 @@ import { useOnceFlag } from "@/lib/onboarding/storage";
  * imported Hub model) on the corner robot. Every "Run on robot" action lands
  * here via `useStudio().deployPrefill`.
  *
- * This is a PARALLEL surface to the legacy `InferenceModal` (still used by
- * JobsSection + the Landing Models panel through `useInferenceLaunch`). To keep
- * those consumers untouched and avoid drift, the checkpoint/policy-config
- * fetch, the bimanual `left_` camera-prefix round-trip, the state_dim 6-vs-12
- * arm-count guard, the camera thumbnails and the start flow are ported VERBATIM
- * from `components/landing/InferenceModal.tsx` (only the palette becomes token
- * classes). The Hub lazy-import reuses `useInferenceLaunch().importSource` so
- * the husk-repo messaging is identical, not re-implemented.
+ * This began as a parallel surface to a legacy `InferenceModal`, which it was
+ * ported from verbatim — the checkpoint/policy-config fetch, the bimanual
+ * `left_` camera-prefix round-trip, the state_dim 6-vs-12 arm-count guard, the
+ * camera thumbnails and the start flow. That modal has since been removed: it
+ * had no remaining consumers once every "Run on robot" action routed here, so
+ * this is now the ONLY inference launch surface and the notes below about
+ * keeping the two in step are history, not a constraint. The Hub lazy-import
+ * still reuses `useInferenceLaunch().importSource` so the husk-repo messaging
+ * is shared rather than re-implemented.
  */
 
 // Mirrors rollout.MAX_EVAL_EPISODES — the server clamps to the same bound, this
@@ -115,7 +129,7 @@ const DEFAULT_TEMPORAL_ENSEMBLE_COEFF = 0.01;
  * was by localizedName, so twin cameras ("KD-USB Cameras" x2) paired
  * arbitrarily and the tiles swapped footage between refreshes.
  * `paused` unmounts the stream so the rollout subprocess can claim the device.
- * (Ported from InferenceModal.) */
+ * (Ported from the since-removed InferenceModal.) */
 const CameraThumbnail: React.FC<{
   cameraIndex?: number;
   uniqueId?: string;
@@ -148,9 +162,9 @@ const CameraThumbnail: React.FC<{
  * One camera as the panel sees it. The BiSO prefix round-trip lives here so the
  * future per-arm routing work has a single obvious place to extend.
  *
- * (Verbatim port of InferenceModal's CameraMapping / cameraMappings — see that
- * file's doc comment for the full BiSO `left_` prefix rationale. Kept here so
- * the legacy modal stays untouched for its existing consumers.)
+ * (Verbatim port of the since-removed InferenceModal's CameraMapping /
+ * cameraMappings. This is now the only copy, so the BiSO `left_` prefix
+ * rationale is spelled out where it is used rather than cross-referenced.)
  */
 interface CameraMapping {
   /** Checkpoint feature key — the key into `policyConfig.image_features`. */
@@ -435,7 +449,7 @@ const DeployPanel: React.FC = () => {
   // to the library section below.
   const [importModalOpen, setImportModalOpen] = useState(false);
 
-  // --- Inference config state (ported from InferenceModal) ---------------
+  // --- Inference config state (ported from the removed InferenceModal) ---
   const [checkpoints, setCheckpoints] = useState<JobCheckpoint[]>([]);
   // Keyed on `ref`, NOT step. The picker lists a whole resume lineage, and a
   // rewind (resuming from an ancestor's checkpoint) legitimately produces two
@@ -541,7 +555,13 @@ const DeployPanel: React.FC = () => {
   // doesn't fail loudly — it just makes the policy worse in ways that look
   // like the policy being bad. So a single unambiguous task is filled in, and
   // several are offered as choices rather than guessed between.
-  const [datasetTasks, setDatasetTasks] = useState<string[]>([]);
+  const [taskPrefill, setTaskPrefill] = useState<TaskPrefillState>({
+    kind: "idle",
+  });
+  // Purely cosmetic companions to `taskPrefill`: which dot the animation is on,
+  // and whether it has run long enough to stop claiming to be loading.
+  const [taskLoadingTick, setTaskLoadingTick] = useState(0);
+  const [taskLoadingExpired, setTaskLoadingExpired] = useState(false);
   // Inference engine A/B. "sync" is the server default and the historical
   // behaviour; "rtc" is experimental (see InferenceSessionOptions).
   const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
@@ -1000,12 +1020,6 @@ const DeployPanel: React.FC = () => {
     (robot?.mode === "bimanual" &&
       (!robot?.right_leader_port || !robot?.right_leader_config));
   const coachLeaderMissing = runMode === "coach" && leaderMissing;
-  // Coaching writes the task string into every recorded frame, so the server
-  // refuses an empty one for ANY policy — including one that doesn't condition
-  // on language and therefore never showed the field. That combination gave a
-  // green panel, an enabled Start, and a 400 naming a control the operator
-  // could not make appear.
-  const coachTaskMissing = task.trim() === "";
 
   // Everything a launch needs that does NOT depend on which verb was pressed.
   const canStartAnyMode =
@@ -1040,6 +1054,7 @@ const DeployPanel: React.FC = () => {
       // The effective value: an empty box that falls back to a real default is
       // not a missing task, and blocking on it would be a dead end.
       task: effectiveTask,
+      taskAmbiguous,
     });
     return key === null ? null : t(key as never);
   };
@@ -1089,44 +1104,129 @@ const DeployPanel: React.FC = () => {
   // The task the checkpoint was trained on, most-represented first. Same
   // placeholder contract as the name above: shown greyed, sent when the field
   // is left empty, and restored the moment the operator clears what they typed.
-  const defaultTask = datasetTasks[0] ?? "";
-  const effectiveTask = task.trim() || defaultTask;
+  const datasetTasks = tasksFrom(taskPrefill);
+  const defaultTask = defaultTaskFrom(taskPrefill);
+  const taskAmbiguous = taskIsAmbiguous(taskPrefill, task);
+  const effectiveTask = effectiveTaskFor(
+    task,
+    taskPrefill,
+    !!policyConfig?.requires_task,
+    runMode,
+  );
 
   // Prefill the task from the dataset the selected checkpoint was trained on.
   // Typing it by hand means retyping a sentence that already exists, and a
   // typo'd task is invisible until the policy underperforms.
+  //
+  // Sourced from the CHECKPOINT (policyConfig, addressed by owner + step), with
+  // the job record only as a fallback for a backend too old to send the field.
+  // The record is the wrong source twice over: an import's carries the
+  // "(imported)" placeholder rather than a repo id, and on a resume chain the
+  // tip's record does not describe a checkpoint owned by an ancestor. Keying on
+  // policyConfig also means the lookup re-runs when the STEP changes, which
+  // keying on selectedJob never did.
   useEffect(() => {
-    const repoId = selectedJob?.config?.dataset_repo_id;
+    const repoId =
+      policyConfig?.dataset_repo_id ?? selectedJob?.config?.dataset_repo_id;
     if (!repoId || repoId === "(imported)") {
-      setDatasetTasks([]);
+      setTaskPrefill({ kind: "idle" });
       return;
     }
     let cancelled = false;
+    // Say so BEFORE awaiting. Without this the field kept whatever it last
+    // said — for a Hub round-trip that meant several seconds of "No task found
+    // on the training dataset" before the real sentence appeared, which is the
+    // same lie this module exists to stop telling, just on a timer.
+    setTaskPrefill({ kind: "loading" });
     (async () => {
       try {
         const info = await getDatasetInfo(baseUrl, fetchWithHeaders, repoId);
         if (cancelled) return;
-        // Most-represented task first: if the operator has to choose, the one
-        // the policy saw most is the likeliest answer and should be nearest.
-        const tasks = [...(info.tasks ?? [])]
-          .sort((a, b) => b.num_episodes - a.num_episodes)
-          .map((t) => t.task)
-          .filter(Boolean);
-        // Offered as a PLACEHOLDER default (see `defaultTask`), not written
-        // into the field: the operator should be able to tell the app's guess
-        // from their own sentence, and clearing the box should fall back to the
-        // guess rather than to nothing.
-        setDatasetTasks(tasks);
-      } catch {
-        // A Hub-only or missing dataset simply has no tasks to offer; the
-        // field stays as the user left it.
-        if (!cancelled) setDatasetTasks([]);
+        // Ranking and the placeholder contract both live in deployTaskPrefill,
+        // where they can be tested: the default is offered GREYED rather than
+        // written into the field, so the operator can tell the app's guess from
+        // their own sentence and clearing the box falls back to the guess.
+        setTaskPrefill(classifyTaskLookup(info));
+      } catch (e) {
+        // NOT "this dataset has no task" — that is a claim, and a failed lookup
+        // is not evidence for it. A deleted or renamed dataset (404) and an
+        // unreachable one say different things to an operator, so both are
+        // carried through as `unknown` with the reason attached.
+        if (!cancelled) setTaskPrefill(classifyTaskLookup(e, true));
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [selectedJob, baseUrl, fetchWithHeaders]);
+  }, [policyConfig, selectedJob, baseUrl, fetchWithHeaders]);
+
+  // Animate the loading placeholder's trailing dots, and give up saying
+  // "loading" after TASK_LOADING_MAX_MS.
+  //
+  // The timeout does NOT cancel the request — it only stops the animation and
+  // lets the field invite typing instead. A lookup still running after eight
+  // seconds is a slow Hub round-trip the operator can beat by hand, but if it
+  // does land afterwards its answer replaces the invitation, because a real
+  // task always beats one somebody invented.
+  useEffect(() => {
+    if (taskPrefill.kind !== "loading") {
+      setTaskLoadingTick(0);
+      setTaskLoadingExpired(false);
+      return;
+    }
+    const dots = window.setInterval(
+      () => setTaskLoadingTick((n) => n + 1),
+      TASK_LOADING_DOT_MS,
+    );
+    const giveUp = window.setTimeout(
+      () => setTaskLoadingExpired(true),
+      TASK_LOADING_MAX_MS,
+    );
+    return () => {
+      window.clearInterval(dots);
+      window.clearTimeout(giveUp);
+    };
+  }, [taskPrefill.kind]);
+
+  // Drop the operator's typed overrides when the POLICY changes.
+  //
+  // `task` and `coachDatasetName` are this panel's only free-text fields (every
+  // other input here is a number, a boolean or a fixed choice), and typed text
+  // BEATS the derived default (`effectiveTask` / `effectiveCoachName`
+  // both read `typed.trim() || default`). Without this reset a sentence typed
+  // for one policy rides silently along to the next one and suppresses that
+  // policy's own prefill — and the task string is not cosmetic: it reaches
+  // lerobot as `--task=` on every run and is written into EVERY FRAME of a
+  // coaching dataset as `--dataset.single_task`, so a stale one mislabels data
+  // on disk with nothing anywhere reporting it.
+  //
+  // Keyed on `policyConfigJobId` — the job that actually OWNS the selected
+  // checkpoint — and deliberately NOT on `selectedStep`. Walking the steps of
+  // one job is the most common thing done in this panel, and every checkpoint
+  // of a job shares that job's training dataset, so resetting per step would
+  // clear a carefully typed sentence for no correctness gain. The owner id DOES
+  // change when the selection crosses into an ancestor of a resume chain, which
+  // is exactly the case where the training dataset can differ.
+  useEffect(() => {
+    setTask("");
+    setCoachDatasetName("");
+  }, [policyConfigJobId]);
+
+  // The same two overrides, dropped when the studio is dismissed.
+  //
+  // StudioOverlay never unmounts — Launchpad renders it unconditionally and
+  // open/close only slides it with a transform — so panel state survives a
+  // close/reopen by design. That is right for the robot picker and the camera
+  // bindings, and wrong for these two: a stale duration or episode count only
+  // shapes the next run, while a stale task or corrections name MISLABELS what
+  // that run writes to disk. Reopening the studio tomorrow must not silently
+  // re-arm yesterday's sentence against whatever policy is selected then.
+  useEffect(() => {
+    if (!open) {
+      setTask("");
+      setCoachDatasetName("");
+    }
+  }, [open]);
 
   // A prefill may name the run mode — that is how "Policy failing? Coach it"
   // lands the user in coaching without them having to know the control exists.
@@ -1545,7 +1645,7 @@ const DeployPanel: React.FC = () => {
                   meant a plain ACT checkpoint gave a green panel, an enabled
                   Start, and then a 400 naming a field that was not on screen
                   and could not be made to appear. */}
-              {policyConfig.requires_task || runMode === "coach" ? (
+              {taskFieldVisible(!!policyConfig.requires_task, runMode) ? (
                 <div className="space-y-2">
                   <Label htmlFor="deploy-task">
                     {t("studio.deploy.task.label")}
@@ -1560,8 +1660,32 @@ const DeployPanel: React.FC = () => {
                     // shown greyed in the same slot the REAL inherited task
                     // uses is indistinguishable from one. When the lineage
                     // yields nothing, say so instead.
+                    // Three different situations used to render the same
+                    // "no task found" sentence, and only one of them was true:
+                    // a dataset that really lists none, a lookup that 404'd,
+                    // and a lookup that failed. Each says something different
+                    // about what the operator should do next.
                     placeholder={
-                      defaultTask || t("studio.deploy.task.placeholderNone")
+                      defaultTask ||
+                      (taskPrefill.kind === "loading" && !taskLoadingExpired
+                        ? // The word is translated and cycles once per dot
+                          // cycle; the dots are punctuation driven by the tick,
+                          // so they stay out of the catalog.
+                          `${t(loadingWordKey(taskLoadingTick) as never)}${loadingDots(taskLoadingTick)}`
+                        : taskPrefill.kind === "loading"
+                          ? // Still running, but past the point where watching
+                            // dots beats typing. Does NOT claim the dataset has
+                            // no task — it hasn't answered either way yet.
+                            t("studio.deploy.task.placeholderSlow")
+                          : taskPrefill.kind === "unknown"
+                            ? t(
+                                taskPrefill.reason === "not_found"
+                                  ? "studio.deploy.task.placeholderMissing"
+                                  : "studio.deploy.task.placeholderUnreadable",
+                              )
+                            : taskAmbiguous
+                              ? t("studio.deploy.task.placeholderChoose")
+                              : t("studio.deploy.task.placeholderNone"))
                     }
                   />
                   <p className="text-xs text-muted-foreground">
