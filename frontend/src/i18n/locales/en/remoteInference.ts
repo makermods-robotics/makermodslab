@@ -126,6 +126,9 @@ export default {
     driftBody:
       "You changed {{fields}} since the GPU was started. A running server keeps the values it was started with, and a mismatch is a run that receives nothing — not an error. It is running:",
     restart: "Restart GPU with these settings",
+    // Shown in the idle state while Start GPU is disabled for an empty task.
+    taskRequired:
+      "Describe the task first — this policy is language-conditioned, and the GPU's policy server refuses to start without one.",
     roomLabel: "Room",
     logLabel: "Log",
   },

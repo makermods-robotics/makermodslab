@@ -815,7 +815,55 @@ def stop_app(app_id: str, profile: str = "") -> tuple[bool, str]:
 # Substrings, lowercased, that make a failure diagnosable. Kept as data so the
 # three interesting classes read as a table rather than as a chain of ifs.
 _AUTH_MARKERS = ("modal token new", "not authenticated", "authenticationerror", "token id", "token_id")
-_TAILSCALE_MARKERS = ("ts_authkey", "authkey", "auth key", "tailscale up", "[tailscale]")
+# Auth-key failure markers ONLY. `[tailscale]` and `tailscale up` used to be in
+# this list, and they appear in EVERY launch log (the container narrates its
+# tailnet join), so any failure early enough for the join block to still be
+# inside the 40-line tail was blamed on the auth key — on 2026-09-03 a policy
+# server that refused to start over an empty --task was reported as "The GPU
+# couldn't join the tailnet" with a key-minting hint, while the log's own
+# "joined tailnet as modal-policy" sat twenty lines above the real error.
+_TAILSCALE_MARKERS = ("ts_authkey", "authkey", "auth key", "needslogin", "login required")
+# The line the container prints once the tailnet join succeeded; its presence
+# rules the tailnet OUT as the cause of whatever came after.
+_TAILNET_JOINED_MARKER = "joined tailnet as"
+# The container's own last words. Modal prints the remote exception on one
+# line; our servers exit via SystemExit with a full sentence. Either is the
+# backend's (well, the GPU's) own prose and is surfaced verbatim.
+_REMOTE_EXCEPTION_MARKERS = (
+    "uncaught exception raised in remote container:",
+    "systemexit:",
+)
+
+
+def _last_remote_exception_line(output_tail: str) -> str | None:
+    """The container's exit message, verbatim, or None.
+
+    Modal relays a remote exception as one line beginning
+    `Stopping app - uncaught exception raised in remote container: <repr>`;
+    our servers refuse to start with a `SystemExit: <sentence>` line in the
+    remote traceback. The LAST such line wins (the traceback repeats it),
+    and the repr wrapper `SystemExit('…')` is unwrapped so the operator reads
+    the sentence, not Python.
+    """
+    found: str | None = None
+    for raw in output_tail.splitlines():
+        line = raw.strip()
+        low = line.lower()
+        for marker in _REMOTE_EXCEPTION_MARKERS:
+            idx = low.find(marker)
+            if idx < 0:
+                continue
+            text = line[idx + len(marker) :].strip()
+            # SystemExit('msg') / SystemExit("msg") → msg
+            for prefix in ("SystemExit('", 'SystemExit("'):
+                if text.startswith(prefix):
+                    text = text[len(prefix) :].rstrip(")").rstrip("'\"")
+            # Modal's line is a Python repr, so quotes inside the sentence
+            # arrive escaped (\'molmoact2\'); the operator reads a sentence.
+            text = text.replace("\\'", "'").replace('\\"', '"')
+            if text:
+                found = text
+    return found
 
 
 def classify_failure(
@@ -855,7 +903,20 @@ def classify_failure(
             "Run `modal token new` in a terminal on this machine, then try again. "
             "The Lab never reads or writes ~/.modal.toml — the CLI owns it.",
         )
-    if any(marker in tail for marker in _TAILSCALE_MARKERS):
+    # The policy server's own refusal (an empty --task for a language-
+    # conditioned policy, a checkpoint that cannot be loaded, a wrong flag):
+    # the most specific diagnosis there is, and it is already a sentence.
+    # Checked BEFORE the tailnet markers, and independently of them: the join
+    # block is always in the tail of an early failure.
+    remote_line = _last_remote_exception_line(output_tail)
+    if remote_line is not None:
+        return (
+            ErrorCode.GPU_LAUNCH_FAILED,
+            f"The policy server stopped itself: {remote_line}",
+            "That is the container's own message. Fix what it names and start the GPU again; "
+            "the full traceback is in the log below.",
+        )
+    if any(marker in tail for marker in _TAILSCALE_MARKERS) and _TAILNET_JOINED_MARKER not in tail:
         return (
             ErrorCode.GPU_LAUNCH_FAILED,
             "The GPU couldn't join the tailnet, so it had no route back to this machine's SFU.",

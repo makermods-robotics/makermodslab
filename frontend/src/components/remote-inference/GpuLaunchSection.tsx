@@ -64,7 +64,11 @@ const GpuLaunchSection: React.FC<{
   /** The effective task — the same string the robot side is started with, so
    * a language-conditioned policy is steered by the same sentence. */
   task: string;
-}> = ({ launcher, targets, config, hubIdDefault, task }) => {
+  /** The policy is language-conditioned: an empty task must not reach the
+   * GPU (its server refuses to start, and the failure used to be misread as
+   * a tailnet problem). */
+  taskRequired: boolean;
+}> = ({ launcher, targets, config, hubIdDefault, task, taskRequired }) => {
   const { t } = useTranslation();
   const { status, pending, error, start, stop, launched } = launcher;
   const {
@@ -97,6 +101,7 @@ const GpuLaunchSection: React.FC<{
     environment,
   };
   const launch = () => void start(startBody);
+  const taskMissing = taskRequired && task.trim() === "";
 
   // The running server holds the values it was started with; the form can
   // move on without it. Everything below is part of the Portal wire schema
@@ -179,7 +184,7 @@ const GpuLaunchSection: React.FC<{
             type="button"
             size="sm"
             onClick={launch}
-            disabled={busy || !hubId}
+            disabled={busy || !hubId || taskMissing}
             className="h-7 gap-1.5 px-2 text-xs"
           >
             <Play className="h-3 w-3" />
@@ -294,6 +299,7 @@ const GpuLaunchSection: React.FC<{
           <p className="text-xs leading-relaxed text-muted-foreground">
             {/* The wrapper PATH is data — it is what `modal run` is handed, and
                 it is how the operator knows which of the two servers this is. */}
+            {taskMissing ? `${t("remoteInference.gpu.taskRequired")} ` : ""}
             {t("remoteInference.gpu.idleHint", {
               wrapper: MODAL_WRAPPERS[config.engine],
             })}

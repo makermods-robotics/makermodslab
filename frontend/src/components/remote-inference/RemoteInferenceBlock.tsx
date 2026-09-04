@@ -62,6 +62,12 @@ const RemoteInferenceBlock: React.FC<{
   /** The effective task (typed, else the checkpoint's inherited default) —
    * the same string the start request carries. */
   task: string;
+  /** Whether the checkpoint's policy is language-conditioned. A remote GPU
+   * launched with an empty task for one of those does not fail on the arm —
+   * the policy server refuses to start (MolmoAct2 would otherwise prompt its
+   * VLM with the literal "The task is to ."), so Start GPU is gated here on
+   * the same fact the session guard uses. */
+  taskRequired: boolean;
   transportState: UseRemoteInferenceTransport;
   status: RemoteInferenceStatus | null;
   /** Known when THIS tab started the run. Null after a reload or for a run
@@ -80,6 +86,7 @@ const RemoteInferenceBlock: React.FC<{
   cameraRoleNameMatched,
   onCameraRoleChange,
   task,
+  taskRequired,
   transportState,
   status,
   sessionId,
@@ -172,6 +179,7 @@ const RemoteInferenceBlock: React.FC<{
             config={config}
             hubIdDefault={hubIdDefault}
             task={task}
+            taskRequired={taskRequired}
           />
           <Collapsible open={showManual} onOpenChange={setShowManual}>
             <CollapsibleTrigger className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">

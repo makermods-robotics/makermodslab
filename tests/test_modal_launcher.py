@@ -1474,3 +1474,55 @@ def test_a_client_someone_else_killed_keeps_its_record_for_the_next_boot(spawned
 
     ml._handle_exit(spawned["proc"], -9)
     assert ml.read_app_record()["app_id"] == "ap-killed"
+
+
+# --- classify_failure: the container's own exit message, and the tailnet
+# false positive it used to hide ---------------------------------------------
+
+_JOINED_THEN_TASK_REFUSED = """\
+[tailscale] tailscale up --hostname=modal-policy --auth-key=<redacted>
+2026/09/04 02:53:11 Switching ipn state NoState -> NeedsLogin (WantRunning=true, nm=false)
+[tailscale] joined tailnet as modal-policy (100.118.36.94)
+[tailscale] relay 127.0.0.1:7880 -> socks5 -> 100.80.250.40:7880
+[policy] HF_TOKEN present; gated base models will authenticate.
+Traceback (most recent call last):
+  File "/root/makermodslab/drtc/policy_rtc.py", line 253, in load_policy
+    raise SystemExit(
+SystemExit: --task is required for a 'molmoact2' policy. It is language-conditioned.
+Stopping app - uncaught exception raised in remote container: SystemExit("--task is required for a 'molmoact2' policy. It is language-conditioned.")
+"""
+
+
+def test_classify_failure_surfaces_the_containers_own_exit_message() -> None:
+    """The 2026-09-03 case: the join succeeded, the policy server refused an
+    empty --task, and the classifier blamed the auth key because the join
+    block was still inside the tail."""
+    code, message, hint = ml.classify_failure(_JOINED_THEN_TASK_REFUSED, 1)
+    assert code == ErrorCode.GPU_LAUNCH_FAILED
+    assert "policy server stopped itself" in message
+    assert "--task is required for a 'molmoact2' policy" in message
+    assert "SystemExit(" not in message  # the repr wrapper is unwrapped
+    assert "tailnet" not in message
+    assert hint is not None and "log" in hint
+
+
+def test_classify_failure_does_not_blame_the_tailnet_once_it_joined() -> None:
+    tail = """\
+[tailscale] tailscale up --hostname=modal-policy --auth-key=<redacted>
+[tailscale] joined tailnet as modal-policy (100.118.36.94)
+[policy] loading 'x/y' on cuda ...
+some other failure with no recognised marker
+"""
+    _code, message, _hint = ml.classify_failure(tail, 1)
+    assert "tailnet" not in message
+
+
+def test_classify_failure_still_blames_the_tailnet_when_the_join_never_happened() -> None:
+    tail = """\
+[tailscale] tailscale up --hostname=modal-policy --auth-key=<redacted>
+2026/09/04 02:53:11 Switching ipn state NoState -> NeedsLogin (WantRunning=true, nm=false)
+control: RegisterReq: got response; nodeKeyExpired=true, machineAuthorized=false
+"""
+    _code, message, hint = ml.classify_failure(tail, 1)
+    assert "couldn't join the tailnet" in message
+    assert hint is not None and "TS_AUTHKEY" in hint

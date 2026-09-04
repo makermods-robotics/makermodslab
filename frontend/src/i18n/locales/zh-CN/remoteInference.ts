@@ -111,6 +111,9 @@ export default {
     driftBody:
       "GPU 启动后你改动了 {{fields}}。正在运行的服务会一直沿用启动时的取值，二者不一致时运行不会报错，只会什么都收不到。它当前的取值是：",
     restart: "用这些设置重启 GPU",
+    // 任务为空、“启动 GPU” 被禁用时，在空闲状态下显示。
+    taskRequired:
+      "请先描述任务 — 该策略以语言为条件，GPU 上的策略服务没有任务就会拒绝启动。",
     roomLabel: "房间",
     logLabel: "日志",
   },

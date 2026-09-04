@@ -2161,6 +2161,10 @@ const DeployPanel: React.FC = () => {
                 onConfigChange={setRemoteConfig}
                 hubIdDefault={selectedJob?.hf_repo_id ?? ""}
                 rtcSupported={rtcSupported}
+                // The GPU launch has no server-side twin of deployGuards'
+                // task check (the launcher knows a Hub id, not a policy
+                // type), so the panel gates Start GPU on the same fact.
+                taskRequired={!!policyConfig?.requires_task}
                 // The ceiling on the horizon, straight off the checkpoint.
                 checkpointHorizon={policyConfig?.n_action_steps ?? null}
                 // Only the roles nothing matched by name; an empty list renders
