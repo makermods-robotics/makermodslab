@@ -70,10 +70,16 @@ What the contract covers TODAY (refactor step "4a" of docs/extensions/plan.md):
   keeps its zero internally and takes its drive effort from the MIT gains
   connect() writes.
 
-What step "4b" still adds (deliberately NOT declared yet): the stop-path
-pair return_to_rest / release_torque, and the telemetry kind the loops
-broadcast (URDF joints vs degrees by motor name). Until then those flows
-keep their own per-family modules.
+* stop path — capture_rest_poses at session start, return_to_rest before
+  torque is released, release_torque last. The ORDER is the core's and every
+  flow that energizes an arm keeps it (teleoperation, recording, replay;
+  inference gets it from lerobot's --return_to_initial_position); the
+  MECHANISM is the family's: a Feetech profile-velocity move for the SO-101,
+  an interpolated MIT setpoint judged by convergence for the CAN arms, which
+  have no brakes and drop under gravity if released anywhere but near rest.
+
+What step "4b" still adds (deliberately NOT declared yet): the telemetry
+kind the loops broadcast (URDF joints vs degrees by motor name).
 """
 
 from __future__ import annotations
@@ -279,6 +285,50 @@ class ArmFamily(ABC):
         CAN follower's drive effort is its MIT gains, set at connect().
         """
         return []
+
+    # --- stop path ----------------------------------------------------------------
+    # The one sequence every energizing flow follows: capture where the arm
+    # started, drive it back there before torque goes, then release. The core
+    # calls these in that order on every stop path — including error paths
+    # and the expiry watchdog — and never skips a step; the family decides
+    # how each is done for its hardware.
+
+    @abstractmethod
+    def capture_rest_poses(self, robot: Any, *, include_gripper: bool = False) -> list[tuple[Any, dict]]:
+        """Where each follower arm is right now, as (handle, pose) pairs.
+
+        Called once at session start, after connect and before anything
+        moves. FOLLOWERS only, never the human-held leader. One pair per
+        drivable arm (a bimanual robot yields two). The gripper is excluded by
+        default — at stop time it may be holding something, and returning it
+        to its (likely open) starting width would drop that object
+        mid-return; replay passes include_gripper=True because the dataset
+        drives the gripper and its start width is part of the pose restored.
+        Never raises: a session must not fail to start over this.
+        """
+
+    @abstractmethod
+    def return_to_rest(self, rest_poses: list[tuple[Any, dict]], abort_event: Any = None) -> None:
+        """Drive every captured arm back to its pose, concurrently, then return.
+
+        Runs on a NORMAL stop, immediately before release_torque, and returns
+        only when every arm has finished (arrived, settled, stalled, hit the
+        ceiling, or been cut short). ``abort_event`` (a second stop press)
+        cuts every arm's return short promptly, leaving it nearer rest than it
+        started. Best-effort, never raises: every outcome falls through to
+        the unconditional release.
+        """
+
+    @abstractmethod
+    def release_torque(self, device: Any, label: str = "device") -> list[str]:
+        """Disable torque on every motor of ``device``, loudly on failure.
+
+        The last step before disconnect, and belt-and-braces on purpose:
+        lerobot's disconnect disables torque too, but any exception on the way
+        leaves the arm energized (rigid). Returns problem descriptions, empty
+        when every motor released; each is also logged at ERROR level naming
+        the port. Never raises.
+        """
 
     # --- device construction -------------------------------------------------
 

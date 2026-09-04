@@ -86,6 +86,31 @@ class SO101Family(ArmFamily):
         warnings += clear_goal_velocity(robot, FOLLOWER, label)
         return warnings
 
+    def capture_rest_poses(self, robot: Any, *, include_gripper: bool = False) -> list[tuple[Any, dict]]:
+        # One bus per follower arm (a bimanual BiSO robot exposes two), raw
+        # ticks — directly replayable as Goal_Position later.
+        from .. import rest_pose, torque
+
+        poses = []
+        for bus in torque.device_buses(robot):
+            pose = rest_pose.capture_rest_pose(bus)
+            if not include_gripper:
+                pose = {m: v for m, v in pose.items() if m != "gripper"}
+            poses.append((bus, pose))
+        return poses
+
+    def return_to_rest(self, rest_poses: list[tuple[Any, dict]], abort_event: Any = None) -> None:
+        # A Feetech profile-velocity move per bus, all buses at once.
+        from .. import rest_pose
+
+        rest_pose.return_buses_to_rest(rest_poses, abort_event)
+
+    def release_torque(self, device: Any, label: str = "device") -> list[str]:
+        # Motor by motor, so one bad motor cannot leave the other joints locked.
+        from .. import torque
+
+        return torque.force_disable_torque(device, label)
+
     async def identify_by_motion(self, device_type: str, ports: list[str] | None = None) -> dict:
         # Both halves speak Feetech serial on motor id 1, so the side asked
         # about changes nothing — identify.py watches the same register either way.

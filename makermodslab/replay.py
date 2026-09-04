@@ -38,21 +38,19 @@ from pydantic import BaseModel
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
+from . import rest_pose as _rest_pose
 from .api_errors import ErrorCode
-from .arm_capabilities import ARM_TYPE_LABEL, arm_type_from_robot_type, uses_feetech_bus
+from .arm_capabilities import ARM_TYPE_LABEL, arm_type_from_robot_type
 from .arms import registry as arm_registry
 from .datasets import get_episode_action_series, read_dataset_robot_type
-from .maker_rest_pose import capture_maker_pose, return_maker_to_pose
+from .maker_rest_pose import return_maker_to_pose
 from .motor_power import FOLLOWER, clear_goal_velocity
 from .rest_pose import (
     RETURN_CEILING_S,
     _clamp_to_representable_range,
-    capture_rest_pose,
-    return_to_rest_pose,
 )
 from .session_events import notify_session_changed
-from .teleoperate import _cleanup_after_setup_failure, force_disable_torque
-from .torque import release_maker_torque
+from .teleoperate import _cleanup_after_setup_failure
 from .utils.config import get_robot_record, normalize_arm_type, setup_follower_calibration_file
 
 logger = logging.getLogger(__name__)
@@ -558,17 +556,15 @@ def _replay_worker(
     # gripper, matching what capture_rest_pose does here for the SO-101 —
     # replay drives the gripper from the dataset, so its start width is part of
     # the pose being restored.
-    feetech = uses_feetech_bus(arm_type)
-    if feetech:
-        start_pose = capture_rest_pose(robot.bus, normalize=False)
-    else:
-        start_pose = capture_maker_pose(robot, include_gripper=True)
+    family = arm_registry.get(normalize_arm_type(arm_type))
+    feetech = family.uses_feetech_bus
+    rest_poses = family.capture_rest_poses(robot, include_gripper=True)
 
     try:
         if frames:
             frame0 = dict(zip(action_names, frames[0], strict=True))
             if feetech:
-                arrived, reason = return_to_rest_pose(
+                arrived, reason = _rest_pose.return_to_rest_pose(
                     robot.bus,
                     _bus_keyed(frame0, robot.bus),
                     abort_event=_stop_event,
@@ -740,10 +736,12 @@ def _replay_worker(
         # Playback is over but the arm is still energized for the return —
         # a phase of this session, not idle yet.
         notify_session_changed("replay", True, phase=_replay_meta.get("phase"))
-        if feetech:
-            return_to_rest_pose(robot.bus, start_pose, label="follower arm")
-        else:
-            return_maker_to_pose(robot, start_pose, abort_event=_stop_event, label="follower arm")
+        # The abort asymmetry is deliberate and pre-dates the family: the SO-101
+        # return runs to completion (the stop that ended playback already set
+        # _stop_event, so passing it would cut the return short at once), while
+        # the CAN return is handed that same event. Kept as-is — see the
+        # hardware checklist in the arm-family refactor notes.
+        family.return_to_rest(rest_poses, abort_event=None if feetech else _stop_event)
     except Exception as e:
         logger.error(f"Replay worker error: {e}")
         with _state_lock:
@@ -751,13 +749,13 @@ def _replay_worker(
             _replay_meta["error"] = str(e)
     finally:
         if feetech:
-            force_disable_torque(robot, "follower arm")
+            family.release_torque(robot, "follower arm")
             try:
                 robot.bus.disconnect(disable_torque=False)
             except Exception as e:
                 logger.warning(f"Could not disconnect the follower after replay: {e}")
         else:
-            release_maker_torque(robot, "CAN follower arm")
+            family.release_torque(robot, "CAN follower arm")
             try:
                 # disconnect() (not bus.disconnect(disable_torque=False)):
                 # MakerFollower.disconnect honours disable_torque_on_disconnect,

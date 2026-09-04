@@ -102,6 +102,29 @@ class CanArmFamily(ArmFamily):
     def single_leader_config(self, port: str, config_id: str):
         return self._device_classes().teleop(port=port, id=config_id)
 
+    def capture_rest_poses(self, robot: Any, *, include_gripper: bool = False) -> list[tuple[Any, dict]]:
+        # Degrees by bare motor name, one entry per drivable sub-arm (the
+        # bimanual wrapper's sub-arms drive directly, on their own buses).
+        from .. import maker_rest_pose
+
+        return [
+            (arm, maker_rest_pose.capture_maker_pose(arm, include_gripper=include_gripper))
+            for arm, _label in maker_rest_pose.maker_follower_arms(robot)
+        ]
+
+    def return_to_rest(self, rest_poses: list[tuple[Any, dict]], abort_event: Any = None) -> None:
+        # The MIT setpoint interpolated at a bounded rate, arrival judged by
+        # CONVERGENCE (a loaded joint holds a standing error), all arms at once.
+        from .. import maker_rest_pose
+
+        maker_rest_pose.return_maker_arms_to_rest(rest_poses, abort_event)
+
+    def release_torque(self, device: Any, label: str = "device") -> list[str]:
+        # One whole-bus disable per bus; the Star leader has no motors and is skipped.
+        from .. import torque
+
+        return torque.release_maker_torque(device, label)
+
     async def probe_ports(self, ports: list[str] | None = None) -> dict:
         from .. import maker_ports
 

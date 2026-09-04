@@ -41,20 +41,9 @@ from .datasets import (
     invalidate_hub_status,
     push_dataset_to_hub,
 )
-from .maker_rest_pose import (
-    capture_maker_pose,
-    maker_follower_arms,
-    return_maker_arms_to_rest,
-)
-from .rest_pose import RETURN_CEILING_S, capture_rest_pose
+from .rest_pose import RETURN_CEILING_S
 from .session_events import notify_session_changed
-from .teleoperate import (
-    _device_buses,
-    _return_followers_to_rest,
-    force_disable_torque,
-    force_disconnect_partial,
-)
-from .torque import release_maker_torque
+from .teleoperate import force_disconnect_partial
 from .utils.config import (
     CameraResolutionError,
     load_robot_cameras,
@@ -1946,15 +1935,7 @@ def record_with_web_events(
     # mechanism differs by bus (see teleoperate's matching branch and
     # maker_rest_pose.py). A Maker arm has no brakes, so releasing torque
     # wherever the last episode ended would drop it.
-    if feetech:
-        follower_rest_poses = [
-            (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
-            for bus in _device_buses(robot)
-        ]
-        maker_rest_poses = []
-    else:
-        follower_rest_poses = []
-        maker_rest_poses = [(arm, capture_maker_pose(arm)) for arm, _label in maker_follower_arms(robot)]
+    rest_poses = family.capture_rest_poses(robot)
 
     # Start with episode 1 - but track it properly
     current_episode = 1
@@ -2208,16 +2189,17 @@ def record_with_web_events(
                 # session, not idle yet (the worker's finally emits the final
                 # release hint once cleanup is done).
                 notify_session_changed("recording", True, phase="releasing")
-                _return_followers_to_rest(follower_rest_poses, _release_now)
-                return_maker_arms_to_rest(maker_rest_poses, _release_now)
+                family.return_to_rest(rest_poses, _release_now)
             # Belt and braces: disable torque explicitly before disconnect, so a
             # failure inside disconnect() can't leave an arm energized (rigid).
             # force_disable_torque logs any failure at ERROR level with the port.
+            # Every family releases the follower; only a family whose leader
+            # has motors (the SO-101) has a leader to release too.
             if feetech:
-                force_disable_torque(robot, "robot")
-                force_disable_torque(teleop, "teleop")
+                family.release_torque(robot, "robot")
+                family.release_torque(teleop, "teleop")
             else:
-                release_maker_torque(robot, "CAN follower arm")
+                family.release_torque(robot, "CAN follower arm")
             robot.disconnect()
             if teleop:
                 teleop.disconnect()

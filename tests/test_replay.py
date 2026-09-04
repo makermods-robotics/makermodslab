@@ -668,9 +668,9 @@ def test_stop_during_ease_in_signals_the_same_abort_event_and_still_returns_gent
             return False, "cut-short"
         return True, "returned: max delta 0 ticks ()"
 
-    monkeypatch.setattr(replay, "capture_rest_pose", fake_capture_rest_pose)
-    monkeypatch.setattr(replay, "return_to_rest_pose", fake_return_to_rest_pose)
-    monkeypatch.setattr(replay, "force_disable_torque", lambda robot, label: None)
+    monkeypatch.setattr("makermodslab.rest_pose.capture_rest_pose", fake_capture_rest_pose)
+    monkeypatch.setattr("makermodslab.rest_pose.return_to_rest_pose", fake_return_to_rest_pose)
+    monkeypatch.setattr("makermodslab.torque.force_disable_torque", lambda robot, label: None)
 
     action_series = {
         "action_names": ["shoulder_pan.pos"],
@@ -759,9 +759,11 @@ def _run_ease_in_worker(monkeypatch, verdict, bus):
     from makermodslab import replay
 
     monkeypatch.setattr(replay, "replay_active", True)
-    monkeypatch.setattr(replay, "capture_rest_pose", lambda bus, normalize=False: {"shoulder_pan": 10})
+    monkeypatch.setattr(
+        "makermodslab.rest_pose.capture_rest_pose", lambda bus, normalize=False: {"shoulder_pan": 10}
+    )
     monkeypatch.setattr(replay, "_ensure_uncapped", lambda robot, label: None)
-    monkeypatch.setattr(replay, "force_disable_torque", lambda robot, label: None)
+    monkeypatch.setattr("makermodslab.torque.force_disable_torque", lambda robot, label: None)
 
     def fake_return_to_rest_pose(
         bus, target, abort_event=None, label="arm", normalize=False, tolerance=None, stall_min_progress=None
@@ -769,7 +771,7 @@ def _run_ease_in_worker(monkeypatch, verdict, bus):
         # normalize=True is the ease-in; the raw-ticks call is the stopping return.
         return verdict if normalize else (True, "returned: max delta 0 ticks ()")
 
-    monkeypatch.setattr(replay, "return_to_rest_pose", fake_return_to_rest_pose)
+    monkeypatch.setattr("makermodslab.rest_pose.return_to_rest_pose", fake_return_to_rest_pose)
 
     robot = _EaseRobot(bus)
     replay._replay_worker(robot, _EASE_FRAMES, None)

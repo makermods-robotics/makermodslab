@@ -191,6 +191,76 @@ def test_preflight_is_feetech_register_work_and_nothing_elsewhere(
         assert identity == [] and registers == [] and calls == []
 
 
+class _Bus:
+    def __init__(self, pose: dict) -> None:
+        self.pose = pose
+        self.port = "/dev/fake"
+
+    def sync_read(self, register: str, normalize: bool = False) -> dict:
+        assert register == "Present_Position"
+        return dict(self.pose)
+
+
+class _SoRobot:
+    def __init__(self, pose: dict) -> None:
+        self.bus = _Bus(pose)
+
+
+class _CanArm:
+    def __init__(self, observation: dict) -> None:
+        self._observation = observation
+
+    def get_observation(self) -> dict:
+        return dict(self._observation)
+
+
+def test_so101_stop_path_is_the_feetech_machinery(monkeypatch: pytest.MonkeyPatch) -> None:
+    from makermodslab import rest_pose, torque
+
+    so = registry.get("so101")
+    robot = _SoRobot({"shoulder_pan": 10, "gripper": 5})
+    assert so.capture_rest_poses(robot) == [(robot.bus, {"shoulder_pan": 10})]
+    assert so.capture_rest_poses(robot, include_gripper=True) == [
+        (robot.bus, {"shoulder_pan": 10, "gripper": 5})
+    ]
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        rest_pose, "return_buses_to_rest", lambda poses, abort: calls.append(("return", poses, abort))
+    )
+    monkeypatch.setattr(
+        torque,
+        "force_disable_torque",
+        lambda device, label: calls.append(("release", device, label)) or ["p"],
+    )
+    so.return_to_rest([(robot.bus, {})], "abort")
+    assert so.release_torque(robot, "follower arm") == ["p"]
+    assert calls == [("return", [(robot.bus, {})], "abort"), ("release", robot, "follower arm")]
+
+
+@pytest.mark.parametrize("family_id", ["maker", "metal"])
+def test_can_stop_path_is_the_mit_machinery(family_id: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from makermodslab import maker_rest_pose, torque
+
+    can = registry.get(family_id)
+    arm = _CanArm({"shoulder_pan.pos": 1.5, "gripper.pos": 0.5, "shoulder_pan.vel": 9})
+    assert can.capture_rest_poses(arm) == [(arm, {"shoulder_pan": 1.5})]
+    assert can.capture_rest_poses(arm, include_gripper=True) == [(arm, {"shoulder_pan": 1.5, "gripper": 0.5})]
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        maker_rest_pose,
+        "return_maker_arms_to_rest",
+        lambda poses, abort: calls.append(("return", poses, abort)),
+    )
+    monkeypatch.setattr(
+        torque, "release_maker_torque", lambda device, label: calls.append(("release", device, label)) or []
+    )
+    can.return_to_rest([(arm, {})], "abort")
+    assert can.release_torque(arm, "CAN follower arm") == []
+    assert calls == [("return", [(arm, {})], "abort"), ("release", arm, "CAN follower arm")]
+
+
 def test_library_dirs_are_resolved_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None:
     """The test fixtures redirect calibration libraries by monkeypatching the
     config constants; a family that captured the path at import would silently
@@ -249,6 +319,15 @@ def test_an_incomplete_family_is_refused_naming_the_gaps(monkeypatch: pytest.Mon
             raise NotImplementedError
 
         async def identify_by_motion(self, device_type, ports=None):
+            raise NotImplementedError
+
+        def capture_rest_poses(self, robot, *, include_gripper=False):
+            raise NotImplementedError
+
+        def return_to_rest(self, rest_poses, abort_event=None):
+            raise NotImplementedError
+
+        def release_torque(self, device, label="device"):
             raise NotImplementedError
 
         def build_single_configs(self, request, cameras, leader_id, follower_id):
