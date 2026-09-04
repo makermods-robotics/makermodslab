@@ -128,3 +128,95 @@ def test_the_suite_runs_under_an_override_so_startup_never_migrates_real_state()
     # conftest pins MAKERMODSLAB_HOME before the package is imported; the
     # server's startup hook keys off this flag to skip the migration.
     assert cfg.HOME_IS_OVERRIDDEN is True
+
+
+def test_a_half_copied_destination_is_rolled_back_and_retried(
+    split: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cross-filesystem copy that dies part-way must not leave a partial
+    destination for the destination-wins rule to mistake for live state."""
+    legacy, home = split
+    (legacy / "robots").mkdir()
+    (legacy / "robots" / "a.json").write_text("{}")
+    (legacy / "robots" / "b.json").write_text("{}")
+    real_move = cfg.shutil.move
+
+    def half_copy(src: str, dst: str) -> None:
+        os.makedirs(dst)
+        Path(dst, "a.json").write_text("{}")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cfg.shutil, "move", half_copy)
+    assert cfg.migrate_legacy_state(str(legacy)) == []
+    assert not (home / "robots").exists()
+    assert not (home / "robots.migrating").exists()
+    assert sorted(p.name for p in (legacy / "robots").iterdir()) == ["a.json", "b.json"]
+
+    monkeypatch.setattr(cfg.shutil, "move", real_move)
+    assert cfg.migrate_legacy_state(str(legacy)) == [cfg.ROBOTS_PATH]
+    assert sorted(p.name for p in (home / "robots").iterdir()) == ["a.json", "b.json"]
+
+
+def test_directories_present_at_both_places_are_merged_name_by_name(
+    split: tuple[Path, Path], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The new → old → new round-trip: the new version created an (empty or
+    partly filled) robots/ dir, the old version then wrote records beside
+    lerobot's files. Names the new dir lacks move over; clashes stay put
+    and are named in a warning."""
+    legacy, home = split
+    (legacy / "robots").mkdir()
+    (legacy / "robots" / "old_only.json").write_text("old")
+    (legacy / "robots" / "both.json").write_text("old")
+    (home / "robots").mkdir(parents=True)
+    (home / "robots" / "both.json").write_text("new")
+
+    with caplog.at_level("WARNING"):
+        written = cfg.migrate_legacy_state(str(legacy))
+
+    assert written == [cfg.ROBOTS_PATH]
+    assert (home / "robots" / "old_only.json").read_text() == "old"
+    assert (home / "robots" / "both.json").read_text() == "new"
+    assert [p.name for p in (legacy / "robots").iterdir()] == ["both.json"]
+    assert "left in place" in caplog.text and str(legacy / "robots") in caplog.text
+
+
+def test_an_empty_new_directory_does_not_block_the_legacy_one(split: tuple[Path, Path]) -> None:
+    """list_robot_records creates robots/ on every listing; that must not count
+    as 'the destination exists' against a legacy dir full of records."""
+    legacy, home = split
+    (legacy / "robots").mkdir()
+    (legacy / "robots" / "bot.json").write_text("{}")
+    (home / "robots").mkdir(parents=True)
+
+    assert cfg.migrate_legacy_state(str(legacy)) == [cfg.ROBOTS_PATH]
+    assert (home / "robots" / "bot.json").exists()
+    assert not (legacy / "robots").exists()  # emptied, so removed
+
+
+def test_the_server_startup_hook_migrates_when_home_is_not_overridden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    import makermodslab.server as srv
+
+    calls: list[int] = []
+    monkeypatch.setattr(srv, "HOME_IS_OVERRIDDEN", False)
+    monkeypatch.setattr(srv, "migrate_legacy_state", lambda: calls.append(1) or [])
+    with TestClient(srv.app):
+        pass
+    assert calls == [1]
+
+
+def test_the_server_startup_hook_skips_under_an_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi.testclient import TestClient
+
+    import makermodslab.server as srv
+
+    calls: list[int] = []
+    monkeypatch.setattr(srv, "HOME_IS_OVERRIDDEN", True)
+    monkeypatch.setattr(srv, "migrate_legacy_state", lambda: calls.append(1) or [])
+    with TestClient(srv.app):
+        pass
+    assert calls == []

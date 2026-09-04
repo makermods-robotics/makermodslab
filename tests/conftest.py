@@ -51,12 +51,13 @@ else:  # pragma: no cover - only when the caller pinned a root themselves
 # even in a test that forgets the `tmp_lerobot_home` fixture — and, because
 # the override is set, the server's startup migration is skipped, so a test
 # run can never move a developer's real pre-split state anywhere (least of
-# all into a tmp dir that is deleted at exit).
+# all into a tmp dir that is deleted at exit). Set UNCONDITIONALLY, unlike the
+# output root: MAKERMODSLAB_HOME is a production override a station or a
+# container exports, and honouring an exported value here would point the
+# `client` fixture at that machine's real state.
 _TEST_STATE_HOME = tempfile.mkdtemp(prefix="makermodslab-home-")
-if os.environ.setdefault("MAKERMODSLAB_HOME", _TEST_STATE_HOME) == _TEST_STATE_HOME:
-    atexit.register(shutil.rmtree, _TEST_STATE_HOME, ignore_errors=True)
-else:  # pragma: no cover - only when the caller pinned a home themselves
-    shutil.rmtree(_TEST_STATE_HOME, ignore_errors=True)
+os.environ["MAKERMODSLAB_HOME"] = _TEST_STATE_HOME
+atexit.register(shutil.rmtree, _TEST_STATE_HOME, ignore_errors=True)
 
 
 @pytest.fixture

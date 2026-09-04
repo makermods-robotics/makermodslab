@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import json
 import logging
 import os
@@ -274,45 +275,112 @@ _LEGACY_STATE_ENTRIES: tuple[tuple[str, str], ...] = (
 )
 
 
+def _remove_path(path: str) -> None:
+    """Best-effort removal of a file, symlink or directory tree."""
+    if os.path.islink(path) or os.path.isfile(path):
+        with contextlib.suppress(OSError):
+            os.remove(path)
+    elif os.path.isdir(path):
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _move_entry(src: str, dst: str) -> bool:
+    """Move ``src`` to ``dst`` without ever leaving a half-written ``dst``.
+
+    ``shutil.move`` is a rename on one filesystem but copy-then-delete across
+    two — and ``~/.cache/huggingface`` symlinked onto a big external drive is
+    a common lerobot setup, which puts the two roots on different volumes. A
+    copy that dies half-way (disk full, one unreadable file) would leave a
+    partial ``dst`` that the destination-wins rule then treats as the live
+    state forever. So the move lands in a sibling ``<dst>.migrating`` first
+    and is renamed into place only once complete; on failure the sibling is
+    removed and ``src`` is untouched (``shutil.move`` deletes the source only
+    after a full copy).
+    """
+    staging = dst + ".migrating"
+    _remove_path(staging)
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.move(src, staging)
+        os.replace(staging, dst)
+    except OSError as exc:
+        logger.warning("Could not migrate %s -> %s: %s", src, dst, exc)
+        _remove_path(staging)
+        return False
+    return True
+
+
+def _merge_dir(src: str, dst: str) -> tuple[int, int]:
+    """Move the entries of legacy dir ``src`` that ``dst`` lacks; keep the rest.
+
+    Returns (moved, left). ``src`` is removed once nothing is left in it.
+    """
+    moved = left = 0
+    for name in sorted(os.listdir(src)):
+        s, d = os.path.join(src, name), os.path.join(dst, name)
+        if os.path.lexists(d):
+            left += 1
+        elif _move_entry(s, d):
+            moved += 1
+        else:
+            left += 1
+    if left == 0:
+        with contextlib.suppress(OSError):
+            os.rmdir(src)
+    return moved, left
+
+
 def migrate_legacy_state(legacy_root: str | None = None) -> list[str]:
     """Move MakerMods Lab state written beside lerobot's cache into MAKERMODSLAB_HOME.
 
-    One-shot and idempotent: an entry moves only when it exists at the legacy
-    location and NOTHING exists at the new one. A destination that already
-    exists is the live state and wins — so an old version run after the split
-    cannot clobber newer files on the next upgrade, and a second call is a
-    no-op. A failed move is logged and skipped; the app then starts with that
-    entry at its defaults rather than refusing to start. Returns the
-    destinations written (for the startup log and the tests).
+    One-shot and idempotent. A FILE entry moves only when nothing exists at
+    the new path: a destination that already exists is the live state and
+    wins, so an old version run after the split cannot clobber newer files on
+    the next upgrade, and a second call is a no-op. A DIRECTORY entry that
+    exists at both places is merged name by name under the same rule — the
+    new location's directories get created empty by ordinary reads
+    (``list_robot_records`` makes ``robots/`` on every listing), so a
+    new → old → new round-trip would otherwise strand every robot record the
+    old version wrote in between. Whatever is left behind is named in one
+    WARNING per start, so a user can find it. A failed move is logged and
+    skipped; the app then starts with that entry at its defaults rather than
+    refusing to start. Returns the destinations written.
 
     The caller decides WHEN this runs (server startup, before the first read
     of any entry — every reader here is lazy) and whether it runs at all
-    (never under a ``MAKERMODSLAB_HOME`` override; see the note on
-    HOME_IS_OVERRIDDEN).
+    (never under a ``MAKERMODSLAB_HOME`` override; see HOME_IS_OVERRIDDEN).
     """
     root = LEGACY_STATE_ROOT if legacy_root is None else legacy_root
-    moved: list[str] = []
+    written: list[str] = []
+    left_behind: list[str] = []
     for legacy_name, attr in _LEGACY_STATE_ENTRIES:
         src = os.path.join(root, legacy_name)
         dst = globals()[attr]
-        if not os.path.lexists(src) or os.path.lexists(dst):
+        if not os.path.lexists(src):
             continue
-        try:
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.move(src, dst)
-        except OSError as exc:
-            logger.warning("Could not migrate %s -> %s: %s", src, dst, exc)
+        if not os.path.lexists(dst):
+            if _move_entry(src, dst):
+                written.append(dst)
             continue
-        moved.append(dst)
-    if moved:
+        if os.path.isdir(src) and not os.path.islink(src) and os.path.isdir(dst):
+            moved, left = _merge_dir(src, dst)
+            if moved:
+                written.append(dst)
+            if left:
+                left_behind.append(src)
+        else:
+            left_behind.append(src)
+    if written:
         logger.info(
-            "Moved %d MakerMods Lab state entr%s from %s to %s",
-            len(moved),
-            "y" if len(moved) == 1 else "ies",
-            root,
-            os.path.dirname(moved[0]) if len(moved) == 1 else MAKERMODSLAB_HOME,
+            "Moved %d MakerMods Lab state entries from %s to %s", len(written), root, MAKERMODSLAB_HOME
         )
-    return moved
+    if left_behind:
+        logger.warning(
+            "Legacy MakerMods Lab state left in place because a newer copy exists under %s: %s",
+            MAKERMODSLAB_HOME,
+            ", ".join(left_behind),
+        )
+    return written
 
 
 def _atomic_write_text(path: str, content: str) -> None:

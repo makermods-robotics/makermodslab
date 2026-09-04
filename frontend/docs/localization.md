@@ -669,7 +669,8 @@ With DevTools open, do the same action in both languages and diff:
 - **Network** — request bodies and headers must be identical.
 - **Application → Local Storage** — the only difference is `makerlab:language`.
 - **On disk** — after recording a dataset or saving a robot config while in another
-  language, files under `~/.cache/huggingface/lerobot/` must still be pure ASCII.
+  language, files under `~/.makermods/makermodslab/` (robot records, ports) and
+  `~/.cache/huggingface/lerobot/` (datasets, calibrations) must still be pure ASCII.
 
 ---
 
