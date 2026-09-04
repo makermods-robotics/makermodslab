@@ -24,6 +24,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
+from ..arms import registry as arm_registry
+
 logger = logging.getLogger(__name__)
 
 RobotSide = Literal["leader", "follower"]
@@ -75,9 +77,14 @@ FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "so_follower")
 # leader on FashionStar UART servos. The two share no bus protocol, no
 # calibration procedure and no port-detection method, so the arm type is the
 # discriminant every hardware path branches on.
+# The registry (makermodslab/arms) is the source of truth for which families
+# exist; ARM_TYPES mirrors it. The Literal is still hand-written because the
+# request models are typed with it and the API contract snapshot names its
+# members — tests/test_arm_registry.py pins the two in agreement until the
+# extension work opens the set (TB5 in docs/extensions/plan.md).
 ArmType = Literal["so101", "maker", "metal"]
-ARM_TYPES: tuple[str, ...] = ("so101", "maker", "metal")
-DEFAULT_ARM_TYPE = "so101"
+ARM_TYPES: tuple[str, ...] = arm_registry.ids()
+DEFAULT_ARM_TYPE = arm_registry.DEFAULT_ID
 
 # lerobot derives a device's calibration directory from the device CLASS's
 # `name` attribute (Robot.__init__ / Teleoperator.__init__ ->
@@ -114,10 +121,11 @@ def normalize_arm_type(value: object) -> str:
 # calibration is meaningless to an SO-101 and vice versa, and lerobot would not
 # look for it in the other directory anyway. Nothing merges the two listings.
 #
-# Both resolvers read the module-level path globals at CALL time rather than
-# capturing them in a lookup table at import time, so a test (or an install
-# with a relocated cache) that monkeypatches LEADER_CONFIG_PATH still steers
-# every caller — a frozen table would silently ignore the patch.
+# Each family NAMES its library constants (ArmFamily.leader_library_attr /
+# follower_library_attr) and resolves them off this module at CALL time rather
+# than capturing a path at import, so a test (or an install with a relocated
+# cache) that monkeypatches LEADER_CONFIG_PATH still steers every caller — a
+# frozen table would silently ignore the patch.
 
 
 def leader_config_path_for(arm_type: object = DEFAULT_ARM_TYPE) -> str:
@@ -128,19 +136,12 @@ def leader_config_path_for(arm_type: object = DEFAULT_ARM_TYPE) -> str:
     separation there is carried by the minted config NAMES instead
     (default_slot_config_name).
     """
-    if normalize_arm_type(arm_type) in ("maker", "metal"):
-        return MAKER_LEADER_CONFIG_PATH
-    return LEADER_CONFIG_PATH
+    return arm_registry.get(normalize_arm_type(arm_type)).leader_calibration_dir()
 
 
 def follower_config_path_for(arm_type: object = DEFAULT_ARM_TYPE) -> str:
     """The calibration library dir holding this arm type's FOLLOWER configs."""
-    normalized = normalize_arm_type(arm_type)
-    if normalized == "maker":
-        return MAKER_FOLLOWER_CONFIG_PATH
-    if normalized == "metal":
-        return METAL_FOLLOWER_CONFIG_PATH
-    return FOLLOWER_CONFIG_PATH
+    return arm_registry.get(normalize_arm_type(arm_type)).follower_calibration_dir()
 
 
 def default_slot_config_name(record_name: str, mode: object, arm: str, arm_type: object) -> str:
@@ -154,10 +155,11 @@ def default_slot_config_name(record_name: str, mode: object, arm: str, arm_type:
     that is wrong for one of them. Followers get the same suffix purely for
     consistency (their libraries are already separate).
 
-    Only a default: a slot that already names a calibration keeps it.
+    Only a default: a slot that already names a calibration keeps it. The
+    single-mode rule is the family's (ArmFamily.default_calibration_name);
+    the bimanual ``_<arm>`` suffix is the same for every family.
     """
-    normalized = normalize_arm_type(arm_type)
-    base = record_name if normalized == DEFAULT_ARM_TYPE else f"{record_name}_{normalized}"
+    base = arm_registry.get(normalize_arm_type(arm_type)).default_calibration_name(record_name)
     return f"{base}_{arm}" if mode == "bimanual" else base
 
 
