@@ -78,6 +78,14 @@ export interface GpuStatus {
    * a value and `flow_steps_applied` separates a drop from a non-choice. */
   flow_steps: number | null;
   flow_steps_applied: boolean;
+  /** The EXTRA camera views this launch asked to declare on the checkpoint
+   * (S3.8g), by role name. Null while idle (and on a server too old to echo
+   * it); `[]` is a real answer — the checkpoint's own views. `applied` false
+   * beside a non-empty list is a launch that asked and was dropped, because
+   * that checkpoint's view count is fixed by its architecture. Role names are
+   * DATA, rendered verbatim. */
+  extra_image_roles: string[] | null;
+  extra_image_roles_applied: boolean;
   /** WHAT THE CONTAINER SAID IT IS RUNNING ON — e.g. "NVIDIA A100-SXM4-40GB
    * (39.6 GiB)", from the policy server's own `[policy] device:` line. Null
    * while idle and until that line arrives.
@@ -133,6 +141,15 @@ export interface GpuStartRequest {
    * sends when the selected checkpoint's config says the knob does not apply,
    * whatever this browser remembered. */
   flow_steps: number | null;
+  /** EXTRA camera views to declare on the checkpoint before the weights load
+   * (S3.8g) — `["cam2"]` on a checkpoint published with `cam0`/`cam1`. Empty
+   * (the default) is the checkpoint's own views and sends no flag.
+   *
+   * NOT a `useGpuKnobs` value, unlike the three above: it is not a preference
+   * the browser remembers per Lab but the other half of a camera BINDING, so
+   * it comes from the camera-roles state (which is remembered per checkpoint
+   * AND robot) and must match what the robot side is asked to publish. */
+  extra_image_roles: string[];
 }
 
 /** The precisions the launcher will pass to `--model-dtype`, mirroring
@@ -558,6 +575,15 @@ export interface GpuKnobSupport {
   modelDtype: boolean;
   flowSteps: boolean;
   flowStepsDefault: number | null;
+  /** Whether extra camera VIEWS may be declared on this checkpoint (S3.8g).
+   *
+   * The ONE field here that fails CLOSED, and deliberately: the other two are
+   * knobs the operator already chose and a "not established" must not silently
+   * change what goes out, while this one is an OFFER the panel makes. Offering
+   * to add a third camera to a checkpoint whose vision tower is fixed at two
+   * buys a shape error inside a container after a paid cold start; not offering
+   * it costs one refresh. */
+  extraImageRoles: boolean;
 }
 
 export function gpuKnobSupport(
@@ -565,6 +591,7 @@ export function gpuKnobSupport(
     supports_model_dtype?: boolean;
     supports_flow_steps?: boolean;
     flow_steps_default?: number | null;
+    supports_extra_image_roles?: boolean;
   } | null,
 ): GpuKnobSupport {
   return {
@@ -573,6 +600,9 @@ export function gpuKnobSupport(
     modelDtype: config?.supports_model_dtype ?? true,
     flowSteps: config?.supports_flow_steps ?? true,
     flowStepsDefault: config?.flow_steps_default ?? null,
+    // `?? false` — see the field's comment: this one is an offer, not a
+    // remembered pick, so an unknown answer withholds it.
+    extraImageRoles: config?.supports_extra_image_roles ?? false,
   };
 }
 

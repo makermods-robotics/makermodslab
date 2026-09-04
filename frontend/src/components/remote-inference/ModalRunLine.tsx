@@ -50,6 +50,10 @@ const ModalRunLine: React.FC<{
   /** Which of them the selected checkpoint can use, so a knob its config has
    * no field for never appears in a line the operator is about to paste. */
   knobSupport: GpuKnobSupport;
+  /** EXTRA camera views the run declares on the checkpoint (S3.8g), by role
+   * name. Not part of `knobs`: it is the other half of a camera binding, and it
+   * belongs to the (checkpoint, robot) pair rather than to this browser. */
+  extraImageRoles: string[];
 }> = ({
   config,
   transport,
@@ -59,6 +63,7 @@ const ModalRunLine: React.FC<{
   environment,
   knobs,
   knobSupport,
+  extraImageRoles,
 }) => {
   const { t } = useTranslation();
   const { toast } = useToast();
@@ -77,6 +82,12 @@ const ModalRunLine: React.FC<{
     modelDtype: effective.modelDtype,
     // A flag too, right after the precision.
     flowSteps: effective.flowSteps,
+    // And the third flag, which unlike the other two is not a GPU preference:
+    // it is the other half of a camera binding, so it comes from the panel's
+    // camera-role state rather than from `knobs`. A hand-run command that omits
+    // it while the robot side publishes the extra track is exactly the wire
+    // mismatch this line exists to make comparable.
+    extraImageRoles,
     gpu: effective.gpu,
     horizon: config.horizon,
     fps: config.fps,

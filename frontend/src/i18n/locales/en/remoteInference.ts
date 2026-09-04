@@ -92,6 +92,16 @@ export default {
     disconnected: "Not plugged in right now.",
     identityNote:
       "The choice is remembered for this checkpoint and robot, and is sent with this run only. Nothing is renamed: the camera keeps the name it has in Robot settings, and the server still finds the device by it.",
+    // S3.8g — a view the checkpoint does not declare at all. The role NAME
+    // interpolated below is data (cam2), rendered verbatim in every language.
+    addRole: "Add a camera role",
+    addRoleHint:
+      "This checkpoint was fine-tuned with the two views it declares, but the model underneath takes any number of them, so the GPU can be asked for one more. It costs latency (more image tokens per step) and the checkpoint's own authors never tested it — measure before trusting it. The extra camera needs to be chosen above, and the GPU must be started from this panel so both halves agree.",
+    addRoleFull:
+      "That is as many extra views as this launcher will add. Each one is more work per step, and past a point the chunk arrives after the arm needed it.",
+    extraBadge: "Added for this run — not a view the checkpoint was trained with.",
+    remove: "Remove",
+    removeRole: "Remove the camera role {{role}}",
   },
   // Backend engine values. Matched on, never displayed raw — the raw value is
   // the fallback for an engine a newer server introduces.

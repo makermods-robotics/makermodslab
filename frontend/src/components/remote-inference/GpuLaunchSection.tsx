@@ -84,6 +84,12 @@ const GpuLaunchSection: React.FC<{
    * GPU (its server refuses to start, and the failure used to be misread as
    * a tailnet problem). */
   taskRequired: boolean;
+  /** EXTRA camera views this run declares on the checkpoint (S3.8g), by role
+   * name. NOT one of `knobs`: those are GPU preferences this browser remembers
+   * per Lab, while this is the other half of a camera BINDING and belongs to
+   * the (checkpoint, robot) pair — so it arrives from the panel's camera-role
+   * state, and the robot side is publishing exactly these tracks. */
+  extraImageRoles: string[];
 }> = ({
   launcher,
   targets,
@@ -93,6 +99,7 @@ const GpuLaunchSection: React.FC<{
   hubIdDefault,
   task,
   taskRequired,
+  extraImageRoles,
 }) => {
   const { t } = useTranslation();
   const { status, pending, error, start, stop, launched } = launcher;
@@ -135,6 +142,10 @@ const GpuLaunchSection: React.FC<{
     // Also what a knob this checkpoint cannot use collapses to, whatever the
     // browser remembered for the last one.
     flow_steps: effective.flowSteps,
+    // The camera-role state's, verbatim: the robot side publishes a track per
+    // bound role, so the GPU has to declare exactly the same set or Portal's
+    // fingerprints stop matching and every packet is dropped in silence.
+    extra_image_roles: extraImageRoles,
   };
   const launch = () => void start(startBody);
   const taskMissing = taskRequired && task.trim() === "";
@@ -177,6 +188,9 @@ const GpuLaunchSection: React.FC<{
           // launch that sent no step count ran the checkpoint's own, which is
           // what this form's default names.
           flow_steps: status.flow_steps ?? null,
+          // Undefined on a server too old to echo it; `[]` is a real answer
+          // (the checkpoint's own views), so the two are told apart below.
+          extra_image_roles: status.extra_image_roles ?? null,
         }
       : null;
   const reference: {
@@ -190,6 +204,7 @@ const GpuLaunchSection: React.FC<{
     model_dtype: string | null;
     gpu: string | null;
     flow_steps: number | null;
+    extra_image_roles: string[] | null;
   } | null = echoed ?? launched;
   const drifted: string[] = [];
   if (reference && up) {
@@ -229,6 +244,17 @@ const GpuLaunchSection: React.FC<{
       reference.flow_steps !== startBody.flow_steps
     )
       drifted.push("flow_steps");
+    // The views are decided when the config is built, before the weights load,
+    // so they cannot change under a running server either — and unlike the
+    // three above this one is half the WIRE: the robot publishes a track per
+    // role, and a GPU expecting a different set drops every packet in silence.
+    // Null is "unknown" (a server too old to echo, or this tab's memory of a
+    // start that predates the field); an empty list is a real answer.
+    if (
+      reference.extra_image_roles != null &&
+      reference.extra_image_roles.join(",") !== startBody.extra_image_roles.join(",")
+    )
+      drifted.push("extra_image_roles");
   }
   const restart = async () => {
     await stop();

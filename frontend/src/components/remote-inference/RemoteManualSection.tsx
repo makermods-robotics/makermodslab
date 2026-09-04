@@ -53,6 +53,10 @@ const RemoteManualSection: React.FC<{
   /** Forwarded so the pasted line carries the same knobs Start GPU would —
    * including the blanking of one the selected checkpoint cannot use. */
   knobSupport: GpuKnobSupport;
+  /** The extra camera views the run declares on the checkpoint (S3.8g), so a
+   * hand-run command publishes the same track set the robot side does — the
+   * two disagreeing is a session that connects and receives nothing. */
+  extraImageRoles: string[];
 }> = ({
   config,
   transport,
@@ -62,6 +66,7 @@ const RemoteManualSection: React.FC<{
   environment,
   knobs,
   knobSupport,
+  extraImageRoles,
 }) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -84,6 +89,7 @@ const RemoteManualSection: React.FC<{
           environment={environment}
           knobs={knobs}
           knobSupport={knobSupport}
+          extraImageRoles={extraImageRoles}
         />
         {transport?.sfu_enabled ? (
           <div className="space-y-1.5 rounded-md border border-border p-2">

@@ -366,6 +366,7 @@ const policyConfig = (policy: string): PolicyConfigSummary => ({
   // flow families sample in steps; ACT does not.
   supports_model_dtype: false,
   supports_flow_steps: policy === "smolvla" || policy === "pi05",
+  supports_extra_image_roles: policy === "molmoact2",
   flow_steps_default: policy === "smolvla" ? 10 : policy === "pi05" ? 10 : null,
   state_dim: 6,
   action_dim: 6,

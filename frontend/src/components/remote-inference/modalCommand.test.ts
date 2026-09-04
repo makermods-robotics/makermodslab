@@ -39,6 +39,7 @@ const cloud: ModalRunLineInput = {
   // verbatim line below byte-for-byte pre-S3.8e.
   modelDtype: "",
   flowSteps: null,
+  extraImageRoles: [],
   gpu: "",
 };
 
@@ -272,6 +273,36 @@ describe("what the pasted line runs as, and what it runs on", () => {
     expect(buildModalRunLine({ ...cloud, flowSteps: null })).not.toContain(
       "--flow-steps",
     );
+  });
+
+  // The fourth knob (S3.8g), and the only one that is half the WIRE: the robot
+  // side publishes a video track per bound camera role, so a hand-run command
+  // that omits this flag declares fewer views than the arm is sending — and
+  // Portal answers a fingerprint mismatch by dropping every packet in silence.
+  it("passes the extra camera roles as ONE comma-joined flag, after the steps", () => {
+    const line = buildModalRunLine({
+      ...rtcCloud,
+      modelDtype: "bfloat16",
+      flowSteps: 4,
+      extraImageRoles: ["cam2", "cam3"],
+    });
+    expect(line).toBe(
+      "modal run makermodslab/drtc/modal_policy_rtc.py " +
+        "--policy-path makermods/pick-place " +
+        "--model-dtype bfloat16 --flow-steps 4 " +
+        "--extra-image-roles cam2,cam3 " +
+        "--horizon 50 --fps 30 --s-min 4 --video-codec H264 " +
+        "--livekit-room portal-lerobot-inference",
+    );
+  });
+
+  it("omits the extra-image-roles flag when no view was added", () => {
+    // Comma-joined into one flag because both wrappers take a Click str, not a
+    // repeatable option — and absent is the only way to say "the views the
+    // checkpoint was published with".
+    expect(
+      buildModalRunLine({ ...cloud, extraImageRoles: [] }),
+    ).not.toContain("--extra-image-roles");
   });
 });
 

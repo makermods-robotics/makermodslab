@@ -91,6 +91,7 @@ import {
   type RemoteRunConfig,
 } from "@/components/remote-inference/remoteRunConfig";
 import {
+  MAX_EXTRA_CAMERA_ROLES,
   remoteCameraRoleKey,
   useRemoteCameraRoles,
 } from "@/hooks/useRemoteCameraRoles";
@@ -633,12 +634,39 @@ const DeployPanel: React.FC = () => {
     () => robotCameras.map((c) => c.name),
     [robotCameras],
   );
-  const { roles: remoteCameraRoles, setRole: setRemoteCameraRole } =
-    useRemoteCameraRoles(
-      remoteCameraRoleKey(policyConfigJobId, selectedRef),
-      robot?.name ?? null,
-      robotCameraNames,
-    );
+  const {
+    roles: remoteCameraRoles,
+    setRole: setRemoteCameraRole,
+    extraRoles: storedExtraRoles,
+    addExtraRole,
+    removeExtraRole,
+  } = useRemoteCameraRoles(
+    remoteCameraRoleKey(policyConfigJobId, selectedRef),
+    robot?.name ?? null,
+    robotCameraNames,
+  );
+
+  /**
+   * EXTRA camera views — roles the CHECKPOINT does not declare, which the GPU
+   * side is asked to add before the weights load (S3.8g).
+   *
+   * Gated on two things, both of which have to hold for the roles to be USED
+   * rather than merely remembered:
+   *
+   *  - `knobSupport.extraImageRoles`, the server's answer for THIS checkpoint's
+   *    policy family. Fail-closed (see `gpuKnobSupport`): adding a view to a
+   *    policy whose vision tower is fixed is a shape error inside a container
+   *    after a paid cold start.
+   *  - `remote`. A local rollout loads the checkpoint on this machine with no
+   *    flag that could declare the extra view, so an extra binding there would
+   *    open a camera the policy never looks at. The roles stay REMEMBERED
+   *    across a switch to a local run; they simply stop applying.
+   */
+  const canAddCameraRoles = remote && knobSupport.extraImageRoles;
+  const extraCameraRoles = useMemo(
+    () => (canAddCameraRoles ? storedExtraRoles : []),
+    [canAddCameraRoles, storedExtraRoles],
+  );
 
   /**
    * The camera bindings, DERIVED BY NAME rather than chosen: each camera the
@@ -655,9 +683,30 @@ const DeployPanel: React.FC = () => {
    * the round-trip still works: the rollout re-prefixes it back into the
    * checkpoint's `left_<name>` feature.
    */
+  /**
+   * The checkpoint's own camera mappings plus the operator-added ones.
+   *
+   * Appended rather than merged, so the checkpoint's roles keep their order and
+   * an added one is always last — which is the order `--extra-image-roles`
+   * sends them in and the order the GPU appends the features in. An added role
+   * carries NO `dims`: there is nothing in the checkpoint to read them from,
+   * and the remote path resizes every frame GPU-side anyway.
+   */
+  const allCameraMappings = useMemo(
+    () => [
+      ...cameraMap,
+      ...extraCameraRoles.map((role) => ({
+        feature: `observation.images.${role}`,
+        display: role,
+        requestKey: role,
+      })),
+    ],
+    [cameraMap, extraCameraRoles],
+  );
+
   const cameraBindings = useMemo(
     () =>
-      cameraMap.map((mapping) => {
+      allCameraMappings.map((mapping) => {
         const camera =
           robotCameras.find(
             (c) => c.name.toLowerCase() === mapping.display.toLowerCase(),
@@ -678,7 +727,7 @@ const DeployPanel: React.FC = () => {
             (camera.width !== dims.width || camera.height !== dims.height),
         };
       }),
-    [cameraMap, robotCameras, policyConfig, availableCameras],
+    [allCameraMappings, robotCameras, policyConfig, availableCameras],
   );
 
   /**
@@ -742,17 +791,27 @@ const DeployPanel: React.FC = () => {
 
   /** The picker's slots: the roles with NO name match, in checkpoint order.
    * A matched role gets no control — there is no decision to make. */
-  const cameraRoleSlots: CameraRoleSlot[] = useMemo(
-    () =>
-      cameraBindings
-        .filter((b) => b.camera == null)
-        .map((b) => ({
-          requestKey: b.mapping.requestKey,
-          display: b.mapping.display,
-          dims: b.dims,
-          selected: remoteCameraRoles[b.mapping.requestKey] ?? null,
-        })),
-    [cameraBindings, remoteCameraRoles],
+  const cameraRoleSlots: CameraRoleSlot[] = useMemo(() => {
+    const added = new Set(extraCameraRoles);
+    return cameraBindings
+      .filter((b) => b.camera == null)
+      .map((b) => ({
+        requestKey: b.mapping.requestKey,
+        display: b.mapping.display,
+        dims: b.dims,
+        selected: remoteCameraRoles[b.mapping.requestKey] ?? null,
+        // An added role gets a remove control and says it is untested; a
+        // checkpoint role that merely matched nothing by name does not.
+        extra: added.has(b.mapping.requestKey),
+      }));
+  }, [cameraBindings, remoteCameraRoles, extraCameraRoles]);
+
+  /** Mints `cam<N>` for the lowest free N, counting the CHECKPOINT's own roles
+   * as taken — a role named after one the checkpoint already declares would be
+   * refused by the GPU as "this checkpoint already declares it". */
+  const addCameraRole = useCallback(
+    () => addExtraRole(cameraMap.map((m) => m.requestKey)),
+    [addExtraRole, cameraMap],
   );
 
   /** The robot's cameras as options. Names are the record's own spelling —
@@ -1934,6 +1993,13 @@ const DeployPanel: React.FC = () => {
               cameras={cameraRoleOptions}
               nameMatchedCount={cameraBindings.length - cameraRoleSlots.length}
               onChange={setRemoteCameraRole}
+              // S3.8g — the offer to add a view the checkpoint never declared.
+              // Only for a remote run against a policy family whose view count
+              // lives in its lerobot wrapper; see `canAddCameraRoles`.
+              canAddRoles={canAddCameraRoles}
+              onAddRole={addCameraRole}
+              onRemoveRole={removeExtraRole}
+              addRolesFull={extraCameraRoles.length >= MAX_EXTRA_CAMERA_ROLES}
               disabled={controlsLocked}
             />
 
@@ -2079,6 +2145,10 @@ const DeployPanel: React.FC = () => {
                   // task check (the launcher knows a Hub id, not a policy
                   // type), so the panel gates Start GPU on the same fact.
                   taskRequired={!!policyConfig?.requires_task}
+                  // The extra views the ROBOT side is about to publish tracks
+                  // for. Both halves are launched from this one list so their
+                  // wire schemas cannot disagree.
+                  extraImageRoles={extraCameraRoles}
                 />
                 <RemoteManualSection
                   config={remoteConfig}
@@ -2090,6 +2160,7 @@ const DeployPanel: React.FC = () => {
                   environment={gpuTargets.environment}
                   knobs={gpuKnobs}
                   knobSupport={knobSupport}
+                  extraImageRoles={extraCameraRoles}
                 />
                 <RemoteAdvancedSection
                   config={remoteConfig}

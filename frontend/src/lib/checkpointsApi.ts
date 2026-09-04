@@ -42,6 +42,11 @@ export interface PolicyConfigSummary {
    * the default below because null there is BOTH "no such knob" and "the knob
    * exists and this checkpoint saved nothing". */
   supports_flow_steps?: boolean;
+  /** Whether extra camera views may be DECLARED on this checkpoint at launch
+   * (S3.8g) — true only for a family whose image-view count is a property of
+   * its lerobot wrapper rather than of its architecture (MolmoAct2 today).
+   * Absent on a server too old to answer, which the panel reads as false. */
+  supports_extra_image_roles?: boolean;
   /** The steps-per-chunk this checkpoint would run with, when its config says.
    * Null means "no number to show", never "no default": MolmoAct2 saves
    * `num_inference_steps: null` and the number that then applies (10) lives in

@@ -48,6 +48,11 @@ export interface ModalRunLineInput {
    * checkpoint's config has no such field, so a remembered pick for another
    * policy never appears in a line the operator is about to paste. */
   flowSteps: number | null;
+  /** EXTRA camera views to declare on the checkpoint before the weights load
+   * (S3.8g). Empty ⇒ NO flag, i.e. the views the checkpoint was published with.
+   * Comma-joined into ONE flag because that is what both wrappers'
+   * `local_entrypoint` parameter is — a Click str, not a repeatable option. */
+  extraImageRoles: string[];
   /** The Modal GPU to run on. It cannot be a flag: `_FN_KWARGS["gpu"]` is
    * evaluated when `modal run` imports the wrapper, before Click parses
    * anything — so it is emitted as an env-var ASSIGNMENT prefixing the
@@ -158,6 +163,12 @@ export function buildModalRunLine(input: ModalRunLineInput): string {
     // take (the pin raises on it), so the flag's absence is the only way to
     // say "leave the checkpoint's own".
     ...(input.flowSteps ? [`--flow-steps ${input.flowSteps}`] : []),
+    // Right after it again, the order the three were added in. Omitted when
+    // empty for the same reason: no list is the checkpoint's own views, and
+    // there is no value that could stand for it other than the flag's absence.
+    ...(input.extraImageRoles.length > 0
+      ? [`--extra-image-roles ${input.extraImageRoles.join(",")}`]
+      : []),
     `--horizon ${input.horizon}`,
     `--fps ${input.fps}`,
     // RTC only. The sync wrapper has no --s-min flag at all, so emitting it

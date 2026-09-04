@@ -1911,3 +1911,178 @@ unconditionally once the knob is set, so a wrapper without the parameter dies
 on a Click usage error — after the cold start is paid for.
 `test_the_wrappers_forward_flow_steps` asserts all three links in each file, the
 same way `test_the_wrappers_forward_model_dtype` does.
+
+---
+
+## S3.8g as built (2026-09-04) — a third camera on a checkpoint published with two
+
+`lerobot/MolmoAct2-SO100_101-LeRobot` declares exactly two image inputs,
+`observation.images.cam0` and `cam1` (3×224×224, VISUAL/IDENTITY). The allenai
+model underneath takes a LIST of images and was fine-tuned on community datasets
+carrying one to three cameras; the lerobot team simply fixed the list at two in
+the wrapper. A Hub fork to add a third is not an option — that repo's
+`model.safetensors` is 21.8 GB — so the third view is a RUNTIME override, applied
+to the config before the policy and its processors are built, exactly like
+`--model-dtype` and `--flow-steps`.
+
+### What was verified in the pin, because the whole thing rests on it
+
+Two claims, both read out of the installed
+`lerobot/policies/molmoact2/` rather than assumed:
+
+* **Nothing counts to two.** `MolmoAct2PackInputsProcessorStep._extract_images`
+  (`processor_molmoact2.py:814`) iterates whatever image keys it resolves and
+  appends one array per key. `_build_robot_text` joins `Image {i}<|image|>` over
+  `range(num_images)` (`:377`) and `infer_molmoact2_max_sequence_length` budgets
+  `num_images * 196` (`:100`). `MOLMOACT2_DEFAULT_NUM_IMAGES = 2` (`:67`) exists
+  only as the fallback for a `num_images < 1` call. Three declared views really
+  are three pictures.
+* **No dataset statistics are needed.** `normalization_mapping["VISUAL"]` is
+  `NormalizationMode.IDENTITY` (`configuration_molmoact2.py:123`), and lerobot's
+  `NormalizerProcessorStep` returns the tensor untouched both for IDENTITY and
+  for any key it has no stats for (`processor/normalize_processor.py:329`);
+  `_normalize_observation` (`:278`) only touches keys it carries a feature for,
+  so an added image key the saved normalizer has never heard of passes straight
+  through. That is what makes the override cheap.
+
+### The thing that is not what it looks like
+
+The obvious reading of `make_pre_post_processors` is that it builds the pipeline
+from `config.input_features`, so declaring the feature would be enough. **It
+does not, on the path both policy servers take.** With a `pretrained_path` the
+factory never calls `make_molmoact2_pre_post_processors` at all
+(`policies/factory.py:180-209`) — it LOADS the pipeline the checkpoint saved, and
+`MolmoAct2PackInputsProcessorStep.get_config` serializes `image_keys`
+(`processor_molmoact2.py:748`). So a third feature added to the config would be
+put on the wire, decoded, resized, handed to the pipeline — and dropped on the
+floor by a pack step still packing the two keys it saved, with nothing in the log.
+
+Hence `drtc/_policy_views.add_extra_image_roles` returns
+`preprocessor_overrides` and both servers merge them into their
+`make_pre_post_processors` call beside `device_processor`. Constructor overrides
+are merged per step over the saved config (`processor/pipeline.py:1243`,
+`{**saved_cfg, **step_overrides}`), keyed by registry name —
+`_PACK_STEP_BY_TYPE` maps the policy type to `molmoact2_pack_inputs`. Two
+consequences taken deliberately: `_validate_overrides_used` (`pipeline.py:1336`)
+RAISES if the saved pipeline has no such step, which is the right direction (a
+checkpoint saved by a lerobot too old to have the pack step fails loudly at load
+instead of quietly serving two views); and only `image_keys` is overridden, never
+`allow_image_key_fallback`, because the fallback is reached only when a declared
+key is MISSING and `Inference._build_batch` already raises on a camera the robot
+did not send.
+
+`config.image_keys` is still written — for the no-`pretrained_path` factory path,
+and so the config the policy carries agrees with the pipeline reading it.
+
+### The allowlist is a table, not a field, and it is closed
+
+`utils.system.VARIABLE_VIEW_POLICY_TYPES` is `{"molmoact2"}`. It could not be
+answered the way `supports_model_dtype` is (key presence in a config.json dump):
+no field says "this family's vision tower takes any number of pictures" — that
+is a fact about its processor, established by reading one. So a family goes in
+only after someone has read ITS processor and confirmed the same three things.
+
+It answers **False for a type this pin has never heard of**, which is the
+opposite of `supports_model_dtype`/`supports_flow_steps` and deliberate: those
+two are knobs the operator already chose, where "not established" must not
+silently change what goes out, while this one is an OFFER the panel makes.
+Offering a third camera on a policy whose vision tower is genuinely fixed at N
+buys a shape error inside a container after a paid cold start; withholding the
+offer costs a refresh.
+
+`MAX_EXTRA_IMAGE_ROLES = 2` is a LATENCY ceiling, not a model limit — each view
+is another ~196 image tokens through a ~7B prefill, on a round trip an rtc run
+has 867 ms to spend. `is_valid_image_role` (`^[a-z][a-z0-9_]{0,31}$`) is narrower
+than "any string" because the role becomes four things at once: a policy feature
+key, a Portal video TRACK name, a `--robot.cameras` key inside a draccus-parsed
+argv, and one element of a COMMA-separated flag. A comma, a space, a brace or a
+dot breaks one of those in a place that presents as "the session receives
+nothing".
+
+### It travels the flow-steps road, and drops the same way
+
+`--extra-image-roles a,b` is a wrapper FLAG, forwarded through both wrappers on
+`flow_steps`' three links — a `local_entrypoint` parameter, the `fn.remote`
+kwarg, the argv append — plus `modal_policy.py`'s `run_config["last"]`, so a
+`/reset` replays the same views instead of quietly reverting to the checkpoint's.
+Comma-JOINED into one flag rather than repeated, because the wrappers' parameter
+is a Click `str`; `modal_launcher.build_argv` does the joining, and it sits after
+`--flow-steps`, the order the three were added in.
+
+`resolve_knobs` DROPS it for a checkpoint whose type is not variable-view,
+recording `extra_image_roles_applied: false` — the same shape as S3.8f's two
+drops, and for the same bench reason: a role remembered from a MolmoAct2 run must
+not cost a cold start after the operator switches checkpoint. An unreadable
+config passes it through unchanged, again on S3.8f's rule. The status echoes the
+ASK (`[]` when nothing was asked, null only while idle) so a panel comparing its
+form against the record still matches after a drop.
+
+### The robot side needed no new field
+
+The remote-run request already carries `camera_bindings: {role → robot camera
+name}`, and `_session_cameras` / `bind_robot_cameras` key `--robot.cameras` by
+the POLICY-expected name — "the whole mitigation for Portal's silent fingerprint
+mismatch", per `_robot_sync_args`' docstring. **An extra role is one more camera
+keyed that way**, so the track appears named by the role with no change to the
+argv builder, the options schema or the child. The Portal video-track count is
+not capped anywhere: `robot_sync` loops `for cam in schema.cameras`.
+
+What was added is the GATE, in `remote_inference._extra_camera_role_refusal`,
+because before it a role the checkpoint never declared was accepted silently and
+became exactly the failure Portal is worst at reporting — the robot opens the
+camera, encodes it, publishes a track, and the two halves' schema fingerprints no
+longer match, so every packet is dropped without a word. It runs before the arm
+is claimed and checks two things: the role NAME, always and with no read at all;
+and, only when there are bindings, whether the checkpoint can TAKE an extra view,
+off its own config.json (`_checkpoint_camera_roles`, `@root` unwrapped the way
+`rollout`'s rtc guard does it). **Fail-open on an unreadable config**, on
+`resolve_knobs`' rule — the GPU still refuses the flag itself before the weights
+load, which makes this an early diagnosis rather than the authority.
+
+### The panel
+
+`CameraRoleBindings` gains an "Add a camera role" control that appends the next
+free `cam<N>` (counting the checkpoint's own roles as taken), with a remove
+control per added role. An added role is an ordinary slot in every other respect:
+it needs a camera, and an unbound one blocks Start exactly as an unmatched
+checkpoint role does. The control renders only when the policy config reports
+`supports_extra_image_roles` AND the run is remote — a local rollout loads the
+checkpoint on this machine with no flag that could declare the view, so an extra
+binding there would open a camera the policy never looks at. The roles stay
+remembered across a switch to a local run; they simply stop applying.
+
+They ride the SAME localStorage record the per-role picks do
+(`makermodslab.remoteCameraRoles`, keyed by checkpoint + robot), as a separate
+`extra` list rather than more entries in the role → camera map, because an extra
+role exists — and must keep blocking Start — before it is bound to anything. The
+stored value gained a shape (`{roles, extra}`); `readEntry` still reads the old
+bare-map one, discriminated on the value's TYPE rather than on key presence,
+since `roles` is itself a legal role name.
+
+The start body carries `extra_image_roles` wired where `flow_steps` is wired, but
+it is deliberately NOT a `useGpuKnobs` value: the other three are GPU
+preferences this browser remembers per Lab, while this is the other half of a
+camera BINDING and belongs to the (checkpoint, robot) pair. The drift warning
+covers it — and it is the only one of the four that is half the WIRE, so a change
+under a running GPU is a session that connects and receives nothing. The manual
+`modal run` line carries the flag too, for the same reason.
+
+Help copy says the three things an operator needs and no more: the checkpoint was
+fine-tuned with the two views it declares, the model underneath takes any number,
+and it costs latency and is untested by the checkpoint's authors. en + zh-CN,
+parity green; role names are DATA and render verbatim in both.
+
+### Checks
+
+`ruff check` / `ruff format --check` clean; `pytest -q` green. New tests in the
+existing styles: the `utils.system` allowlist and the role validator (four
+journeys' worth of bad names); the launcher's flag-only-when-set, the drop for a
+fixed-view type, the bad-name / too-many / duplicate refusals before any spawn,
+and the status echo; `remote_inference`'s acceptance for a variable-view
+checkpoint and refusal for a fixed-view one, the name check that reads no config
+at all, and the fail-open on an unreadable one; the wrappers' three links plus
+the `/reset` replay, source-level as that file does it; and
+`modalCommand.test.ts` for the comma-joined flag. `docs/api/openapi.json`
+regenerated — one request field, one policy-config field, two status fields.
+Frontend: lint at the 38-problem / 4-error baseline, both typecheck projects
+clean, vitest 30 files / 347 tests, `npx vite build` clean to a scratch dir.
