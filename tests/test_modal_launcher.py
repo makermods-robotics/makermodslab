@@ -498,6 +498,100 @@ def test_a_dropped_knob_is_echoed_as_asked_beside_an_applied_false(spawned, fake
     assert status["flow_steps_applied"] is True
 
 
+# --- extra camera views (S3.8g) ----------------------------------------------
+
+
+def test_extra_image_roles_are_a_flag_and_only_when_the_list_is_not_empty():
+    """Comma-JOINED into one flag, because both wrappers' `local_entrypoint`
+    parameter is a Click str rather than a repeatable option. An empty list is
+    the checkpoint's own views, and the flag's absence is the only way to say
+    so."""
+    argv = ml.build_argv(_plan(), **_ARGS, engine="rtc", extra_image_roles=["cam2", "cam3"])
+    assert argv[argv.index("--extra-image-roles") + 1] == "cam2,cam3"
+    # After --flow-steps, before --horizon: the order the three knobs were
+    # added in, which is the order both wrappers' signatures read in.
+    assert argv.index("--horizon") > argv.index("--extra-image-roles")
+
+    for unset in (
+        ml.build_argv(_plan(), **_ARGS, engine="sync"),
+        ml.build_argv(_plan(), **_ARGS, engine="rtc", extra_image_roles=[]),
+    ):
+        assert "--extra-image-roles" not in unset
+
+
+def test_a_bad_or_over_long_role_list_refuses_before_anything_is_spawned(spawned):
+    """Two different failures, neither of which fails loudly anywhere else. A
+    bad NAME reaches Portal as a track name and draccus as a dict key, and
+    breaks one of them as "the session receives nothing"; too MANY is a latency
+    ceiling the container would happily blow through."""
+    # An EMPTY entry is not on this list: `start` strips and drops blanks
+    # before checking, so `[""]` is "no extra roles" rather than a bad one —
+    # a JSON array with a stray "" in it is a client artefact, not an ask.
+    for bad in (["Cam2"], ["cam 2"], ["cam,2"], ["2cam"], ["cam.2"]):
+        with pytest.raises(ApiError) as excinfo:
+            ml.start(engine="rtc", policy_hub_id="someone/p", extra_image_roles=bad)
+        assert excinfo.value.code == ErrorCode.GPU_LAUNCH_FAILED
+
+    too_many = [f"cam{n}" for n in range(ml.MAX_EXTRA_IMAGE_ROLES + 1)]
+    with pytest.raises(ApiError) as excinfo:
+        ml.start(engine="rtc", policy_hub_id="someone/p", extra_image_roles=too_many)
+    assert excinfo.value.code == ErrorCode.GPU_LAUNCH_FAILED
+
+    with pytest.raises(ApiError):
+        ml.start(engine="rtc", policy_hub_id="someone/p", extra_image_roles=["cam2", "cam2"])
+
+    assert spawned["popen"] == []
+
+
+def test_extra_roles_are_dropped_for_a_checkpoint_whose_views_are_fixed():
+    """Same shape as the other two per-checkpoint drops, and the cost of NOT
+    doing it is worse: a view added to a policy whose vision tower is fixed at
+    N is a shape error inside the container after a paid cold start.
+
+    Unlike them the check is a TABLE lookup, because no config.json field says
+    "this family takes any number of pictures"."""
+    dropped = ml.resolve_knobs(
+        "someone/smolvla", "", 0, read_config=_reader(_SMOLVLA_CFG), extra_image_roles=["cam2"]
+    )
+    assert dropped.extra_image_roles == () and dropped.extra_image_roles_applied is False
+
+    kept = ml.resolve_knobs(
+        "someone/molmo", "", 0, read_config=_reader(_MOLMOACT2_CFG), extra_image_roles=["cam2"]
+    )
+    assert kept.extra_image_roles == ("cam2",) and kept.extra_image_roles_applied is True
+
+    # And an unreadable config passes it through, on the same rule as the other
+    # two: None is "not established", never "inapplicable".
+    unknown = ml.resolve_knobs("someone/p", "", 0, read_config=_reader(None), extra_image_roles=["cam2"])
+    assert unknown.extra_image_roles == ("cam2",) and unknown.extra_image_roles_applied is True
+
+    # Asking for nothing still reads nothing.
+    reads: list[str] = []
+    ml.resolve_knobs("someone/p", "", 0, read_config=lambda p: reads.append(p) or _MOLMOACT2_CFG)
+    assert reads == []
+
+
+def test_the_status_echoes_the_roles_asked_for_beside_whether_they_went(spawned, fake_clock, monkeypatch):
+    """The ASK, like the other two — a panel comparing its form against this
+    record must still match after a drop. And this one is half the WIRE: the
+    robot publishes a track per role, so a drop the panel could not see would
+    be a session that connects and receives nothing."""
+    monkeypatch.setattr(ml, "read_pretrained_config", lambda _path: _SMOLVLA_CFG)
+    ml.start(engine="rtc", policy_hub_id="someone/smolvla", extra_image_roles=["cam2"])
+
+    argv, _env = spawned["popen"][0]
+    assert "--extra-image-roles" not in argv
+
+    status = ml.status()
+    assert status["extra_image_roles"] == ["cam2"]
+    assert status["extra_image_roles_applied"] is False
+
+    ml.stop()
+    ml._go_idle_locked()
+    assert ml.status()["extra_image_roles"] is None
+    assert ml.status()["extra_image_roles_applied"] is False
+
+
 def test_the_device_line_is_parsed_out_of_the_container_stdout(spawned, fake_clock):
     """The ONLY evidence anywhere about what hardware a run got. `gpu` is what
     was ASKED for, which is a different fact and was the one being read as
@@ -913,6 +1007,8 @@ def test_the_status_dict_always_carries_every_key(spawned, fake_clock):
         "model_dtype_applied",
         "flow_steps",
         "flow_steps_applied",
+        "extra_image_roles",
+        "extra_image_roles_applied",
         "device_name",
         "log_path",
         "started_at",

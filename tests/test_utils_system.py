@@ -286,6 +286,61 @@ def test_model_dtype_support_is_answered_from_the_saved_config() -> None:
     assert policy_supports_model_dtype({}) is False
 
 
+def test_the_variable_view_allowlist_is_closed_and_small() -> None:
+    """Which checkpoints may be given a camera they were not published with
+    (S3.8g). Answered off a TABLE rather than off key presence the way
+    `model_dtype` is, because nothing in a config.json says "this family's
+    vision tower takes any number of pictures" — that is a fact about its
+    processor, established by reading one.
+
+    MolmoAct2 is in it because its lerobot wrapper FIXED at two a list the
+    allenai model takes any length of (`processor_molmoact2._extract_images`
+    iterates whatever keys it resolves; the prompt and the sequence budget are
+    both computed from `len(images)`). Everything else answers False, INCLUDING
+    a type this pin has never heard of — which is the safe direction: the
+    checkpoint then runs with the views it was published with, and the operator
+    gets a refusal instead of a shape error inside a paid container."""
+    from makermodslab.utils.system import (
+        VARIABLE_VIEW_POLICY_TYPES,
+        policy_supports_extra_image_roles,
+    )
+
+    assert frozenset({"molmoact2"}) == VARIABLE_VIEW_POLICY_TYPES
+    assert policy_supports_extra_image_roles("molmoact2") is True
+    for policy_type in ("smolvla", "pi0", "pi05", "act", "pi0_fast", "", "something_new"):
+        assert policy_supports_extra_image_roles(policy_type) is False, policy_type
+    # Read off a config dict whose "type" can be anything at all.
+    assert policy_supports_extra_image_roles(None) is False
+    assert policy_supports_extra_image_roles(7) is False
+
+
+def test_a_camera_role_must_survive_four_journeys() -> None:
+    """The role becomes a policy feature key, a Portal VIDEO TRACK name, a
+    `--robot.cameras` dict key inside a draccus-parsed argv, and one element of
+    a COMMA-separated flag. A comma, a space, a brace or a dot breaks one of
+    those in a place that presents as "the session receives nothing" rather than
+    as an error — hence a rule narrower than "any string"."""
+    from makermodslab.utils.system import is_valid_image_role
+
+    for good in ("cam2", "c", "wrist_cam", "cam_0", "a" * 32):
+        assert is_valid_image_role(good) is True, good
+    for bad in (
+        "",
+        "Cam2",  # uppercase: the feature key is spelled lowercase everywhere
+        "2cam",  # must start with a letter
+        "cam 2",  # a space splits the draccus dict
+        "cam,2",  # a comma splits the flag itself
+        "cam.2",  # a dot is the feature-key separator
+        "cam-2",
+        "{cam2}",
+        "a" * 33,
+        None,
+        7,
+        ["cam2"],
+    ):
+        assert is_valid_image_role(bad) is False, bad
+
+
 def test_molmoact2_device_warning_is_advisory_and_names_the_device() -> None:
     """A WARNING, not a gate: nothing in this pin requires CUDA (the action-flow
     CUDA graph falls back off-CUDA), so this only sets expectations about a ~7B

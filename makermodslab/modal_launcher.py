@@ -142,6 +142,24 @@ silently dropping) on it would turn an offline moment into a launch that
 quietly ran something other than what was asked for. The container still has
 its own check, which is what makes dropping here safe rather than authoritative.
 
+Extra camera views (S3.8g)
+--------------------------
+``extra_image_roles`` is the fourth knob and the only one that changes the WIRE
+rather than the GPU's own work: each role becomes an
+``observation.images.<role>`` input feature on the checkpoint before the weights
+load, so the policy's schema carries another camera and the robot side is asked
+for another video track. It is a wrapper FLAG
+(``--extra-image-roles a,b``, comma-separated), opt-in like the other two, and
+capped at :data:`makermodslab.utils.system.MAX_EXTRA_IMAGE_ROLES` — a LATENCY
+ceiling (another ~196 image tokens per view through a ~7B prefill), not a model
+one.
+
+It follows `flow_steps`' per-checkpoint rule exactly: `resolve_knobs` DROPS it
+when the target's saved config names a policy type whose view count is fixed by
+its architecture (`utils.system.VARIABLE_VIEW_POLICY_TYPES`), rather than
+spending a cold start on the container's own refusal. Unreadable config → passed
+through unchanged, same as the other two.
+
 The device line
 ---------------
 Nothing in this stack could say what hardware a run actually got. The Lab ASKS
@@ -176,7 +194,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Literal, get_args
@@ -186,7 +204,13 @@ from .api_errors import ApiError, ErrorCode
 from .jobs import read_pretrained_config
 from .rollout import _signal_group, _terminate_tree
 from .utils.config import DRTC_GPU_APP_FILE, DRTC_LOG_DIR, _atomic_write_text
-from .utils.system import policy_flow_steps_field, policy_supports_model_dtype
+from .utils.system import (
+    MAX_EXTRA_IMAGE_ROLES,
+    is_valid_image_role,
+    policy_flow_steps_field,
+    policy_supports_extra_image_roles,
+    policy_supports_model_dtype,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -627,8 +651,14 @@ def check_target(profile: str, environment: str) -> None:
         )
 
 
-def check_knobs(model_dtype: str, gpu: str, flow_steps: int = 0) -> None:
-    """Refuse a precision, a GPU type or a step count this launcher won't send.
+def check_knobs(
+    model_dtype: str,
+    gpu: str,
+    flow_steps: int = 0,
+    extra_image_roles: Sequence[str] = (),
+) -> None:
+    """Refuse a precision, a GPU type, a step count or a camera role this
+    launcher won't send.
 
     A PURE input check, and the first thing `start` does after the Hub id,
     because neither value fails in a place worth waiting for: an off-list `gpu`
@@ -676,6 +706,38 @@ def check_knobs(model_dtype: str, gpu: str, flow_steps: int = 0) -> None:
             "own step count.",
             code=ErrorCode.GPU_LAUNCH_FAILED,
         )
+    # The fourth knob's checks, and the two failure modes they close are
+    # different from each other. A bad NAME never fails loudly anywhere: the
+    # role becomes a policy feature key, a Portal video-track name and a
+    # `--robot.cameras` dict key inside a draccus-parsed argv, and a comma, a
+    # brace or a space in it breaks one of those as "the session receives
+    # nothing". Too MANY is a latency ceiling — see MAX_EXTRA_IMAGE_ROLES.
+    roles = list(extra_image_roles)
+    if len(roles) > MAX_EXTRA_IMAGE_ROLES:
+        raise ApiError(
+            400,
+            f"This launcher will add at most {MAX_EXTRA_IMAGE_ROLES} extra camera "
+            f"{'role' if MAX_EXTRA_IMAGE_ROLES == 1 else 'roles'} to a checkpoint; got "
+            f"{len(roles)} ({', '.join(roles)}). Every extra view is another ~196 image tokens "
+            "through the prefill, which is a latency ceiling rather than a model limit.",
+            code=ErrorCode.GPU_LAUNCH_FAILED,
+        )
+    for role in roles:
+        if not is_valid_image_role(role):
+            raise ApiError(
+                400,
+                f"`{role}` isn't a usable camera role. Use lowercase letters, digits and "
+                "underscores, starting with a letter, at most 32 characters (e.g. `cam2`).",
+                code=ErrorCode.GPU_LAUNCH_FAILED,
+            )
+    if len(set(roles)) != len(roles):
+        raise ApiError(
+            400,
+            f"The same extra camera role is listed twice ({', '.join(roles)}). Each role is one "
+            "input feature on the checkpoint and one video track, so a duplicate is not a "
+            "second camera.",
+            code=ErrorCode.GPU_LAUNCH_FAILED,
+        )
 
 
 @dataclass(frozen=True)
@@ -693,6 +755,10 @@ class KnobPlan:
     model_dtype_applied: bool
     flow_steps: int
     flow_steps_applied: bool
+    # A TUPLE rather than a list, because KnobPlan is frozen and a mutable
+    # default would make two plans able to share one object.
+    extra_image_roles: tuple[str, ...] = ()
+    extra_image_roles_applied: bool = False
 
 
 def resolve_knobs(
@@ -700,6 +766,7 @@ def resolve_knobs(
     model_dtype: str,
     flow_steps: int,
     read_config: Callable[[str], dict[str, Any] | None] | None = None,
+    extra_image_roles: Sequence[str] = (),
 ) -> KnobPlan:
     """Decide, per CHECKPOINT, which knobs this launch may still send (S3.8f).
 
@@ -731,7 +798,8 @@ def resolve_knobs(
     read = read_pretrained_config if read_config is None else read_config
     want_dtype = model_dtype.strip()
     want_steps = flow_steps if flow_steps and flow_steps > 0 else 0
-    if not want_dtype and not want_steps:
+    want_roles = tuple(extra_image_roles)
+    if not want_dtype and not want_steps and not want_roles:
         return KnobPlan("", False, 0, False)
 
     try:
@@ -740,7 +808,14 @@ def resolve_knobs(
         logger.info("Couldn't read the checkpoint config for %s; knobs pass through", policy_hub_id)
         cfg = None
     if cfg is None:
-        return KnobPlan(want_dtype, bool(want_dtype), want_steps, bool(want_steps))
+        return KnobPlan(
+            want_dtype,
+            bool(want_dtype),
+            want_steps,
+            bool(want_steps),
+            want_roles,
+            bool(want_roles),
+        )
 
     policy_type = cfg.get("type")
     dtype_applied = bool(want_dtype) and policy_supports_model_dtype(cfg)
@@ -763,11 +838,30 @@ def resolve_knobs(
             policy_hub_id,
             policy_type,
         )
+    # The third per-checkpoint drop, and it is the one whose wrong answer is
+    # expensive in a different way: a role added to a policy whose vision tower
+    # really is fixed at N is a shape error INSIDE the container after a paid
+    # cold start. `policy_supports_extra_image_roles` is closed and small, and
+    # answers False for a type this pin has never heard of — which is the safe
+    # direction here, unlike the two above, because the checkpoint then simply
+    # runs with the views it was published with.
+    roles_applied = bool(want_roles) and policy_supports_extra_image_roles(policy_type)
+    if want_roles and not roles_applied:
+        logger.info(
+            "Ignoring extra_image_roles=%s for %s: a '%s' checkpoint's image views are fixed by "
+            "its architecture rather than by its wrapper, so an added one would not be a camera. "
+            "Launching with the checkpoint's own views.",
+            ",".join(want_roles),
+            policy_hub_id,
+            policy_type,
+        )
     return KnobPlan(
         want_dtype if dtype_applied else "",
         dtype_applied,
         want_steps if steps_applied else 0,
         steps_applied,
+        want_roles if roles_applied else (),
+        roles_applied,
     )
 
 
@@ -845,6 +939,7 @@ def build_argv(
     environment: str = "",
     model_dtype: str = "",
     flow_steps: int = 0,
+    extra_image_roles: Sequence[str] = (),
 ) -> list[str]:
     """The `modal run` command, as a LIST — never a string, never a shell.
 
@@ -866,6 +961,11 @@ def build_argv(
       step count any sampler would take (the pin raises on it), so there is no
       value that could stand for "leave it alone" other than the flag's
       absence. It sits after --model-dtype, the order the two were added in.
+    - `--extra-image-roles` is omitted when the list is empty, for the same
+      reason again, and its value is a COMMA-JOINED string rather than a
+      repeated flag because that is what both wrappers' `local_entrypoint`
+      parameter is (a Click str). It sits after --flow-steps, the order the
+      three were added in.
     - the GPU TYPE is deliberately NOT here either, and unlike the profile it
       could not be: `_FN_KWARGS["gpu"]` is evaluated when `modal run` imports
       the wrapper, before any flag is parsed. It rides `DRTC_GPU` in the child
@@ -900,6 +1000,7 @@ def build_argv(
         *(["--task", task] if task else []),
         *(["--model-dtype", model_dtype] if model_dtype else []),
         *(["--flow-steps", str(flow_steps)] if flow_steps else []),
+        *(["--extra-image-roles", ",".join(extra_image_roles)] if extra_image_roles else []),
         "--horizon",
         str(horizon),
         "--fps",
@@ -1284,6 +1385,13 @@ _gpu: str | None = None
 _model_dtype_applied: bool = False
 _flow_steps: int | None = None
 _flow_steps_applied: bool = False
+# The extra camera roles AS ASKED FOR (S3.8g), null while idle. A LIST rather
+# than a string because it is a list on the wire too — the comma-joining is
+# `build_argv`'s business, and a panel comparing its own state against this
+# should not have to re-split. Empty list is a real answer ("the checkpoint's
+# own views"), which is why it is not folded into null.
+_extra_image_roles: list[str] | None = None
+_extra_image_roles_applied: bool = False
 # The device the container ITSELF reported, parsed out of its first `[policy]
 # device:` line. Null until that line arrives — and it is the only evidence
 # anywhere about the hardware; `_gpu` above is what was asked for.
@@ -1340,6 +1448,7 @@ def _go_idle_locked() -> None:
     global _profile, _environment, _app_id
     global _task, _horizon, _fps, _video_codec, _s_min, _model_dtype, _gpu
     global _model_dtype_applied, _flow_steps, _flow_steps_applied, _device_name
+    global _extra_image_roles, _extra_image_roles_applied
     _state = STATE_IDLE
     _proc = None
     _phase = None
@@ -1359,6 +1468,8 @@ def _go_idle_locked() -> None:
     _model_dtype_applied = False
     _flow_steps = None
     _flow_steps_applied = False
+    _extra_image_roles = None
+    _extra_image_roles_applied = False
     _device_name = None
     _started_at = None
     _started_mono = None
@@ -1759,6 +1870,7 @@ def start(
     model_dtype: str = "",
     gpu: str = "",
     flow_steps: int | None = None,
+    extra_image_roles: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Launch the GPU policy server. Returns `{started, message, gpu}`.
 
@@ -1785,17 +1897,23 @@ def start(
     `@app.function(gpu=…)` is decided at import — but they are range-checked
     together, before anything else touches the disk or the network.
 
-    The two per-CHECKPOINT ones are then resolved against the target's own
-    config (`resolve_knobs`), which DROPS one the checkpoint has no field for
-    rather than spending a cold start on the container's refusal. That read is
-    the one network call this function makes before the listing, it is a few
-    KB, and it cannot fail the launch.
+    `extra_image_roles` is the fourth (S3.8g) and the only one that changes the
+    WIRE: each role becomes another image feature on the checkpoint, so the
+    policy expects another video track and the robot side publishes one. Empty
+    is the checkpoint's own views and passes no flag.
+
+    The three per-CHECKPOINT ones are then resolved against the target's own
+    config (`resolve_knobs`), which DROPS one the checkpoint has no field (or,
+    for the roles, no variable view count) for rather than spending a cold start
+    on the container's refusal. That read is the one network call this function
+    makes before the listing, it is a few KB, and it cannot fail the launch.
     """
     global _state, _proc, _phase, _engine, _policy_hub_id, _room
     global _started_at, _started_mono, _log_path, _message, _hint, _last_line, _idle_since
     global _stop_outcome, _code, _drain_deadline, _profile, _environment, _app_id
     global _task, _horizon, _fps, _video_codec, _s_min, _model_dtype, _gpu
     global _model_dtype_applied, _flow_steps, _flow_steps_applied, _device_name
+    global _extra_image_roles, _extra_image_roles_applied
 
     with _state_lock:
         if _state in (STATE_STARTING, STATE_READY, STATE_STOPPING):
@@ -1820,12 +1938,13 @@ def start(
     want_dtype = model_dtype.strip()
     want_gpu = gpu.strip()
     want_steps = flow_steps or 0
-    check_knobs(want_dtype, want_gpu, want_steps)
+    want_roles = [r.strip() for r in (extra_image_roles or []) if r.strip()]
+    check_knobs(want_dtype, want_gpu, want_steps, want_roles)
 
-    # And then the one check that needs the CHECKPOINT rather than the request:
-    # a knob the config has no field for is dropped here instead of failing the
+    # And then the checks that need the CHECKPOINT rather than the request: a
+    # knob the config has no field for is dropped here instead of failing the
     # container ninety seconds from now (see `resolve_knobs`).
-    plan_knobs = resolve_knobs(hub_id, want_dtype, want_steps)
+    plan_knobs = resolve_knobs(hub_id, want_dtype, want_steps, extra_image_roles=want_roles)
 
     modal_bin = find_modal()
     if modal_bin is None:
@@ -1881,6 +2000,7 @@ def start(
         # status still echoes the ask (see below) — this is the wire.
         model_dtype=plan_knobs.model_dtype,
         flow_steps=plan_knobs.flow_steps,
+        extra_image_roles=plan_knobs.extra_image_roles,
     )
     log_handle, path = _open_log()
     try:
@@ -1931,6 +2051,11 @@ def start(
         _model_dtype_applied = plan_knobs.model_dtype_applied
         _flow_steps = want_steps or None
         _flow_steps_applied = plan_knobs.flow_steps_applied
+        # The ASK again, on the same rule: [] is "no extra views", which a
+        # dropped knob must still read as, or the panel would see drift and
+        # offer a restart that dropped it again.
+        _extra_image_roles = list(want_roles)
+        _extra_image_roles_applied = plan_knobs.extra_image_roles_applied
         # Not known until the container says so, and a previous run's answer
         # would be a lie about this one.
         _device_name = None
@@ -1952,9 +2077,13 @@ def start(
     # generated line renders it — so the two stay comparable character for
     # character. The precision is already in argv as `--model-dtype`.
     logger.info(
-        "Launching the GPU policy server: %s%s",
+        "Launching the GPU policy server: %s%s%s",
         f"{ENV_GPU}={want_gpu} " if want_gpu else "",
         " ".join(argv),
+        # Beside the command rather than inside it, because a DROPPED role is
+        # not in the argv and the interesting line is the one that says both
+        # what was asked for and that it did not go.
+        f"  (extra camera roles asked for: {','.join(want_roles)})" if want_roles else "",
     )
     _start_pump(proc, log_handle)
     return {
@@ -2167,6 +2296,12 @@ def _status_locked() -> dict[str, Any]:
         # cases share one value; `flow_steps_applied` separates them).
         "flow_steps": _flow_steps,
         "flow_steps_applied": _flow_steps_applied,
+        # The extra camera views this launch ASKED to declare on the checkpoint
+        # (S3.8g), null while idle and [] when none were asked for. The `applied`
+        # bool beside it separates "dropped, because this checkpoint's view count
+        # is fixed by its architecture" from "nobody asked".
+        "extra_image_roles": _extra_image_roles,
+        "extra_image_roles_applied": _extra_image_roles_applied,
         # WHAT IT ACTUALLY RAN ON, from the container's own `[policy] device:`
         # line — evidence, unlike `gpu` above, which is only what was asked
         # for. Null until that line arrives (and while idle).

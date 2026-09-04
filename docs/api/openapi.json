@@ -406,6 +406,10 @@
             ],
             "title": "State Dim"
           },
+          "supports_extra_image_roles": {
+            "title": "Supports Extra Image Roles",
+            "type": "boolean"
+          },
           "supports_flow_steps": {
             "title": "Supports Flow Steps",
             "type": "boolean"
@@ -444,6 +448,7 @@
           "supports_rtc",
           "supports_model_dtype",
           "supports_flow_steps",
+          "supports_extra_image_roles",
           "flow_steps_default",
           "state_dim",
           "action_dim",
@@ -1269,6 +1274,14 @@
             "title": "Environment",
             "type": "string"
           },
+          "extra_image_roles": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 2,
+            "title": "Extra Image Roles",
+            "type": "array"
+          },
           "flow_steps": {
             "anyOf": [
               {
@@ -1411,6 +1424,24 @@
               }
             ],
             "title": "Environment"
+          },
+          "extra_image_roles": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra Image Roles"
+          },
+          "extra_image_roles_applied": {
+            "title": "Extra Image Roles Applied",
+            "type": "boolean"
           },
           "flow_steps": {
             "anyOf": [
@@ -1642,6 +1673,8 @@
           "model_dtype_applied",
           "flow_steps",
           "flow_steps_applied",
+          "extra_image_roles",
+          "extra_image_roles_applied",
           "device_name",
           "log_path",
           "started_at",

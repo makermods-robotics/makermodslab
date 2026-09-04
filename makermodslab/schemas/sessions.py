@@ -667,6 +667,19 @@ class GpuStatusResponse(BaseModel):
     # smolvla, `num_inference_steps` for pi0/pi05/MolmoAct2.
     flow_steps: int | None
     flow_steps_applied: bool
+    # The EXTRA camera views this launch asked to declare on the checkpoint
+    # (S3.8g) — role names, e.g. ["cam2"]. Null while idle; [] is a real answer
+    # ("the checkpoint's own views") and is what an unasked launch echoes.
+    #
+    # The only one of these knobs that changes the WIRE: an added role is one
+    # more `observation.images.<role>` input feature, so the policy expects one
+    # more video track and the robot side publishes it. Dropped, on the same
+    # rule as the two above, for a checkpoint whose view count is fixed by its
+    # architecture rather than by its wrapper — `extra_image_roles_applied`
+    # separates that drop from "nobody asked". Role names are DATA and are
+    # rendered verbatim in every language.
+    extra_image_roles: list[str] | None
+    extra_image_roles_applied: bool
     # WHAT THE CONTAINER SAID IT IS RUNNING ON — e.g. "NVIDIA A100-SXM4-40GB
     # (39.6 GiB)", parsed out of the policy server's own `[policy] device:`
     # line. Null while idle and until that line arrives.

@@ -617,6 +617,7 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
     task: str = "",
     model_dtype: str = "",
     flow_steps: int = 0,
+    extra_image_roles: str = "",
     horizon: int = 16,
     fps: int = 30,
     duration: float = 0.0,
@@ -687,6 +688,7 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
         "task": task,
         "model_dtype": model_dtype,
         "flow_steps": flow_steps,
+        "extra_image_roles": extra_image_roles,
         "horizon": horizon,
         "fps": fps,
         "duration": duration,
@@ -740,6 +742,18 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
         # utils.system.POLICY_FLOW_STEPS_FIELDS). Fewer steps is less GPU work
         # per chunk and a coarser action trajectory; measure before trusting it.
         argv += ["--flow-steps", str(flow_steps)]
+    if extra_image_roles:
+        # The third opt-in, and the only one that changes the WIRE: each role
+        # becomes another `observation.images.<role>` input feature, so the
+        # policy's schema carries another camera and the robot side is asked for
+        # another video track. Comma-separated, empty is "leave the checkpoint's
+        # own views alone", and the server REFUSES it for a policy family whose
+        # view count is fixed by its architecture (see
+        # utils.system.VARIABLE_VIEW_POLICY_TYPES) — before the weights load, so
+        # the refusal does not cost a 21.8 GB download. More views is more image
+        # tokens per prefill and therefore more latency, and the checkpoint's
+        # own authors did not test it.
+        argv += ["--extra-image-roles", extra_image_roles]
     if task:
         argv += ["--task", task]
     sys.argv = argv
@@ -825,6 +839,7 @@ def main(  # nosec B107 — the empty `*_secret` defaults are "flag not passed",
     task: str = "",
     model_dtype: str = "",
     flow_steps: int = 0,
+    extra_image_roles: str = "",
     horizon: int = 16,
     fps: int = 30,
     duration: float = 0.0,
@@ -870,6 +885,7 @@ def main(  # nosec B107 — the empty `*_secret` defaults are "flag not passed",
         task=task,
         model_dtype=model_dtype,
         flow_steps=flow_steps,
+        extra_image_roles=extra_image_roles,
         horizon=horizon,
         fps=fps,
         duration=duration,

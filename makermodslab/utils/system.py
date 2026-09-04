@@ -18,6 +18,7 @@ import logging
 import os
 import platform
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -547,6 +548,74 @@ def policy_flow_steps_default(policy_config: Mapping[str, Any]) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value if value > 0 else None
+
+
+# Policy families whose IMAGE VIEW COUNT is a property of the checkpoint's
+# wrapper rather than of the architecture — the only ones an extra camera role
+# may be added to (S3.8g).
+#
+# MolmoAct2 is the case that motivated it, and the reasoning is specific rather
+# than a general "VLAs take any number of pictures". The allenai model takes a
+# LIST of images and was fine-tuned across community datasets carrying one to
+# three cameras; lerobot's wrapper
+# (`lerobot/MolmoAct2-SO100_101-LeRobot`) simply FIXED that list at two by
+# declaring `observation.images.cam0` / `cam1` in `input_features`. Nothing
+# downstream of that declaration counts: verified against the pin's own
+# `policies/molmoact2/processor_molmoact2.py`, the pack step builds its image
+# list by iterating whatever image keys it resolves (`_extract_images`), and the
+# prompt and the sequence budget are both computed from `len(images)`
+# (`_build_prompt`'s `Image {i}<|image|>` join, `image_tokens = num_images *
+# 196`). So a third declared feature is a third picture, not a crash.
+#
+# CLOSED and small on purpose. Adding a view to a policy whose vision tower
+# really is fixed at N is not a degraded run, it is a shape error inside the
+# container after a paid cold start — and worse, some architectures would accept
+# the feature and silently ignore it. A family goes in here only after someone
+# has read ITS processor and confirmed the same three things.
+#
+# Mirrored by the container (`drtc/policy.py`, `drtc/policy_rtc.py`), the
+# launcher (which drops the knob for a checkpoint that is not in it) and
+# `remote_inference` (which refuses an unknown camera role for one), so all
+# three answer identically. Update on a lerobot pin bump.
+VARIABLE_VIEW_POLICY_TYPES: frozenset[str] = frozenset({MOLMOACT2})
+
+# How many extra roles a single launch may add. Not a model limit — it is a
+# LATENCY one, and it is deliberately conservative: each view is another 196
+# image tokens through the prefill of a ~7B VLM, on a round trip an rtc run has
+# 867 ms to spend. Two is enough for "the two the checkpoint declares plus one
+# or two more"; a bench that wants five should measure first and raise it here.
+MAX_EXTRA_IMAGE_ROLES = 2
+
+# A camera role, as `observation.images.<role>` will spell it. Deliberately
+# narrower than "any string": the role becomes a policy feature key, a Portal
+# VIDEO TRACK NAME, a `--robot.cameras` dict key inside a draccus-parsed argv,
+# and a `--extra-image-roles` element in a COMMA-separated flag. A comma, a
+# space, a brace or a dot in it breaks one of those four in a place that
+# presents as "the session receives nothing" rather than as an error.
+_IMAGE_ROLE_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+
+
+def is_valid_image_role(name: object) -> bool:
+    """Whether ``name`` is a camera role this stack will carry end to end.
+
+    ``object`` rather than ``str`` for the same reason `policy_flow_steps_field`
+    takes one: the callers read these off a request body and a comma-split CLI
+    string, either of which can hand over something that is not a string at all.
+    """
+    return isinstance(name, str) and bool(_IMAGE_ROLE_RE.match(name))
+
+
+def policy_supports_extra_image_roles(policy_type: object) -> bool:
+    """Whether extra image roles may be added to this policy type (S3.8g).
+
+    The single reading of :data:`VARIABLE_VIEW_POLICY_TYPES`, so the container,
+    the launcher and the robot side cannot disagree about which checkpoints take
+    a third camera. False for a type this pin has never heard of, which is the
+    safe direction: an unknown architecture gets the checkpoint's own views, and
+    the operator gets a refusal instead of a shape error ninety seconds into a
+    cold start.
+    """
+    return isinstance(policy_type, str) and policy_type in VARIABLE_VIEW_POLICY_TYPES
 
 
 # One install manager per install target (lerobot[smolvla] / lerobot[pi] / …),

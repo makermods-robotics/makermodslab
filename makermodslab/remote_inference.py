@@ -148,8 +148,10 @@ from .drtc_protocol import (
     parse_kv,
     parse_stats,
 )
+from .jobs import read_pretrained_config
 from .rest_pose import RETURN_CEILING_S
 from .rollout import (
+    _HUB_ROOT_REF_RE,
     InferenceRequest,
     PolicyCameraDims,
     _arm_count_mismatch,
@@ -168,6 +170,11 @@ from .utils.config import (
     get_instance_id,
 )
 from .utils.errors import friendly_hint, transport_hint
+from .utils.system import (
+    MAX_EXTRA_IMAGE_ROLES,
+    is_valid_image_role,
+    policy_supports_extra_image_roles,
+)
 
 # The `[drtc]` extra is OPTIONAL, and this module is imported by the FastAPI
 # server at boot (and by every peer feature's reciprocal guard), so none of its
@@ -459,6 +466,126 @@ def _missing_credentials(env: dict[str, str]) -> list[str]:
     return [name for name in _REQUIRED_ENV if not env.get(name)]
 
 
+# --- extra camera views (S3.8g) ----------------------------------------------
+
+
+def _checkpoint_camera_roles(policy_ref: str) -> tuple[set[str], str | None] | None:
+    """``({role, …}, policy_type)`` off the checkpoint's own config.json.
+
+    Roles are the SUFFIXES of the visual `input_features` keys — `cam0` for
+    `observation.images.cam0` — because that is the vocabulary
+    `camera_bindings` speaks: `/policy-config` strips the prefix the same way,
+    and the panel builds its bindings from what that route returned.
+
+    None means "not established", never "fine": an unreadable config (a private
+    repo, no network, a path that is not there yet) must not refuse a run, on
+    exactly the rule `modal_launcher.resolve_knobs` follows for the launch
+    knobs. `@root` refs are handed over as the bare repo id, which is where that
+    shape keeps its config.json — the same unwrap `rollout`'s own rtc guard does.
+    """
+    ref = (policy_ref or "").strip()
+    if not ref:
+        return None
+    root = _HUB_ROOT_REF_RE.match(ref)
+    try:
+        cfg = read_pretrained_config(root.group("repo") if root else ref)
+    except Exception:  # noqa: BLE001 — a camera-role check must never fail a start
+        logger.info("Couldn't read the checkpoint config for %s; camera roles pass through", ref)
+        cfg = None
+    if cfg is None:
+        return None
+    features = cfg.get("input_features")
+    if not isinstance(features, dict):
+        return None
+    roles = {
+        str(key).split(".")[-1]
+        for key, feat in features.items()
+        if isinstance(feat, dict) and feat.get("type") == "VISUAL"
+    }
+    policy_type = cfg.get("type")
+    return roles, policy_type if isinstance(policy_type, str) else None
+
+
+def _extra_camera_role_refusal(request: RemoteInferenceRequest) -> str | None:
+    """Why this run's camera bindings can't be honoured, or None (S3.8g).
+
+    Binding a role the checkpoint never declared is now a REAL thing to do — the
+    GPU side can declare extra views on a checkpoint before the weights load
+    (`--extra-image-roles`, `drtc/_policy_views`) — but only for a family whose
+    view count is a property of its lerobot wrapper rather than of its
+    architecture. For everything else an unknown role is a camera the policy
+    will never look at: the robot opens it, encodes it, publishes a track for
+    it, and Portal's schema fingerprint no longer matches the policy's, which
+    presents as a session that connects and receives nothing.
+
+    So this runs BEFORE the arm is claimed and refuses in the panel, and it
+    checks two separate things:
+
+    * the role NAME, always and with no read at all. It becomes a
+      `--robot.cameras` dict key inside a draccus-parsed argv and a Portal video
+      TRACK name, and a comma, a brace or a space in it breaks one of those
+      silently.
+    * whether the checkpoint can TAKE an extra view, which needs the
+      checkpoint's own config.json — a few KB, local for a local ref and a
+      cached download for a Hub one, and read only when there are bindings to
+      check.
+
+    Fail-OPEN on an unreadable config, deliberately and on
+    `modal_launcher.resolve_knobs`' rule: None from the reader is "not
+    established", and an offline moment must not become a refusal. The GPU side
+    still refuses the flag itself, before the weights load, which is what makes
+    this an early diagnosis rather than the authority.
+    """
+    bindings = request.camera_bindings
+    if not bindings:
+        return None
+    for role in bindings:
+        if not is_valid_image_role(role):
+            return (
+                f"'{role}' isn't a usable camera role. Use lowercase letters, digits and "
+                "underscores, starting with a letter, at most 32 characters (e.g. `cam2`) — "
+                "the role becomes a video track name and a robot camera key, and anything "
+                "else breaks the stream rather than raising."
+            )
+
+    known = _checkpoint_camera_roles(request.policy_ref)
+    if known is None:
+        return None
+    roles, policy_type = known
+    extra = sorted(set(bindings) - roles)
+    if not extra:
+        return None
+
+    if not policy_supports_extra_image_roles(policy_type):
+        declared = ", ".join(sorted(roles)) or "none"
+        return (
+            f"This checkpoint has no camera role called {', '.join(repr(r) for r in extra)}. "
+            f"It declares: {declared}. A '{policy_type}' policy's image views are fixed by its "
+            "architecture, so an extra camera would be published, encoded and never looked at — "
+            "and the two halves' wire schemas would stop matching, which shows up as a session "
+            "that connects and receives no chunks. Remove the binding."
+        )
+    if len(extra) > MAX_EXTRA_IMAGE_ROLES:
+        return (
+            f"{len(extra)} extra camera roles were bound ({', '.join(extra)}); at most "
+            f"{MAX_EXTRA_IMAGE_ROLES} may be added to a checkpoint. Every extra view is another "
+            "~196 image tokens through the policy's prefill, which is a latency ceiling rather "
+            "than a model limit."
+        )
+    logger.info(
+        "Remote inference: %s extra camera %s (%s) beyond the checkpoint's own (%s) — allowed, "
+        "'%s' declares its views in its wrapper rather than its architecture. The GPU must be "
+        "launched with --extra-image-roles=%s or the two wire schemas will not match.",
+        len(extra),
+        "role" if len(extra) == 1 else "roles",
+        ", ".join(extra),
+        ", ".join(sorted(roles)) or "none",
+        policy_type,
+        ",".join(extra),
+    )
+    return None
+
+
 def _robot_request(request: RemoteInferenceRequest) -> InferenceRequest:
     """The rollout-shaped request `_prepare_robot`/`_session_cameras` consume.
 
@@ -525,7 +652,9 @@ def _robot_sync_args(
     cameras` block `lerobot-rollout` gets, and the cameras in it are keyed by
     the POLICY-expected names (see `_session_cameras` / `bind_robot_cameras`).
     That keying is the whole mitigation for Portal's silent fingerprint
-    mismatch, so `--robot.cameras` must be built no other way.
+    mismatch, so `--robot.cameras` must be built no other way. An S3.8g extra
+    role changes nothing about that: it is one more camera keyed by the name the
+    policy will use for it, which is precisely why it needs no new flag here.
 
     The transport is PINNED to what the preflight actually verified rather than
     left to the child's own `_env` resolution, which is what closes the "parent
@@ -1579,6 +1708,15 @@ def handle_start_remote_inference(request: RemoteInferenceRequest) -> dict[str, 
     if mismatch is not None:
         _release_slot()
         return {"success": False, "status_code": 409, "message": mismatch}
+    # Before the record lookup, because this one needs no hardware and no robot
+    # record at all: a role the CHECKPOINT does not have (and cannot be given)
+    # is wrong however well the robot answers to it.
+    role_refusal = _extra_camera_role_refusal(request)
+    if role_refusal is not None:
+        _release_slot()
+        logger.warning("Rejected remote inference start: %s", role_refusal)
+        return {"success": False, "status_code": 400, "message": role_refusal}
+
     robot_request = _robot_request(request)
     try:
         _session_cameras(robot_request)

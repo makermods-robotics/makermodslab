@@ -61,6 +61,7 @@ from ..utils.system import (
     policy_requires_task,
 )
 from ._common import fmt_us, load_env, mint_token, required_env
+from ._policy_views import EXTRA_IMAGE_ROLES_HELP, add_extra_image_roles, parse_extra_image_roles
 from ._schema import CHUNK_NAME, IMAGE_PREFIX, policy_wire_schema
 
 IDENTITY = "policy"
@@ -107,10 +108,11 @@ def load_policy(
     task: str = "",
     model_dtype: str = "",
     flow_steps: int = 0,
+    extra_image_roles: list[str] | None = None,
 ):
     """Load any lerobot policy + its pre/post processors from a checkpoint.
 
-    Three things happen BEFORE the weights load, and the ordering is the point —
+    Four things happen BEFORE the weights load, and the ordering is the point —
     the first checkpoint this matters for pulls a 21.8 GB base VLM, so a
     refusal or an override that lands after the download is worth nothing.
 
@@ -132,6 +134,13 @@ def load_policy(
       the knob by, so the two cannot disagree about whether a checkpoint has
       one. Here too it must land before the weights: the count is read by the
       sampler off the config the policy was constructed with.
+    * **``--extra-image-roles``, when passed, DECLARES extra camera views on
+      the checkpoint.** It has to happen here and not one line later: the
+      pre/post-processors below are built from ``policy.config``, so a feature
+      added after them would change the wire schema and nothing that consumes
+      it. Refused outright for a policy family whose view count is fixed by its
+      architecture — see ``_policy_views``, which also documents why declaring
+      the feature is genuinely enough for the one family that is not.
     * **A missing ``inference_action_mode`` is filled in, and only a missing
       one.** ``utils.system.molmoact2_inference_action_mode`` decides, again so
       the Lab and the GPU answer identically.
@@ -190,6 +199,15 @@ def load_policy(
         setattr(policy_cfg, field, flow_steps)
         overridden = True
 
+    # Last of the three opt-ins, and the only one that changes the WIRE: an
+    # added role becomes another image feature, so `policy_wire_schema` yields
+    # another camera and the robot side is asked for another video track. It is
+    # also the only one that has to reach the PROCESSORS as well as the config —
+    # see `_policy_views`, whose returned overrides are merged below.
+    view_overrides = add_extra_image_roles(policy_cfg, list(extra_image_roles or []))
+    if view_overrides:
+        overridden = True
+
     # A GAP FILL, never an override. `MolmoAct2Config.inference_action_mode`
     # defaults to None and the policy raises on None, so a checkpoint that saved
     # no mode cannot be served at all; the published one saves "continuous" and
@@ -215,10 +233,15 @@ def load_policy(
     policy.to(device)
     policy.eval()
 
+    # `pretrained_path` means these pipelines are LOADED from the checkpoint's
+    # own saved processor config, not rebuilt from `policy.config` — so an added
+    # image feature has to be declared here too or the pack step keeps the two
+    # views it saved. `view_overrides` is empty unless --extra-image-roles was
+    # passed, which keeps every other run byte-identical.
     preprocessor, postprocessor = make_pre_post_processors(
         policy.config,
         pretrained_path=policy_path,
-        preprocessor_overrides={"device_processor": {"device": str(device)}},
+        preprocessor_overrides={"device_processor": {"device": str(device)}, **view_overrides},
         postprocessor_overrides={"device_processor": {"device": str(device)}},
     )
     return policy, preprocessor, postprocessor
@@ -349,6 +372,11 @@ async def main() -> None:
         "there is, and the first one to cost quality.",
     )
     parser.add_argument(
+        "--extra-image-roles",
+        default="",
+        help=EXTRA_IMAGE_ROLES_HELP,
+    )
+    parser.add_argument(
         "--fps", type=int, default=30, help="Control/stream frequency. MUST match robot --fps."
     )
     parser.add_argument(
@@ -386,6 +414,7 @@ async def main() -> None:
         task=args.task,
         model_dtype=args.model_dtype,
         flow_steps=args.flow_steps,
+        extra_image_roles=parse_extra_image_roles(args.extra_image_roles),
     )
     schema, image_features = policy_wire_schema(policy)
     print(

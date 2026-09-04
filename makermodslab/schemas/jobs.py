@@ -155,6 +155,18 @@ class CheckpointPolicyConfigResponse(BaseModel):
     # knob" and "the knob exists and this checkpoint saved nothing this side
     # can resolve" — a pi05 with a null `num_inference_steps` is the second.
     supports_flow_steps: bool
+    # Whether extra camera views may be DECLARED on this checkpoint at launch
+    # (S3.8g) — true only for a family whose image-view count is a property of
+    # its lerobot wrapper rather than of its architecture
+    # (`utils.system.VARIABLE_VIEW_POLICY_TYPES`; in this pin, MolmoAct2 alone).
+    #
+    # Answered from a TABLE of policy types rather than from key presence the
+    # way `supports_model_dtype` is, because there is no field in a config.json
+    # that says "this vision tower takes any number of pictures" — it is a fact
+    # about the family's processor, established by reading it. False for a type
+    # this pin has never heard of, which is the safe direction: the checkpoint
+    # then runs with the views it was published with.
+    supports_extra_image_roles: bool
     # The steps-per-chunk the checkpoint would run with, when it can be known.
     # Null both for a policy with no such knob (ACT, pi0_fast) and for one that
     # saved no value whose applying default is not readable from here.

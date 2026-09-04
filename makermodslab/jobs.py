@@ -54,6 +54,7 @@ from .utils.system import (
     policy_flow_steps_default,
     policy_flow_steps_field,
     policy_requires_task,
+    policy_supports_extra_image_roles,
     policy_supports_model_dtype,
     torchcodec_loads,
 )
@@ -5312,6 +5313,13 @@ class JobRegistry:
             # checkpoint saved nothing we can resolve" (a pi05 with a null
             # `num_inference_steps`).
             "supports_flow_steps": policy_flow_steps_field(cfg.get("type")) is not None,
+            # And whether extra camera VIEWS may be declared on it (S3.8g).
+            # Off a table rather than off key presence, because no config.json
+            # field says "this family's vision tower takes any number of
+            # pictures" — that is a fact about its processor, and
+            # `utils.system.VARIABLE_VIEW_POLICY_TYPES` is where it was written
+            # down after reading one.
+            "supports_extra_image_roles": policy_supports_extra_image_roles(cfg.get("type")),
             # Null when there is no number to show — a policy with no such knob,
             # or one that saved none and whose applying default this side cannot
             # see. MolmoAct2 is NOT that case: it saves null and runs at 10, the

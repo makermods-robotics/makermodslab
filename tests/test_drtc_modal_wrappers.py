@@ -171,6 +171,35 @@ def test_the_wrappers_forward_flow_steps(wrapper: Path) -> None:
     assert 'argv += ["--flow-steps", str(flow_steps)]' in text, wrapper.name
 
 
+@pytest.mark.parametrize("wrapper", _WRAPPERS, ids=lambda p: p.name)
+def test_the_wrappers_forward_extra_image_roles(wrapper: Path) -> None:
+    """`--extra-image-roles` rides the same three links again (S3.8g).
+
+    A break costs the same Click usage error after the same paid cold start, and
+    it is the ONE knob whose loss would also be silent in the other direction:
+    the robot side publishes a video track per bound camera role, so a GPU that
+    never got the flag declares fewer views, and Portal answers a fingerprint
+    mismatch by dropping every packet without a word.
+
+    A comma-joined STRING rather than a list, because that is what a Click
+    parameter takes — `modal_launcher.build_argv` does the joining."""
+    text = wrapper.read_text(encoding="utf-8")
+    # Twice in the signatures (_serve_impl and main), once in the fn.remote call.
+    assert text.count('extra_image_roles: str = ""') == 2, wrapper.name
+    assert "extra_image_roles=extra_image_roles," in text, wrapper.name
+    assert 'argv += ["--extra-image-roles", extra_image_roles]' in text, wrapper.name
+
+
+def test_the_sync_wrapper_replays_extra_image_roles_on_reset() -> None:
+    """`/reset` re-spawns from `run_config["last"]`, so a knob missing from that
+    dict is one a reset silently drops — the run would come back with the
+    checkpoint's own views while the robot kept publishing the extra track.
+
+    Sync only: `modal_policy_rtc.py` has no `/reset` endpoint and no run_config."""
+    text = _WRAPPERS[0].read_text(encoding="utf-8")
+    assert '"extra_image_roles": extra_image_roles,' in text
+
+
 # --- the tailnet node is ONE node -------------------------------------------
 # Tailscale identifies a node by its node key, which lives in tailscaled's state
 # file; the wrappers keep that file on a dedicated Modal Volume so every launch

@@ -582,6 +582,125 @@ def test_preflight_refuses_an_unresolvable_camera_binding_and_releases_the_slot(
 
 
 # ---------------------------------------------------------------------------
+# Extra camera views (S3.8g)
+# ---------------------------------------------------------------------------
+
+_MOLMOACT2_CFG = {
+    "type": "molmoact2",
+    "input_features": {
+        "observation.images.cam0": {"type": "VISUAL", "shape": [3, 224, 224]},
+        "observation.images.cam1": {"type": "VISUAL", "shape": [3, 224, 224]},
+        "observation.state": {"type": "STATE", "shape": [6]},
+    },
+}
+_SMOLVLA_CFG = {
+    "type": "smolvla",
+    "input_features": {
+        "observation.images.top": {"type": "VISUAL", "shape": [3, 512, 512]},
+        "observation.state": {"type": "STATE", "shape": [6]},
+    },
+}
+
+
+def _config_reader(monkeypatch: pytest.MonkeyPatch, cfg) -> None:
+    """No test in this module reaches the Hub: the one checkpoint read the
+    preflight makes is stubbed the way `test_modal_launcher` stubs its own."""
+    monkeypatch.setattr(ri, "read_pretrained_config", lambda _path: cfg)
+
+
+def test_a_role_the_checkpoint_never_declared_is_refused_for_a_fixed_view_policy(
+    preflight, monkeypatch
+) -> None:
+    """Binding a role a fixed-view checkpoint has no feature for is not a
+    degraded run: the robot opens the camera, encodes it and publishes a track,
+    and Portal's schema fingerprint then differs from the policy's — which it
+    answers by dropping every packet in silence. So it is refused in the panel,
+    before the arm is claimed."""
+    _config_reader(monkeypatch, _SMOLVLA_CFG)
+    result = ri.handle_start_remote_inference(
+        _request(
+            robot_name="solo",
+            policy_ref="someone/smolvla@root",
+            camera_bindings={"top": "front", "cam2": "wrist"},
+        )
+    )
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "cam2" in result["message"]
+    assert ri.remote_inference_active is False
+    assert preflight == []
+
+
+def test_a_role_the_checkpoint_never_declared_is_accepted_for_a_variable_view_one(
+    preflight, monkeypatch, tmp_lerobot_home
+) -> None:
+    """The whole point of S3.8g: `lerobot/MolmoAct2-SO100_101-LeRobot` declares
+    two views where the allenai model underneath takes a list of any length, so
+    a third camera is a real thing to ask for — and the GPU is told to declare
+    it with the matching `--extra-image-roles`."""
+    _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "solo")
+    _config_reader(monkeypatch, _MOLMOACT2_CFG)
+    result = ri.handle_start_remote_inference(
+        _request(
+            robot_name="solo",
+            policy_ref="someone/molmo@root",
+            camera_bindings={"cam0": "wrist", "cam2": "wrist"},
+        )
+    )
+    assert result["success"] is True
+    assert len(preflight) == 1
+
+
+def test_an_unusable_role_name_is_refused_with_no_checkpoint_read_at_all(preflight, monkeypatch) -> None:
+    """The name check is free and comes first: the role becomes a
+    `--robot.cameras` key inside a draccus-parsed argv and a Portal video TRACK
+    name, and a comma or a space in it breaks one of those as "the session
+    receives nothing"."""
+    reads: list[str] = []
+    monkeypatch.setattr(ri, "read_pretrained_config", lambda p: reads.append(p) or _MOLMOACT2_CFG)
+    result = ri.handle_start_remote_inference(_request(robot_name="solo", camera_bindings={"cam 2": "wrist"}))
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert reads == []
+    assert ri.remote_inference_active is False
+
+
+def test_an_unreadable_checkpoint_config_never_refuses_a_run(
+    preflight, monkeypatch, tmp_lerobot_home
+) -> None:
+    """None from the reader is "not established" — a private repo, no network, a
+    ref that is not there yet — and never "this role is wrong". Refusing on it
+    would make an offline moment a failed launch; the GPU side still refuses the
+    flag itself, before the weights load."""
+    _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "solo")
+    for reader in (lambda _p: None, lambda _p: (_ for _ in ()).throw(OSError("no network"))):
+        monkeypatch.setattr(ri, "read_pretrained_config", reader)
+        assert (
+            ri._extra_camera_role_refusal(
+                _request(robot_name="solo", policy_ref="x@root", camera_bindings={"cam2": "wrist"})
+            )
+            is None
+        )
+
+
+def test_too_many_extra_roles_is_refused_even_on_a_variable_view_policy() -> None:
+    """A LATENCY ceiling, not a model limit: each view is another ~196 image
+    tokens through a ~7B prefill, on a round trip an rtc run has 867 ms for."""
+    import makermodslab.remote_inference as _ri
+
+    roles = {f"cam{n}": "wrist" for n in range(2, 3 + _ri.MAX_EXTRA_IMAGE_ROLES)}
+    request = _request(policy_ref="someone/molmo@root", camera_bindings=roles)
+    original = _ri.read_pretrained_config
+    _ri.read_pretrained_config = lambda _p: _MOLMOACT2_CFG  # type: ignore[assignment]
+    try:
+        message = _ri._extra_camera_role_refusal(request)
+    finally:
+        _ri.read_pretrained_config = original  # type: ignore[assignment]
+    assert message is not None
+    assert str(_ri.MAX_EXTRA_IMAGE_ROLES) in message
+
+
+# ---------------------------------------------------------------------------
 # The event pump
 # ---------------------------------------------------------------------------
 

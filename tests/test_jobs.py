@@ -4833,6 +4833,13 @@ def test_policy_config_summary_reports_which_gpu_knobs_apply(tmp_path, tmp_lerob
     assert act["supports_flow_steps"] is False
     assert act["flow_steps_default"] is None
 
+    # And the third knob (S3.8g), which is the one the panel FAILS CLOSED on:
+    # it is an OFFER to add a camera, and offering it for a policy whose vision
+    # tower is fixed buys a shape error inside a paid container.
+    assert molmo["supports_extra_image_roles"] is True
+    assert smol["supports_extra_image_roles"] is False
+    assert act["supports_extra_image_roles"] is False
+
 
 def test_policy_config_summary_reports_the_chunk_geometry(tmp_path, tmp_lerobot_home) -> None:
     """n_action_steps is the CEILING on a remote-inference horizon: declare

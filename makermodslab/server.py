@@ -1310,6 +1310,31 @@ class GpuStartBody(BaseModel):
         ge=modal_launcher.FLOW_STEPS_MIN,
         le=modal_launcher.FLOW_STEPS_MAX,
     )
+    # EXTRA CAMERA VIEWS to declare on the checkpoint before the weights load
+    # (S3.8g), by role name — `["cam2"]` on a checkpoint published with
+    # `cam0`/`cam1`. Empty (the default) is the checkpoint's own views and
+    # passes no flag, so a client that never sends it sees no change.
+    #
+    # The only knob here that changes the WIRE rather than the GPU's own work:
+    # each role becomes an `observation.images.<role>` input feature, so the
+    # policy expects one more video track and the robot side must publish one
+    # (bind it in the same `camera_bindings` the checkpoint's own roles use).
+    #
+    # A LIST rather than a comma-joined string, because that is what it is;
+    # `modal_launcher.build_argv` does the joining, the wrappers' Click
+    # parameter being a str. `max_length` and the per-item pattern are the
+    # launcher's own (`MAX_EXTRA_IMAGE_ROLES`, `is_valid_image_role`) and it
+    # checks them AGAIN before spawning, because `start()` is a plain function
+    # and a pydantic field cannot guard the callers that skip this model.
+    #
+    # Dropped before the spawn for a checkpoint whose view count is fixed by
+    # its architecture, on `flow_steps`' rule (`extra_image_roles_applied` in
+    # the GPU status says so) — a role remembered from a MolmoAct2 run must not
+    # cost a cold start after the operator switches checkpoint.
+    extra_image_roles: list[str] = Field(
+        default_factory=list,
+        max_length=modal_launcher.MAX_EXTRA_IMAGE_ROLES,
+    )
 
 
 @v1_router.get(
@@ -1372,6 +1397,7 @@ def start_remote_inference_gpu(body: GpuStartBody):
         model_dtype=body.model_dtype,
         gpu=body.gpu,
         flow_steps=body.flow_steps,
+        extra_image_roles=body.extra_image_roles,
     )
 
 
