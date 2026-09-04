@@ -685,11 +685,16 @@ def main():
     )
     parser.add_argument(
         "--host",
+        nargs="?",
+        const="",
+        default=None,
         metavar="ROBOT",
         help=(
-            "Station mode: host this saved robot for remote teleoperation from startup — its follower "
-            "and cameras join the LiveKit room parked (torque off), an operator engages it automatically, "
-            "and hosting re-arms after any local session. Requires --sfu"
+            "Station mode: this machine hosts a robot for remote teleoperation — its follower and "
+            "cameras join the LiveKit room parked (torque off), an operator engages it automatically, "
+            "and hosting re-arms after any local session. ROBOT (optional) names the saved robot and "
+            "is remembered; without it the last choice is used, a lone hostable robot is picked, or the "
+            "station's UI chooses one. Requires --sfu"
         ),
     )
     parser.add_argument(
@@ -719,16 +724,15 @@ def main():
     # exit before anything starts, never a half-started stack.
     sfu_bin = _require_livekit_server() if args.sfu else None
     if args.host is not None:
-        if not args.host.strip():
-            logger.error("❌ --host needs a saved robot name.")
-            sys.exit(1)
         if not args.sfu and not os.environ.get(sfu.ENV_URL):
             logger.error(
                 "❌ --host needs the LiveKit SFU: add --sfu (or set %s to an external SFU).", sfu.ENV_URL
             )
             sys.exit(1)
         # Read by makermodslab.server at startup (remote_host.start_station_mode)
-        # — same import-order rule as the other flags.
+        # — same import-order rule as the other flags. STATION marks the
+        # posture; HOST_ROBOT is the optional robot (empty = remembered/auto/UI).
+        os.environ["MAKERMODSLAB_STATION"] = "1"
         os.environ["MAKERMODSLAB_HOST_ROBOT"] = args.host.strip()
 
     _ensure_path_symlinks()

@@ -27,11 +27,12 @@ Wants=network-online.target
 User=makermods
 WorkingDirectory=/home/makermods/MakerModsLab
 ExecStart=/home/makermods/MakerModsLab/.venv/bin/makermodslab-station
-# Remote teleoperation station: append --sfu --host <robot> (livekit-server must
-# be on the unit's PATH — `curl -sSL https://get.livekit.io | bash`; the robot
-# is a saved record with its follower + cameras) and open 7880/tcp, 7881/tcp,
-# 7882/udp. The arm sits parked (torque off) until an operator connects. E.g.:
-#ExecStart=/home/makermods/MakerModsLab/.venv/bin/makermodslab-station --sfu --host arm1
+# Remote teleoperation station: append --sfu --host (livekit-server must be on
+# the unit's PATH — `curl -sSL https://get.livekit.io | bash`) and open
+# 7880/tcp, 7881/tcp, 7882/udp. The hosted robot is remembered from the
+# station's UI (or name it: --host arm1); the arm sits parked (torque off)
+# until an operator connects. E.g.:
+#ExecStart=/home/makermods/MakerModsLab/.venv/bin/makermodslab-station --sfu --host
 Restart=on-failure
 RestartSec=3
 # Serial ports: the unit user must be in dialout (usermod -aG dialout <user>).

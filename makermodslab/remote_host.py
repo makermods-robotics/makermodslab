@@ -112,6 +112,7 @@ _BROADCAST_INTERVAL_S = 0.05  # 20 Hz joint broadcast, same as local teleop
 _STATION_RETRY_S = 3.0
 _STATION_BACKOFF_S = 15.0
 STATION_ROBOT_ENV = "MAKERMODSLAB_HOST_ROBOT"
+STATION_ENV = "MAKERMODSLAB_STATION"
 
 PHASES = ("parked", "engaging", "engaged", "parking")
 
@@ -939,21 +940,107 @@ def handle_hosting_status(request_host: str) -> dict[str, Any]:
 # --- station mode ------------------------------------------------------------
 
 
-def start_station_mode(robot_name: str, websocket_manager=None) -> threading.Thread:
-    """`--host <robot>`: keep the named robot hosted. A daemon thread re-arms
-    hosting whenever nothing holds the hardware, through the normal session
-    front door (owner-less, so no lease — the parked/engaged timeouts do the
-    lease's job for an unattended arm). Refusals are logged and retried
-    with a backoff, so a camera that is unplugged at boot comes back later."""
+def hostable_robots() -> list[str]:
+    """Saved robots this station could host: follower side set up (the arm
+    scope hosting drives) and an SO-101 (this release's family)."""
+    from .utils.config import is_robot_record_clean, list_robot_records
+
+    return [
+        r["name"]
+        for r in list_robot_records()
+        if uses_feetech_bus(r.get("arm_type")) and is_robot_record_clean(r, arms="follower")
+    ]
+
+
+def pick_station_robot(remembered: str | None, hostable: list[str]) -> str | None:
+    """Which robot a station should host: the remembered choice if it is
+    still hostable, else the ONLY hostable robot (a machine with one robot
+    needs no picker), else None — the UI chooses."""
+    if remembered and remembered in hostable:
+        return remembered
+    if len(hostable) == 1:
+        return hostable[0]
+    return None
+
+
+def set_station_robot(robot: str | None) -> dict[str, Any]:
+    """The station UI's choice: remember `robot` (None clears it) and re-arm
+    hosting on it. A parked, unseated hosting session of another robot yields
+    (the supervisor re-hosts within seconds); an engaged/seated one is a held
+    session — refused with session.held so an operator is never dropped by a
+    click at the station."""
+    global station_robot
+    from .utils.config import get_robot_record, is_robot_record_clean, is_valid_robot_name, save_station_robot
+
+    if robot is not None:
+        record = get_robot_record(robot) if is_valid_robot_name(robot) else None
+        if record is None:
+            raise ApiError(404, f"No robot named {robot!r}.", code=ErrorCode.ROBOT_NOT_FOUND)
+        if not uses_feetech_bus(record.get("arm_type")):
+            raise ApiError(
+                400,
+                "Hosting supports the SO-101 in this release.",
+                code=ErrorCode.ROBOT_NOT_READY,
+            )
+        if not is_robot_record_clean(record, arms="follower"):
+            raise ApiError(
+                400,
+                f"Robot {robot!r} is not set up for hosting: its follower arm needs a port and a calibration.",
+                code=ErrorCode.ROBOT_NOT_READY,
+            )
+    current = current_descriptor["robot"] if (hosting_active and current_descriptor) else None
+    if hosting_active and current != robot and not yield_for_local():
+        holder = seat_holder()
+        raise ApiError(
+            409,
+            f"An operator ({holder!r}) is driving {current!r} right now. Change the hosted robot once they leave.",
+            code=ErrorCode.SESSION_HELD,
+            details={"holder": {"kind": "hosting", "session_id": None}},
+        )
+    save_station_robot(robot)
+    with _state_lock:
+        station_robot = robot
+    return handle_station_status()
+
+
+def handle_station_status() -> dict[str, Any]:
+    """GET /api/v1/station: the posture, the chosen robot, what could be
+    hosted, and whether hosting is up right now."""
+    return {
+        "station_mode": station_mode,
+        "robot": station_robot,
+        "hostable": hostable_robots(),
+        "hosting_active": hosting_active,
+        "phase": phase if hosting_active else None,
+    }
+
+
+def start_station_mode(robot_name: str | None, websocket_manager=None) -> threading.Thread:
+    """`--host [robot]`: this machine is a station. A daemon thread re-arms
+    hosting of the chosen robot whenever nothing holds the hardware, through
+    the normal session front door (owner-less, so no lease — the
+    parked/engaged timeouts do the lease's job for an unattended arm).
+
+    The choice: an explicit `--host <robot>` is remembered (station.json); a
+    bare `--host` uses the remembered one, else the only hostable robot,
+    else nothing until the station's UI picks (set_station_robot). Refusals
+    are logged and retried with a backoff, so a camera that is unplugged at
+    boot comes back later."""
     global station_mode, station_robot
+    from .utils.config import load_station_robot, save_station_robot
+
     station_mode = True
-    station_robot = robot_name
+    if robot_name:
+        save_station_robot(robot_name)
+    station_robot = robot_name or load_station_robot()
 
     def supervisor() -> None:
+        global station_robot
         from .schemas.sessions import SessionStartBody
         from .sessions import handle_start_session, held_by
 
         delay = _STATION_RETRY_S
+        announced_idle = False
         while station_mode:
             time.sleep(delay)
             delay = _STATION_RETRY_S
@@ -962,17 +1049,37 @@ def start_station_mode(robot_name: str, websocket_manager=None) -> threading.Thr
             if hosting_thread is not None and hosting_thread.is_alive():
                 continue  # previous session still releasing
             try:
+                hostable = hostable_robots()
+            except Exception as exc:
+                logger.warning(f"Station mode: could not list robots: {exc}")
+                delay = _STATION_BACKOFF_S
+                continue
+            chosen = pick_station_robot(station_robot, hostable)
+            if chosen is None:
+                if not announced_idle:
+                    logger.info(
+                        "Station mode: no robot to host yet — pick one in the station's UI"
+                        + (f" (hostable: {hostable})" if hostable else " (none is set up for hosting)")
+                    )
+                    announced_idle = True
+                delay = _STATION_BACKOFF_S
+                continue
+            announced_idle = False
+            if chosen != station_robot:
+                station_robot = chosen
+                save_station_robot(chosen)
+            try:
                 handle_start_session(
-                    SessionStartBody(kind="hosting", robot=robot_name, options={}), websocket_manager
+                    SessionStartBody(kind="hosting", robot=chosen, options={}), websocket_manager
                 )
-                logger.info(f"Station mode: hosting {robot_name!r}")
+                logger.info(f"Station mode: hosting {chosen!r}")
             except ApiError as exc:
                 logger.warning(
-                    f"Station mode: could not host {robot_name!r} ({exc.detail}); retrying in {_STATION_BACKOFF_S:.0f}s"
+                    f"Station mode: could not host {chosen!r} ({exc.detail}); retrying in {_STATION_BACKOFF_S:.0f}s"
                 )
                 delay = _STATION_BACKOFF_S
             except Exception as exc:
-                logger.exception(f"Station mode: unexpected failure hosting {robot_name!r}: {exc}")
+                logger.exception(f"Station mode: unexpected failure hosting {chosen!r}: {exc}")
                 delay = _STATION_BACKOFF_S
 
     thread = threading.Thread(target=supervisor, name="station-mode", daemon=True)

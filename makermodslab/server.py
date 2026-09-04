@@ -215,7 +215,12 @@ from .schemas.nodes import (
     NodeListResponse,
     NodeRemoveResponse,
 )
-from .schemas.remote import HostingStatusResponse, RemoteCommandResponse, RemoteTeleoperationStatusResponse
+from .schemas.remote import (
+    HostingStatusResponse,
+    RemoteCommandResponse,
+    RemoteTeleoperationStatusResponse,
+    StationStatusResponse,
+)
 from .schemas.sessions import (
     CoachingCommandResponse,
     CurrentSessionResponse,
@@ -1285,6 +1290,29 @@ def get_remote_teleoperation_camera(name: str):
     return StreamingResponse(
         remote_teleoperate.camera_stream(name), media_type="multipart/x-mixed-replace; boundary=frame"
     )
+
+
+class StationRobotBody(BaseModel):
+    """PUT /api/v1/station/robot — the robot this station hosts; null clears
+    the choice (hosting stops once idle and waits for a new pick)."""
+
+    robot: str | None = None
+
+
+@v1_router.get("/station", response_model=StationStatusResponse, tags=["remote"])
+def get_station_status():
+    """Station mode posture (remote_host.py): whether this machine was started
+    with --host, which robot it hosts, which saved robots it could host."""
+    return remote_host.handle_station_status()
+
+
+@v1_router.put("/station/robot", response_model=StationStatusResponse, tags=["remote"])
+def set_station_robot(body: StationRobotBody):
+    """Choose (or clear) the hosted robot. Remembered across restarts; a
+    parked, unseated hosting session of another robot yields and the
+    supervisor re-hosts the new choice within seconds; an engaged one is
+    refused with session.held."""
+    return remote_host.set_station_robot(body.robot)
 
 
 @v1_router.post("/remote-teleoperation/home", response_model=RemoteCommandResponse, tags=["remote"])
@@ -4704,9 +4732,10 @@ def start_station_mode():
     """`makermodslab --host <robot>`: keep that robot hosted for remote
     teleoperation (remote_host.start_station_mode) — parked from startup,
     re-armed after any local session, no browser required."""
-    robot_name = os.environ.get(remote_host.STATION_ROBOT_ENV, "").strip()
-    if robot_name:
-        remote_host.start_station_mode(robot_name, manager)
+    if os.environ.get(remote_host.STATION_ENV) == "1":
+        remote_host.start_station_mode(
+            os.environ.get(remote_host.STATION_ROBOT_ENV, "").strip() or None, manager
+        )
 
 
 # Strong reference so the loop's task set can't drop the pump mid-flight.

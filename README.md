@@ -113,9 +113,11 @@ It needs the `livekit-server` binary on your PATH — `brew install livekit` on 
 hint if it is missing. Peers fetch short-lived room tokens from `POST /api/v1/sfu/token`; the signing
 secret stays in a 0600 file on the station. Open `7880/tcp`, `7881/tcp` and `7882/udp` for remote peers.
 
-**Remote teleoperation.** Start the station in station mode — `makermodslab --sfu --host <robot>` (or
-`makermodslab-station --sfu --host <robot>` headless): its follower and cameras join the room **parked**
-(torque off, streaming, listening). On your laptop, plug in the leader arm, pick the station in **Remote**,
+**Remote teleoperation.** Start the station in station mode — `makermodslab --sfu --host` (or
+`makermodslab-station --sfu --host` headless; add a robot name to pick one from the command line): the
+station hosts its saved robot — the remembered choice, the only hostable one, or the one you pick in the
+station's UI — with its follower and cameras joining the room **parked** (torque off, streaming, listening).
+You can change the hosted robot from the station's UI at any time an operator isn't driving. On your laptop, plug in the leader arm, pick the station in **Remote**,
 and drive: the arm engages with a one-second soft start, **Home** parks it again, and ending your session
 parks it at once. One operator at a time; a brief network blip is tolerated (15 s) and a reconnect resumes
 your seat. Anything you start at the station itself takes the arm back from a parked, idle hosting session

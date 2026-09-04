@@ -30,7 +30,21 @@ __all__ = [
     "RemoteStation",
     "RemoteTeleoperationMetrics",
     "RemoteTeleoperationStatusResponse",
+    "StationStatusResponse",
 ]
+
+
+class StationStatusResponse(BaseModel):
+    """remote_host.handle_station_status — the --host posture. `robot` is the
+    remembered/auto-picked choice (null = nothing chosen yet), `hostable` the
+    saved robots whose follower side is set up, `phase` the live hosting
+    phase (null when hosting is down)."""
+
+    station_mode: bool
+    robot: str | None
+    hostable: list[str]
+    hosting_active: bool
+    phase: Literal["parked", "engaging", "engaged", "parking"] | None
 
 
 class HostingCamera(BaseModel):

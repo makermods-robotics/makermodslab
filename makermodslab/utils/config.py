@@ -242,6 +242,12 @@ LIVEKIT_KEY_FILE = os.path.join(MAKERMODSLAB_HOME, "livekit_keys.yaml")
 # `makermodslab --stop` uses to recognise the SFU child as ours.
 LIVEKIT_CONFIG_FILE = os.path.join(MAKERMODSLAB_HOME, "livekit_config.yaml")
 
+# Station mode's remembered choice: {"robot": name} — which saved robot this
+# machine hosts for remote teleoperation. Written by `--host <robot>` and by
+# the station UI's picker; read by a bare `--host`. Absent/blank = no choice
+# yet (a lone hostable robot is picked automatically, else the UI chooses).
+STATION_FILE = os.path.join(MAKERMODSLAB_HOME, "station.json")
+
 # Tag stamped on every dataset pushed to the Hub from MakerMods Lab, so we can later
 # query the Hub for MakerMods Lab-produced datasets and compute usage metrics.
 MAKERMODSLAB_TAG = "MakerModsLab"
@@ -456,6 +462,22 @@ def get_instance_id() -> str:
         _atomic_write_text(INSTANCE_ID_FILE, stored + "\n")
     _instance_id_cache = stored
     return stored
+
+
+def load_station_robot(path: str | None = None) -> str | None:
+    """The remembered hosted-robot name, or None (missing/corrupt/blank)."""
+    try:
+        with open(path or STATION_FILE) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    robot = data.get("robot") if isinstance(data, dict) else None
+    return robot if isinstance(robot, str) and is_valid_robot_name(robot) else None
+
+
+def save_station_robot(robot: str | None, path: str | None = None) -> None:
+    """Persist (or clear, with None) the station's hosted-robot choice."""
+    _atomic_write_text(path or STATION_FILE, json.dumps({"robot": robot}, indent=2) + "\n")
 
 
 def parse_livekit_keys(text: str) -> dict[str, str]:

@@ -279,6 +279,10 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # Operator-side Home / Engage: forwarded to the station as Portal RPCs.
         "POST /api/v1/remote-teleoperation/home",
         "POST /api/v1/remote-teleoperation/engage",
+        # Station mode posture: the hosted-robot choice, changeable from the
+        # station's UI and remembered across restarts.
+        "GET /api/v1/station",
+        "PUT /api/v1/station/robot",
         "POST /api/v1/nodes/{instance_id}/jobs/{job_id}/stop",
         "DELETE /api/v1/nodes/{instance_id}/jobs/{job_id}",
         # Environment proxies: the peer's own policy-extra status / install /

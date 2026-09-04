@@ -5332,6 +5332,81 @@
         "title": "SkillsResponse",
         "type": "object"
       },
+      "StationRobotBody": {
+        "description": "PUT /api/v1/station/robot — the robot this station hosts; null clears\nthe choice (hosting stops once idle and waits for a new pick).",
+        "properties": {
+          "robot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Robot"
+          }
+        },
+        "title": "StationRobotBody",
+        "type": "object"
+      },
+      "StationStatusResponse": {
+        "description": "remote_host.handle_station_status — the --host posture. `robot` is the\nremembered/auto-picked choice (null = nothing chosen yet), `hostable` the\nsaved robots whose follower side is set up, `phase` the live hosting\nphase (null when hosting is down).",
+        "properties": {
+          "hostable": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Hostable",
+            "type": "array"
+          },
+          "hosting_active": {
+            "title": "Hosting Active",
+            "type": "boolean"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "enum": [
+                  "parked",
+                  "engaging",
+                  "engaged",
+                  "parking"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "robot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Robot"
+          },
+          "station_mode": {
+            "title": "Station Mode",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "station_mode",
+          "robot",
+          "hostable",
+          "hosting_active",
+          "phase"
+        ],
+        "title": "StationStatusResponse",
+        "type": "object"
+      },
       "SuccessRepoIdResponse": {
         "description": "The pin/hide mutations' shared shape (server.py datasets_save_custom /\ndatasets_remove_custom / datasets_hide / datasets_unhide and their models\nmirrors) — success is False when a remove/unhide had nothing to remove.",
         "properties": {
@@ -11097,6 +11172,70 @@
           }
         },
         "summary": "Start Replay"
+      }
+    },
+    "/api/v1/station": {
+      "get": {
+        "description": "Station mode posture (remote_host.py): whether this machine was started\nwith --host, which robot it hosts, which saved robots it could host.",
+        "operationId": "get_station_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StationStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Station Status",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
+    "/api/v1/station/robot": {
+      "put": {
+        "description": "Choose (or clear) the hosted robot. Remembered across restarts; a\nparked, unseated hosting session of another robot yields and the\nsupervisor re-hosts the new choice within seconds; an engaged one is\nrefused with session.held.",
+        "operationId": "set_station_robot",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StationRobotBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StationStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Station Robot",
+        "tags": [
+          "remote"
+        ]
       }
     },
     "/api/v1/stop-auto-calibration": {

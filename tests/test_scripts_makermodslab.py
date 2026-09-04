@@ -807,3 +807,12 @@ def test_host_flag_requires_the_sfu_and_exports_the_robot(monkeypatch: pytest.Mo
     launcher.main()
     assert seen["robot"] == "arm1"
     assert seen["sfu_bin"] == "/opt/homebrew/bin/livekit-server"
+    assert os.environ.get("MAKERMODSLAB_STATION") == "1"
+
+    # A bare --host is station mode with the robot chosen later (remembered,
+    # auto-picked, or from the station's UI): the posture is set, the name empty.
+    monkeypatch.delenv("MAKERMODSLAB_STATION", raising=False)
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--sfu", "--host"])
+    launcher.main()
+    assert seen["robot"] == ""
+    assert os.environ.get("MAKERMODSLAB_STATION") == "1"

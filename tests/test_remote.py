@@ -703,3 +703,78 @@ def test_remote_home_and_engage_routes_refuse_when_idle(client, _idle) -> None:
     for verb in ("home", "engage"):
         body = client.post(f"/api/v1/remote-teleoperation/{verb}").json()
         assert body["success"] is False
+
+
+# --- station mode: the hosted-robot choice -------------------------------------
+
+
+def test_pick_station_robot_rules() -> None:
+    pick = remote_host.pick_station_robot
+    assert pick("arm1", ["arm1", "arm2"]) == "arm1"  # remembered and still hostable
+    assert (
+        pick("gone", ["arm1", "arm2"]) is None
+    )  # remembered but not hostable, two candidates: the UI decides
+    assert pick("gone", ["arm1"]) == "arm1"  # a lone hostable robot needs no picker
+    assert pick(None, []) is None
+
+
+def test_station_file_round_trip(tmp_lerobot_home) -> None:
+    from makermodslab.utils import config as cfg
+
+    path = str(Path(cfg.MAKERMODSLAB_HOME) / "station.json")
+    assert cfg.load_station_robot(path) is None
+    cfg.save_station_robot("arm1", path)
+    assert cfg.load_station_robot(path) == "arm1"
+    cfg.save_station_robot(None, path)
+    assert cfg.load_station_robot(path) is None
+    Path(path).write_text('{"robot": "../etc"}')
+    assert cfg.load_station_robot(path) is None  # an invalid name never comes back
+
+
+def test_station_status_and_choice_routes(client, tmp_lerobot_home, _idle, monkeypatch) -> None:
+    from makermodslab.utils import config as cfg
+
+    monkeypatch.setattr(remote_host, "station_mode", True)
+    monkeypatch.setattr(remote_host, "station_robot", None)
+    monkeypatch.setattr(cfg, "STATION_FILE", str(Path(cfg.MAKERMODSLAB_HOME) / "station.json"))
+    _make_robot("arm1", leader=False, follower=True)
+    _make_robot("laptop", leader=True, follower=False)  # not hostable: no follower
+
+    body = client.get("/api/v1/station").json()
+    assert body == {
+        "station_mode": True,
+        "robot": None,
+        "hostable": ["arm1"],
+        "hosting_active": False,
+        "phase": None,
+    }
+
+    assert client.put("/api/v1/station/robot", json={"robot": "ghost"}).status_code == 404
+    denied = client.put("/api/v1/station/robot", json={"robot": "laptop"})
+    assert denied.status_code == 400 and denied.json()["code"] == "robot.not_ready"
+
+    chosen = client.put("/api/v1/station/robot", json={"robot": "arm1"}).json()
+    assert chosen["robot"] == "arm1"
+    assert cfg.load_station_robot() == "arm1"  # remembered across restarts
+    assert client.put("/api/v1/station/robot", json={"robot": None}).json()["robot"] is None
+
+
+def test_changing_the_hosted_robot_is_refused_while_an_operator_drives(
+    client, tmp_lerobot_home, _idle, monkeypatch
+) -> None:
+    from makermodslab.utils import config as cfg
+
+    monkeypatch.setattr(cfg, "STATION_FILE", str(Path(cfg.MAKERMODSLAB_HOME) / "station.json"))
+    _make_robot("arm1", leader=False, follower=True)
+    _make_robot("arm2", leader=False, follower=True)
+    m = remote_host.SeatMonitor()
+    m.operator_joined("laptop")
+    monkeypatch.setattr(remote_host, "hosting_active", True)
+    monkeypatch.setattr(remote_host, "phase", "engaged")
+    monkeypatch.setattr(remote_host, "seat", m)
+    monkeypatch.setattr(remote_host, "current_descriptor", {"robot": "arm1"})
+    resp = client.put("/api/v1/station/robot", json={"robot": "arm2"})
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "session.held"
+    # Re-choosing the robot already hosted is a no-op, not a refusal.
+    assert client.put("/api/v1/station/robot", json={"robot": "arm1"}).status_code == 200
