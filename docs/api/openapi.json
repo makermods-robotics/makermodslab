@@ -1242,6 +1242,11 @@
             "title": "Engine",
             "type": "string"
           },
+          "environment": {
+            "default": "",
+            "title": "Environment",
+            "type": "string"
+          },
           "fps": {
             "default": 30,
             "title": "Fps",
@@ -1255,6 +1260,11 @@
           "policy_hub_id": {
             "default": "",
             "title": "Policy Hub Id",
+            "type": "string"
+          },
+          "profile": {
+            "default": "",
+            "title": "Profile",
             "type": "string"
           },
           "s_min": {
@@ -1308,6 +1318,17 @@
               }
             ],
             "title": "Engine"
+          },
+          "environment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment"
           },
           "hint": {
             "anyOf": [
@@ -1386,6 +1407,17 @@
             ],
             "title": "Policy Hub Id"
           },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile"
+          },
           "room": {
             "anyOf": [
               {
@@ -1419,6 +1451,8 @@
           "engine",
           "policy_hub_id",
           "room",
+          "profile",
+          "environment",
           "log_path",
           "started_at",
           "elapsed_s",
@@ -1429,6 +1463,73 @@
           "idle_stop_in_s"
         ],
         "title": "GpuStatusResponse",
+        "type": "object"
+      },
+      "GpuTargetsError": {
+        "description": "Why the listing could not be made — in the BODY, never as a 500.\n\nA machine with no `modal`, an expired token or a slow API must still be\nable to launch: with no selection the CLI resolves the profile and\nenvironment itself. So a listing failure costs the two pickers and nothing\nelse, and the panel shows this message verbatim beside a Start button that\nstill works.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "GpuTargetsError",
+        "type": "object"
+      },
+      "GpuTargetsResponse": {
+        "description": "GET /api/v1/remote-inference/gpu/targets — shape authority:\nmodal_launcher.list_targets().\n\nWhat THIS MACHINE can bill, so a launch can be pointed at one workspace\nwithout `modal profile activate` rewriting the ~/.modal.toml every other\nterminal on this machine shares. Read-only: two `modal … list --json`\nsubprocesses, bounded, and no mutating subcommand anywhere near this path.\n`~/.modal.toml` itself — which holds token_id AND token_secret per profile\n— is never opened, so nothing here can carry a credential.",
+        "properties": {
+          "environments": {
+            "items": {
+              "$ref": "#/components/schemas/ModalEnvironmentEntry"
+            },
+            "title": "Environments",
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GpuTargetsError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile"
+          },
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/ModalProfileEntry"
+            },
+            "title": "Profiles",
+            "type": "array"
+          }
+        },
+        "required": [
+          "profiles",
+          "environments",
+          "profile",
+          "error"
+        ],
+        "title": "GpuTargetsResponse",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -3014,6 +3115,49 @@
           "step"
         ],
         "title": "MetricsHistoryPoint",
+        "type": "object"
+      },
+      "ModalEnvironmentEntry": {
+        "description": "One row of `modal environment list --json`, for one profile's workspace.\n\nThe CLI emits `active` there as the STRING \"True\" and carries a key with a\nspace in it; both are normalized in `modal_launcher.parse_environments`, so\nthis model sees a plain boolean.",
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "active"
+        ],
+        "title": "ModalEnvironmentEntry",
+        "type": "object"
+      },
+      "ModalProfileEntry": {
+        "description": "One row of `modal profile list --json`.\n\nAll three fields are DATA: a profile name and a workspace name are\nidentifiers the CLI matches on, never prose to translate.",
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "workspace": {
+            "title": "Workspace",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "workspace",
+          "active"
+        ],
+        "title": "ModalProfileEntry",
         "type": "object"
       },
       "ModelDeleteBody": {
@@ -10244,6 +10388,50 @@
           }
         },
         "summary": "Stop Remote Inference Gpu",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/remote-inference/gpu/targets": {
+      "get": {
+        "description": "This machine's Modal profiles, and one profile's environments.\n\nWhat the two pickers above Start GPU are built from, so a launch can be\nbilled to a chosen workspace WITHOUT `modal profile activate` — that\nrewrites ~/.modal.toml, which every other terminal on this machine shares,\nand a web request has no business doing that. The profile rides the child's\nMODAL_PROFILE instead, and the environment rides `modal run --env`.\n\n`profile` picks whose environments to list (empty: the active one), because\n`modal environment list` only ever describes one profile's workspace.\n\nRead-only and never 500: two bounded `modal … list --json` subprocesses, no\nmutating subcommand, and ~/.modal.toml — which holds every profile's\ntoken_id and token_secret — is never opened. A missing CLI, an expired\ntoken or a listing this build cannot parse come back as a coded `error` in\nthe body, because a failed listing is not a failed launch: with no selection\nthe CLI still resolves the target on its own.",
+        "operationId": "get_remote_inference_gpu_targets",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "profile",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Profile",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GpuTargetsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Remote Inference Gpu Targets",
         "tags": [
           "sessions"
         ]

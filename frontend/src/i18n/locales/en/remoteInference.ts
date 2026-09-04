@@ -105,7 +105,17 @@ export default {
       connected: "In the room",
       claimed: "Driving",
     },
+    // The two target pickers. Their OPTIONS are never translated: a profile
+    // name, a workspace name and an environment name are identifiers the CLI
+    // matches on, and the panel shows them exactly as `modal` reports them.
+    profileLabel: "Modal profile",
+    environmentLabel: "Environment",
     running: "GPU running — this is billing.",
+    // {{profile}}, {{workspace}} and {{environment}} are all DATA — Modal's own
+    // names, shown verbatim inside whatever sentence a translator writes.
+    billingTo: "Billing to {{profile}}.",
+    billingToWorkspace: "Billing to {{profile}} · {{workspace}}.",
+    billingEnvironment: "Environment {{environment}}.",
     // {{minutes}} is a plain integer, deliberately not `count`.
     idleStopIn:
       "It stops itself in about {{minutes}} min if no remote run starts.",

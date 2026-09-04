@@ -303,6 +303,11 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         "POST /api/v1/remote-inference/gpu/start",
         "POST /api/v1/remote-inference/gpu/stop",
         "GET /api/v1/remote-inference/gpu",
+        # Which workspace a launch bills (S3.8b): this machine's Modal profiles
+        # and one profile's environments, read from the CLI's own listings.
+        # Read-only — the Lab never runs `modal profile activate` and never
+        # opens ~/.modal.toml.
+        "GET /api/v1/remote-inference/gpu/targets",
     ]
 )
 

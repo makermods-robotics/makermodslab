@@ -54,6 +54,29 @@ HERE, on the user's machine), and :func:`build_argv` passes neither flag —
 they ride the child env instead. `tests/test_modal_launcher.py` asserts both
 halves of that, because it is the one regression nothing else would catch.
 
+Which workspace it bills (S3.8b)
+--------------------------------
+A machine can hold many Modal profiles, one of them active, and each profile's
+workspace holds one or more environments. The launch takes both PER LAUNCH,
+through the two mechanisms the CLI itself documents, and through no other:
+
+- the PROFILE as ``MODAL_PROFILE`` in the CHILD ENV, next to the credentials
+  that already travel there. Never ``modal profile activate`` — that rewrites
+  ``~/.modal.toml`` and would silently re-point every other terminal on this
+  machine, which is a side effect a web request has no business having.
+- the ENVIRONMENT as ``modal run --env <name>``, a `modal run` OPTION, so it
+  goes before the wrapper path; after it, Click hands it to the wrapper's own
+  `local_entrypoint` and the run dies on an unknown flag.
+
+Empty for either means the CLI's own resolution (``MODAL_ENVIRONMENT``, then
+the active profile, then the workspace default), which is exactly what S3.8
+did — so an API client that never sends them sees no change at all.
+
+``~/.modal.toml`` holds both halves of every profile's token and is NEVER read
+here. The two listing commands (`modal profile list --json`,
+`modal environment list --json`) carry names and workspaces only, and are the
+launcher's one and only view of what this machine can bill.
+
 What is deliberately NOT tested
 -------------------------------
 The real `modal run` subprocess, Modal authentication, cold-start timing, the
@@ -68,6 +91,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import json
 import logging
 import os
 import shutil
@@ -128,6 +152,15 @@ _GPU_IDLE_STOP_S = 600.0
 # How long a terminate may take before the group is SIGKILLed (rollout's own
 # default, restated so the number is visible next to the ones above).
 _TERMINATE_TIMEOUT_S = 5.0
+# The two listings behind the profile / environment pickers. They sit inside a
+# GET the panel calls on open, so the bound is short: an unreachable Modal must
+# cost the operator a coded line, not a hung panel. `environment list` talks to
+# the API (it is the one that can be slow); `profile list` is local.
+_TARGETS_TIMEOUT_S = 8.0
+# How much of a failed listing's own output is quoted back. One line, capped:
+# enough to name the cause, short enough that a CLI that ever decides to dump
+# something long cannot turn a status line into a wall.
+_TARGETS_DETAIL_CHARS = 240
 # And how long we then wait for the PUMP to notice. `_terminate_tree` already
 # escalated to SIGKILL, so the process is gone; what can still hang is the
 # stdout pipe, whose write end an un-reaped grandchild may hold open — leaving
@@ -207,6 +240,252 @@ def find_modal(
     return None
 
 
+# --- what this machine can bill ----------------------------------------------
+# Everything below reads the `modal` CLI's own listings and nothing else. It
+# never opens ~/.modal.toml (which holds token_id AND token_secret per profile),
+# never activates a profile, and never runs a subcommand with a side effect.
+
+
+def _as_bool(value: Any) -> bool:
+    """Modal's two listings disagree about how to say "active".
+
+    `profile list --json` emits a JSON boolean; `environment list --json` emits
+    the STRING "True" (its table renderer's text, serialized as-is). Parsing
+    defensively here is cheaper than depending on either staying put.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return bool(value)
+
+
+def parse_profiles(payload: Any) -> list[dict[str, Any]]:
+    """`modal profile list --json` → `[{name, workspace, active}]`.
+
+    Pure, and forgiving: a row without a usable name is DROPPED rather than
+    offered as a blank option, and a missing workspace renders as empty. A
+    listing this build cannot understand must degrade to "no choices", never to
+    a picker whose entries would launch against something unnamed.
+    """
+    rows = payload if isinstance(payload, list) else []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        out.append(
+            {
+                "name": name,
+                "workspace": str(row.get("workspace") or "").strip(),
+                "active": _as_bool(row.get("active")),
+            }
+        )
+    return out
+
+
+def parse_environments(payload: Any) -> list[dict[str, Any]]:
+    """`modal environment list --json` → `[{name, active}]`.
+
+    Same forgiveness as `parse_profiles`. Note the shape it reads: the CLI's
+    rows are `{"name": ..., "web suffix": ..., "active": "True"}` — a key with
+    a SPACE in it and a string boolean, neither of which this parser depends on
+    beyond the two fields it takes.
+    """
+    rows = payload if isinstance(payload, list) else []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        out.append({"name": name, "active": _as_bool(row.get("active"))})
+    return out
+
+
+def _listing_error(text: str, exit_code: int | None) -> tuple[str, str]:
+    """(code, message) for a listing that came back badly.
+
+    Modal's unauthenticated failure is the one worth naming — its remedy
+    (`modal token new`) has nothing in common with any other, and it is exactly
+    the state a machine with seven profiles ends up in when one of them expires.
+    Everything else is quoted back, one capped line of it: the CLI's own words
+    beat any sentence written here about a condition we did not anticipate.
+    """
+    if any(marker in text.lower() for marker in _AUTH_MARKERS):
+        return (
+            str(ErrorCode.GPU_UNAUTHENTICATED),
+            "Modal rejected this machine's credentials, so its profiles couldn't be listed. "
+            "Run `modal token new` in a terminal on this machine. "
+            "The Lab never reads or writes ~/.modal.toml — the CLI owns it.",
+        )
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    detail = f" {lines[-1][:_TARGETS_DETAIL_CHARS]}" if lines else ""
+    code = "" if exit_code is None else f" (exit code {exit_code})"
+    return (
+        str(ErrorCode.GPU_TARGETS_UNAVAILABLE),
+        f"The `modal` CLI couldn't list this machine's Modal targets{code}.{detail}",
+    )
+
+
+def _modal_json(argv: list[str], *, profile: str = "") -> tuple[Any, tuple[str, str] | None]:
+    """Run one read-only `modal … --json` listing. `(payload, None)` or `(None, (code, message))`.
+
+    `profile` selects WHICH profile the listing describes, through the env var
+    the CLI documents for exactly this — never `modal profile activate`, which
+    would rewrite a file every other terminal on this machine shares.
+
+    Bounded and non-raising by construction: this sits inside a GET that a panel
+    calls on open, and a listing failure is a line of text, never a 500 and
+    never a blocked launch.
+    """
+    env = dict(os.environ)
+    if profile:
+        env["MODAL_PROFILE"] = profile
+    try:
+        proc = subprocess.run(  # noqa: S603 — a fixed argv, no shell
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=_TARGETS_TIMEOUT_S,
+            env=env,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, (
+            str(ErrorCode.GPU_TARGETS_UNAVAILABLE),
+            f"`modal {' '.join(argv[1:])}` didn't answer within {int(_TARGETS_TIMEOUT_S)}s.",
+        )
+    except OSError as exc:
+        return None, (str(ErrorCode.GPU_TARGETS_UNAVAILABLE), f"Couldn't run `{argv[0]}`: {exc}")
+    if proc.returncode != 0:
+        return None, _listing_error(f"{proc.stderr or ''}\n{proc.stdout or ''}", proc.returncode)
+    try:
+        return json.loads(proc.stdout or ""), None
+    except ValueError:
+        return None, (
+            str(ErrorCode.GPU_TARGETS_UNAVAILABLE),
+            "The `modal` CLI's listing wasn't the JSON this build knows how to read. "
+            "The profile and environment pickers are unavailable; the launch still uses the CLI's "
+            "own active profile.",
+        )
+
+
+def _cli_missing_error() -> dict[str, str]:
+    return {
+        "code": str(ErrorCode.GPU_CLI_MISSING),
+        "message": f"The `modal` command isn't on this machine's PATH. {INSTALL_HINT}",
+    }
+
+
+def list_targets(profile: str | None = None) -> dict[str, Any]:
+    """What this machine can bill: its Modal profiles, and one profile's environments.
+
+    `profile` picks whose environments to list; empty means the active one.
+    Returns `{profiles, environments, profile, error}` where `profile` names the
+    profile the environments belong to (null when none could be listed) and
+    `error` is `{code, message}` or null.
+
+    NEVER raises and never 500s. A missing CLI, an expired token, a slow API and
+    a listing this build cannot parse all come back as a coded body, because the
+    launch does not depend on any of them: with no selection at all the CLI
+    resolves the profile and environment itself, exactly as it did before S3.8b.
+    """
+    modal_bin = find_modal()
+    if modal_bin is None:
+        return {"profiles": [], "environments": [], "profile": None, "error": _cli_missing_error()}
+
+    wanted = (profile or "").strip()
+    payload, err = _modal_json([modal_bin, "profile", "list", "--json"])
+    if err is not None:
+        return {
+            "profiles": [],
+            "environments": [],
+            "profile": None,
+            "error": {"code": err[0], "message": err[1]},
+        }
+    profiles = parse_profiles(payload)
+    active = next((p["name"] for p in profiles if p["active"]), None)
+
+    if wanted and not any(p["name"] == wanted for p in profiles):
+        # Naming a profile this machine does not have is the one case where
+        # falling back to the active one would be actively harmful: the panel
+        # would then show a DIFFERENT workspace's environments under the label
+        # the operator picked.
+        return {
+            "profiles": profiles,
+            "environments": [],
+            "profile": None,
+            "error": {
+                "code": str(ErrorCode.GPU_TARGETS_UNAVAILABLE),
+                "message": f"This machine has no Modal profile called `{wanted}`.",
+            },
+        }
+
+    listed_for = wanted or active
+    payload, err = _modal_json([modal_bin, "environment", "list", "--json"], profile=wanted)
+    if err is not None:
+        # The profiles are still worth returning: picking one is what re-runs
+        # this listing, and a workspace that is merely slow to answer should not
+        # cost the operator the profile picker too.
+        return {
+            "profiles": profiles,
+            "environments": [],
+            "profile": None,
+            "error": {"code": err[0], "message": err[1]},
+        }
+    return {
+        "profiles": profiles,
+        "environments": parse_environments(payload),
+        "profile": listed_for,
+        "error": None,
+    }
+
+
+def check_target(profile: str, environment: str) -> None:
+    """Refuse a launch aimed at a target this machine cannot confirm.
+
+    A no-op when BOTH are empty, which is the whole S3.8 behaviour and the
+    default: the CLI resolves the profile and environment itself, and there is
+    nothing to check.
+
+    When either is named, the listings are the authority, and a listing that
+    did not answer is a REFUSAL rather than a shrug. The asymmetry is
+    deliberate and it is about money: an unconfirmable target may be a typo
+    (loud, ninety seconds later, in a log nobody is reading yet) or a real
+    workspace belonging to someone else (silent, and billed). Refusing costs a
+    retry; guessing costs an A100-hour on the wrong account.
+
+    Raises `ApiError(400)` with a `gpu.*` code; the caller does nothing but let
+    it out.
+    """
+    wanted_profile = profile.strip()
+    wanted_env = environment.strip()
+    if not wanted_profile and not wanted_env:
+        return
+
+    targets = list_targets(wanted_profile)
+    error = targets["error"]
+    if error is not None:
+        raise ApiError(
+            400,
+            f"{error['message']} Clear the profile and environment to let the `modal` CLI choose, "
+            "or fix the CLI and try again.",
+            code=error["code"],
+        )
+    if wanted_env and not any(e["name"] == wanted_env for e in targets["environments"]):
+        known = ", ".join(f"`{e['name']}`" for e in targets["environments"]) or "none"
+        where = f"profile `{wanted_profile}`" if wanted_profile else "the active profile"
+        raise ApiError(
+            400,
+            f"{where} has no Modal environment called `{wanted_env}`. It has: {known}.",
+            code=ErrorCode.GPU_LAUNCH_FAILED,
+        )
+
+
 # --- the transport plan ------------------------------------------------------
 
 
@@ -278,6 +557,7 @@ def build_argv(
     video_codec: str,
     s_min: int,
     modal_bin: str,
+    environment: str = "",
 ) -> list[str]:
     """The `modal run` command, as a LIST — never a string, never a shell.
 
@@ -292,6 +572,16 @@ def build_argv(
       generated line so the two remain comparable.
     - `--s-min` is rtc-ONLY: `modal_policy.py` has no such flag, so emitting it
       there is a Click usage error, not a defaulted run.
+    - `--env` is a `modal run` OPTION and therefore goes BEFORE the wrapper
+      path — `modal run [OPTIONS] FUNC_REF`. After it, Click hands it to the
+      wrapper's own `local_entrypoint`, which has no such parameter, and the
+      run dies on an unknown flag instead of billing the named environment.
+      Omitted when empty, so the CLI's own resolution (`MODAL_ENVIRONMENT`,
+      the active profile, the workspace default) stands untouched.
+    - the PROFILE is deliberately NOT here: it travels as `MODAL_PROFILE` in
+      the child env (`child_env`), because the CLI takes it that way and the
+      alternative — `modal profile activate` — would rewrite a file every
+      other terminal on this machine shares.
     - **the key and the secret are not here.** They ride the child env
       (`LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET`), which both wrappers' `main()`
       falls back to. argv is world-readable in `ps` on this machine.
@@ -303,6 +593,7 @@ def build_argv(
     return [
         modal_bin,
         "run",
+        *(["--env", environment] if environment else []),
         str(wrapper),
         "--policy-path",
         policy_hub_id,
@@ -324,16 +615,30 @@ def build_argv(
     ]
 
 
-def child_env(plan: TransportPlan, env: Mapping[str, str] | None = None) -> dict[str, str]:
+def child_env(
+    plan: TransportPlan,
+    env: Mapping[str, str] | None = None,
+    *,
+    profile: str = "",
+) -> dict[str, str]:
     """The environment the `modal run` child inherits.
 
     Unbuffered (so the phase lines arrive as they are printed rather than in
     4 KB gulps at the end) plus the two credentials that must never be argv.
+
+    `profile` is the third thing that travels here, for a related reason: the
+    CLI reads `MODAL_PROFILE` per process, so ONE launch can bill a different
+    workspace without touching the machine-wide active profile that every other
+    terminal on this machine shares. Empty leaves the variable alone (rather
+    than setting it empty, which the CLI would read as a profile named ""),
+    so the CLI's own resolution stands.
     """
     base = dict(os.environ if env is None else env)
     base["PYTHONUNBUFFERED"] = "1"
     base["LIVEKIT_API_KEY"] = plan.api_key
     base["LIVEKIT_API_SECRET"] = plan.api_secret
+    if profile:
+        base["MODAL_PROFILE"] = profile
     return base
 
 
@@ -426,6 +731,12 @@ _phase: str | None = None
 _engine: str | None = None
 _policy_hub_id: str | None = None
 _room: str | None = None
+# The Modal target this launch was billed to, AS LAUNCHED — null when the
+# operator left the choice to the CLI. Echoed in the status so a running GPU
+# can say which workspace is paying for it, which is the whole point of letting
+# it be chosen at all.
+_profile: str | None = None
+_environment: str | None = None
 _log_path: str | None = None
 _started_at: float | None = None  # wall clock, for display
 _started_mono: float | None = None  # monotonic, for elapsed + the cold-start bound
@@ -475,12 +786,15 @@ def _go_idle_locked() -> None:
     """
     global _state, _proc, _phase, _engine, _policy_hub_id, _room
     global _started_at, _started_mono, _idle_since, _last_line, _drain_deadline
+    global _profile, _environment
     _state = STATE_IDLE
     _proc = None
     _phase = None
     _engine = None
     _policy_hub_id = None
     _room = None
+    _profile = None
+    _environment = None
     _started_at = None
     _started_mono = None
     _idle_since = None
@@ -752,6 +1066,8 @@ def start(
     fps: int = 30,
     video_codec: str = "H264",
     s_min: int = 4,
+    profile: str = "",
+    environment: str = "",
 ) -> dict[str, Any]:
     """Launch the GPU policy server. Returns `{started, message, gpu}`.
 
@@ -762,10 +1078,17 @@ def start(
     remote-inference↔training refusal is already flagged in CLAUDE.md as the one
     asymmetry in the matrix — a second, weaker instance would entrench a rule we
     already suspect.
+
+    `profile` / `environment` say WHICH WORKSPACE PAYS. Both empty is S3.8's
+    behaviour byte for byte — the CLI resolves them — so nothing changes for a
+    client that never sends them. A non-empty one is checked against this
+    machine's own listings first: an A100-hour billed to the wrong workspace is
+    not recoverable, so "we could not confirm the target" refuses in a
+    millisecond rather than spending ninety seconds finding out.
     """
     global _state, _proc, _phase, _engine, _policy_hub_id, _room
     global _started_at, _started_mono, _log_path, _message, _hint, _last_line, _idle_since
-    global _stop_outcome, _code, _drain_deadline
+    global _stop_outcome, _code, _drain_deadline, _profile, _environment
 
     with _state_lock:
         if _state in (STATE_STARTING, STATE_READY, STATE_STOPPING):
@@ -791,6 +1114,13 @@ def start(
             f"The `modal` command isn't on this machine's PATH. {INSTALL_HINT}",
             code=ErrorCode.GPU_CLI_MISSING,
         )
+
+    # Before anything is spawned, and before the transport is even resolved: a
+    # target the listings cannot confirm is the one pre-spawn refusal whose
+    # cost is money rather than a retry.
+    want_profile = profile.strip()
+    want_environment = environment.strip()
+    check_target(want_profile, want_environment)
 
     try:
         plan = resolve_transport_plan()
@@ -826,10 +1156,11 @@ def start(
         video_codec=video_codec,
         s_min=s_min,
         modal_bin=modal_bin,
+        environment=want_environment,
     )
     log_handle, path = _open_log()
     try:
-        proc = _popen(argv, child_env(plan))
+        proc = _popen(argv, child_env(plan, profile=want_profile))
     except Exception as exc:
         with contextlib.suppress(Exception):
             log_handle.close()
@@ -848,6 +1179,10 @@ def start(
         _engine = engine
         _policy_hub_id = hub_id
         _room = plan.room
+        # Null, not "", when the CLI chose: the status says "we did not pick",
+        # which is a different fact from "we picked the empty one".
+        _profile = want_profile or None
+        _environment = want_environment or None
         _log_path = str(path)
         _started_at = time.time()
         _started_mono = _clock()
@@ -927,6 +1262,11 @@ def _status_locked() -> dict[str, Any]:
         "engine": _engine,
         "policy_hub_id": _policy_hub_id,
         "room": _room,
+        # The Modal target AS LAUNCHED, null when the CLI resolved it. The
+        # panel's ready line says which workspace is billing, which is the
+        # reason the choice exists.
+        "profile": _profile,
+        "environment": _environment,
         "log_path": _log_path,
         "started_at": _started_at,
         "elapsed_s": elapsed,

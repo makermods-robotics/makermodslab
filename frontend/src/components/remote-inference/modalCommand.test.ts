@@ -29,6 +29,10 @@ const cloud: ModalRunLineInput = {
   // The key NAME the transport endpoint reports. Real, and unused on the Cloud
   // path — only the SFU line carries it.
   sfuKeyId: "APIkey123",
+  // Nothing chosen: the CLI resolves the profile and environment itself, which
+  // is what every assertion below the target block assumes.
+  profile: "",
+  environment: "",
 };
 
 /** The rtc pairing: the other wrapper, the flow families' full chunk_size, and
@@ -107,6 +111,68 @@ describe("the generated modal run line", () => {
     expect(buildModalRunLine({ ...cloud, room: "" })).not.toContain(
       "--livekit-room",
     );
+  });
+});
+
+describe("which workspace the pasted line bills", () => {
+  // The line has to match what the Lab's own launcher runs, flag for flag and
+  // variable for variable — it is the manual fallback AND the ground truth an
+  // operator compares against. `modal_launcher.build_argv` / `child_env` are
+  // the other half of this pair.
+  it("prefixes the profile as an env-var assignment, never a flag", () => {
+    // `modal run` has no --profile, and `modal profile activate` would rewrite
+    // the ~/.modal.toml every other terminal on this machine shares.
+    const line = buildModalRunLine({ ...cloud, profile: "work-account" });
+    expect(line).toBe(
+      "MODAL_PROFILE=work-account modal run makermodslab/drtc/modal_policy.py " +
+        "--policy-path makermods/pick-place " +
+        "--horizon 16 --fps 30 --video-codec H264 " +
+        "--livekit-room portal-lerobot-inference",
+    );
+    expect(line).not.toContain("--profile");
+    expect(line).not.toContain("profile activate");
+  });
+
+  it("puts --env before the wrapper path, where `modal run` reads it", () => {
+    // `modal run [OPTIONS] FUNC_REF`. After the path, Click hands --env to the
+    // wrapper's own local_entrypoint, which has no such parameter.
+    const line = buildModalRunLine({ ...cloud, environment: "staging" });
+    expect(line).toBe(
+      "modal run --env staging makermodslab/drtc/modal_policy.py " +
+        "--policy-path makermods/pick-place " +
+        "--horizon 16 --fps 30 --video-codec H264 " +
+        "--livekit-room portal-lerobot-inference",
+    );
+    expect(line.indexOf("--env")).toBeLessThan(line.indexOf("modal_policy.py"));
+  });
+
+  it("carries both together on the rtc wrapper", () => {
+    expect(
+      buildModalRunLine({
+        ...rtcCloud,
+        profile: "work-account",
+        environment: "staging",
+      }),
+    ).toBe(
+      "MODAL_PROFILE=work-account modal run --env staging " +
+        "makermodslab/drtc/modal_policy_rtc.py " +
+        "--policy-path makermods/pick-place " +
+        "--horizon 50 --fps 30 --s-min 4 --video-codec H264 " +
+        "--livekit-room portal-lerobot-inference",
+    );
+  });
+
+  it("emits neither when nothing is chosen, so the CLI resolves them", () => {
+    // Byte for byte the pre-S3.8b line. `--env ""` would name an environment
+    // called "", and `MODAL_PROFILE= ` a profile called "".
+    const line = buildModalRunLine({
+      ...cloud,
+      profile: "  ",
+      environment: " ",
+    });
+    expect(line.startsWith("modal run makermodslab/")).toBe(true);
+    expect(line).not.toContain("--env");
+    expect(line).not.toContain("MODAL_PROFILE");
   });
 });
 
@@ -210,6 +276,8 @@ describe("the task travels to the GPU side too", () => {
 
   it("omits the flag entirely for an empty or whitespace task", () => {
     expect(buildModalRunLine(cloud)).not.toContain("--task");
-    expect(buildModalRunLine({ ...cloud, task: "   " })).not.toContain("--task");
+    expect(buildModalRunLine({ ...cloud, task: "   " })).not.toContain(
+      "--task",
+    );
   });
 });

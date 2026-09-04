@@ -92,7 +92,16 @@ export default {
       connected: "已在房间中",
       claimed: "正在驱动",
     },
+    // 两个目标选择器。它们的选项永远不翻译：profile 名、workspace 名和
+    // environment 名都是 CLI 用于匹配的标识符，面板按 modal 报告的原样显示。
+    profileLabel: "Modal profile",
+    environmentLabel: "Environment",
     running: "GPU 正在运行 — 这会产生费用。",
+    // {{profile}}、{{workspace}} 和 {{environment}} 都是数据 — Modal 自己的
+    // 名称，在译文句子中原样呈现。
+    billingTo: "计费到 {{profile}}。",
+    billingToWorkspace: "计费到 {{profile}} · {{workspace}}。",
+    billingEnvironment: "环境 {{environment}}。",
     // {{minutes}} 是普通整数，刻意不使用 count 机制。
     idleStopIn: "若约 {{minutes}} 分钟内没有远程运行开始，它会自动停止。",
     idleStopPaused: "有远程运行正在使用它，因此不会自动停止。",

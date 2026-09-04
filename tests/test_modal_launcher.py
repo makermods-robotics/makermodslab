@@ -220,6 +220,300 @@ def test_the_secret_is_never_in_argv_and_always_in_the_child_env():
     assert env["PYTHONUNBUFFERED"] == "1"
 
 
+# --- which workspace pays (S3.8b) --------------------------------------------
+
+
+def test_the_environment_is_a_modal_run_option_and_sits_before_the_wrapper():
+    """`modal run [OPTIONS] FUNC_REF`. After the path, Click hands `--env` to
+    the wrapper's own local_entrypoint — which has no such parameter — and the
+    run dies on an unknown flag instead of billing the named environment."""
+    argv = ml.build_argv(_plan(), **_ARGS, engine="sync", environment="staging")
+
+    assert argv[:4] == ["/usr/bin/modal", "run", "--env", "staging"]
+    assert argv[4].endswith("modal_policy.py")
+    assert argv.index("--env") < argv.index("--policy-path")
+
+
+def test_no_environment_means_no_flag_at_all():
+    """Empty is S3.8's behaviour byte for byte: the CLI resolves the
+    environment itself (MODAL_ENVIRONMENT, the active profile, the workspace
+    default). Passing `--env ""` would name an environment called ""."""
+    for argv in (
+        ml.build_argv(_plan(), **_ARGS, engine="sync"),
+        ml.build_argv(_plan(), **_ARGS, engine="rtc", environment=""),
+    ):
+        assert "--env" not in argv
+
+
+def test_the_profile_travels_in_the_child_env_and_never_in_argv():
+    """`MODAL_PROFILE` per process is what lets ONE launch bill another
+    workspace without `modal profile activate` rewriting the ~/.modal.toml
+    every other terminal on this machine shares."""
+    plan = _plan()
+    argv = ml.build_argv(plan, **_ARGS, engine="sync", environment="main")
+    assert "--profile" not in argv
+    assert "work-account" not in " ".join(argv)
+
+    env = ml.child_env(plan, env={"PATH": "/usr/bin"}, profile="work-account")
+    assert env["MODAL_PROFILE"] == "work-account"
+
+
+def test_an_unchosen_profile_leaves_the_variable_alone():
+    """Not set to "" — the CLI would read that as a profile named ""."""
+    env = ml.child_env(_plan(), env={"PATH": "/usr/bin"})
+    assert "MODAL_PROFILE" not in env
+
+    inherited = ml.child_env(_plan(), env={"MODAL_PROFILE": "from-the-shell"})
+    assert inherited["MODAL_PROFILE"] == "from-the-shell"
+
+
+# --- the two listings --------------------------------------------------------
+
+_PROFILE_ROWS = [
+    {"name": "personal", "workspace": "mokuroh54", "active": False},
+    {"name": "work", "workspace": "makermods", "active": True},
+]
+# The environment listing's real shape: a key with a SPACE in it, and `active`
+# as the STRING "True" rather than a JSON boolean.
+_ENV_ROWS = [
+    {"name": "main", "web suffix": "", "active": "True"},
+    {"name": "staging", "web suffix": "-staging", "active": "False"},
+]
+
+
+def test_profiles_are_parsed_with_their_workspace_and_active_flag():
+    assert ml.parse_profiles(_PROFILE_ROWS) == [
+        {"name": "personal", "workspace": "mokuroh54", "active": False},
+        {"name": "work", "workspace": "makermods", "active": True},
+    ]
+
+
+def test_environments_are_parsed_through_the_string_boolean():
+    """`modal environment list --json` serializes its table renderer's text, so
+    `active` arrives as "True". A picker that read that as truthy-string would
+    mark every environment active."""
+    assert ml.parse_environments(_ENV_ROWS) == [
+        {"name": "main", "active": True},
+        {"name": "staging", "active": False},
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload", [None, {}, "nope", [None, 3, "x"], [{"workspace": "w"}], [{"name": "  "}]]
+)
+def test_a_listing_this_build_cannot_read_degrades_to_no_choices(payload):
+    """Never a blank option: a row with no usable name would launch against
+    something unnamed, and no picker at all is the honest answer."""
+    assert ml.parse_profiles(payload) == []
+    assert ml.parse_environments(payload) == []
+
+
+def test_a_missing_cli_is_a_coded_body_never_a_raise(monkeypatch):
+    """This sits inside a GET the panel calls on open. A failed listing costs
+    the two pickers and NOTHING else — the CLI's own resolution still works, so
+    Start GPU must stay live."""
+    monkeypatch.setattr(ml, "find_modal", lambda: None)
+    out = ml.list_targets()
+    assert out["error"]["code"] == "gpu.cli_missing"
+    assert "uv tool install modal" in out["error"]["message"]
+    assert out["profiles"] == [] and out["environments"] == [] and out["profile"] is None
+
+
+def test_the_listings_are_read_only_and_name_the_profile_they_describe(monkeypatch):
+    seen: list[tuple[list[str], str]] = []
+
+    def _fake(argv, *, profile=""):
+        seen.append((argv, profile))
+        return (_PROFILE_ROWS if argv[1] == "profile" else _ENV_ROWS), None
+
+    monkeypatch.setattr(ml, "find_modal", lambda: "/usr/bin/modal")
+    monkeypatch.setattr(ml, "_modal_json", _fake)
+
+    out = ml.list_targets()
+    # The active profile is what the environments were listed for when none was
+    # asked for — reported so a stale list cannot read as current.
+    assert out["profile"] == "work"
+    assert out["error"] is None
+    assert [e["name"] for e in out["environments"]] == ["main", "staging"]
+    # Only `list`, only `--json`, and never `activate` / `create` / `token`.
+    assert [argv[1:] for argv, _ in seen] == [
+        ["profile", "list", "--json"],
+        ["environment", "list", "--json"],
+    ]
+    assert [p for _, p in seen] == ["", ""]
+
+
+def test_another_profile_s_environments_are_listed_under_the_profile_env_var(monkeypatch):
+    """`modal environment list` describes ONE profile's workspace, and the env
+    var is how another one is asked for — never `modal profile activate`."""
+    seen: list[tuple[list[str], str]] = []
+
+    def _fake(argv, *, profile=""):
+        seen.append((argv, profile))
+        return (_PROFILE_ROWS if argv[1] == "profile" else _ENV_ROWS), None
+
+    monkeypatch.setattr(ml, "find_modal", lambda: "/usr/bin/modal")
+    monkeypatch.setattr(ml, "_modal_json", _fake)
+
+    out = ml.list_targets("personal")
+    assert out["profile"] == "personal"
+    assert seen[1][1] == "personal"
+
+
+def test_the_profile_env_var_is_the_only_thing_a_listing_changes(monkeypatch):
+    """The one place the subprocess is real enough to check: the env var goes
+    in, the argv stays a fixed list, and no shell is involved."""
+    captured: dict[str, object] = {}
+
+    class _Done:
+        returncode = 0
+        stdout = '[{"name": "main", "active": "True"}]'
+        stderr = ""
+
+    def _run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs["env"]
+        captured["timeout"] = kwargs["timeout"]
+        captured["kwargs"] = kwargs
+        return _Done()
+
+    monkeypatch.setattr(ml.subprocess, "run", _run)
+    payload, err = ml._modal_json(["/usr/bin/modal", "environment", "list", "--json"], profile="personal")
+
+    assert err is None and payload == [{"name": "main", "active": "True"}]
+    assert captured["env"]["MODAL_PROFILE"] == "personal"
+    assert captured["timeout"] == ml._TARGETS_TIMEOUT_S
+    assert "shell" not in captured["kwargs"]
+
+
+def test_a_profile_this_machine_does_not_have_is_refused_rather_than_silently_swapped(monkeypatch):
+    """Falling back to the active profile here would show a DIFFERENT
+    workspace's environments under the label the operator picked."""
+    monkeypatch.setattr(ml, "find_modal", lambda: "/usr/bin/modal")
+    monkeypatch.setattr(ml, "_modal_json", lambda argv, *, profile="": (_PROFILE_ROWS, None))
+
+    out = ml.list_targets("does-not-exist")
+    assert out["error"]["code"] == "gpu.targets_unavailable"
+    assert "does-not-exist" in out["error"]["message"]
+    assert out["environments"] == []
+    assert out["profile"] is None
+    # The profiles still come back: picking one is what re-runs the listing.
+    assert [p["name"] for p in out["profiles"]] == ["personal", "work"]
+
+
+def test_an_unauthenticated_listing_names_the_one_remedy_that_differs():
+    code, message = ml._listing_error("Error: token id and token secret are missing", 1)
+    assert code == "gpu.unauthenticated"
+    assert "modal token new" in message
+    assert "never reads or writes ~/.modal.toml" in message
+
+
+def test_an_unclassified_listing_failure_quotes_the_cli_s_own_last_line():
+    code, message = ml._listing_error("warming up\nError: workspace lookup failed", 2)
+    assert code == "gpu.targets_unavailable"
+    assert "Error: workspace lookup failed" in message
+    assert "exit code 2" in message
+
+
+def test_output_that_is_not_json_costs_the_pickers_and_says_so(monkeypatch):
+    class _Done:
+        returncode = 0
+        stdout = "Profile  Workspace\npersonal mokuroh54"
+        stderr = ""
+
+    monkeypatch.setattr(ml.subprocess, "run", lambda argv, **kw: _Done())
+    payload, err = ml._modal_json(["/usr/bin/modal", "profile", "list", "--json"])
+    assert payload is None
+    assert err[0] == "gpu.targets_unavailable"
+    assert "the launch still uses the CLI's own active profile" in err[1]
+
+
+# --- choosing a target at launch ---------------------------------------------
+
+
+def test_choosing_nothing_checks_nothing(monkeypatch):
+    """The default path must not pay for a listing — and must not be able to
+    fail because of one."""
+    monkeypatch.setattr(ml, "list_targets", lambda profile="": pytest.fail("no listing here"))
+    ml.check_target("", "   ")
+
+
+def test_an_unknown_environment_refuses_before_anything_is_spawned(spawned, monkeypatch):
+    monkeypatch.setattr(
+        ml,
+        "list_targets",
+        lambda profile="": {
+            "profiles": ml.parse_profiles(_PROFILE_ROWS),
+            "environments": ml.parse_environments(_ENV_ROWS),
+            "profile": "work",
+            "error": None,
+        },
+    )
+    with pytest.raises(ApiError) as excinfo:
+        ml.start(engine="sync", policy_hub_id="someone/p", environment="prod")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.code == ErrorCode.GPU_LAUNCH_FAILED
+    assert "`main`" in excinfo.value.detail and "`staging`" in excinfo.value.detail
+    assert spawned["popen"] == []
+
+
+def test_a_target_that_cannot_be_confirmed_refuses_rather_than_guesses(spawned, monkeypatch):
+    """An A100-hour billed to the wrong workspace is not recoverable. A typo is
+    loud ninety seconds later; someone else's real workspace is silent and
+    billed — so an unconfirmable target costs a retry, not a guess."""
+    monkeypatch.setattr(
+        ml,
+        "list_targets",
+        lambda profile="": {
+            "profiles": [],
+            "environments": [],
+            "profile": None,
+            "error": {"code": "gpu.unauthenticated", "message": "Modal rejected this machine."},
+        },
+    )
+    with pytest.raises(ApiError) as excinfo:
+        ml.start(engine="sync", policy_hub_id="someone/p", profile="work")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.code == "gpu.unauthenticated"
+    assert "Clear the profile and environment" in excinfo.value.detail
+    assert spawned["popen"] == []
+
+
+def test_the_chosen_target_reaches_the_env_the_argv_and_the_status(spawned, fake_clock, monkeypatch):
+    monkeypatch.setattr(
+        ml,
+        "list_targets",
+        lambda profile="": {
+            "profiles": ml.parse_profiles(_PROFILE_ROWS),
+            "environments": ml.parse_environments(_ENV_ROWS),
+            "profile": profile or "work",
+            "error": None,
+        },
+    )
+    ml.start(engine="sync", policy_hub_id="someone/p", profile=" work ", environment=" staging ")
+
+    argv, env = spawned["popen"][0]
+    assert env["MODAL_PROFILE"] == "work"  # stripped
+    assert argv[argv.index("--env") + 1] == "staging"
+    # The whole point of the feature: a running GPU says which workspace pays.
+    assert ml.status()["profile"] == "work"
+    assert ml.status()["environment"] == "staging"
+
+
+def test_an_unchosen_target_is_null_in_the_status_not_empty(spawned, fake_clock, monkeypatch):
+    """ "We did not pick" is a different fact from "we picked the empty one"."""
+    # The child inherits os.environ, so a developer shell that already exports
+    # MODAL_PROFILE would otherwise decide this assertion.
+    monkeypatch.delenv("MODAL_PROFILE", raising=False)
+    ml.start(engine="sync", policy_hub_id="someone/p")
+    assert ml.status()["profile"] is None
+    assert ml.status()["environment"] is None
+    _, env = spawned["popen"][0]
+    assert "MODAL_PROFILE" not in env
+
+
 # --- the log parser ----------------------------------------------------------
 
 
@@ -351,6 +645,8 @@ def test_the_status_dict_always_carries_every_key(spawned, fake_clock):
         "engine",
         "policy_hub_id",
         "room",
+        "profile",
+        "environment",
         "log_path",
         "started_at",
         "elapsed_s",

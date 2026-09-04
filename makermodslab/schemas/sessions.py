@@ -601,6 +601,13 @@ class GpuStatusResponse(BaseModel):
     # The room the launcher pinned with --livekit-room. The one value whose
     # mismatch is invisible by construction, so it is reported.
     room: str | None
+    # WHICH WORKSPACE IS PAYING, as launched. The Modal profile went to the
+    # child as MODAL_PROFILE and the environment as `modal run --env`; both are
+    # null when the operator left the choice to the CLI's own resolution, which
+    # is a different fact from an empty selection. Data — profile, workspace
+    # and environment names are never translated.
+    profile: str | None
+    environment: str | None
     # Survives an idle transition on purpose: after a failure the log is the
     # most useful thing left. Null before the first launch since boot.
     log_path: str | None
@@ -623,6 +630,72 @@ class GpuStatusResponse(BaseModel):
     # session is running: a busy GPU is not idle, and a countdown that keeps
     # ticking through a live run would be a lie.
     idle_stop_in_s: float | None
+
+
+class ModalProfileEntry(BaseModel):
+    """One row of `modal profile list --json`.
+
+    All three fields are DATA: a profile name and a workspace name are
+    identifiers the CLI matches on, never prose to translate."""
+
+    name: str
+    # The Modal workspace the profile bills to — the thing an operator actually
+    # recognizes, and why the picker shows it beside the name.
+    workspace: str
+    # Whether this is the machine-wide active profile. The picker's DEFAULT,
+    # never a constraint: the Lab picks per launch and never activates one.
+    active: bool
+
+
+class ModalEnvironmentEntry(BaseModel):
+    """One row of `modal environment list --json`, for one profile's workspace.
+
+    The CLI emits `active` there as the STRING "True" and carries a key with a
+    space in it; both are normalized in `modal_launcher.parse_environments`, so
+    this model sees a plain boolean."""
+
+    name: str
+    active: bool
+
+
+class GpuTargetsError(BaseModel):
+    """Why the listing could not be made — in the BODY, never as a 500.
+
+    A machine with no `modal`, an expired token or a slow API must still be
+    able to launch: with no selection the CLI resolves the profile and
+    environment itself. So a listing failure costs the two pickers and nothing
+    else, and the panel shows this message verbatim beside a Start button that
+    still works."""
+
+    # `gpu.cli_missing` | `gpu.unauthenticated` | `gpu.targets_unavailable`.
+    # A string rather than the enum: a newer server may name a condition this
+    # client has never heard of — match on it, do not exhaust it.
+    code: str
+    # Backend prose. Rendered as sent; the Python backend is never localized.
+    message: str
+
+
+class GpuTargetsResponse(BaseModel):
+    """GET /api/v1/remote-inference/gpu/targets — shape authority:
+    modal_launcher.list_targets().
+
+    What THIS MACHINE can bill, so a launch can be pointed at one workspace
+    without `modal profile activate` rewriting the ~/.modal.toml every other
+    terminal on this machine shares. Read-only: two `modal … list --json`
+    subprocesses, bounded, and no mutating subcommand anywhere near this path.
+    `~/.modal.toml` itself — which holds token_id AND token_secret per profile
+    — is never opened, so nothing here can carry a credential.
+    """
+
+    profiles: list[ModalProfileEntry]
+    # The environments of `profile` below — NOT of every profile. Empty
+    # whenever `error` is set.
+    environments: list[ModalEnvironmentEntry]
+    # Which profile the environments were listed for: the `profile` query when
+    # one was given, otherwise the active one. Null when they could not be
+    # listed at all, which is what stops a stale list reading as current.
+    profile: str | None
+    error: GpuTargetsError | None
 
 
 class GpuLaunchResponse(BaseModel):

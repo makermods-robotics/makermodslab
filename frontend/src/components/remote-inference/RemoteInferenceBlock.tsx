@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { ChevronDown } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
-import { useGpuLauncher } from "@/hooks/useGpuLauncher";
+import { useGpuLauncher, useGpuTargets } from "@/hooks/useGpuLauncher";
 import { getCurrentSession, stopSession } from "@/lib/sessionApi";
 import type { RemoteInferenceStatus } from "@/hooks/useRemoteInferenceStatus";
 import type { UseRemoteInferenceTransport } from "@/hooks/useRemoteInferenceTransport";
@@ -95,6 +95,11 @@ const RemoteInferenceBlock: React.FC<{
   // gate the remote verb — that stays the transport probe's `operator_present`,
   // which observes the room rather than a log line.
   const gpu = useGpuLauncher(armed);
+  // WHICH WORKSPACE PAYS. Its own hook beside the launcher rather than inside
+  // it: the listing is a read of this MACHINE (two `modal … list --json`
+  // calls), not of the launch, and it must keep answering — and keep being
+  // pickable — while a GPU is up.
+  const gpuTargets = useGpuTargets(armed);
 
   const active = status?.remote_inference_active === true;
   const showStatus = active || status?.exited === true;
@@ -163,6 +168,7 @@ const RemoteInferenceBlock: React.FC<{
           />
           <GpuLaunchSection
             launcher={gpu}
+            targets={gpuTargets}
             config={config}
             hubIdDefault={hubIdDefault}
             task={task}
@@ -180,6 +186,9 @@ const RemoteInferenceBlock: React.FC<{
                 transport={transportState.transport}
                 hubIdDefault={hubIdDefault}
                 task={task}
+                // So the pasted line bills the same workspace Start GPU would.
+                profile={gpuTargets.profile}
+                environment={gpuTargets.environment}
               />
             </CollapsibleContent>
           </Collapsible>

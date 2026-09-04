@@ -36,6 +36,12 @@ export interface GpuStatus {
   policy_hub_id: string | null;
   /** The room the launcher pinned with --livekit-room. Data. */
   room: string | null;
+  /** WHICH WORKSPACE IS PAYING, as launched: the Modal profile that went to
+   * the child as MODAL_PROFILE, and the environment that went to `modal run`
+   * as --env. Both null when the operator left the choice to the CLI's own
+   * resolution — a different fact from an empty selection. Names, so DATA. */
+  profile: string | null;
+  environment: string | null;
   /** Survives an idle transition: after a failure this is the most useful
    * thing left. A path — data. */
   log_path: string | null;
@@ -65,6 +71,40 @@ export interface GpuStartRequest {
   fps: number;
   video_codec: "H264" | "MJPEG";
   s_min: number;
+  /** WHICH WORKSPACE PAYS. Empty means the `modal` CLI resolves it itself,
+   * which is what an API client that never sends them gets. The UI is
+   * deliberately explicit instead: it sends whatever is selected, always. */
+  profile: string;
+  environment: string;
+}
+
+/** One row of `modal profile list --json`. All three are DATA — a profile name
+ * and a workspace name are identifiers, never prose. */
+export interface ModalProfile {
+  name: string;
+  workspace: string;
+  /** The machine-wide active profile. The picker's DEFAULT, never a
+   * constraint: the Lab chooses per launch and never activates one. */
+  active: boolean;
+}
+
+/** One row of `modal environment list --json`, for one profile's workspace. */
+export interface ModalEnvironment {
+  name: string;
+  active: boolean;
+}
+
+export interface GpuTargets {
+  profiles: ModalProfile[];
+  /** The environments of `profile` below — not of every profile. */
+  environments: ModalEnvironment[];
+  /** Which profile the environments belong to. Null when they could not be
+   * listed, which is what stops a stale list reading as current. */
+  profile: string | null;
+  /** Why the listing failed, or null. A failed listing is NOT a failed launch:
+   * with no selection the CLI still resolves the target, so this costs the two
+   * pickers and nothing else. `message` is backend prose — shown verbatim. */
+  error: { code: string; message: string } | null;
 }
 
 interface GpuLaunchResult {
@@ -96,6 +136,21 @@ export async function startGpu(
     fetcher,
     "/api/v1/remote-inference/gpu/start",
     { method: "POST", body, action: "Start the GPU" },
+  );
+}
+
+export async function getGpuTargets(
+  baseUrl: string,
+  fetcher: Fetcher,
+  profile: string,
+  signal?: AbortSignal,
+): Promise<GpuTargets> {
+  const query = profile ? `?profile=${encodeURIComponent(profile)}` : "";
+  return apiRequest<GpuTargets>(
+    baseUrl,
+    fetcher,
+    `/api/v1/remote-inference/gpu/targets${query}`,
+    { signal, action: "List this machine's Modal targets" },
   );
 }
 
@@ -160,14 +215,18 @@ export function useGpuLauncher(enabled: boolean): UseGpuLauncher {
         const next = await getGpuStatus(baseUrl, fetchWithHeaders);
         if (cancelled) return;
         setStatus(next);
-        if (next.state === "failed" || next.state === "idle") settled.current = true;
+        if (next.state === "failed" || next.state === "idle")
+          settled.current = true;
       } catch {
         // Transient; the next tick retries. A failed poll must never blank a
         // panel the operator is reading mid-launch.
       }
     };
     void tick();
-    if (quiet) return () => { cancelled = true; };
+    if (quiet)
+      return () => {
+        cancelled = true;
+      };
     const id = setInterval(
       () => void tick(),
       state === "starting" || state === "stopping"
@@ -215,4 +274,137 @@ export function useGpuLauncher(enabled: boolean): UseGpuLauncher {
   }, [baseUrl, fetchWithHeaders, refresh]);
 
   return { status, pending, error, start, stop, refresh };
+}
+
+/* -------------------------------------------------------------------------
+ * WHICH WORKSPACE PAYS
+ * ---------------------------------------------------------------------- */
+
+/** Remembered per Lab (the API base is not part of the key, exactly as
+ * useSelectedModel's is not): an operator works one machine at a time, and a
+ * profile that followed them to a different Lab would be a profile that
+ * machine may not even have. */
+const PROFILE_KEY = "makermodslab.gpuModalProfile";
+const ENVIRONMENT_KEY = "makermodslab.gpuModalEnvironment";
+
+function read(key: string): string {
+  try {
+    return localStorage.getItem(key) ?? "";
+  } catch {
+    // Storage unavailable (private mode). In-memory state still works, and the
+    // active target is the fallback either way.
+    return "";
+  }
+}
+
+function write(key: string, value: string): void {
+  try {
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
+  } catch {
+    // Same: a preference that cannot be persisted is still a live selection.
+  }
+}
+
+export interface UseGpuTargets {
+  /** The listing, or null before the first answer. */
+  targets: GpuTargets | null;
+  /** The EFFECTIVE selection — what a launch will be sent with. Empty when
+   * nothing could be listed, which is the backend's "let the CLI decide". */
+  profile: string;
+  environment: string;
+  setProfile: (name: string) => void;
+  setEnvironment: (name: string) => void;
+}
+
+/**
+ * This machine's Modal profiles and the selected profile's environments.
+ *
+ * Two rules shape it, and both are about not lying about who pays:
+ *
+ *  - **A remembered value that no longer exists falls back to the active one,
+ *    silently.** A stale localStorage entry (the profile was renamed, or this
+ *    is a different machine) must not leave the panel showing a target that
+ *    cannot be launched — and must not block Start GPU either.
+ *  - **The environments are re-listed when the profile changes**, because
+ *    `modal environment list` describes ONE profile's workspace. Showing the
+ *    previous workspace's environments under a newly picked profile is exactly
+ *    the mislead this feature exists to prevent.
+ *
+ * @param enabled fetch while true.
+ */
+export function useGpuTargets(enabled: boolean): UseGpuTargets {
+  const { baseUrl, fetchWithHeaders } = useApi();
+  const [targets, setTargets] = useState<GpuTargets | null>(null);
+  // What the LISTING is requested for. State (not derived) because it is an
+  // input to the fetch; the displayed selection below is derived from it.
+  const [wantedProfile, setWantedProfile] = useState<string>(() =>
+    read(PROFILE_KEY),
+  );
+  const [wantedEnvironment, setWantedEnvironment] = useState<string>(() =>
+    read(ENVIRONMENT_KEY),
+  );
+
+  useEffect(() => {
+    if (!enabled) return;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        setTargets(
+          await getGpuTargets(
+            baseUrl,
+            fetchWithHeaders,
+            wantedProfile,
+            controller.signal,
+          ),
+        );
+      } catch {
+        // Transient. The listing is a convenience — leaving the last answer in
+        // place beats blanking a panel the operator is reading, and Start GPU
+        // never depended on it.
+      }
+    })();
+    return () => controller.abort();
+  }, [enabled, baseUrl, fetchWithHeaders, wantedProfile]);
+
+  // The one place a stale remembered profile is dropped: the machine answered,
+  // it has profiles, and none of them is the remembered one. Clearing it
+  // re-runs the fetch against the active profile.
+  useEffect(() => {
+    if (!targets || !wantedProfile) return;
+    if (targets.profiles.length === 0) return;
+    if (targets.profiles.some((p) => p.name === wantedProfile)) return;
+    write(PROFILE_KEY, "");
+    setWantedProfile("");
+  }, [targets, wantedProfile]);
+
+  const profiles = targets?.profiles ?? [];
+  const environments = targets?.environments ?? [];
+
+  const activeProfile = profiles.find((p) => p.active)?.name ?? "";
+  const activeEnvironment = environments.find((e) => e.active)?.name ?? "";
+
+  // Derived rather than stored, so a remembered value that does not exist in
+  // the CURRENT listing simply reads as the active one. This is what makes the
+  // fallback silent for the environment too, with no second clearing effect:
+  // switching profile switches workspace, and the old environment usually
+  // isn't in the new one.
+  const profile = profiles.some((p) => p.name === wantedProfile)
+    ? wantedProfile
+    : activeProfile;
+  const environment = environments.some((e) => e.name === wantedEnvironment)
+    ? wantedEnvironment
+    : activeEnvironment;
+
+  const setProfile = useCallback((name: string) => {
+    write(PROFILE_KEY, name);
+    setWantedProfile(name);
+  }, []);
+
+  const setEnvironment = useCallback((name: string) => {
+    write(ENVIRONMENT_KEY, name);
+    setWantedEnvironment(name);
+  }, []);
+
+  return { targets, profile, environment, setProfile, setEnvironment };
 }

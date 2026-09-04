@@ -57,6 +57,14 @@ export interface ModalRunLineInput {
    * because it identifies rather than authorizes. Empty ⇒ a placeholder is
    * emitted instead. */
   sfuKeyId: string;
+  /** WHICH WORKSPACE PAYS, mirroring what the Lab's own launch does with the
+   * same two values: the profile as a `MODAL_PROFILE=` assignment PREFIXING
+   * the command (the CLI reads it per process, and `modal profile activate`
+   * would rewrite the ~/.modal.toml every other terminal on this machine
+   * shares), the environment as `modal run --env`. Empty ⇒ omitted, which is
+   * the CLI's own resolution. */
+  profile: string;
+  environment: string;
 }
 
 /** Literal stand-in for the API SECRET. The API deliberately never exposes it
@@ -104,8 +112,19 @@ export function shellQuote(value: string): string {
 
 export function buildModalRunLine(input: ModalRunLineInput): string {
   const task = input.task.trim();
+  const profile = input.profile.trim();
+  const environment = input.environment.trim();
   const parts = [
-    `modal run ${MODAL_WRAPPERS[input.engine]}`,
+    // The profile is an env-var ASSIGNMENT in front of the command, not a
+    // flag: `modal run` has no --profile, and the CLI reads MODAL_PROFILE per
+    // process — which is exactly what makes this line safe to paste without
+    // re-pointing every other terminal on the machine.
+    `${profile ? `MODAL_PROFILE=${profile} ` : ""}modal run` +
+      // `--env` is a `modal run` OPTION, so it goes BEFORE the wrapper path.
+      // After it, Click hands it to the wrapper's own local_entrypoint — which
+      // has no such parameter — and the command dies on an unknown flag.
+      `${environment ? ` --env ${environment}` : ""} ` +
+      MODAL_WRAPPERS[input.engine],
     `--policy-path ${input.policyHubId.trim() || POLICY_PATH_PLACEHOLDER}`,
     // Flag order follows each wrapper's own local_entrypoint signature, so the
     // line reads the same way the function does. `--s-min` sits between --fps

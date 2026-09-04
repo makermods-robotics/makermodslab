@@ -167,11 +167,19 @@ class ErrorCode(StrEnum):
     # the Lab never touches ~/.modal.toml). `already_running`/`not_running`: a
     # start against a live launcher, a stop against a dead one — the GPU is a
     # Lab-level resource, so these are its own, not `robot.busy.*`.
+    # `targets_unavailable`: the `modal profile list` / `modal environment
+    # list` listing behind the profile+environment pickers did not answer (a
+    # non-zero exit, a timeout, output that is not the JSON this build parses,
+    # or a profile query naming something this machine does not have). Its own
+    # rung rather than `launch_failed` because NOTHING WAS LAUNCHED: the
+    # remedy is the CLI's own state, and a failed listing must never block a
+    # launch — the CLI's own profile resolution still works.
     GPU_CLI_MISSING = "gpu.cli_missing"
     GPU_UNAUTHENTICATED = "gpu.unauthenticated"
     GPU_ALREADY_RUNNING = "gpu.already_running"
     GPU_NOT_RUNNING = "gpu.not_running"
     GPU_LAUNCH_FAILED = "gpu.launch_failed"
+    GPU_TARGETS_UNAVAILABLE = "gpu.targets_unavailable"
 
     # sfu.* — the bundled LiveKit server (sfu.py). `disabled`: this process
     # was started without --sfu (or an external SFU configured), so there is

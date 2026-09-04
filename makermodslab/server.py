@@ -227,6 +227,7 @@ from .schemas.sessions import (
     CurrentSessionResponse,
     GpuLaunchResponse,
     GpuStatusResponse,
+    GpuTargetsResponse,
     RemoteInferenceStatusResponse,
     RemoteInferenceTransportStatusResponse,
     SessionCoachingBody,
@@ -1254,6 +1255,43 @@ class GpuStartBody(BaseModel):
     fps: int = 30
     video_codec: Literal["H264", "MJPEG"] = "H264"
     s_min: int = 4
+    # WHICH WORKSPACE PAYS. Both optional, and empty means exactly what S3.8
+    # did: the `modal` CLI resolves the profile and the environment itself
+    # (MODAL_ENVIRONMENT, then the active local profile, then the workspace
+    # default). A client that never sends them sees no change.
+    #
+    # Free-form strings rather than a Literal because the valid set is THIS
+    # MACHINE's, read from the CLI at request time — see
+    # GET /remote-inference/gpu/targets. Unknown values are refused there and
+    # again in `modal_launcher.check_target`, before anything is spawned.
+    profile: str = ""
+    environment: str = ""
+
+
+@v1_router.get(
+    "/remote-inference/gpu/targets",
+    response_model=GpuTargetsResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_gpu_targets(profile: str = ""):
+    """This machine's Modal profiles, and one profile's environments.
+
+    What the two pickers above Start GPU are built from, so a launch can be
+    billed to a chosen workspace WITHOUT `modal profile activate` — that
+    rewrites ~/.modal.toml, which every other terminal on this machine shares,
+    and a web request has no business doing that. The profile rides the child's
+    MODAL_PROFILE instead, and the environment rides `modal run --env`.
+
+    `profile` picks whose environments to list (empty: the active one), because
+    `modal environment list` only ever describes one profile's workspace.
+
+    Read-only and never 500: two bounded `modal … list --json` subprocesses, no
+    mutating subcommand, and ~/.modal.toml — which holds every profile's
+    token_id and token_secret — is never opened. A missing CLI, an expired
+    token or a listing this build cannot parse come back as a coded `error` in
+    the body, because a failed listing is not a failed launch: with no selection
+    the CLI still resolves the target on its own."""
+    return modal_launcher.list_targets(profile)
 
 
 @v1_router.post(
@@ -1285,6 +1323,8 @@ def start_remote_inference_gpu(body: GpuStartBody):
         fps=body.fps,
         video_codec=body.video_codec,
         s_min=body.s_min,
+        profile=body.profile,
+        environment=body.environment,
     )
 
 

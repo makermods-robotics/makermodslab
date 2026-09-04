@@ -35,7 +35,11 @@ const ModalRunLine: React.FC<{
   /** The task the robot side will be started with — DATA, forwarded so both
    * sides steer the policy with the same sentence. */
   task: string;
-}> = ({ config, transport, hubIdDefault, task }) => {
+  /** The Modal target selected above, so the pasted line bills the SAME
+   * workspace the Lab's own Start GPU would. Empty ⇒ the CLI resolves it. */
+  profile: string;
+  environment: string;
+}> = ({ config, transport, hubIdDefault, task, profile, environment }) => {
   const { t } = useTranslation();
   const { toast } = useToast();
 
@@ -57,6 +61,10 @@ const ModalRunLine: React.FC<{
     url: transport?.sfu_modal_url ?? "",
     source: transport?.source ?? "none",
     sfuKeyId: transport?.sfu_key_id ?? "",
+    // The same two values Start GPU sends, rendered the way the CLI takes
+    // them: MODAL_PROFILE= in front, --env as a `modal run` option.
+    profile,
+    environment,
   });
 
   const copy = async () => {

@@ -2,7 +2,15 @@ import React from "react";
 import { useTranslation } from "react-i18next";
 import { Cpu, Loader2, Play, Square, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { UseGpuLauncher } from "@/hooks/useGpuLauncher";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import type { UseGpuLauncher, UseGpuTargets } from "@/hooks/useGpuLauncher";
 import { MODAL_WRAPPERS } from "./modalCommand";
 import type { RemoteRunConfig } from "./remoteRunConfig";
 
@@ -16,10 +24,18 @@ import type { RemoteRunConfig } from "./remoteRunConfig";
  *    transport probe's `operator_present`, never off `gpu.state`. Two
  *    independent signals, and the one that gates the ARM is the one that
  *    observes the room — a log line saying "connected" is a hint.
- *  - **It says the GPU is billing.** A ready A100 costs real money whether or
- *    not an arm is moving, so the ready state says so and shows the countdown
+ *  - **It says the GPU is billing, and WHO PAYS.** A ready A100 costs real
+ *    money whether or not an arm is moving, so the ready state says so, names
+ *    the profile and workspace it was launched against, and shows the countdown
  *    to the automatic idle stop. Visibility is the cheapest cost control there
- *    is.
+ *    is. The two pickers above the button are the same idea one step earlier:
+ *    a machine with seven Modal profiles should not bill whichever one happens
+ *    to be active in some other terminal.
+ *  - **A failed listing never blocks a launch.** The pickers come from two
+ *    `modal … list --json` calls; when they fail, the backend's own message
+ *    replaces them and Start GPU stays live, because with no selection the CLI
+ *    resolves the profile and environment itself — exactly as it did before
+ *    the pickers existed.
  *  - **The manual command stays** (below, under "Run it yourself instead"). It
  *    is the only route when `modal` is missing or unauthenticated, the only
  *    route to a hand-tuned flag, and the ground truth an operator compares
@@ -31,19 +47,33 @@ import type { RemoteRunConfig } from "./remoteRunConfig";
  */
 const GpuLaunchSection: React.FC<{
   launcher: UseGpuLauncher;
+  /** This machine's Modal profiles + the selected profile's environments, and
+   * the remembered selection. */
+  targets: UseGpuTargets;
   config: RemoteRunConfig;
   /** The Hub id to launch with when the field is left empty. */
   hubIdDefault: string;
   /** The effective task — the same string the robot side is started with, so
    * a language-conditioned policy is steered by the same sentence. */
   task: string;
-}> = ({ launcher, config, hubIdDefault, task }) => {
+}> = ({ launcher, targets, config, hubIdDefault, task }) => {
   const { t } = useTranslation();
   const { status, pending, error, start, stop } = launcher;
+  const {
+    targets: listing,
+    profile,
+    environment,
+    setProfile,
+    setEnvironment,
+  } = targets;
 
   const state = status?.state ?? "idle";
   const hubId = config.policyHubId.trim() || hubIdDefault;
   const busy = pending || state === "stopping";
+  // Nothing to pick from is not an error state: it is the CLI deciding, which
+  // is what happened before these pickers existed.
+  const canPick = listing != null && listing.error == null;
+  const running = state !== "idle" && state !== "failed";
 
   const launch = () =>
     void start({
@@ -54,7 +84,18 @@ const GpuLaunchSection: React.FC<{
       fps: config.fps,
       video_codec: config.videoCodec,
       s_min: config.sMin,
+      // Whatever is selected, always — the backend's "empty means the CLI
+      // decides" is for API clients; the panel is explicit about who pays.
+      profile,
+      environment,
     });
+
+  // The workspace behind the profile a RUNNING GPU was launched with. The
+  // status echoes the profile name only, so the workspace is looked up in the
+  // listing; a profile that has since disappeared just shows its name.
+  const launchedWorkspace = listing?.profiles.find(
+    (p) => p.name === status?.profile,
+  )?.workspace;
 
   return (
     <div className="space-y-2 rounded-lg border border-border p-3">
@@ -96,6 +137,79 @@ const GpuLaunchSection: React.FC<{
           </Button>
         )}
       </div>
+
+      {/* WHO PAYS. Above the button because it is a property of the launch,
+          and disabled while one is in flight or a GPU is up — the selection
+          describes what WAS launched until that GPU is stopped. */}
+      {canPick && listing.profiles.length > 0 ? (
+        <div className="grid gap-2 sm:grid-cols-2">
+          <div className="space-y-1">
+            <Label htmlFor="gpu-modal-profile" className="text-xs">
+              {t("remoteInference.gpu.profileLabel")}
+            </Label>
+            <Select
+              value={profile}
+              disabled={busy || running}
+              onValueChange={setProfile}
+            >
+              <SelectTrigger id="gpu-modal-profile" className="h-8 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {listing.profiles.map((p) => (
+                  // BOTH halves are data: the profile name is what
+                  // MODAL_PROFILE is set to, and the workspace is the thing an
+                  // operator actually recognizes as "the account this bills".
+                  <SelectItem key={p.name} value={p.name} className="text-xs">
+                    <span className="font-mono">{p.name}</span>
+                    {p.workspace ? (
+                      <span className="text-muted-foreground">
+                        {" · "}
+                        {p.workspace}
+                      </span>
+                    ) : null}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {listing.environments.length > 0 ? (
+            <div className="space-y-1">
+              <Label htmlFor="gpu-modal-environment" className="text-xs">
+                {t("remoteInference.gpu.environmentLabel")}
+              </Label>
+              <Select
+                value={environment}
+                disabled={busy || running}
+                onValueChange={setEnvironment}
+              >
+                <SelectTrigger
+                  id="gpu-modal-environment"
+                  className="h-8 text-xs"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {listing.environments.map((e) => (
+                    <SelectItem key={e.name} value={e.name} className="text-xs">
+                      <span className="font-mono">{e.name}</span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {listing?.error ? (
+        // The backend's own text, verbatim. NOT a blocker: Start GPU stays
+        // live above, because with no selection the CLI resolves the target
+        // itself — a failed listing is not a failed launch.
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          {listing.error.message}
+        </p>
+      ) : null}
 
       {state === "idle" ? (
         <>
@@ -147,6 +261,30 @@ const GpuLaunchSection: React.FC<{
         <div className="space-y-1">
           <p className="text-xs font-medium text-emerald-600 dark:text-emerald-500">
             {t("remoteInference.gpu.running")}
+            {/* WHICH WORKSPACE PAYS, from the status echo — the whole point of
+                letting the target be chosen. Absent when the CLI resolved it,
+                which is honest: the Lab genuinely does not know which one it
+                picked. Profile, workspace and environment names are DATA. */}
+            {status?.profile ? (
+              <>
+                {" "}
+                <span className="font-normal text-muted-foreground">
+                  {launchedWorkspace
+                    ? t("remoteInference.gpu.billingToWorkspace", {
+                        profile: status.profile,
+                        workspace: launchedWorkspace,
+                      })
+                    : t("remoteInference.gpu.billingTo", {
+                        profile: status.profile,
+                      })}
+                  {status.environment
+                    ? ` ${t("remoteInference.gpu.billingEnvironment", {
+                        environment: status.environment,
+                      })}`
+                    : ""}
+                </span>
+              </>
+            ) : null}
           </p>
           <p className="text-xs leading-relaxed text-muted-foreground">
             {status?.idle_stop_in_s == null
