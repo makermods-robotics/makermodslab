@@ -99,6 +99,18 @@ def test_render_config_specific_address_pins_node_ip() -> None:
     assert "  - 100.64.0.7" in lines
 
 
+def test_render_config_specific_address_also_binds_loopback() -> None:
+    """The launcher's readiness probe and the robot child both dial
+    127.0.0.1; binding the tailnet address ALONE made the launcher kill a
+    healthy server after 15 s ("never came up")."""
+    lines = _lines(sfu.render_config(bind_host="100.64.0.7", key_file="/k.yaml"))
+    bind_block = lines[lines.index("bind_addresses:") + 1 :]
+    assert bind_block[:2] == ["  - 100.64.0.7", "  - 127.0.0.1"]
+    # Loopback and wildcard binds gain nothing and get no second line.
+    loop = _lines(sfu.render_config(bind_host="127.0.0.1", key_file="/k.yaml"))
+    assert loop.count("  - 127.0.0.1") == 1
+
+
 def test_render_config_ports_are_overridable() -> None:
     lines = _lines(
         sfu.render_config(bind_host="127.0.0.1", key_file="/k", http_port=1, tcp_port=2, udp_port=3)
@@ -106,6 +118,70 @@ def test_render_config_ports_are_overridable() -> None:
     assert "port: 1" in lines
     assert "  tcp_port: 2" in lines
     assert "  udp_port: 3" in lines
+
+
+def test_render_config_external_ip_turns_the_stun_probe_on_and_drops_the_pin() -> None:
+    """`--sfu-external-ip`. A Modal container reaches the signalling URL over
+    the tailnet but has to HOLE-PUNCH for media, and it has no route to a
+    tailnet address — so the only candidate it can punch to is the public IP
+    livekit discovers with STUN. The `node_ip` pin has to go with it: pinning
+    the tailnet address is exactly what makes the discovered candidate
+    unreachable, so the two are mutually exclusive rather than additive."""
+    lines = _lines(sfu.render_config(bind_host="100.64.0.7", key_file="/k.yaml", external_ip=True))
+    assert "  use_external_ip: true" in lines
+    assert not any(line.strip().startswith("node_ip") for line in lines)
+    # The listener still follows the bind: signalling stays on the tailnet.
+    assert "  - 100.64.0.7" in lines
+
+
+def test_render_config_external_ip_skips_hairpin_validation_and_keeps_lan_candidate() -> None:
+    """Bench finding (2026-09-03): livekit's post-STUN self-check hairpins
+    through the router and times out on a home NAT, after which it drops the
+    internal candidates the robot child needs. With validation skipped and
+    the internal IP advertised, livekit logged
+    `using external IPs ["73.x/192.168.x"]` — one public, one LAN. The
+    tailnet is excluded from candidate gathering by CIDR (media never rides
+    it, and its probe collides with the LAN socket's on :7882)."""
+    text = sfu.render_config(bind_host="100.64.0.7", key_file="/k.yaml", external_ip=True)
+    lines = _lines(text)
+    assert "  skip_external_ip_validation: true" in lines
+    assert "  advertise_internal_ip: true" in lines
+    assert "      - 100.64.0.0/10" in lines
+    assert "      - fd7a:115c:a1e0::/48" in lines
+    # rtc.ips.excludes must sit INSIDE the rtc block, i.e. before the
+    # top-level bind_addresses key.
+    assert text.index("    excludes:") < text.index("bind_addresses:")
+    # None of it leaks into the default (Cloud-free loopback) config.
+    off = _lines(sfu.render_config(bind_host="127.0.0.1", key_file="/k.yaml"))
+    assert not any("skip_external_ip_validation" in line or "advertise_internal_ip" in line for line in off)
+
+
+def test_render_config_external_ip_defaults_off() -> None:
+    """Off is right for a LAN-only station: the STUN self-probe stalls a
+    machine with no internet, and it is only for cloud NAT."""
+    assert "  use_external_ip: false" in _lines(sfu.render_config(bind_host="100.64.0.7", key_file="/k.yaml"))
+
+
+def test_external_ip_enabled_reads_the_launcher_export(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The app REPORTS the flag (on the transport panel) and never acts on it —
+    the config it shapes was rendered before the app started."""
+    monkeypatch.delenv(sfu.ENV_EXTERNAL_IP, raising=False)
+    assert sfu.external_ip_enabled() is False
+    monkeypatch.setenv(sfu.ENV_EXTERNAL_IP, "0")
+    assert sfu.external_ip_enabled() is False
+    monkeypatch.setenv(sfu.ENV_EXTERNAL_IP, "1")
+    assert sfu.external_ip_enabled() is True
+
+
+def test_local_url_is_loopback_and_honours_the_url_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A child this process spawns has no request to derive a host from, and
+    loopback is the one address it is always reachable on whatever the SFU
+    bound. An external SFU still stays external."""
+    monkeypatch.delenv(sfu.ENV_URL, raising=False)
+    monkeypatch.setenv(sfu.ENV_PORT, "7880")
+    assert sfu.local_url() == "ws://127.0.0.1:7880"
+    monkeypatch.setenv(sfu.ENV_URL, "wss://sfu.example.com")
+    assert sfu.local_url() == "wss://sfu.example.com"
 
 
 def test_public_host_names_localhost_for_loopback() -> None:

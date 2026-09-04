@@ -23,7 +23,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from pydantic import BaseModel
@@ -310,7 +310,161 @@ POLICY_EXTRAS: dict[str, tuple[str, str]] = {
     "pi0_fast": ("transformers", "lerobot[pi]"),
     "pi05": ("transformers", "lerobot[pi]"),
     "diffusion": ("diffusers", "lerobot[diffusion]"),
+    # MolmoAct2's `lerobot[molmoact2]` extra is transformers + peft + scipy, but
+    # only TRANSFORMERS is a construction-time requirement for a rollout on this
+    # pin, so that is what we probe:
+    #   * peft is reached only from `_apply_lora_adapters`, i.e. when
+    #     `enable_lora_vlm` is set — a training-side option;
+    #   * scipy is the discrete action tokenizer, required by
+    #     `MolmoAct2PackInputsProcessorStep.__post_init__` only when the
+    #     checkpoint's `action_mode` is "discrete" or "both". The released
+    #     `lerobot/MolmoAct2-*-LeRobot` checkpoints save `action_mode:
+    #     "continuous"`, which is the one value that skips it.
+    # Probing either would report needs_extra && !available for a checkpoint
+    # that runs fine, and DeployPanel REFUSES to launch on that — a false
+    # blocker is worse than a buried ImportError. Revisit when MolmoAct2
+    # training lands, or if a "both"/"discrete" checkpoint ships.
+    "molmoact2": ("transformers", "lerobot[molmoact2]"),
 }
+
+
+# --------------------------------------------------------------------------- #
+# Policy runtime requirements
+# --------------------------------------------------------------------------- #
+# Sibling of POLICY_EXTRAS above, and the same shape of question: not "which
+# package does this policy need installed" but "which flags does this lerobot
+# pin REQUIRE to run this policy at all". Kept here rather than in rollout.py
+# because three front-ends will want the same answer — the rollout/eval/coaching
+# subprocess builders today, a MolmoAct2 training config later, and the remote
+# inference policy server after that.
+#
+# Everything below is a pure function of the checkpoint's own saved config.json
+# (the dict lerobot writes next to the weights), so it is trivially testable and
+# has no import-time cost.
+
+MOLMOACT2 = "molmoact2"
+
+# `--policy.*` overrides are applied by lerobot ON TOP of the checkpoint's saved
+# config (RolloutConfig.__post_init__ → PreTrainedConfig.from_pretrained(
+# cli_overrides=...)), which is why filling a gap here is enough and why
+# overriding a value the checkpoint deliberately saved would be wrong.
+
+
+def molmoact2_inference_action_mode(policy_config: Mapping[str, Any]) -> str:
+    """The action mode a MolmoAct2 rollout will actually run in.
+
+    `MolmoAct2Config.inference_action_mode` defaults to None and
+    `_resolve_inference_action_mode` raises on None — "MolmoAct2 inference
+    requires `inference_action_mode` to be set explicitly" — so a checkpoint
+    that never saved one cannot be rolled out at all without an override.
+
+    The released `lerobot/MolmoAct2-SO100_101-LeRobot` config DOES save
+    ``"inference_action_mode": "continuous"``, so this only fills a gap: a
+    locally fine-tuned checkpoint, or a raw `allenai/MolmoAct2` repo. The
+    default mirrors the checkpoint's TRAINING mode, because forcing continuous
+    onto an `action_mode="discrete"` checkpoint raises in `__post_init__` —
+    which would turn "no mode saved" into a different, equally fatal error.
+    """
+    saved = policy_config.get("inference_action_mode")
+    if saved in ("continuous", "discrete"):
+        return str(saved)
+    return "discrete" if policy_config.get("action_mode") == "discrete" else "continuous"
+
+
+def policy_inference_args(policy_config: Mapping[str, Any]) -> list[str]:
+    """Extra ``--policy.*`` rollout flags this pin requires for a checkpoint.
+
+    Keyed on the checkpoint's own ``type``; empty for every policy that needs
+    nothing (act, smolvla, pi0, …), which is all of them but MolmoAct2 today.
+    Deliberately emits NOTHING when the checkpoint already saved an explicit
+    choice — a rollout must run the policy the way its config says.
+    """
+    if policy_config.get("type") != MOLMOACT2:
+        return []
+    if policy_config.get("inference_action_mode") in ("continuous", "discrete"):
+        return []
+    return [f"--policy.inference_action_mode={molmoact2_inference_action_mode(policy_config)}"]
+
+
+def molmoact2_rtc_conflict(policy_config: Mapping[str, Any]) -> str | None:
+    """Why RTC can't drive this MolmoAct2 checkpoint, or None when it can.
+
+    `MolmoAct2Policy.supports_rtc()` is literally
+    ``inference_action_mode == "continuous"``, and `build_rollout_context`
+    turns a False into a ValueError — but only AFTER loading a multi-GB VLM
+    onto the accelerator. Answering from the saved config costs nothing and
+    fails in the launch panel instead. Only meaningful for MolmoAct2: every
+    other policy's RTC support is decided elsewhere (upstream's
+    `supports_rtc_inference`), and this returns None for them rather than
+    pretending to know.
+    """
+    if policy_config.get("type") != MOLMOACT2:
+        return None
+    if molmoact2_inference_action_mode(policy_config) == "continuous":
+        return None
+    return (
+        "Real-Time Chunking needs continuous actions, and this MolmoAct2 checkpoint runs "
+        "discrete ones. Use the standard (sync) inference engine for it."
+    )
+
+
+def molmoact2_device_warning(policy_config: Mapping[str, Any], device: str) -> str | None:
+    """Why a MolmoAct2 rollout on `device` is likely to disappoint, or None.
+
+    A WARNING and deliberately not a refusal. Nothing in this lerobot pin
+    requires CUDA: the only CUDA-specific code is the action-flow graph cache,
+    and `ActionCudaGraphManager.can_use_action_flow` returns False off-CUDA and
+    falls back to the eager loop. So refusing would be MakerMods Lab inventing
+    a hardware requirement lerobot does not state — the honest thing is to say
+    what the operator is in for and let them decide.
+
+    What they are in for is the model's size, not a missing kernel: MolmoAct2
+    is a ~7B vision-language model queried inside a 30 Hz control loop.
+
+    `device` is injected (rollout passes `_detect_device()`) so this stays a
+    pure function and the tests never touch a real accelerator.
+    """
+    if policy_config.get("type") != MOLMOACT2:
+        return None
+    if device == "cuda":
+        return None
+    return (
+        "MolmoAct2 is a ~7B vision-language model and this machine has no CUDA GPU "
+        f"(running on {device}). Expect very slow inference, or an out-of-memory failure. "
+        "Run it on a machine with an NVIDIA GPU for a usable control rate."
+    )
+
+
+# Policy types whose forward pass is conditioned on a natural-language task
+# string. THE single source of truth: jobs.py's `requires_task` (what the launch
+# UI gates its task field on) and the two DRTC policy servers' startup refusal
+# both read it, so the Lab and the GPU can never disagree about whether a run
+# needs a task.
+#
+# Why a hard requirement and not a nudge: with no task the policies here do not
+# fail, they DEGRADE SILENTLY. MolmoAct2 is the worst of them — its processor
+# renders `None` as the empty string into a fixed template, so the VLM is
+# prompted with the literal "The task is to ." and produces confidently wrong
+# actions with nothing in any log to say why. Refusing at startup costs an
+# operator one flag; not refusing costs them a session and a diagnosis.
+#
+# Mirrored by hand from the pinned fork's modeling_<policy>.py, alongside
+# POLICY_EXTRAS above — update both on a pin bump.
+LANGUAGE_CONDITIONED_POLICY_TYPES = frozenset({"smolvla", "pi0", "pi0_fast", "pi05", MOLMOACT2})
+
+
+def policy_requires_task(policy_type: object) -> bool:
+    """Whether a checkpoint of this architecture needs a ``--task`` string.
+
+    Takes ``object`` rather than ``str`` because both callers hand it a value
+    read straight out of a checkpoint's config.json, where the key can be
+    missing (None) or, in a corrupt file, some other type entirely. An
+    unreadable type is NOT language-conditioned: a False here only means the
+    task field stays optional, and a policy that really wanted one still says
+    so from inside the subprocess.
+    """
+    return isinstance(policy_type, str) and policy_type in LANGUAGE_CONDITIONED_POLICY_TYPES
+
 
 # One install manager per install target (lerobot[smolvla] / lerobot[pi] / …),
 # created lazily so pi0 and pi0_fast share the lerobot[pi] install.

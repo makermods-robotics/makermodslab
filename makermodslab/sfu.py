@@ -77,6 +77,11 @@ ENV_PORT = "MAKERMODSLAB_SFU_PORT"
 ENV_HOST = "MAKERMODSLAB_SFU_HOST"
 ENV_URL = "MAKERMODSLAB_SFU_URL"
 ENV_BIN = "MAKERMODSLAB_LIVEKIT_BIN"
+# "1" when the SFU was started with --sfu-external-ip. Reported, never acted
+# on, by the app: the flag shapes the config the launcher already rendered, and
+# the transport panel needs to say whether a Modal container can hole-punch
+# here at all.
+ENV_EXTERNAL_IP = "MAKERMODSLAB_SFU_EXTERNAL_IP"
 
 BINARY_NAME = "livekit-server"
 
@@ -140,6 +145,7 @@ def render_config(
     http_port: int = SFU_HTTP_PORT,
     tcp_port: int = SFU_TCP_PORT,
     udp_port: int = SFU_UDP_PORT,
+    external_ip: bool = False,
 ) -> str:
     """The livekit-server YAML for one run.
 
@@ -149,8 +155,20 @@ def render_config(
     too, so ICE candidates advertise the address peers actually reach us on
     rather than whatever LAN IP livekit would auto-pick; for loopback and
     the wildcard, livekit's own auto-detection is left alone.
-    `use_external_ip` stays off: the STUN self-probe it triggers stalls a
-    station with no internet and is only for cloud NAT.
+    `use_external_ip` stays off by default: the STUN self-probe it triggers
+    stalls a station with no internet and is only for cloud NAT.
+
+    `external_ip` (the launcher's `--sfu-external-ip`) turns that probe ON and
+    drops the `node_ip` pin, which is the ONE arrangement that lets a peer with
+    no route to this machine's private address reach it: a Modal container
+    dials the signalling URL over the tailnet, but its MEDIA has to hole-punch,
+    and a tailnet address is not a route it has. With the probe on, livekit
+    discovers this machine's public IP and advertises `<public>:7882` as an ICE
+    candidate, which the container can punch to. It costs a STUN round trip at
+    startup and needs UDP 7882 reachable here (forward it if your NAT defeats
+    hole punching). Off is right for a LAN-only station; see
+    docs/drtc/README.md's transport section.
+
     Rendered by hand rather than a YAML library so the output is exactly the
     handful of keys we mean to set and nothing else.
     """
@@ -161,13 +179,53 @@ def render_config(
         "rtc:",
         f"  tcp_port: {tcp_port}",
         f"  udp_port: {udp_port}",
-        "  use_external_ip: false",
+        f"  use_external_ip: {'true' if external_ip else 'false'}",
     ]
-    if _is_specific_address(bind_host):
+    if external_ip:
+        # Three settings that turn the STUN probe into candidates a peer can
+        # actually use, all confirmed against livekit 1.13.4's own decision
+        # log on the bench (2026-09-03):
+        #
+        #  - skip_external_ip_validation. After STUN, livekit "validates" the
+        #    public IP by sending itself a packet at <public ip>:7882 and
+        #    waiting 5 s for it to come back — a hairpin through the router,
+        #    which most home routers do not do. When that times out livekit
+        #    logs "could not validate external IP", declares NO external
+        #    mappings, and falls back to rewriting every candidate to the
+        #    node IP with the internal addresses DROPPED — so the robot child
+        #    on this machine is left with only a public address it cannot
+        #    hairpin to either. The STUN answer was right all along; the
+        #    self-check is what fails.
+        #  - advertise_internal_ip. Keep the LAN candidate beside the public
+        #    one: the Modal container needs 73.x.x.x:7882, the robot child on
+        #    this machine needs 192.168.x.x:7882, and both peers are in the
+        #    same room.
+        #  - ips.excludes. Media never rides the tailnet (the container's
+        #    tailscale is userspace networking: TCP relay only, no UDP), so
+        #    the Tailscale interface is a candidate that can never connect,
+        #    and its STUN probe from <tailnet ip>:7882 collides with the LAN
+        #    socket's on the router's single :7882 mapping. Excluded by
+        #    Tailscale's CIDRs rather than by interface name (livekit matches
+        #    names exactly, and macOS numbers utun devices per boot).
+        lines += [
+            "  skip_external_ip_validation: true",
+            "  advertise_internal_ip: true",
+            "  ips:",
+            "    excludes:",
+            "      - 100.64.0.0/10",
+            "      - fd7a:115c:a1e0::/48",
+        ]
+    # The pin and the probe are mutually exclusive: pinning node_ip to a
+    # tailnet address is exactly what makes the discovered public candidate
+    # unreachable, so `--sfu-external-ip` must not do both.
+    if not external_ip and _is_specific_address(bind_host):
         lines.append(f"  node_ip: {bind_host}")
     if bind_host != "0.0.0.0":  # noqa: S104  # nosec B104 — the wildcard is livekit's default listener, so it needs no bind line
         lines.append("bind_addresses:")
         lines.append(f"  - {bind_host}")
+        # A specific address is the ONLY place the server answers: the
+        # launcher's readiness probe and every participant on this machine
+        # (`local_url`) dial the bind host, never loopback.
     lines += [
         "room:",
         "  auto_create: true",
@@ -203,6 +261,13 @@ def sfu_enabled(env: Mapping[str, str] | None = None) -> bool:
     return bool(env.get(ENV_KEY_FILE))
 
 
+def external_ip_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Whether this SFU was started with `--sfu-external-ip` (see
+    :func:`render_config`). A read of the launcher's export, nothing more."""
+    env = os.environ if env is None else env
+    return env.get(ENV_EXTERNAL_IP) == "1"
+
+
 def sfu_url(request_host: str, env: Mapping[str, str] | None = None) -> str:
     """The signalling URL a participant should connect to.
 
@@ -220,9 +285,12 @@ def sfu_url(request_host: str, env: Mapping[str, str] | None = None) -> str:
 
 
 def local_url(env: Mapping[str, str] | None = None) -> str:
-    """The signalling URL for a participant running INSIDE this process
-    (remote_host's worker): MAKERMODSLAB_SFU_URL if set, else the bind host
-    the launcher exported (loopback for the wildcard bind) plus the port."""
+    """The signalling URL for a participant running on THIS machine — a
+    hosting session's in-process worker, or the remote-inference child this
+    process spawns. Neither has a request to derive a host from (see
+    :func:`sfu_url`), so it is MAKERMODSLAB_SFU_URL if set (an external SFU
+    stays external), else the bind host the launcher exported (loopback for
+    the wildcard bind) plus the port."""
     env = os.environ if env is None else env
     override = env.get(ENV_URL)
     if override:

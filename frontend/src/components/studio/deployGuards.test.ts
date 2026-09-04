@@ -14,9 +14,12 @@ const ok: DeployGuardContext = {
   leaderMissing: false,
   requiresTask: false,
   task: "pick up the red block",
+  transportReady: true,
+  armSupportsRemote: true,
+  remoteEngineSupported: true,
 };
 
-const MODES: DeployRunMode[] = ["single", "eval", "coach"];
+const MODES: DeployRunMode[] = ["single", "eval", "coach", "remote"];
 
 describe("a language-conditioned policy cannot launch without its task", () => {
   // The check used to live only under `mode === "coach"`, so a plain run or a
@@ -56,6 +59,81 @@ describe("coaching keeps its own task requirement", () => {
   it("does not demand a leader arm for the other modes", () => {
     expect(deployBlockedReason("single", { ...ok, leaderMissing: true })).toBeNull();
     expect(deployBlockedReason("eval", { ...ok, leaderMissing: true })).toBeNull();
+    // Remote inference least of all: the Star Arm 102 leader holds encoders
+    // and no motors, and the remote run never touches a leader anyway.
+    expect(deployBlockedReason("remote", { ...ok, leaderMissing: true })).toBeNull();
+  });
+});
+
+describe("remote inference has three guards of its own", () => {
+  it("blocks remote when the transport is not ready", () => {
+    // Also the pre-probe state. Launching into an unverified transport
+    // energizes the arm for a run that nothing may ever drive.
+    expect(deployBlockedReason("remote", { ...ok, transportReady: false })).toMatch(
+      /blocked\.transportNotReady/,
+    );
+  });
+
+  it("blocks remote on an arm family the ease-in does not support", () => {
+    expect(deployBlockedReason("remote", { ...ok, armSupportsRemote: false })).toMatch(
+      /blocked\.remoteArmUnsupported/,
+    );
+  });
+
+  it("reports the unsupported arm before the transport", () => {
+    // The arm is a fact about the robot that no transport fix changes; naming
+    // the transport first sends the operator to the wrong problem.
+    expect(
+      deployBlockedReason("remote", {
+        ...ok,
+        armSupportsRemote: false,
+        transportReady: false,
+      }),
+    ).toMatch(/blocked\.remoteArmUnsupported/);
+  });
+
+  it("blocks remote when the engine does not suit the checkpoint", () => {
+    // The engine guard has NO backend twin and cannot have one: the server
+    // never loads the checkpoint, so it cannot tell a flow policy from an ACT
+    // one and accepts whichever engine it is handed. This is the only gate.
+    expect(
+      deployBlockedReason("remote", { ...ok, remoteEngineSupported: false }),
+    ).toMatch(/blocked\.remoteEngineUnsupported/);
+  });
+
+  it("reports the unsuitable engine before the transport", () => {
+    // A fact about the CHECKPOINT, with a one-click remedy (switch back to
+    // Adaptive sync) that "the transport isn't ready" would send them past.
+    expect(
+      deployBlockedReason("remote", {
+        ...ok,
+        remoteEngineSupported: false,
+        transportReady: false,
+      }),
+    ).toMatch(/blocked\.remoteEngineUnsupported/);
+  });
+
+  it("still reports the unsupported arm before the engine", () => {
+    expect(
+      deployBlockedReason("remote", {
+        ...ok,
+        armSupportsRemote: false,
+        remoteEngineSupported: false,
+      }),
+    ).toMatch(/blocked\.remoteArmUnsupported/);
+  });
+
+  it("imposes none of the three on the local modes", () => {
+    for (const mode of ["single", "eval", "coach"] as DeployRunMode[]) {
+      expect(
+        deployBlockedReason(mode, {
+          ...ok,
+          transportReady: false,
+          armSupportsRemote: false,
+          remoteEngineSupported: false,
+        }),
+      ).toBeNull();
+    }
   });
 });
 

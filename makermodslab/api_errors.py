@@ -56,6 +56,12 @@ class ErrorCode(StrEnum):
     ROBOT_BUSY_CALIBRATION = "robot.busy.calibration"
     ROBOT_BUSY_AUTO_CALIBRATION = "robot.busy.auto_calibration"
     ROBOT_BUSY_WIGGLE = "robot.busy.wiggle"
+    # Remote inference (makermodslab/remote_inference.py): a policy on a remote
+    # GPU driving this machine's follower over LiveKit. Its own discriminant
+    # rather than `inference` because the two are different sessions with
+    # different stop machinery — a client refused by one and pointed at the
+    # other's Stop button would get an endpoint that reports idle.
+    ROBOT_BUSY_REMOTE_INFERENCE = "robot.busy.remote_inference"
     ROBOT_BUSY_RELEASING = "robot.busy.releasing"
     # The remote pair (remote_host.py / remote_teleoperate.py): `hosting`
     # holds the follower + cameras for a LiveKit room; `remote_teleoperation`
@@ -145,6 +151,18 @@ class ErrorCode(StrEnum):
     SESSION_LEASE_EXPIRED = "session.lease_expired"
     SESSION_NOT_FOUND = "session.not_found"
 
+    # transport.* — the LiveKit path remote inference runs over (the SFU and
+    # the room), an external service this node depends on. Its own domain for
+    # the same reason `hub` has one: folding it into `hardware.connect_failed`
+    # would lie (that is the serial bus) and so would `system.*` (it is not
+    # this process). `no_policy` is the empty-room case — the room answers but
+    # no GPU-side operator is in it, caught BEFORE the arm is energized.
+    TRANSPORT_EXTRA_MISSING = "transport.extra_missing"
+    TRANSPORT_NOT_CONFIGURED = "transport.not_configured"
+    TRANSPORT_UNREACHABLE = "transport.unreachable"
+    TRANSPORT_UNAUTHORIZED = "transport.unauthorized"
+    TRANSPORT_NO_POLICY = "transport.no_policy"
+
     # system.* — the server process itself. `restart_unsupported`: this
     # process cannot safely re-exec (a dev reload worker, or a launch whose
     # argv isn't one of our entry points) — the remedy is restarting it the
@@ -155,6 +173,32 @@ class ErrorCode(StrEnum):
     # An optional extra the flow needs is not importable (the `remote` extra
     # for the LiveKit Portal plugins) — install it, then retry.
     SYSTEM_EXTRA_MISSING = "system.extra_missing"
+
+    # gpu.* — the remote GPU that runs the policy for a remote-inference run
+    # (modal_launcher.py), reached through the `modal` CLI. Its own level-1
+    # domain by the same argument `transport` earned one: a second external
+    # service this node depends on, with a different remedy set. `transport.*`
+    # would blunt four rungs that are carefully distinguished (the GPU is
+    # neither the SFU nor the room), and `system.*` would lie — `unauthenticated`
+    # and `launch_failed` are facts about Modal, not about this process.
+    # `cli_missing`: the binary isn't on PATH (remedy: `uv tool install modal`).
+    # `unauthenticated`: Modal rejected this machine (remedy: `modal token new`;
+    # the Lab never touches ~/.modal.toml). `already_running`/`not_running`: a
+    # start against a live launcher, a stop against a dead one — the GPU is a
+    # Lab-level resource, so these are its own, not `robot.busy.*`.
+    # `targets_unavailable`: the `modal profile list` / `modal environment
+    # list` listing behind the profile+environment pickers did not answer (a
+    # non-zero exit, a timeout, output that is not the JSON this build parses,
+    # or a profile query naming something this machine does not have). Its own
+    # rung rather than `launch_failed` because NOTHING WAS LAUNCHED: the
+    # remedy is the CLI's own state, and a failed listing must never block a
+    # launch — the CLI's own profile resolution still works.
+    GPU_CLI_MISSING = "gpu.cli_missing"
+    GPU_UNAUTHENTICATED = "gpu.unauthenticated"
+    GPU_ALREADY_RUNNING = "gpu.already_running"
+    GPU_NOT_RUNNING = "gpu.not_running"
+    GPU_LAUNCH_FAILED = "gpu.launch_failed"
+    GPU_TARGETS_UNAVAILABLE = "gpu.targets_unavailable"
 
     # sfu.* — the bundled LiveKit server (sfu.py). `disabled`: this process
     # was started without --sfu (or an external SFU configured), so there is

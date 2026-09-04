@@ -102,6 +102,7 @@ def test_session_kinds_match_the_mutex_features() -> None:
         "teleoperation",
         "recording",
         "inference",
+        "remote_inference",
         "replay",
         "calibration",
         "auto_calibration",

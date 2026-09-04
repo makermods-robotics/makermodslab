@@ -477,18 +477,42 @@ def test_bad_bind_fails_fast_before_anything_starts(
     assert "no-such-if0" in caplog.text
 
 
-def test_bind_is_ignored_in_dev_mode_with_a_warning(
+def test_bind_in_dev_mode_reaches_the_sfu_and_nothing_else(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """`--bind` is not ignored in dev — it is NARROWED to the SFU.
+
+    Vite serves localhost only and uvicorn follows it, so the web halves stay
+    on loopback. The SFU is not a web server for this browser: a remote peer (a
+    Modal container) has to reach its SIGNALLING port, and a loopback bind is
+    what made a dev session LiveKit-Cloud-only.
+    """
     import makermodslab.scripts.makermodslab as launcher
 
+    captured: dict = {}
     monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
-    monkeypatch.setattr(launcher, "_run_dev", lambda **_kwargs: None)
+    monkeypatch.setattr(launcher, "_run_dev", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(launcher, "_resolve_bind_host", lambda value: value)
     monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--dev", "--bind", "100.64.0.7"])
 
     with caplog.at_level(logging.WARNING):
         launcher.main()
-    assert "--bind is ignored in --dev mode" in caplog.text
+    assert captured["sfu_host"] == "100.64.0.7"
+    assert "--bind applies to the SFU only in --dev mode" in caplog.text
+
+
+def test_dev_mode_without_bind_leaves_the_sfu_on_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default is unchanged: a dev session that never asked for a remote
+    peer must not start advertising itself on an interface."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    captured: dict = {}
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
+    monkeypatch.setattr(launcher, "_run_dev", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--dev"])
+
+    launcher.main()
+    assert captured["sfu_host"] == "127.0.0.1"
 
 
 # --- Shutdown reliability: --stop, port preflight, process-tree teardown -----
@@ -688,38 +712,101 @@ def test_ensure_port_available_passes_when_free(monkeypatch: pytest.MonkeyPatch)
     launcher._ensure_port_available("Backend", 8000)
 
 
-def test_terminate_tree_terminates_parent_and_children(
+class _TreeProc:
+    """A process tree stand-in that records what it was sent."""
+
+    def __init__(self, pid: int, log: list[tuple[str, int]], kids: list[int] | None = None) -> None:
+        self.pid = pid
+        self._log = log
+        self._kids = kids or []
+
+    def children(self, recursive: bool = False) -> list:
+        return [_TreeProc(k, self._log) for k in self._kids]
+
+    def terminate(self) -> None:
+        self._log.append(("terminate", self.pid))
+
+    def kill(self) -> None:
+        self._log.append(("kill", self.pid))
+
+
+def test_terminate_tree_gives_the_leader_its_grace_before_walking_the_tree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Tree teardown terminates the parent AND every descendant (so npm/vite
-    and uvicorn reload workers can't outlive the parent and hold the ports)."""
+    """The leader is signalled ALONE first, and a tree that goes quiet within
+    the grace is never walked.
+
+    That step exists for one grandchild: the `modal run` client under the
+    backend. It stops its Modal app only when its own parent's shutdown handler
+    SIGINTs it — a SIGTERM straight from here kills it first and leaves an A100
+    billing for minutes. A well-behaved leader takes its children with it, so
+    this also costs nothing when there is no GPU to stop.
+    """
     import makermodslab.scripts.makermodslab as launcher
 
-    terminated: list[int] = []
-    killed: list[int] = []
+    sent: list[tuple[str, int]] = []
+    waits: list[float] = []
 
-    class _TreeProc:
-        def __init__(self, pid: int, kids: list[int] | None = None) -> None:
-            self.pid = pid
-            self._kids = kids or []
+    def _wait(procs, timeout=None):
+        waits.append(timeout)
+        return (procs, [])  # everything exited within the grace
 
-        def children(self, recursive: bool = False) -> list:
-            return [_TreeProc(k) for k in self._kids]
-
-        def terminate(self) -> None:
-            terminated.append(self.pid)
-
-        def kill(self) -> None:  # pragma: no cover - alive list is empty here
-            killed.append(self.pid)
-
-    monkeypatch.setattr(launcher.psutil, "Process", lambda pid: _TreeProc(pid, kids=[2, 3]))
-    monkeypatch.setattr(launcher.psutil, "wait_procs", lambda procs, timeout=None: (procs, []))
+    monkeypatch.setattr(launcher.psutil, "Process", lambda pid: _TreeProc(pid, sent, kids=[2, 3]))
+    monkeypatch.setattr(launcher.psutil, "wait_procs", _wait)
 
     launcher._terminate_tree(1)
 
-    # Parent (1) plus both children (2, 3) all get terminate(); nothing killed.
-    assert sorted(terminated) == [1, 2, 3]
-    assert killed == []
+    assert sent == [("terminate", 1)]
+    assert waits == [launcher._LEADER_GRACE_S]
+
+
+def test_terminate_tree_still_walks_the_tree_when_the_grace_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The grace is a courtesy, never a licence to leak: a descendant that
+    outlived its parent still gets terminate → wait → kill, so nothing keeps
+    holding :8000/:8080."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    sent: list[tuple[str, int]] = []
+    survivors: list[_TreeProc] = []
+
+    def _wait(procs, timeout=None):
+        if timeout == launcher._LEADER_GRACE_S:
+            return ([], procs)  # nothing exited on the leader's signal alone
+        return ([], survivors)
+
+    monkeypatch.setattr(launcher.psutil, "Process", lambda pid: _TreeProc(pid, sent, kids=[2, 3]))
+    monkeypatch.setattr(launcher.psutil, "wait_procs", _wait)
+    launcher._terminate_tree(1)
+
+    # The leader once for its grace, then the whole snapshot — parent included.
+    assert sent == [("terminate", 1), ("terminate", 2), ("terminate", 3), ("terminate", 1)]
+
+    sent.clear()
+    survivors.append(_TreeProc(3, sent))
+    launcher._terminate_tree(1)
+    assert ("kill", 3) in sent
+
+
+def test_terminate_tree_with_no_grace_signals_everything_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`grace=0` is the old behaviour, kept for `npm run dev`: npm routinely
+    leaves vite behind rather than taking it down, so waiting on that tree
+    would add the whole grace to every Ctrl-C and change nothing."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    sent: list[tuple[str, int]] = []
+    monkeypatch.setattr(launcher.psutil, "Process", lambda pid: _TreeProc(pid, sent, kids=[2, 3]))
+    monkeypatch.setattr(launcher.psutil, "wait_procs", lambda procs, timeout=None: (procs, []))
+
+    launcher._terminate_tree(1, grace=0.0)
+
+    # The leader's own signal and the tree walk are back to back, with no wait
+    # between them (the leader is signalled twice; SIGTERM is idempotent).
+    assert {pid for _op, pid in sent} == {1, 2, 3}
+    assert all(op == "terminate" for op, _pid in sent)
 
 
 # --- --sfu: fail-fast binary check, handoff to the run functions, --stop identity
@@ -816,3 +903,72 @@ def test_host_flag_requires_the_sfu_and_exports_the_robot(monkeypatch: pytest.Mo
     launcher.main()
     assert seen["robot"] == ""
     assert os.environ.get("MAKERMODSLAB_STATION") == "1"
+
+
+# --- _frontend_deps_current ---------------------------------------------------
+#
+# `--dev` used to run a bare `npm install` on every start. With a complete
+# node_modules that is two registry round trips (audit + fund) that install
+# nothing — and the audit POST hung a start for minutes on 2026-09-03. The
+# skip is keyed on npm's own end-of-install marker.
+
+
+def _frontend_tree(tmp_path, *, marker: bool = True):
+    import os
+
+    frontend = tmp_path / "frontend"
+    (frontend / "node_modules").mkdir(parents=True)
+    (frontend / "package.json").write_text("{}")
+    (frontend / "package-lock.json").write_text("{}")
+    if marker:
+        (frontend / "node_modules" / ".package-lock.json").write_text("{}")
+    # Pin every mtime explicitly so the assertions do not depend on how fast
+    # the filesystem wrote the three files.
+    base = 1_700_000_000
+    for name, t in (
+        ("package.json", base),
+        ("package-lock.json", base),
+        ("node_modules/.package-lock.json", base + 10),
+    ):
+        p = frontend / name
+        if p.exists():
+            os.utime(p, (t, t))
+    return frontend
+
+
+def test_frontend_deps_current_when_marker_is_newer_than_both_manifests(tmp_path) -> None:
+    from makermodslab.scripts.makermodslab import _frontend_deps_current
+
+    assert _frontend_deps_current(_frontend_tree(tmp_path)) is True
+
+
+def test_frontend_deps_stale_without_npm_marker(tmp_path) -> None:
+    # Fresh clone, deleted node_modules, or an install that died midway.
+    from makermodslab.scripts.makermodslab import _frontend_deps_current
+
+    assert _frontend_deps_current(_frontend_tree(tmp_path, marker=False)) is False
+
+
+@pytest.mark.parametrize("touched", ["package.json", "package-lock.json"])
+def test_frontend_deps_stale_when_a_manifest_is_touched_after_install(tmp_path, touched) -> None:
+    import os
+
+    from makermodslab.scripts.makermodslab import _frontend_deps_current
+
+    frontend = _frontend_tree(tmp_path)
+    later = 1_700_000_000 + 20
+    os.utime(frontend / touched, (later, later))
+    assert _frontend_deps_current(frontend) is False
+
+
+def test_frontend_deps_stale_when_frontend_dir_is_missing(tmp_path) -> None:
+    from makermodslab.scripts.makermodslab import _frontend_deps_current
+
+    assert _frontend_deps_current(tmp_path / "nowhere") is False
+
+
+def test_npm_install_skips_audit_and_fund() -> None:
+    from makermodslab.scripts.makermodslab import NPM_INSTALL_ARGS
+
+    assert NPM_INSTALL_ARGS[:2] == ("npm", "install")
+    assert {"--no-audit", "--no-fund", "--prefer-offline"} <= set(NPM_INSTALL_ARGS)

@@ -311,6 +311,24 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # run is launched with. Read/replace only — never deletes an episode.
         "GET /api/v1/datasets/excluded-episodes",
         "PUT /api/v1/datasets/excluded-episodes",
+        # Remote inference (DRTC): read-only status + transport, plus the one
+        # mutation that clears the local-SFU override. Start/stop ride
+        # POST /api/v1/sessions and /sessions/{id}/stop — no new verbs. No flat
+        # mirror: the flat surface only ever shrinks.
+        "GET /api/v1/remote-inference-status",
+        "GET /api/v1/remote-inference/transport",
+        # The GPU half (modal_launcher.py), a LAB-LEVEL resource rather than a
+        # session field: it holds no hardware, so it gets its own verbs instead
+        # of a `launch_gpu` option that would hold the busy discriminant for a
+        # 1-3 minute cold start while the arm sat free.
+        "POST /api/v1/remote-inference/gpu/start",
+        "POST /api/v1/remote-inference/gpu/stop",
+        "GET /api/v1/remote-inference/gpu",
+        # Which workspace a launch bills (S3.8b): this machine's Modal profiles
+        # and one profile's environments, read from the CLI's own listings.
+        # Read-only — the Lab never runs `modal profile activate` and never
+        # opens ~/.modal.toml.
+        "GET /api/v1/remote-inference/gpu/targets",
     ]
 )
 

@@ -26,6 +26,14 @@ const setup = (over: Partial<Props> = {}) => {
 const coachButton = () =>
   screen.getByRole("button", { name: /Human in the loop/i });
 
+// "Run" is a PREFIX of "Run it remotely", so /^Run/ on its own matches two of
+// the three verbs and getByRole throws. Excluding the remote label is what
+// makes it a single match — and it survives a rewording of the commitment
+// line, which the accessible name also carries (label and commitment are
+// concatenated with no separator: "Runhands off").
+const runButton = () =>
+  screen.getByRole("button", { name: /^Run(?! it remotely)/i });
+
 describe("a blocked run verb can still be armed", () => {
   // THE deadlock. Coaching is blocked while the task is empty, but the task
   // field only renders once coach is ARMED. While the button was `disabled`,
@@ -66,7 +74,7 @@ describe("a blocked run verb can still be armed", () => {
 
   it("leaves unblocked verbs launchable", () => {
     const { onLaunch } = setup({ blockedReason: blockedCoach });
-    fireEvent.click(screen.getByRole("button", { name: /^Run/i }));
+    fireEvent.click(runButton());
     expect(onLaunch).toHaveBeenCalledWith("single");
   });
 });
@@ -90,20 +98,31 @@ describe("armed state is exposed to assistive tech", () => {
   it("marks the active verb pressed and the others not", () => {
     setup({ active: "coach" });
     expect(coachButton()).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: /^Run/i })).toHaveAttribute(
-      "aria-pressed",
-      "false",
-    );
+    expect(runButton()).toHaveAttribute("aria-pressed", "false");
   });
 });
 
-describe("the panel offers exactly two run verbs", () => {
+describe("the panel offers exactly three run verbs", () => {
   // "Score it" was retired from this row: the operator chooses between running
-  // the policy and standing at the arm to correct it, and nothing else. The
-  // eval mode itself still exists — this asserts only that it is not a verb.
-  it("shows Run and Human in the loop, and no Score it", () => {
+  // the policy locally, standing at the arm to correct it, and running it
+  // against a remote GPU — and nothing else. The eval mode itself still exists
+  // — this asserts only that it is not a verb.
+  it("shows Run, Human in the loop and Run it remotely, and no Score it", () => {
     setup();
-    expect(screen.getAllByRole("button")).toHaveLength(2);
+    expect(screen.getAllByRole("button")).toHaveLength(3);
+    expect(runButton()).toBeInTheDocument();
+    expect(coachButton()).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Run it remotely/i }),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Score it/i })).toBeNull();
+  });
+
+  // The remote verb is the one that needs a second machine, so it sits on its
+  // own full-width row under the two local verbs rather than in the pair.
+  it("gives the remote verb the full row", () => {
+    setup();
+    const remote = screen.getByRole("button", { name: /Run it remotely/i });
+    expect(remote.parentElement).toHaveClass("col-span-2");
   });
 });

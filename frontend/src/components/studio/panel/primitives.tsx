@@ -183,13 +183,30 @@ export const RobotStatus: React.FC<{
     </Alert>
   );
 
-/** Pins a panel's library to the bottom of its column behind a hairline, so
- * the three libraries sit at the same level across the studio grid. */
+/**
+ * A panel's library, behind a hairline: it starts right after the panel's
+ * action row at the normal gap and STRETCHES to the foot of the column.
+ *
+ * Not `mt-auto` (which pushed the whole block down and left the slack as a gap
+ * above the rule) and not content-height either — `flex-1` in a `min-h-0`
+ * column, so the free space lands INSIDE the library, between its cards and
+ * its "Show all" footer, and the three columns' footers line up because they
+ * all end at the same place. `min-h-0` is what lets it shrink when a panel's
+ * form is open; below the grid's own min height the column scrolls instead.
+ *
+ * Every wrapper between this and the scrolling card viewport has to repeat
+ * `flex min-h-0 flex-1 flex-col`, or the height stops being handed down.
+ */
 export const LibrarySection: React.FC<{
   className?: string;
   children: React.ReactNode;
 }> = ({ className, children }) => (
-  <div className={cn("mt-auto border-t border-border pt-5", className)}>
+  <div
+    className={cn(
+      "flex min-h-0 flex-1 flex-col border-t border-border pt-5",
+      className,
+    )}
+  >
     {children}
   </div>
 );

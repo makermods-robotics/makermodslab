@@ -9,10 +9,11 @@ import React, {
 import { Trans, useTranslation } from "react-i18next";
 import {
   AlertTriangle,
-  Download,
+  ChevronsUpDown,
   Loader2,
   Play,
-  VideoOff,
+  // No VideoOff (the rework dropped CameraThumbnail for SessionCameraList) and
+  // no Square (staging's RunVerbs replaced the Start/Stop pair).
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,6 +21,11 @@ import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
   Select,
   SelectContent,
@@ -49,28 +55,54 @@ import { SkillItem } from "@/lib/modelsApi";
 import { useSkills } from "@/hooks/useSkills";
 import { importSourceForModel } from "@/lib/inferenceLaunch";
 import { deployBlockedReason } from "./deployGuards";
+import type { DeployRunMode } from "./deployGuards";
+import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
+import { useRemoteInferenceStatus } from "@/hooks/useRemoteInferenceStatus";
+import {
+  transportIsReady,
+  useRemoteInferenceTransport,
+} from "@/hooks/useRemoteInferenceTransport";
+import RemoteInferenceBlock from "@/components/remote-inference/RemoteInferenceBlock";
+import type {
+  CameraRoleOption,
+  CameraRoleSlot,
+} from "@/components/remote-inference/CameraRoleBindings";
+import {
+  horizonForEngine,
+  defaultEngineForPolicy,
+  policySupportsRtc,
+  armSupportsRemoteInference,
+  DEFAULT_REMOTE_RUN_CONFIG,
+  type RemoteRunConfig,
+} from "@/components/remote-inference/remoteRunConfig";
+import {
+  remoteCameraRoleKey,
+  useRemoteCameraRoles,
+} from "@/hooks/useRemoteCameraRoles";
 import DisplayName from "@/components/library/DisplayName";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import ModelsLibrary from "@/components/jobs/ModelsLibrary";
-import ImportModelModal from "@/components/jobs/ImportModelModal";
+import ModelPicker from "@/components/landing/ModelPicker";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 import {
   AdvancedSection,
-  FormSection,
   LibrarySection,
-  PANEL_ENTRY_CLASS,
-  PanelEntryDot,
+  PanelEntryControl,
   PanelHeader,
   RobotStatus,
+  SLIDE,
   useEyebrowClass,
 } from "@/components/studio/panel/primitives";
-import { useLanguage } from "@/contexts/LanguageContext";
-import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
-import BackendCameraStream from "@/components/BackendCameraStream";
-import type { CameraConfig } from "@/components/recording/CameraConfiguration";
-import { isCameraConnected, resolveCameraIndex } from "@/lib/cameraResolve";
+// Collect's read-only camera list, rendered here verbatim: both panels are
+// answering the same question (which of this robot's cameras will be used), so
+// they are the same component rather than two views of one robot record.
+import {
+  SessionCameraList,
+  type CameraConfig,
+} from "@/components/recording/CameraConfiguration";
+import { isCameraConnected } from "@/lib/cameraResolve";
 import MilestoneReveal from "@/components/onboarding/MilestoneReveal";
 import { useOnceFlag } from "@/lib/onboarding/storage";
 
@@ -83,10 +115,14 @@ import { useOnceFlag } from "@/lib/onboarding/storage";
  * JobsSection + the Landing Models panel through `useInferenceLaunch`). To keep
  * those consumers untouched and avoid drift, the checkpoint/policy-config
  * fetch, the bimanual `left_` camera-prefix round-trip, the state_dim 6-vs-12
- * arm-count guard, the camera thumbnails and the start flow are ported VERBATIM
- * from `components/landing/InferenceModal.tsx` (only the palette becomes token
+ * arm-count guard and the start flow are ported VERBATIM from
+ * `components/landing/InferenceModal.tsx` (only the palette becomes token
  * classes). The Hub lazy-import reuses `useInferenceLaunch().importSource` so
  * the husk-repo messaging is identical, not re-implemented.
+ *
+ * Cameras are the one place this panel deliberately left the modal behind: the
+ * ported per-feature binding dropdowns are gone, replaced by Collect's
+ * read-only SessionCameraList plus name-based binding (see `cameraBindings`).
  */
 
 // Mirrors rollout.MAX_EVAL_EPISODES — the server clamps to the same bound, this
@@ -98,51 +134,31 @@ const MAX_EVAL_EPISODES = 200;
 // the arm for all of them.
 const MAX_COACHING_CORRECTIONS = 100;
 
-// The three shapes a Deploy run can take. One control instead of inferring the
+// The shapes a Deploy run can take. One control instead of inferring the
 // mode from an episode count, which was already a little cryptic at 1-vs-many
 // and would be worse with a third option folded in.
-type RunMode = "single" | "eval" | "coach";
+//
+// "remote" is the DRTC run: the same checkpoint, the same robot, the same
+// cameras — but the policy runs on a remote GPU and the two meet in a LiveKit
+// room. It is a separate SESSION KIND server-side (remote_inference), not a
+// flag on inference, so everything it needs lives under
+// components/remote-inference/ and touches this file only here.
+type RunMode = DeployRunMode;
+
+/** Stable empty list, so "no checkpoints for the current skill" never hands
+ * children a fresh array identity on every render. */
+const NO_CHECKPOINTS: JobCheckpoint[] = [];
 
 /** Coefficient of the original ACT paper's exponential weighting (see
  * lerobot's ACTTemporalEnsembler). Offered as the starting point when the user
  * switches temporal ensembling on. */
 const DEFAULT_TEMPORAL_ENSEMBLE_COEFF = 0.01;
 
-/** Small preview for verifying which physical camera a role binds to.
- *
- * Streams from the backend by cv2 index — the live feed at exactly the index
- * the rollout will open, independent of any browser deviceId match. That match
- * was by localizedName, so twin cameras ("KD-USB Cameras" x2) paired
- * arbitrarily and the tiles swapped footage between refreshes.
- * `paused` unmounts the stream so the rollout subprocess can claim the device.
- * (Ported from InferenceModal.) */
-const CameraThumbnail: React.FC<{
-  cameraIndex?: number;
-  uniqueId?: string;
-  paused: boolean;
-}> = ({ cameraIndex, uniqueId, paused }) => {
-  const { t } = useTranslation();
-  if (paused || cameraIndex === undefined) {
-    return (
-      <div className="flex h-24 w-32 flex-col items-center justify-center rounded border border-border bg-muted">
-        <VideoOff className="mb-1 h-5 w-5 text-muted-foreground" />
-        <span className="text-[10px] text-muted-foreground">
-          {paused
-            ? t("studio.deploy.thumbnail.released")
-            : t("studio.deploy.thumbnail.noPreview")}
-        </span>
-      </div>
-    );
-  }
-  // BackendCameraStream owns its own failure/retry UI.
-  return (
-    <BackendCameraStream
-      cameraIndex={cameraIndex}
-      uniqueId={uniqueId}
-      className="h-24 w-32 rounded border border-border bg-muted object-cover"
-    />
-  );
-};
+/** The studio's form-field trigger size — what a bare shadcn <SelectTrigger>
+ * and <Input> already are (h-10, full width, text-sm), spelled out for the one
+ * control that ships a card-sized trigger of its own. `cn` is tailwind-merge,
+ * so these win over the component's defaults rather than fighting them. */
+const FIELD_TRIGGER = "h-10 w-full text-sm";
 
 /**
  * One camera as the panel sees it. The BiSO prefix round-trip lives here so the
@@ -243,23 +259,30 @@ const RUN_MODES: {
   // `${stem}.title` / `.what` / `.commitment`.
   stem: string;
   handsOn?: boolean;
+  // Renders across both grid columns. Only the remote verb sets it — see the
+  // grid comment below for why the row is shaped local-pair-then-remote.
+  wide?: boolean;
 }[] = [
   { value: "single", stem: "single" },
   // Eval ("Score it") is deliberately NOT offered here. The scored-evaluation
   // engine still exists and the mode is still a valid `RunMode` — it is just
-  // not one of the two things this panel asks the operator to choose between.
+  // not one of the things this panel asks the operator to choose between.
   { value: "coach", stem: "coach", handsOn: true },
+  // Hands off in the same sense "single" is — but it needs a second terminal
+  // running the GPU side, which its own commitment line says.
+  { value: "remote", stem: "remote", wide: true },
 ];
 
 /**
- * The two things you can do with a trained policy, as the panel's action row.
+ * The three things you can do with a trained policy, as the panel's action row.
  *
  * This replaces a chooser-plus-Start pair. A chooser is a control you set and
  * then forget you set: the operator picks a mode, gets distracted by the
  * camera bindings, comes back and presses a button that says Start — and the
- * button's own label is the only thing telling them which of two quite
+ * button's own label is the only thing telling them which of three quite
  * different sessions is about to begin. One of them asks them to stand at the
- * robot holding a leader arm for an hour.
+ * robot holding a leader arm for an hour; another needs a GPU process running
+ * somewhere else.
  *
  * So the verb IS the button. Pressing one selects that mode and launches it in
  * the same gesture; there is nothing left in a position to be wrong about.
@@ -287,9 +310,19 @@ export const RunVerbs: React.FC<{
       ? t("studio.deploy.runVerbs.coach", { count: counts.coach })
       : m === "eval"
         ? t("studio.deploy.runVerbs.eval", { count: counts.eval })
-        : t("studio.deploy.runVerbs.single");  const blocked = blockedReason(active);
+        : m === "remote"
+          ? t("studio.deploy.runVerbs.remote")
+          : t("studio.deploy.runVerbs.single");
+  const blocked = blockedReason(active);
   return (
     <div className="flex flex-col gap-2">
+      {/* Two columns, not three: the studio panel is a third of the overlay
+          wide, and a third verb squeezed onto one row shrank every label to
+          two words on a wrap. So the two LOCAL verbs keep the side-by-side row
+          they were designed as, and the remote verb spans both columns beneath
+          them — which is also the honest grouping, since it is the one verb
+          that needs a second machine. Each commitment line stays readable,
+          which is the whole reason the commitment travels with the verb. */}
       <div
         className="grid grid-cols-2 gap-2"
         role="group"
@@ -318,9 +351,14 @@ export const RunVerbs: React.FC<{
           // guarded below.
           const blockedHere = !ready || busy || reason !== null;
           return (
-            <div key={m.value} className="relative">
+            <div
+              key={m.value}
+              className={cn("relative", m.wide && "col-span-2")}
+            >
               <Button
-                onClick={() => (blockedHere ? onArm(m.value) : onLaunch(m.value))}
+                onClick={() =>
+                  blockedHere ? onArm(m.value) : onLaunch(m.value)
+                }
                 onMouseEnter={() => onArm(m.value)}
                 onFocus={() => onArm(m.value)}
                 aria-disabled={blockedHere}
@@ -395,8 +433,6 @@ export const RunVerbs: React.FC<{
 
 const DeployPanel: React.FC = () => {
   const { t } = useTranslation();
-  const { language } = useLanguage();
-  const isCJK = isCaselessScript(language);
   const eyebrow = useEyebrowClass();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
@@ -406,7 +442,6 @@ const DeployPanel: React.FC = () => {
   // Reuse the shared lazy-import (husk-repo messaging + idempotent registration)
   // so a Hub skill resolves to a pseudo-job exactly as the Jobs cards do.
   const { importSource } = useInferenceLaunch();
-
   // --- Skill picker state ------------------------------------------------
   // The listing is NOT owned here. It is one app-wide fetch behind the
   // `jobs_changed` push (see ModelsDataContext), so a run that finishes while
@@ -430,10 +465,27 @@ const DeployPanel: React.FC = () => {
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [selectedJob, setSelectedJob] = useState<JobRecord | null>(null);
   const [resolving, setResolving] = useState(false);
-  // Duplicate of ModelsLibrary's "Import skill" entry point, surfaced right
-  // on the skill picker itself so importing doesn't require scrolling down
-  // to the library section below.
-  const [importModalOpen, setImportModalOpen] = useState(false);
+
+  // (No client-side deny-list here any more. The rework derived one from the
+  // job registry's `checkpoint_count` to keep a cloud run that died before its
+  // first checkpoint out of the picker; `/skills` now answers that question
+  // server-side and better — `deployable` means the weights are loadable AND
+  // nothing supersedes the row — so `models` above is already the filtered
+  // set and a second, weaker filter over it would only be drift waiting to
+  // happen.)
+
+  // The run form slides open in place under the panel's entry control, same as
+  // Collect's "Record new dataset" and Train's "Start a new training"; the
+  // skills library folds to its header while it is open (still expandable by
+  // hand). Everything that configures a run lives inside it, the skill picker
+  // first.
+  const [formOpen, setFormOpen] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(true);
+
+  const toggleForm = useCallback((open: boolean) => {
+    setFormOpen(open);
+    setLibraryOpen(!open);
+  }, []);
 
   // --- Inference config state (ported from InferenceModal) ---------------
   const [checkpoints, setCheckpoints] = useState<JobCheckpoint[]>([]);
@@ -476,7 +528,7 @@ const DeployPanel: React.FC = () => {
 
   const selectedCheckpoint =
     selectedRef != null
-      ? checkpoints.find((c) => c.ref === selectedRef) ?? null
+      ? (checkpoints.find((c) => c.ref === selectedRef) ?? null)
       : null;
   // The step is now DERIVED from the selected checkpoint, never the other way
   // round — it is a label, not an identity.
@@ -544,7 +596,9 @@ const DeployPanel: React.FC = () => {
   const [datasetTasks, setDatasetTasks] = useState<string[]>([]);
   // Inference engine A/B. "sync" is the server default and the historical
   // behaviour; "rtc" is experimental (see InferenceSessionOptions).
-  const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
+  const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">(
+    "sync",
+  );
   const [submitting, setSubmitting] = useState(false);
   // ACT temporal ensembling. Held as (on, coeff) rather than `number | null`
   // so clearing the number field mid-edit doesn't silently switch the feature
@@ -570,22 +624,77 @@ const DeployPanel: React.FC = () => {
   } | null>(null);
   const [checkingExtra, setCheckingExtra] = useState(false);
 
-  // Per camera DISPLAY name → the NAME of one of the selected robot's cameras.
-  // Keyed by the stripped display name (== requestKey), and sent verbatim as
-  // the request's `camera_bindings`. The binding is a name pairing only: the
-  // server reads which device and how to open it (index, unique_id, fps,
-  // fourcc, backend) out of the robot record, so a run can never open a camera
-  // set the saved robot doesn't have. Capture resolution is the exception —
-  // it's forwarded from the checkpoint as `camera_dims`, because the rollout
-  // doesn't resize frames. Cameras are edited in Robot settings.
-  const [cameraBindings, setCameraBindings] = useState<
-    Record<string, string | null>
-  >({});
   const { cameras: availableCameras } = useAvailableCameras({ enabled: open });
 
-  // Light status poll while the panel is visible so the launch guards (and
-  // the camera previews) know whether a rollout is already running.
+  // Light status poll while the panel is visible so the launch guards know
+  // whether a rollout is already running, and so SessionCameraList keeps its
+  // previews released for as long as that rollout holds the devices.
   const [status, setStatus] = useState<InferenceStatus | null>(null);
+
+  // --- Remote inference (DRTC) -------------------------------------------
+  // Everything about this mode lives in components/remote-inference/; the
+  // panel holds only what the START request and the guards need.
+  const [remoteConfig, setRemoteConfig] = useState<RemoteRunConfig>(
+    DEFAULT_REMOTE_RUN_CONFIG,
+  );
+  const [remoteSessionId, setRemoteSessionId] = useState<string | null>(null);
+  // 1 Hz while a remote run is live, a slow tick while this panel is open, and
+  // an eager refetch on every `session_changed` hint.
+  const { status: remoteStatus } = useRemoteInferenceStatus(open);
+  // On demand: the probe opens a real (short) call to the SFU, so it is read
+  // when the remote verb is armed rather than on a timer.
+  const remoteTransport = useRemoteInferenceTransport(
+    open && runMode === "remote",
+  );
+  const remoteActive = remoteStatus?.remote_inference_active === true;
+  // The lease. Without this the expiry watchdog safety-stops the run 60s in,
+  // mid-rollout — this panel STAYS MOUNTED for the whole visit (StudioOverlay
+  // never unmounts it), so the beat survives closing the studio.
+  useSessionHeartbeat(remoteSessionId, tabOwnerId(), remoteActive);
+
+  // Whether this checkpoint can be in-painted at all — the rtc engine's whole
+  // premise. The whole policy config goes in, not just its type: the SERVER's
+  // `supports_rtc` is the answer whenever it has one, and the frontend's own
+  // family list only decides for a policy type newer than the server's table.
+  // Unknown on both sides counts as "no": guessing rtc would pair the arm with
+  // a GPU server the operator was never told to start.
+  const rtcSupported = policySupportsRtc(policyConfig);
+
+  // Preselect the engine from the checkpoint's policy family, and the horizon
+  // from the engine. A flow policy defaults to rtc because that is the whole
+  // reason the engine exists: at ~400 ms round trip the sync player re-plans
+  // about once a second, and two flow-policy plans made 400 ms apart disagree
+  // at every seam — a visible ~1 Hz twitch with a perfectly healthy transport.
+  //
+  // Keyed on everything the seed READS, not on the policy type alone — since
+  // S3.7b the horizon also follows the checkpoint's own `n_action_steps`, and
+  // two checkpoints of the same family can declare different ones (MolmoAct2's
+  // published checkpoint returns 30 against an rtc default of 50). Keying on
+  // the type alone would leave the first checkpoint's horizon standing over the
+  // second, which is the exact mismatch Portal drops every packet over.
+  //
+  // Never while a run is live (the fields are disabled then, and re-seeding
+  // under a live run would make the generated command disagree with the arm).
+  // It seeds a DEFAULT, so it deliberately overwrites: an engine left on rtc
+  // from the previous checkpoint is exactly the state this exists to correct.
+  const seededEngineFor = useRef<string | null>(null);
+  useEffect(() => {
+    const policyType = policyConfig?.policy_type ?? null;
+    if (!policyType || remoteActive) return;
+    const seedKey = [
+      policyType,
+      policyConfig?.supports_rtc ?? "?",
+      policyConfig?.n_action_steps ?? "?",
+    ].join("|");
+    if (seededEngineFor.current === seedKey) return;
+    seededEngineFor.current = seedKey;
+    const engine = defaultEngineForPolicy(policyConfig);
+    setRemoteConfig((prev) => ({
+      ...prev,
+      engine,
+      horizon: horizonForEngine(engine, policyConfig?.n_action_steps),
+    }));
+  }, [policyConfig, remoteActive]);
 
   // Edge-triggered "consume once": handleStart sets the pending flag, and the
   // effect below latches it into showDeployMilestone the first time the live
@@ -603,9 +712,6 @@ const DeployPanel: React.FC = () => {
       setDeployMilestonePending(false);
     }
   }, [sessionOpen, deployMilestonePending]);
-
-  // The settings block (robot, checkpoint, run parameters, cameras) collapses
-  // as one so a configured deploy can be folded down to picker + actions.
 
   const jobId = selectedJob?.id ?? null;
   // Address the policy-config endpoint by the checkpoint's OWNER. `(owner, step)`
@@ -629,25 +735,164 @@ const DeployPanel: React.FC = () => {
     [robot],
   );
 
-  /** The robot's camera a binding names, or undefined once the record no
-   * longer has it (camera removed in Robot settings, or another robot
-   * selected). */
-  const recordCameraByName = useCallback(
-    (name: string | null | undefined) =>
-      name == null ? undefined : robotCameras.find((cam) => cam.name === name),
+  // Per-role camera picks for a REMOTE run, remembered per (checkpoint, robot).
+  // The checkpoint half is the pair that addresses its policy config — the
+  // owning job id and the checkpoint ref — because that is what "this
+  // checkpoint" means everywhere else in this panel. A remembered pick naming a
+  // camera the record no longer holds is dropped on read, inside the hook.
+  const robotCameraNames = useMemo(
+    () => robotCameras.map((c) => c.name),
     [robotCameras],
   );
+  const { roles: remoteCameraRoles, setRole: setRemoteCameraRole } =
+    useRemoteCameraRoles(
+      remoteCameraRoleKey(policyConfigJobId, selectedRef),
+      robot?.name ?? null,
+      robotCameraNames,
+    );
 
-  /** Bound AND physically present. A stored camera_index goes stale on replug,
-   * so presence is judged by unique_id against the live enumeration — the same
-   * check the preview tiles use, and the same strictness Start had when
-   * bindings pointed straight at an enumerated device. */
-  const cameraIsReady = useCallback(
-    (name: string | null | undefined) => {
-      const cam = recordCameraByName(name);
-      return cam != null && isCameraConnected(cam, availableCameras);
-    },
-    [recordCameraByName, availableCameras],
+  /**
+   * The camera bindings, DERIVED BY NAME rather than chosen: each camera the
+   * checkpoint was trained with takes the robot camera of the same name.
+   *
+   * There is no picker any more — the panel shows the robot's cameras exactly
+   * as Collect does (SessionCameraList), and a mismatch is reported rather than
+   * repaired here, because a camera's name is a property of the robot and
+   * Robot settings is the one place it is edited. Name matching is
+   * case-insensitive, but the PAYLOAD carries the robot record's own spelling.
+   *
+   * `display` is the bare name in bimanual mode (cameraMappings strips BiSO's
+   * `left_`/`right_` prefix), which is exactly what the robot record stores, so
+   * the round-trip still works: the rollout re-prefixes it back into the
+   * checkpoint's `left_<name>` feature.
+   */
+  const cameraBindings = useMemo(
+    () =>
+      cameraMap.map((mapping) => {
+        const camera =
+          robotCameras.find(
+            (c) => c.name.toLowerCase() === mapping.display.toLowerCase(),
+          ) ?? null;
+        const dims = policyConfig?.image_features[mapping.feature];
+        return {
+          mapping,
+          camera,
+          dims,
+          // A stored camera_index goes stale on replug, so presence is judged
+          // by unique_id against the live enumeration — the same check the
+          // preview cards use.
+          connected:
+            camera != null && isCameraConnected(camera, availableCameras),
+          resolutionDiffers:
+            camera != null &&
+            dims != null &&
+            (camera.width !== dims.width || camera.height !== dims.height),
+        };
+      }),
+    [cameraMap, robotCameras, policyConfig, availableCameras],
+  );
+
+  /**
+   * REMOTE runs only: the same bindings, with the operator's per-role picks
+   * filled in where nothing matched by name.
+   *
+   * A checkpoint's camera name is a ROLE, not a claim about this robot —
+   * `lerobot/MolmoAct2-SO100_101-LeRobot` names `cam0` / `cam1`, which no robot
+   * record has ever been called — and a role nothing matches is a question the
+   * operator has to answer, not a defect in the record. A robot camera's name
+   * stays its identity: nothing here renames anything, and the pick is
+   * remembered per (checkpoint, robot) rather than written to the record.
+   *
+   * Layered over the name-derived list rather than replacing it, so a name
+   * match ALWAYS wins and the local run keeps exactly the bindings it had. A
+   * pick is re-checked against the record on every render (a camera deleted in
+   * Robot settings simply stops resolving) and its connectedness is judged the
+   * same way a name match's is — a pick of an unplugged camera is a pick, not a
+   * binding, and still blocks Start.
+   */
+  const remoteCameraBindings = useMemo(
+    () =>
+      cameraBindings.map((b) => {
+        if (b.camera != null) return b;
+        const picked = remoteCameraRoles[b.mapping.requestKey];
+        const camera = picked
+          ? (robotCameras.find((c) => c.name === picked) ?? null)
+          : null;
+        if (camera == null) return b;
+        return {
+          ...b,
+          camera,
+          connected: isCameraConnected(camera, availableCameras),
+          resolutionDiffers:
+            b.dims != null &&
+            (camera.width !== b.dims.width || camera.height !== b.dims.height),
+        };
+      }),
+    [cameraBindings, remoteCameraRoles, robotCameras, availableCameras],
+  );
+
+  /** Which list a given verb reads. Only the remote run has a picker, so every
+   * other mode sees the name-derived list unchanged — identity included, since
+   * `remoteCameraBindings` is `cameraBindings` when nothing was picked. */
+  const bindingsFor = useCallback(
+    (mode: RunMode) =>
+      mode === "remote" ? remoteCameraBindings : cameraBindings,
+    [remoteCameraBindings, cameraBindings],
+  );
+
+  /** Cameras the policy needs that this robot has nothing named for. Start is
+   * blocked on these: the rollout cannot invent the feed. */
+  const unmatchedCameras = cameraBindings.filter((b) => b.camera == null);
+  /** Matched by name but not enumerated right now (unplugged since the record
+   * was saved). Also blocks Start — the same strictness the picker had. */
+  const disconnectedCameras = cameraBindings.filter(
+    (b) => b.camera != null && !b.connected,
+  );
+  /** Matched, present, but the robot captures at a different size than the
+   * policy trained on. A warning only: the rollout forwards the checkpoint's
+   * dims as `camera_dims` and the camera is opened at those. */
+  const mismatchedCameras = cameraBindings.filter((b) => b.resolutionDiffers);
+
+  // The same three questions asked of the REMOTE list. Kept beside their
+  // name-only twins rather than replacing them: the alert and the guards each
+  // pick the one their mode is about, so a role pick can never quietly change
+  // what a local run is allowed to do.
+  const remoteUnmatchedCameras = remoteCameraBindings.filter(
+    (b) => b.camera == null,
+  );
+  const remoteDisconnectedCameras = remoteCameraBindings.filter(
+    (b) => b.camera != null && !b.connected,
+  );
+  const remoteMismatchedCameras = remoteCameraBindings.filter(
+    (b) => b.resolutionDiffers,
+  );
+
+  /** The picker's slots: the roles with NO name match, in checkpoint order.
+   * A matched role gets no control — there is no decision to make. */
+  const cameraRoleSlots: CameraRoleSlot[] = useMemo(
+    () =>
+      cameraBindings
+        .filter((b) => b.camera == null)
+        .map((b) => ({
+          requestKey: b.mapping.requestKey,
+          display: b.mapping.display,
+          dims: b.dims,
+          selected: remoteCameraRoles[b.mapping.requestKey] ?? null,
+        })),
+    [cameraBindings, remoteCameraRoles],
+  );
+
+  /** The robot's cameras as options. Names are the record's own spelling —
+   * the value the start request carries. */
+  const cameraRoleOptions: CameraRoleOption[] = useMemo(
+    () =>
+      robotCameras.map((c) => ({
+        name: c.name,
+        width: c.width,
+        height: c.height,
+        connected: isCameraConnected(c, availableCameras),
+      })),
+    [robotCameras, availableCameras],
   );
 
   // Opening the studio is a freshness gesture, so it still re-pulls — but it is
@@ -657,14 +902,11 @@ const DeployPanel: React.FC = () => {
     if (open) refreshModels();
   }, [open, refreshModels]);
 
-  // Re-pull after a successful import so the new skill shows up right away —
-  // mirrors ModelsLibrary's onImported. Still explicit: the import posts to
-  // /jobs, so `jobs_changed` covers it, but a fire-and-forget broadcast the
-  // server drops when no socket is registered is not something the panel that
-  // just did the import should be relying on.
-  const handleImported = useCallback(() => {
-    refreshModels();
-  }, [refreshModels]);
+  // (Importing lives in the skills library's own header, which owns its modal
+  // and its own refetch — this panel no longer duplicates that entry point.
+  // Nothing is lost by dropping the local `handleImported`: the listing is the
+  // app-wide ModelsDataContext one, so the library's own refresh repopulates
+  // this picker as well.)
 
   // Apply a "Run on robot" prefill: source "job" selects that job (+ optional
   // step); source "hub" lazy-imports the repo, then selects the pseudo-job.
@@ -676,9 +918,11 @@ const DeployPanel: React.FC = () => {
     let cancelled = false;
     (async () => {
       setResolving(true);
-      // The settings (robot, checkpoint, cameras) are no longer collapsible —
-      // they render as soon as a skill is selected, which the prefill does
-      // below, so there is nothing to re-open here.
+      // A prefill is an intent to configure a run, so it slides the form open
+      // too — the same move Train's prefill effect makes. Without it the skill
+      // resolved below would land inside a form the user still has to open by
+      // hand, and the handoff would look like nothing happened.
+      toggleForm(true);
       try {
         if (deployPrefill.source === "job") {
           const job = await getJob(baseUrl, fetchWithHeaders, deployPrefill.id);
@@ -718,21 +962,25 @@ const DeployPanel: React.FC = () => {
     fetchWithHeaders,
     importSource,
     clearDeployPrefill,
+    toggleForm,
     toast,
     t,
   ]);
 
   // Manual skill pick: resolve the chosen model to a launchable job (its own
   // registry id, an already-imported repo, or a fresh lazy import).
+  //
+  // NOTHING is committed until that resolution succeeds. `selectedModelId`
+  // drives the picker's checkmark and `selectedJob` drives its label, the
+  // checkpoint list and the launch — so committing the id up front made a
+  // failed resolve leave the two disagreeing: the tick sat on the skill the
+  // user had just clicked while every other control, Start included, still
+  // belonged to the previous one. A failed pick now changes nothing at all,
+  // which is what the "leave the prior selection" catch below always meant.
   const handlePickSkill = useCallback(
     async (modelId: string) => {
-      setSelectedModelId(modelId);
       const model = models.find((m) => m.id === modelId);
       if (!model) return;
-      // New skill → drop the prior selection so the load effect picks the new
-      // job's latest checkpoint.
-      setSelectedRef(null);
-      setPendingStep(null);
       setResolving(true);
       try {
         // `job_id` is stamped by the server, which already ranks the runs
@@ -740,11 +988,10 @@ const DeployPanel: React.FC = () => {
         // 200 jobs and re-implement that ranking in TypeScript — a second copy
         // of the definition, kept in sync by hand, and blind to any run past
         // the scan limit.
+        let resolved: JobRecord | null = null;
         if (model.job_id) {
           try {
-            const job = await getJob(baseUrl, fetchWithHeaders, model.job_id);
-            setSelectedJob(job);
-            return;
+            resolved = await getJob(baseUrl, fetchWithHeaders, model.job_id);
           } catch {
             // The record went away between the listing and this click (deleted
             // in another tab, or from the Train panel). The weights may still be
@@ -752,10 +999,18 @@ const DeployPanel: React.FC = () => {
             // the path the old lookup took whenever it found no job at all.
           }
         }
-        // No run tracks it (a bare Hub repo, a scanned directory), or the one
-        // that did is gone — the lazy import registers one, as before.
-        const imported = await importSource(importSourceForModel(model));
-        if (imported) setSelectedJob(imported);
+        if (!resolved) {
+          // No run tracks it (a bare Hub repo, a scanned directory), or the one
+          // that did is gone — the lazy import registers one, as before.
+          resolved = (await importSource(importSourceForModel(model))) ?? null;
+        }
+        if (!resolved) return;
+        // New skill → drop the prior checkpoint selection so the load effect
+        // takes the new job's latest.
+        setSelectedRef(null);
+        setPendingStep(null);
+        setSelectedJob(resolved);
+        setSelectedModelId(modelId);
       } catch {
         // Resolution failed → leave the prior selection; a toast already fired
         // for the import path.
@@ -843,17 +1098,6 @@ const DeployPanel: React.FC = () => {
       .then((cfg) => {
         if (cancelled) return;
         setPolicyConfig(cfg);
-        const mappings = cameraMappings(
-          Object.keys(cfg.image_features),
-          isBimanual,
-        );
-        setCameraBindings((prev) => {
-          const next: Record<string, string | null> = {};
-          for (const m of mappings) {
-            next[m.requestKey] = prev[m.requestKey] ?? null;
-          }
-          return next;
-        });
       })
       .catch((e) => {
         if (cancelled) return;
@@ -866,7 +1110,14 @@ const DeployPanel: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [open, baseUrl, fetchWithHeaders, policyConfigJobId, selectedStep, isBimanual]);
+    // `policyConfigJobId` (staging's owner-addressed lookup), and no
+    // `isBimanual`: the effect no longer re-seeds camera bindings, so the arm
+    // layout is not an input to it any more.
+  }, [open, baseUrl, fetchWithHeaders, policyConfigJobId, selectedStep]);
+
+  // (No binding effects: the pairing is derived by name in `cameraBindings`
+  // above, so there is no stored selection to seed, prune, or keep in step
+  // with the robot record.)
 
   // Real-Time Chunking is an ARCHITECTURE capability, not a per-run taste: the
   // server refuses `inference_engine: "rtc"` with a 400 for a checkpoint whose
@@ -874,6 +1125,12 @@ const DeployPanel: React.FC = () => {
   // tdmpc, vqbet…), before any slot or hardware is held. `supports_rtc: null`
   // means the server doesn't KNOW the type — a policy newer than its table — so
   // it stays on offer and the subprocess decides, same fail-open discipline.
+  //
+  // This is the LOCAL rollout's engine. The remote (DRTC) run asks the same
+  // question of `rtcSupported` above, off the policy type via the frontend's
+  // own table, because that choice is read by the GPU side rather than by
+  // handle_start_inference. The two answers agree wherever the server has an
+  // opinion; only the local engine can be refused by this gate.
   const rtcAvailable = policyConfig?.supports_rtc !== false;
 
   // Picking a checkpoint that can't run RTC drops a stale "rtc" selection back
@@ -883,49 +1140,6 @@ const DeployPanel: React.FC = () => {
   useEffect(() => {
     if (!rtcAvailable) setInferenceEngine("sync");
   }, [rtcAvailable]);
-
-  // Auto-bind robot cameras whose names match a policy-expected camera, by
-  // name against the DISPLAY name (the bare name the user chose at record
-  // time — that's what the robot record stores). No device enumeration is
-  // involved any more: the binding names a RECORD camera, and the record is
-  // what the server resolves against.
-  useEffect(() => {
-    if (!policyConfig || robotCameras.length === 0) return;
-    setCameraBindings((prev) => {
-      let changed = false;
-      const next = { ...prev };
-      for (const m of cameraMap) {
-        if (next[m.requestKey] != null) continue;
-        const robotCam = robotCameras.find(
-          (c) => c.name.toLowerCase() === m.display.toLowerCase(),
-        );
-        if (robotCam) {
-          next[m.requestKey] = robotCam.name;
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [policyConfig, robotCameras, cameraMap]);
-
-  // Drop a binding the robot record no longer backs — the camera was removed
-  // in Robot settings, or another robot was selected. (A binding to a camera
-  // that is merely UNPLUGGED is kept: the tile says "disconnected" and Start
-  // stays disabled, so reconnecting it doesn't cost the user the binding.)
-  useEffect(() => {
-    if (!policyConfig) return;
-    setCameraBindings((prev) => {
-      let changed = false;
-      const next = { ...prev };
-      for (const [name, boundTo] of Object.entries(prev)) {
-        if (boundTo != null && !recordCameraByName(boundTo)) {
-          next[name] = null;
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [policyConfig, recordCameraByName]);
 
   // Poll inference status while visible so the guards reflect a live rollout.
   useEffect(() => {
@@ -970,11 +1184,30 @@ const DeployPanel: React.FC = () => {
     checkpointArms != null &&
     checkpointIsBimanual !== isBimanual;
 
-  const allCamerasBound = cameraMap.every((m) =>
-    cameraIsReady(cameraBindings[m.requestKey]),
-  );
+  // Every camera the policy needs is matched by name AND plugged in.
+  const allCamerasReady =
+    unmatchedCameras.length === 0 && disconnectedCameras.length === 0;
+  // The remote answer to the same question: a role bound by hand counts, and a
+  // pick of an unplugged camera does not. Never LESS ready than the name-only
+  // answer — picks only ever add bindings — so no verb can be blocked by this
+  // that was not blocked before.
+  const remoteCamerasReady =
+    remoteUnmatchedCameras.length === 0 &&
+    remoteDisconnectedCameras.length === 0;
+  const camerasReadyFor = (mode: RunMode) =>
+    mode === "remote" ? remoteCamerasReady : allCamerasReady;
+  // What the alert below reports, for the mode currently armed. A role bound by
+  // hand is no longer "unmatched", so it must not still be listed as the reason
+  // the run cannot start.
+  const shownUnmatchedCameras =
+    runMode === "remote" ? remoteUnmatchedCameras : unmatchedCameras;
+  const shownMismatchedCameras =
+    runMode === "remote" ? remoteMismatchedCameras : mismatchedCameras;
 
   const inferenceActive = status?.inference_active === true;
+  // Either inference mode holds the robot; they are mutually exclusive
+  // server-side, so every guard and every camera preview treats them alike.
+  const runActive = inferenceActive || remoteActive;
 
   // Temporal ensembling is an ACT config field — no other policy type has it,
   // and passing --policy.temporal_ensemble_coeff to one would fail the
@@ -982,8 +1215,12 @@ const DeployPanel: React.FC = () => {
   const isAct = policyConfig?.policy_type === "act";
   // Empty field or a non-positive number: the backend rejects it (weights are
   // exp(-coeff * i)), so block Start rather than round-trip a 400.
+  // Not in remote mode: the control is hidden there (no local rollout to
+  // configure) and the coeff is never sent, so blocking on it would be a dead
+  // end — a refusal naming a field the operator cannot make appear.
   const temporalEnsembleInvalid =
     isAct &&
+    runMode !== "remote" &&
     temporalEnsemble &&
     (temporalEnsembleCoeff === undefined || temporalEnsembleCoeff <= 0);
 
@@ -1014,11 +1251,15 @@ const DeployPanel: React.FC = () => {
     !robotCheckpointArmMismatch &&
     selectedRef != null &&
     !!policyConfig &&
-    allCamerasBound &&
+    // The ARMED mode's answer. Camera readiness stopped being one fact for the
+    // whole panel when the remote run gained its role picker; each verb's own
+    // refusal still comes from `blockedReason(mode)` below, and this only stops
+    // the row disabling a mode whose cameras ARE bound.
+    camerasReadyFor(runMode) &&
     !temporalEnsembleInvalid &&
     !submitting &&
     !checkingExtra &&
-    !inferenceActive;
+    !runActive;
 
   /** Why `mode` cannot be launched right now, or null when it can.
    *
@@ -1032,10 +1273,24 @@ const DeployPanel: React.FC = () => {
       followerReady: !!robot?.follower_ready,
       hasCheckpoint: selectedRef != null && !!policyConfig,
       armMismatch: robotCheckpointArmMismatch,
-      allCamerasBound,
+      // Same predicate, renamed: bindings are derived by name, so "bound"
+      // means matched-and-plugged-in. A REMOTE run may also bind a role by
+      // hand (there is no other way to run a checkpoint whose cameras are
+      // named `cam0`/`cam1`), so it asks the same question of the list that
+      // includes those picks. The guard's own semantics are untouched.
+      allCamerasBound: camerasReadyFor(mode),
       temporalEnsembleInvalid,
-      inferenceActive,
+      inferenceActive: runActive,
       leaderMissing,
+      // Remote inference: both flags are client mirrors of refusals the
+      // backend makes anyway — this only moves them to before the launch.
+      transportReady: transportIsReady(remoteTransport.transport),
+      armSupportsRemote: armSupportsRemoteInference(robot),
+      // This one has NO backend twin and cannot have: the server never loads
+      // the checkpoint, so it cannot tell a flow policy from an ACT one and
+      // accepts whichever engine it is handed. Sync suits any policy, so only
+      // the rtc choice can be wrong here.
+      remoteEngineSupported: remoteConfig.engine !== "rtc" || rtcSupported,
       requiresTask: !!policyConfig?.requires_task,
       // The effective value: an empty box that falls back to a real default is
       // not a missing task, and blocking on it would be a dead end.
@@ -1174,7 +1429,7 @@ const DeployPanel: React.FC = () => {
       }
     }
 
-    // Drops every CameraThumbnail's browser stream so the rollout subprocess can
+    // Drops every camera card's preview stream so the rollout subprocess can
     // open the same camera index via OpenCV without colliding on the device.
     setSubmitting(true);
     await new Promise((r) => setTimeout(r, 300));
@@ -1191,18 +1446,80 @@ const DeployPanel: React.FC = () => {
     // /policy-config, the server applies them.
     const cameraDimsPayload: Record<string, { width: number; height: number }> =
       {};
-    for (const m of cameraMap) {
-      const boundTo = cameraBindings[m.requestKey];
-      if (boundTo == null || !recordCameraByName(boundTo)) continue;
-      cameraBindingPayload[m.requestKey] = boundTo;
-      const dims = policyConfig.image_features[m.feature];
+    // The list this MODE binds with: a remote run's includes the roles bound by
+    // hand, every other mode's is the name-derived list unchanged. Keyed on the
+    // launched mode rather than the armed one, because the verb row can launch
+    // a mode it has only just armed.
+    //
+    // A role pick changes nothing else about the request: the VALUES are still
+    // robot-record camera names the server resolves to devices itself, and
+    // `camera_dims` still comes from the CHECKPOINT's own image_features, the
+    // same for a picked role as for a name-matched one.
+    for (const { mapping, camera, dims } of bindingsFor(mode)) {
+      if (camera == null) continue;
+      // The robot record's own spelling, not the checkpoint's — the name
+      // matched case-insensitively and the server looks it up verbatim.
+      cameraBindingPayload[mapping.requestKey] = camera.name;
       if (dims?.width && dims?.height) {
-        cameraDimsPayload[m.requestKey] = {
+        cameraDimsPayload[mapping.requestKey] = {
           width: dims.width,
           height: dims.height,
         };
       }
     }
+    // Remote inference is its own session KIND, with its own options model and
+    // its own status surface — so it forks here rather than adding a fourth
+    // conditional to the inference options below. Same robot, same checkpoint,
+    // same camera derivation; only the policy is somewhere else.
+    if (mode === "remote") {
+      try {
+        const { session } = await startSession(baseUrl, fetchWithHeaders, {
+          kind: "remote_inference",
+          robot: robot.name,
+          owner: tabOwnerId(),
+          options: {
+            policy_ref: selectedRef,
+            // Advisory to the backend in this slice — it is the GPU side's
+            // --policy-path, and keeping it on the request is what lets the
+            // panel generate that command from this same object.
+            policy_hub_id:
+              remoteConfig.policyHubId.trim() || selectedJob?.hf_repo_id || "",
+            task: effectiveTask,
+            camera_bindings: cameraBindingPayload,
+            camera_dims: cameraDimsPayload,
+            checkpoint_state_dim: policyConfig.state_dim ?? undefined,
+            duration_s: remoteConfig.durationS,
+            // The transport triple. It MUST match the `modal run` line above
+            // it: Portal fingerprints the wire schema and silently drops
+            // mismatched packets, so a disagreement here is a healthy-looking
+            // session that never receives a chunk.
+            horizon: remoteConfig.horizon,
+            fps: remoteConfig.fps,
+            video_codec: remoteConfig.videoCodec,
+            // The engine picks which chunk player the server spawns; s_min is
+            // half a contract with the GPU side and is only read for rtc.
+            engine: remoteConfig.engine,
+            s_min: remoteConfig.sMin,
+          },
+        });
+        setRemoteSessionId(session.id);
+        // No deploy milestone here: it is latched on the local session
+        // DIALOG closing, which a remote run never opens — the banner would
+        // fire the instant the run started.
+      } catch (e) {
+        toast({
+          title: t("remoteInference.toast.startFailed"),
+          description:
+            formatSessionHeld(t, e) ??
+            (e instanceof Error ? e.message : String(e)),
+          variant: "destructive",
+        });
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
+
     try {
       // Robot NAME + policy-shaped options only — ports, configs, mode and
       // the camera devices behind the bindings resolve server-side from the
@@ -1291,691 +1608,737 @@ const DeployPanel: React.FC = () => {
     }
   };
 
-  const onCameraBindingChange = (name: string, value: string) => {
-    setCameraBindings((prev) => ({ ...prev, [name]: value }));
-  };
-
+  // No `onCameraBindingChange`: the pairing is derived by name in
+  // `cameraBindings` above, so there is no stored selection left to write.
+  //
+  // No `handleStop` either, and that one is a decision worth recording,
+  // because the two branches this file was merged from argued it opposite ways.
+  //
+  //   · The rework's note (b21bb1f7's Start ⇄ "View running session" toggle
+  //     could not be landed — `openInferenceSession` needs the session id the
+  //     POST returned, and a rollout this panel did not start has none) went on
+  //     to argue the panel should therefore KEEP its own stop, as the only way
+  //     to wind a run down after the session dialog has been closed.
+  //   · The coaching work removed it: a live rollout owns the modal
+  //     InferenceSessionDialog, which carries its own Stop, so a second stop
+  //     control on a panel the operator cannot see during a run is dead weight
+  //     the rest of the time and enabled only in the one state where it is
+  //     unreachable.
+  //
+  // The second is the later reading and the one the verb row is built around
+  // (RunVerbs is the whole action surface now), so it stands. If the first
+  // concern is real — a session dialog closed on a still-running rollout — the
+  // fix is a reopen path with the live session's id, not a bare stop button.
   const selectedSkillLabel = selectedJob ? jobDisplayName(selectedJob) : null;
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
-      <PanelHeader step="3" title={t("studio.deploy.title")} dataTour="studio-deploy">
+      <PanelHeader
+        step="3"
+        title={t("studio.deploy.title")}
+        dataTour="studio-deploy"
+      >
         {resolving ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
         ) : null}
       </PanelHeader>
 
-      {/* Skill picker — the panel's entry control. A real <Select> rather than
-          a PanelEntryControl because picking a skill IS the value here, not a
-          trigger that opens a form; it wears PANEL_ENTRY_CLASS and a dot so it
-          still reads as the same control as Collect's and Train's openers. */}
-      <div className="space-y-2">
-        <div className="relative">
-          <Select
-            value={selectedModelId ?? undefined}
-            onValueChange={handlePickSkill}
-            disabled={resolving}
+      {/* Run a skill — the panel's entry control, the same opener Collect
+          ("Record new dataset") and Train ("Start a new training") wear: it
+          slides the run's form open in place and folds the skills library to
+          its header while it is open. */}
+      <Collapsible
+        // Forced open while a REMOTE run is live. Remote inference is the one
+        // mode whose live surface (telemetry and, crucially, its Stop) is
+        // inline in this form rather than in the InferenceSessionDialog the
+        // local modes open, so collapsing the form would leave an energized
+        // arm with no Stop on screen. The operator's own `formOpen` is
+        // untouched underneath and takes over again when the run ends.
+        open={formOpen || remoteActive}
+        onOpenChange={toggleForm}
+        className="space-y-5"
+      >
+        <CollapsibleTrigger asChild>
+          {/* The same expression as the Collapsible's, so the chevron never
+              claims the form is shut while a live remote run is showing. */}
+          <PanelEntryControl
+            open={formOpen || remoteActive}
+            dotClassName="bg-sky-500"
           >
-            {/* justify-start + ml-auto on the chevron: SelectTrigger defaults
-                to justify-between, which would shove the dot away from the
-                label once a third child is added. pr-9 reserves room on the
-                right for the Import button overlaid below, so the chevron
-                and the button's own gutter don't collide. */}
-            <SelectTrigger
-              className={cn(
-                PANEL_ENTRY_CLASS,
-                "justify-start pr-9 [&>svg]:ml-auto [&>svg]:shrink-0",
-              )}
-            >
-              <PanelEntryDot className="bg-sky-500" />
-              {selectedSkillLabel ? (
-                <DisplayName name={selectedSkillLabel} className="min-w-0" />
-              ) : (
-                <SelectValue placeholder={t("studio.deploy.picker.placeholder")} />
-              )}
-            </SelectTrigger>
-            <SelectContent>
-              {modelsLoading ? (
-                <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                  {t("studio.deploy.picker.loading")}
-                </div>
-              ) : models.length === 0 ? (
-                // "We could not ask" and "you own nothing" are different
-                // sentences, and the picker used to render the second for the
-                // first: a `/models` failure was caught into an empty array, so
-                // a backend hiccup or a dropped Hub listing read on screen as
-                // the user's skills having been deleted. The listing is only
-                // empty when the fetch actually succeeded and returned nothing.
-                <div
-                  className={cn(
-                    "px-2 py-1.5 text-xs",
-                    modelsError ? "text-destructive" : "text-muted-foreground",
-                  )}
-                >
-                  {modelsError
-                    ? t("studio.deploy.picker.error")
-                    : t("studio.deploy.picker.empty")}
-                </div>
-              ) : (
-                models.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    <DisplayName name={m.name} className="min-w-0" />
-                    {/* `uppercase` is a no-op on Chinese but the tracking is
-                        not — drop both together on a caseless script. */}
-                    <span
-                      className={cn(
-                        "ml-2 text-[10px] text-muted-foreground",
-                        isCJK ? "" : "uppercase tracking-wide",
-                      )}
-                    >
-                      {m.source === "hub"
-                        ? t("studio.deploy.source.hub")
-                        : m.source === "both"
-                          ? t("studio.deploy.source.both")
-                          : t("studio.deploy.source.local")}
-                    </span>
-                    {/* A failed run that saved weights IS runnable, and the
-                        Train panel's card has always run one. It is offered
-                        here rather than silently withheld — but it says so,
-                        because a non-zero exit is a fact about the run the
-                        user should weigh before deploying it. */}
-                    {m.state === "failed" && (
-                      <span
-                        className={cn(
-                          "ml-2 text-[10px] text-amber-600 dark:text-amber-500",
-                          isCJK ? "" : "uppercase tracking-wide",
-                        )}
-                      >
-                        {t("studio.deploy.picker.failedBadge")}
-                      </span>
-                    )}
-                  </SelectItem>
-                ))
-              )}
-            </SelectContent>
-          </Select>
-          {/* An unreachable Hub used to look exactly like an empty shelf: the
-              rows simply were not there. Now the listing says which it is, and
-              keeps serving the last complete Hub result underneath. */}
-          {hubStatus && !hubStatus.ok && (
-            <p className="mt-1 px-1 text-[11px] text-amber-600 dark:text-amber-500">
-              {t("studio.deploy.picker.hubDegraded")}
+            {t("studio.deploy.entry")}
+          </PanelEntryControl>
+        </CollapsibleTrigger>
+        <CollapsibleContent className={SLIDE}>
+          <div className="space-y-6">
+            {/* The form's one-line brief, in the slot and voice Train uses
+                ("Choose what to train on…"): under the opener, above the first
+                field label. It also covers what the Skill field's own helper
+                used to say, so that line is gone. */}
+            <p className="text-sm leading-relaxed text-muted-foreground">
+              {t("studio.deploy.intro")}
             </p>
-          )}
-          {/* Duplicate of ModelsLibrary's "Import skill" button, docked
-              inside the picker's own box (right edge) so it's visible
-              without opening the dropdown. A sibling overlay, not a child of
-              SelectTrigger — SelectTrigger is itself a <button>, and Radix
-              opens on pointerdown, so nesting would either be invalid HTML or
-              also trigger the dropdown. Sitting on top as an absolutely
-              positioned sibling means it alone receives the click. */}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            onClick={(e) => {
-              e.stopPropagation();
-              setImportModalOpen(true);
-            }}
-            disabled={resolving}
-            className="absolute right-1 top-1/2 h-7 w-7 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-            title={t("studio.deploy.picker.import")}
-            aria-label={t("studio.deploy.picker.import")}
-          >
-            <Download className="h-3.5 w-3.5" />
-          </Button>
-        </div>
-      </div>
-      <ImportModelModal
-        open={importModalOpen}
-        onOpenChange={setImportModalOpen}
-        onImported={handleImported}
-      />
 
-      {/* Everything below is flat and appears as soon as a skill is picked —
-          disclosure comes from the selection, not from a second click. The old
-          "Settings & configuration" collapsible was an extra step neither
-          Collect nor Train has. ------------------------------------------- */}
-      {selectedJob ? (
-        <div className="space-y-5">
-          <p className="text-sm leading-relaxed text-muted-foreground">
-            {t("studio.deploy.intro")}
-          </p>
-
-          {/* Robot readiness — a warning, not a parameter, so no eyebrow. A
-              ready robot renders nothing: the robot menu already names the
-              selection and its arm layout. */}
-          <RobotStatus ready={!!robot && robot.follower_ready}>
-            {!robot ? (
-              t("studio.deploy.noRobot")
-            ) : (
-              /* The plural is on the follower ARM count — 2 for a bimanual
-                 robot, 1 otherwise. The number itself is never printed; it
-                 only picks the variant, replacing the old `{s}` splice.
-                 Coaching gets its own key AND its own gap scope: it teleoperates
-                 through the leader too, so a missing leader port is a real
-                 blocker there and noise in every other mode. */
-              <Trans
-                i18nKey={
-                  runMode === "coach"
-                    ? "studio.deploy.robotNotReadyCoach"
-                    : "studio.deploy.robotNotReady"
-                }
-                count={isBimanual ? 2 : 1}
-                values={{
-                  name: robot.name,
-                  gap: formatRobotSetupGap(
-                    t,
-                    robot,
-                    runMode === "coach" ? "all" : "follower",
-                  ),
-                }}
-                components={[<strong key="0" />]}
-              />
-            )}
-          </RobotStatus>
-
-          {/* Run mode. ABOVE the checkpoint and OUTSIDE the policy-config
-              guard, deliberately: it decides what every control below it
-              means, and it used to be the fourth field down and to vanish
-              entirely while a checkpoint's config was still loading. It has no
-              dependency on that config. ------------------------------------ */}
-          {/* The mode chooser used to live here, as a widget you set before
-              pressing a generic Start. The verb buttons at the bottom of the
-              panel are now the chooser AND the action: pressing one selects
-              that mode and launches it, so there is one decision instead of
-              two and nothing to leave in the wrong position. The options
-              below still follow whichever verb is armed. */}
-
-          {/* Checkpoint ------------------------------------------------------- */}
-          <div className="space-y-2">
-            <Label htmlFor="deploy-checkpoint">
-              {t("studio.deploy.checkpoint.label")}
-            </Label>
-            {checkpoints.length === 0 ? (
-                <Alert className="border-warn/40 text-warn [&>svg]:text-warn">
-                  <AlertTriangle className="h-4 w-4" />
-                  <AlertDescription>
-                    {t("studio.deploy.checkpoint.none")}
-                  </AlertDescription>
-                </Alert>
+            {/* Robot readiness — a warning, not a parameter, so no eyebrow. A
+                ready robot renders nothing: the robot menu already names the
+                selection and its arm layout. */}
+            <RobotStatus ready={!!robot && robot.follower_ready}>
+              {!robot ? (
+                t("studio.deploy.noRobot")
               ) : (
-                <CheckpointDropdown
-                  id="deploy-checkpoint"
-                  checkpoints={checkpoints}
-                  // Lineage-wide list: two entries can share a step, so the ref
-                  // is the only safe identity to select by.
-                  selectedRef={selectedRef}
-                  onChange={(c) => setSelectedRef(c.ref)}
-                  owners={checkpointOwnerMap}
+                /* The plural is on the follower ARM count — 2 for a bimanual
+                   robot, 1 otherwise. The number itself is never printed; it
+                   only picks the variant, replacing the old `{s}` splice.
+                   Coaching gets its own key AND its own gap scope: it
+                   teleoperates through the leader too, so a missing leader port
+                   is a real blocker there and noise in every other mode. */
+                <Trans
+                  i18nKey={
+                    runMode === "coach"
+                      ? "studio.deploy.robotNotReadyCoach"
+                      : "studio.deploy.robotNotReady"
+                  }
+                  count={isBimanual ? 2 : 1}
+                  values={{
+                    name: robot.name,
+                    gap: formatRobotSetupGap(
+                      t,
+                      robot,
+                      runMode === "coach" ? "all" : "follower",
+                    ),
+                  }}
+                  components={[<strong key="0" />]}
                 />
               )}
-              {robotCheckpointArmMismatch ? (
-                <Alert className="border-warn/40 text-warn [&>svg]:text-warn">
-                  <AlertTriangle className="h-4 w-4" />
-                  <AlertDescription>
-                    {/* Each branch is one complete key rather than shared
-                        fragments, so a translator owns the whole sentence. */}
-                    <Trans
-                      i18nKey={
-                        checkpointIsBimanual
-                          ? "studio.deploy.armMismatch.bimanualCheckpoint"
-                          : "studio.deploy.armMismatch.singleCheckpoint"
-                      }
-                      values={{
-                        dim: checkpointDim,
-                        arms: checkpointArms,
-                        name: robot?.name,
-                      }}
-                      components={[<strong key="0" />, <strong key="1" />]}
-                    />
-                  </AlertDescription>
-                </Alert>
-              ) : null}
-          </div>
+            </RobotStatus>
 
-          {/* Run parameters — flat, each with its own <Label>; the old "Run
-              parameters" eyebrow sat above two fields that already say what
-              they are. --------------------------------------------------- */}
-          {policyConfig ? (
-            <>
-              {/* Coaching ALWAYS needs it, language-conditioned or not: the
-                  string is written into every recorded frame and the server
-                  refuses an empty one. Gating this on `requires_task` alone
-                  meant a plain ACT checkpoint gave a green panel, an enabled
-                  Start, and then a 400 naming a field that was not on screen
-                  and could not be made to appear. */}
-              {policyConfig.requires_task || runMode === "coach" ? (
-                <div className="space-y-2">
-                  <Label htmlFor="deploy-task">
-                    {t("studio.deploy.task.label")}
-                  </Label>
-                  <Input
-                    id="deploy-task"
-                    value={task}
-                    onChange={(e) => setTask(e.target.value)}
-                    // The trained-on sentence, shown greyed rather than typed
-                    // in. Leaving the box empty sends it; clearing what you
-                    // typed brings it back. No invented example: a fake task
-                    // shown greyed in the same slot the REAL inherited task
-                    // uses is indistinguishable from one. When the lineage
-                    // yields nothing, say so instead.
-                    placeholder={
-                      defaultTask || t("studio.deploy.task.placeholderNone")
-                    }
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {policyConfig.requires_task
-                      ? /* The policy type is an identifier — verbatim. */
-                        t("studio.deploy.task.hint", {
-                          policyType: policyConfig.policy_type ?? "",
-                        })
-                      : t("studio.deploy.task.hintCoach")}
-                    {/* Says where the greyed sentence comes from. Only while
-                        the box is EMPTY — once the operator types, the default
-                        is not what will be sent and claiming otherwise would be
-                        a lie. */}
-                    {task.trim() === "" && defaultTask
-                      ? ` ${t("studio.deploy.task.leaveEmpty")}`
-                      : ""}
-                  </p>
-                  {datasetTasks.length > 1 && (
-                    <div className="space-y-1">
-                      <p className="text-xs text-muted-foreground">
-                        {t("studio.deploy.task.multiTaskHint", {
-                          count: datasetTasks.length,
-                        })}
-                      </p>
-                      <div className="flex flex-wrap gap-1">
-                        {datasetTasks.map((t) => (
-                          <button
-                            key={t}
-                            type="button"
-                            onClick={() => setTask(t)}
-                            className={cn(
-                              "rounded border px-2 py-0.5 text-xs transition-colors",
-                              task === t
-                                ? "border-primary bg-primary/10"
-                                : "border-border hover:bg-muted",
-                            )}
-                          >
-                            {t}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ) : null}
-              {runMode !== "coach" ? (
-                <div className="space-y-2">
-                  <Label htmlFor="deploy-duration">
-                    {t("studio.deploy.duration.label")}
-                  </Label>
-                  <NumberInput
-                    id="deploy-duration"
-                    min={1}
-                    value={durationS}
-                    onChange={(v) => {
-                      if (v !== undefined) setDurationS(v);
-                    }}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {runMode === "eval"
-                      ? t("studio.deploy.duration.hint")
-                      : t("studio.deploy.duration.singleHint")}
-                  </p>
-                </div>
-              ) : null}
-              {runMode === "eval" ? (
-                <div className="space-y-2">
-                  <Label htmlFor="deploy-episodes">
-                    {t("studio.deploy.episodes.label")}
-                  </Label>
-                  <NumberInput
-                    id="deploy-episodes"
-                    min={1}
-                    max={MAX_EVAL_EPISODES}
-                    value={evalEpisodes}
-                    onChange={(v) => {
-                      if (v !== undefined) setEvalEpisodes(v);
-                    }}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {t("studio.deploy.episodes.scoreHint")}
-                  </p>
-                </div>
-              ) : null}
-              {runMode === "coach" ? (
-                <>
-                  {/* Readiness, stated before the operator commits an hour to
-                      it. Coaching corrects a policy's OWN failures, so it has
-                      nothing to work with until the policy sometimes succeeds:
-                      CR-DAgger (arXiv:2506.16685) recommends starting only once
-                      the base policy is at 10-20%, and below that the honest
-                      answer is more demonstrations, not more corrections. This
-                      is the cheapest possible place to say so — the alternative
-                      is discovering it after a session spent rescuing an arm
-                      that never got close. */}
-                  <div className="rounded-lg border border-border bg-muted/40 p-3">
-                    <p className="text-xs leading-relaxed text-muted-foreground">
-                      <span className="font-semibold text-foreground">
-                        Coaching pays off once the policy already works
-                        sometimes.
-                      </span>{" "}
-                      It learns from rescuing the policy's own mistakes, so it
-                      needs the policy to get far enough to make interesting
-                      ones — roughly a 1-in-10 success rate. If it fails
-                      immediately every time, record more demonstrations first;
-                      that's faster than correcting your way there.
-                    </p>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="deploy-corrections">
-                      {t("studio.deploy.coaching.correctionsLabel")}
-                    </Label>
-                    <NumberInput
-                      id="deploy-corrections"
-                      min={1}
-                      max={MAX_COACHING_CORRECTIONS}
-                      value={targetCorrections}
-                      onChange={(v) => {
-                        if (v !== undefined) setTargetCorrections(v);
-                      }}
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      {t("studio.deploy.coaching.correctionsHint")}
-                    </p>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="deploy-coach-dataset">
-                      {t("studio.deploy.coaching.datasetLabel")}
-                    </Label>
-                    {/* `rollout_` is rendered as a fixed, unfocusable part of
-                        the field rather than left in the operator's text. It is
-                        not optional — lerobot refuses a rollout dataset whose
-                        repo name lacks it (rollout/context.py), and merge.py
-                        keys the lossless `intervention`-column drop on the same
-                        prefix — so it must never be something a person can
-                        delete or forget. What they type follows it. */}
-                    <div className="flex items-center rounded-md border border-input bg-background focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
-                      <span
-                        aria-hidden
-                        className="select-none pl-3 pr-0.5 font-mono text-sm text-muted-foreground"
-                      >
-                        rollout_
-                      </span>
-                      <Input
-                        id="deploy-coach-dataset"
-                        value={coachDatasetName}
-                        onChange={(e) => setCoachDatasetName(e.target.value)}
-                        placeholder={
-                          defaultCoachName ||
-                          t("studio.deploy.coaching.datasetFallback")
-                        }
-                        className="border-0 bg-transparent pl-0 font-mono shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
-                      />
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      {/* <0> wraps the literal on-disk prefix, which is an
-                          identifier and stays in the Latin script. */}
-                      <Trans
-                        i18nKey="studio.deploy.coaching.datasetHint"
-                        values={{
-                          prefix: `rollout_${
-                            effectiveCoachName ||
-                            t("studio.deploy.coaching.datasetFallback")
-                          }_`,
-                        }}
-                        components={[<span key="0" className="font-mono" />]}
-                      />
-                    </p>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>{t("studio.deploy.coaching.leaderLabel")}</Label>
-                    <p
-                      className={`text-xs ${
-                        coachLeaderMissing
-                          ? "text-destructive"
-                          : "text-muted-foreground"
-                      }`}
-                    >
-                      {!robot
-                        ? t("studio.deploy.coaching.leaderNoRobot")
-                        : coachLeaderMissing
-                          ? t("studio.deploy.coaching.leaderMissing")
-                          : t("studio.deploy.coaching.leaderFrom", {
-                              name: robot.name,
-                              // Calibration file names — data, never translated.
-                              configs: isBimanual
-                                ? `${robot.leader_config} + ${robot.right_leader_config}`
-                                : robot.leader_config,
-                            })}
-                    </p>
-                    {isBimanual ? (
-                      <p className="text-xs text-warn">
-                        {t("studio.deploy.coaching.bimanualWarning")}
-                      </p>
-                    ) : null}
-                  </div>
-                </>
-              ) : null}
-              {runMode !== "coach" ? (
-                <div className="space-y-2">
-                  <Label htmlFor="deploy-engine">
-                    {t("studio.deploy.engine.label")}
-                  </Label>
-                  <Select
-                    value={inferenceEngine}
-                    onValueChange={(v) =>
-                      setInferenceEngine(v as "sync" | "rtc")
-                    }
+            {/* Skill and Checkpoint share one row — the same two-column
+                grid Collect pairs Episode duration / Reset duration with.
+                They are one decision in two halves (which weights, which
+                step of them), and the second is meaningless without the
+                first, so the row is always two-up: with no skill picked the
+                Checkpoint column holds a disabled "Pick a skill first"
+                instead of collapsing. min-w-0 on both columns so a long
+                name truncates inside its half instead of widening it. */}
+            <div className="grid grid-cols-2 gap-4">
+              {/* Skill — the form's one mandatory field, built as Train's
+                  dataset field is: the current choice as a chip, otherwise the
+                  full-list picker docked in the same box.
+
+                  One way in, not two: the whole control is the popover's
+                  trigger, and ModelPicker's own CommandInput is the only
+                  search box (it also owns the loading / "no models yet" /
+                  "no match" states). The trigger wears SelectTrigger's own
+                  classes so it reads as the same kind of control as the
+                  Checkpoint dropdown beside it and the engine Select below —
+                  it can't BE a SelectTrigger, because what it opens is a
+                  Popover. Picking replaces the selection outright; there is
+                  no clear ✕, since a run always needs a skill and "none" is
+                  only ever the pre-selection state. */}
+              <div className="min-w-0 space-y-2">
+                <Label htmlFor="deploy-skill">
+                  {t("studio.deploy.policy.label")}
+                </Label>
+                {/* `models` is already the DEPLOYABLE projection of /skills —
+                    the server decides it (weights loadable AND nothing
+                    supersedes the row), which is a stricter and better-informed
+                    answer than the checkpoint_count deny-list this panel used
+                    to derive from the job registry. */}
+                <ModelPicker
+                  models={models}
+                  loading={modelsLoading}
+                  onPickExisting={(m) => handlePickSkill(m.id)}
+                >
+                  <button
+                    id="deploy-skill"
+                    type="button"
+                    disabled={resolving}
+                    className="flex h-10 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    <SelectTrigger id="deploy-engine">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {/* Option VALUES ("sync" / "rtc") are what the backend
-                          parses — only the labels are translated. */}
-                      <SelectItem value="sync">
-                        {t("studio.deploy.engine.sync")}
-                      </SelectItem>
-                      {/* Disabled rather than hidden: a checkpoint that can't
-                          run RTC should say so, not silently offer one engine. */}
-                      <SelectItem value="rtc" disabled={!rtcAvailable}>
-                        {t("studio.deploy.engine.rtc")}
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    {inferenceEngine === "rtc"
-                      ? t("studio.deploy.engine.rtcHint")
-                      : t("studio.deploy.engine.syncHint")}
+                    {selectedSkillLabel ? (
+                      <DisplayName
+                        name={selectedSkillLabel}
+                        className="min-w-0"
+                      />
+                    ) : (
+                      <span className="truncate text-muted-foreground">
+                        {t("studio.deploy.picker.placeholder")}
+                      </span>
+                    )}
+                    <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />
+                  </button>
+                </ModelPicker>
+                {/* Listing health, kept from the coaching branch and moved OUT
+                    of the dropdown now that the picker owns its own empty
+                    state. "We could not ask" and "you own nothing" are
+                    different sentences, and an unreachable Hub used to look
+                    exactly like an empty shelf — the rows simply were not
+                    there. The picker still serves the last complete Hub result
+                    underneath. */}
+                {modelsError ? (
+                  <p className="text-xs text-destructive">
+                    {t("studio.deploy.picker.error")}
                   </p>
-                  {rtcAvailable ? null : (
-                    <p className="text-xs text-muted-foreground">
-                      {t("studio.deploy.engine.rtcUnavailable")}
-                    </p>
-                  )}
-                </div>
-              ) : (
-                <p className="text-xs text-muted-foreground">
-                  {t("studio.deploy.engine.coachingNote")}
-                </p>
-              )}
-            </>
-          ) : null}
+                ) : hubStatus && !hubStatus.ok ? (
+                  <p className="text-[11px] text-amber-600 dark:text-amber-500">
+                    {t("studio.deploy.picker.hubDegraded")}
+                  </p>
+                ) : null}
+              </div>
+              {/* Checkpoint — the one control with nothing to offer until a skill is
+                  chosen, so it renders disabled saying so rather than vanishing.
 
-          {/* Cameras — a repeater, so it keeps its eyebrow. ------------------ */}
-          <FormSection title={t("studio.deploy.cameras.title")}>
-              {policyConfigLoading ? (
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  {t("studio.deploy.cameras.loading")}
-                </div>
-              ) : policyConfigError ? (
-                <Alert variant="destructive">
-                  <AlertTriangle className="h-4 w-4" />
-                  <AlertDescription>
-                    {/* The error text is the backend's own — passed through. */}
-                    {t("studio.deploy.cameras.configError", {
-                      error: policyConfigError,
-                    })}
-                  </AlertDescription>
-                </Alert>
-              ) : !policyConfig ? null : cameraMap.length === 0 ? (
-                <p className="text-xs text-muted-foreground">
-                  {t("studio.deploy.cameras.none")}
-                </p>
-              ) : (
-                <div className="space-y-3">
+                  CheckpointDropdown's own trigger is sized for a card's action row
+                  (h-8, text-xs, w-auto); FIELD_TRIGGER puts it back on the studio's
+                  form-field size. Passed from here rather than changed in the
+                  component, because its other callers (JobCard's action line,
+                  ModelCard's w-36 slot) want the compact one. */}
+              <div className="min-w-0 space-y-2">
+                <Label htmlFor="deploy-checkpoint">
+                  {t("studio.deploy.checkpoint.label")}
+                </Label>
+                {!selectedJob ? (
+                  <CheckpointDropdown
+                    id="deploy-checkpoint"
+                    checkpoints={NO_CHECKPOINTS}
+                    selectedRef={null}
+                    onChange={() => {}}
+                    disabled
+                    placeholder={t("studio.deploy.checkpoint.pickPolicyFirst")}
+                    className={FIELD_TRIGGER}
+                  />
+                ) : checkpoints.length === 0 ? (
+                  <Alert className="border-warn/40 text-warn [&>svg]:text-warn">
+                    <AlertTriangle className="h-4 w-4" />
+                    <AlertDescription>
+                      {t("studio.deploy.checkpoint.none")}
+                    </AlertDescription>
+                  </Alert>
+                ) : (
+                  <CheckpointDropdown
+                    id="deploy-checkpoint"
+                    checkpoints={checkpoints}
+                    // Lineage-wide list: two entries can share a step, so the
+                    // ref is the only safe identity to select by.
+                    selectedRef={selectedRef}
+                    onChange={(c) => setSelectedRef(c.ref)}
+                    owners={checkpointOwnerMap}
+                    className={FIELD_TRIGGER}
+                  />
+                )}
+              </div>
+            </div>
+
+            {/* Reading the checkpoint's config is what tells this panel the
+                policy's cameras, its task requirement and its arm count, so the
+                progress and the failure both belong under the checkpoint rather
+                than beside the fields they would have filled in. */}
+            {policyConfigLoading ? (
+              <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {t("studio.deploy.cameras.loading")}
+              </p>
+            ) : null}
+            {policyConfigError ? (
+              <Alert variant="destructive">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertDescription>
+                  {/* The error text is the backend's own — passed through. */}
+                  {t("studio.deploy.cameras.configError", {
+                    error: policyConfigError,
+                  })}
+                </AlertDescription>
+              </Alert>
+            ) : null}
+            {robotCheckpointArmMismatch ? (
+              <Alert className="border-warn/40 text-warn [&>svg]:text-warn">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertDescription>
+                  {/* Each branch is one complete key rather than shared
+                      fragments, so a translator owns the whole sentence. */}
+                  <Trans
+                    i18nKey={
+                      checkpointIsBimanual
+                        ? "studio.deploy.armMismatch.bimanualCheckpoint"
+                        : "studio.deploy.armMismatch.singleCheckpoint"
+                    }
+                    values={{
+                      dim: checkpointDim,
+                      arms: checkpointArms,
+                      name: robot?.name,
+                    }}
+                    components={[<strong key="0" />, <strong key="1" />]}
+                  />
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
+            {/* Run parameters — flat, each with its own <Label>; the old "Run
+                parameters" eyebrow sat above two fields that already say what
+                they are. The block is no longer gated on the policy config
+                having loaded — that gate made half the form appear and vanish
+                with the skill. What IS gated is which fields a given run mode
+                actually uses. ---------------------------------------------- */}
+            <div className="space-y-2">
+              <Label htmlFor="deploy-task">
+                {t("studio.deploy.task.label")}
+              </Label>
+              <Input
+                id="deploy-task"
+                value={task}
+                onChange={(e) => setTask(e.target.value)}
+                // The trained-on sentence, shown greyed rather than typed in.
+                // Leaving the box empty sends it; clearing what you typed brings
+                // it back. No invented example: a fake task shown greyed in the
+                // same slot the REAL inherited task uses is indistinguishable
+                // from one. When the lineage yields nothing, say so instead.
+                placeholder={
+                  defaultTask || t("studio.deploy.task.placeholderNone")
+                }
+              />
+              {/* Whether the field is even read is a property of the checkpoint,
+                  so the helper answers that question in all three states rather
+                  than the field appearing and disappearing with the skill — plus
+                  a fourth: coaching writes the string into every recorded frame,
+                  so it is read even by a policy that ignores it.
+                  The policy type is an identifier — rendered verbatim. */}
+              <p className="text-xs text-muted-foreground">
+                {!policyConfig
+                  ? t("studio.deploy.task.hintUnknown")
+                  : policyConfig.requires_task
+                    ? t("studio.deploy.task.hint", {
+                        policyType: policyConfig.policy_type ?? "",
+                      })
+                    : runMode === "coach"
+                      ? t("studio.deploy.task.hintCoach")
+                      : t("studio.deploy.task.hintNotConditioned", {
+                          policyType: policyConfig.policy_type ?? "",
+                        })}
+                {/* Says where the greyed sentence comes from. Only while the box
+                    is EMPTY — once the operator types, the default is not what
+                    will be sent and claiming otherwise would be a lie. */}
+                {task.trim() === "" && defaultTask
+                  ? ` ${t("studio.deploy.task.leaveEmpty")}`
+                  : ""}
+              </p>
+              {datasetTasks.length > 1 && (
+                <div className="space-y-1">
                   <p className="text-xs text-muted-foreground">
-                    {t("studio.deploy.cameras.intro")}
+                    {t("studio.deploy.task.multiTaskHint", {
+                      count: datasetTasks.length,
+                    })}
                   </p>
-                  {cameraMap.map((m) => {
-                    const dims = policyConfig.image_features[m.feature];
-                    const value = cameraBindings[m.requestKey];
-                    const boundCamera = recordCameraByName(value);
-                    const connected =
-                      boundCamera != null &&
-                      isCameraConnected(boundCamera, availableCameras);
-                    return (
-                      <div key={m.requestKey} className="flex items-center gap-3">
-                        <div className="flex-1">
-                          <Label className="text-sm font-medium">{m.display}</Label>
+                  <div className="flex flex-wrap gap-1">
+                    {datasetTasks.map((candidate) => (
+                      <button
+                        key={candidate}
+                        type="button"
+                        onClick={() => setTask(candidate)}
+                        className={cn(
+                          "rounded border px-2 py-0.5 text-xs transition-colors",
+                          task === candidate
+                            ? "border-primary bg-primary/10"
+                            : "border-border hover:bg-muted",
+                        )}
+                      >
+                        {candidate}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            {/* Remote has its own duration field, beside the transport knobs
+                it must be read with. */}
+            {runMode !== "coach" && runMode !== "remote" ? (
+              <div className="space-y-2">
+                <Label htmlFor="deploy-duration">
+                  {t("studio.deploy.duration.label")}
+                </Label>
+                <NumberInput
+                  id="deploy-duration"
+                  min={1}
+                  value={durationS}
+                  onChange={(v) => {
+                    if (v !== undefined) setDurationS(v);
+                  }}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {runMode === "eval"
+                    ? t("studio.deploy.duration.hint")
+                    : t("studio.deploy.duration.singleHint")}
+                </p>
+              </div>
+            ) : null}
+            {runMode === "eval" ? (
+              <div className="space-y-2">
+                <Label htmlFor="deploy-episodes">
+                  {t("studio.deploy.episodes.label")}
+                </Label>
+                <NumberInput
+                  id="deploy-episodes"
+                  min={1}
+                  max={MAX_EVAL_EPISODES}
+                  value={evalEpisodes}
+                  onChange={(v) => {
+                    if (v !== undefined) setEvalEpisodes(v);
+                  }}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t("studio.deploy.episodes.scoreHint")}
+                </p>
+              </div>
+            ) : null}
+            {runMode === "coach" ? (
+              <>
+                {/* Readiness, stated before the operator commits an hour to it.
+                    Coaching corrects a policy's OWN failures, so it has nothing
+                    to work with until the policy sometimes succeeds: CR-DAgger
+                    (arXiv:2506.16685) recommends starting only once the base
+                    policy is at 10-20%, and below that the honest answer is more
+                    demonstrations, not more corrections. This is the cheapest
+                    possible place to say so — the alternative is discovering it
+                    after a session spent rescuing an arm that never got close. */}
+                <div className="rounded-lg border border-border bg-muted/40 p-3">
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    <span className="font-semibold text-foreground">
+                      Coaching pays off once the policy already works sometimes.
+                    </span>{" "}
+                    It learns from rescuing the policy's own mistakes, so it
+                    needs the policy to get far enough to make interesting ones
+                    — roughly a 1-in-10 success rate. If it fails immediately
+                    every time, record more demonstrations first; that's faster
+                    than correcting your way there.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="deploy-corrections">
+                    {t("studio.deploy.coaching.correctionsLabel")}
+                  </Label>
+                  <NumberInput
+                    id="deploy-corrections"
+                    min={1}
+                    max={MAX_COACHING_CORRECTIONS}
+                    value={targetCorrections}
+                    onChange={(v) => {
+                      if (v !== undefined) setTargetCorrections(v);
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t("studio.deploy.coaching.correctionsHint")}
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="deploy-coach-dataset">
+                    {t("studio.deploy.coaching.datasetLabel")}
+                  </Label>
+                  {/* `rollout_` is rendered as a fixed, unfocusable part of the
+                      field rather than left in the operator's text. It is not
+                      optional — lerobot refuses a rollout dataset whose repo
+                      name lacks it (rollout/context.py), and merge.py keys the
+                      lossless `intervention`-column drop on the same prefix — so
+                      it must never be something a person can delete or forget.
+                      What they type follows it. */}
+                  <div className="flex items-center rounded-md border border-input bg-background focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
+                    <span
+                      aria-hidden
+                      className="select-none pl-3 pr-0.5 font-mono text-sm text-muted-foreground"
+                    >
+                      rollout_
+                    </span>
+                    <Input
+                      id="deploy-coach-dataset"
+                      value={coachDatasetName}
+                      onChange={(e) => setCoachDatasetName(e.target.value)}
+                      placeholder={
+                        defaultCoachName ||
+                        t("studio.deploy.coaching.datasetFallback")
+                      }
+                      className="border-0 bg-transparent pl-0 font-mono shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {/* <0> wraps the literal on-disk prefix, which is an
+                        identifier and stays in the Latin script. */}
+                    <Trans
+                      i18nKey="studio.deploy.coaching.datasetHint"
+                      values={{
+                        prefix: `rollout_${
+                          effectiveCoachName ||
+                          t("studio.deploy.coaching.datasetFallback")
+                        }_`,
+                      }}
+                      components={[<span key="0" className="font-mono" />]}
+                    />
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label>{t("studio.deploy.coaching.leaderLabel")}</Label>
+                  <p
+                    className={cn(
+                      "text-xs",
+                      coachLeaderMissing
+                        ? "text-destructive"
+                        : "text-muted-foreground",
+                    )}
+                  >
+                    {!robot
+                      ? t("studio.deploy.coaching.leaderNoRobot")
+                      : coachLeaderMissing
+                        ? t("studio.deploy.coaching.leaderMissing")
+                        : t("studio.deploy.coaching.leaderFrom", {
+                            name: robot.name,
+                            // Calibration file names — data, never translated.
+                            configs: isBimanual
+                              ? `${robot.leader_config} + ${robot.right_leader_config}`
+                              : robot.leader_config,
+                          })}
+                  </p>
+                  {isBimanual ? (
+                    <p className="text-xs text-warn">
+                      {t("studio.deploy.coaching.bimanualWarning")}
+                    </p>
+                  ) : null}
+                </div>
+              </>
+            ) : null}
+            {/* The sync/rtc engine picker is about the LOCAL rollout process;
+                a remote run has no lerobot rollout to configure. */}
+            {runMode !== "coach" && runMode !== "remote" ? (
+              <div className="space-y-2">
+                <Label htmlFor="deploy-engine">
+                  {t("studio.deploy.engine.label")}
+                </Label>
+                <Select
+                  value={inferenceEngine}
+                  onValueChange={(v) => setInferenceEngine(v as "sync" | "rtc")}
+                >
+                  <SelectTrigger id="deploy-engine">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {/* Option VALUES ("sync" / "rtc") are what the backend
+                        parses — only the labels are translated. */}
+                    <SelectItem value="sync">
+                      {t("studio.deploy.engine.sync")}
+                    </SelectItem>
+                    {/* Disabled rather than hidden: a checkpoint that can't
+                        run RTC should say so, not silently offer one engine. */}
+                    <SelectItem value="rtc" disabled={!rtcAvailable}>
+                      {t("studio.deploy.engine.rtc")}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {inferenceEngine === "rtc"
+                    ? t("studio.deploy.engine.rtcHint")
+                    : t("studio.deploy.engine.syncHint")}
+                </p>
+                {rtcAvailable ? null : (
+                  <p className="text-xs text-muted-foreground">
+                    {t("studio.deploy.engine.rtcUnavailable")}
+                  </p>
+                )}
+              </div>
+            ) : runMode === "coach" ? (
+              <p className="text-xs text-muted-foreground">
+                {t("studio.deploy.engine.coachingNote")}
+              </p>
+            ) : null}
+
+            {/* Remote inference (DRTC) — the run form, the `modal run` line the
+                operator pastes into the other terminal, the transport read-out,
+                and the live telemetry. ONE mount point on purpose: everything
+                here rebases as a unit. Kept mounted while a run is live even if
+                the operator arms another verb, so a live arm is never without
+                its Stop — and the Collapsible above is forced open for the same
+                reason while `remoteActive`. */}
+            {runMode === "remote" ||
+            remoteActive ||
+            remoteStatus?.exited === true ? (
+              <RemoteInferenceBlock
+                armed={runMode === "remote"}
+                config={remoteConfig}
+                onConfigChange={setRemoteConfig}
+                hubIdDefault={selectedJob?.hf_repo_id ?? ""}
+                rtcSupported={rtcSupported}
+                // The GPU launch has no server-side twin of deployGuards'
+                // task check (the launcher knows a Hub id, not a policy
+                // type), so the panel gates Start GPU on the same fact.
+                taskRequired={!!policyConfig?.requires_task}
+                // The ceiling on the horizon, straight off the checkpoint.
+                checkpointHorizon={policyConfig?.n_action_steps ?? null}
+                // Only the roles nothing matched by name; an empty list renders
+                // no section at all.
+                cameraRoleSlots={cameraRoleSlots}
+                cameraRoleOptions={cameraRoleOptions}
+                cameraRoleNameMatched={
+                  cameraBindings.length - cameraRoleSlots.length
+                }
+                onCameraRoleChange={setRemoteCameraRole}
+                // The SAME string the start request sends, so the GPU side and
+                // the robot side steer the policy identically.
+                task={effectiveTask}
+                transportState={remoteTransport}
+                status={remoteStatus}
+                sessionId={remoteSessionId}
+                onStopped={() => setRemoteSessionId(null)}
+              />
+            ) : null}
+
+            {/* Cameras — literally Collect's list: the same component, the same
+                heading and sentence, the same cards, fed from the same place (the
+                selected robot's record). There is nothing to pick here because
+                nothing is picked: each camera the checkpoint was trained with
+                takes the robot camera of the SAME NAME (see cameraBindings), and
+                the only two ways that can go wrong are reported once, below. */}
+            <SessionCameraList
+              cameras={robotCameras}
+              paused={submitting || runActive}
+              emptyLabel={
+                robot
+                  ? t("studio.deploy.cameras.robotHasNone")
+                  : t("studio.deploy.cameras.noRobot")
+              }
+            />
+
+            {/* One alert for both failure modes, and only when there is one: a
+                camera the policy names that the robot hasn't got (blocks Start —
+                the rollout cannot invent the feed), and a name match whose
+                resolution differs from the checkpoint's (a warning: the run
+                captures at the policy's size regardless). */}
+            {shownUnmatchedCameras.length > 0 ||
+            shownMismatchedCameras.length > 0 ? (
+              <Alert
+                variant={
+                  shownUnmatchedCameras.length > 0 ? "destructive" : undefined
+                }
+                className={
+                  shownUnmatchedCameras.length > 0
+                    ? undefined
+                    : "border-warn/40 text-warn [&>svg]:text-warn"
+                }
+              >
+                <AlertTriangle className="h-4 w-4" />
+                <AlertDescription className="space-y-1">
+                  {shownUnmatchedCameras.map((b) => (
+                    <p key={b.mapping.requestKey}>
+                      {/* The camera NAME is data (it is the robot record's own
+                          key), so it rides in as a value and <0> only makes it
+                          bold.
+
+                          Remote runs get their own sentence: renaming a robot
+                          camera is the WRONG remedy there — the name on the
+                          record is that camera's identity, and the role picker
+                          above is the answer. */}
+                      <Trans
+                        i18nKey={
+                          runMode === "remote"
+                            ? "studio.deploy.cameras.unmatchedRemote"
+                            : "studio.deploy.cameras.unmatched"
+                        }
+                        values={{ name: b.mapping.display }}
+                        components={[<strong key="0" />]}
+                      />
+                    </p>
+                  ))}
+                  {/* `resolutionDiffers` is only ever true with both sides
+                      present; the guard is what tells the compiler so. */}
+                  {shownMismatchedCameras.map(({ mapping, camera, dims }) =>
+                    camera && dims ? (
+                      <p key={mapping.requestKey}>
+                        <Trans
+                          i18nKey="studio.deploy.cameras.resolutionMismatch"
+                          values={{
+                            name: camera.name,
+                            robotWidth: camera.width,
+                            robotHeight: camera.height,
+                            policyWidth: dims.width,
+                            policyHeight: dims.height,
+                          }}
+                          components={[<strong key="0" />]}
+                        />
+                      </p>
+                    ) : null,
+                  )}
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
+            {/* Advanced parameters — same AdvancedSection trigger and inner
+                eyebrow/label/help-text rhythm as the Train form's AdvancedCard,
+                so the two panels read as one form. ACT-only for now: temporal
+                ensembling is an ACT config field, so for every other policy type
+                the block has nothing to hold and stays hidden. ------------- */}
+            {/* Hidden for a remote run for the same reason it is hidden for a
+                non-ACT policy: there is no local rollout whose action selection
+                this could configure. */}
+            {isAct && runMode !== "remote" ? (
+              <AdvancedSection
+                open={advancedOpen}
+                onOpenChange={setAdvancedOpen}
+                summary={t("studio.deploy.advanced.summary")}
+              >
+                <div className="space-y-6">
+                  <section className="space-y-3">
+                    <h4 className={eyebrow}>
+                      {t("studio.deploy.advanced.actionSelection")}
+                    </h4>
+                    <div className="flex items-center gap-3">
+                      <Switch
+                        id="deploy-temporal-ensemble"
+                        checked={temporalEnsemble}
+                        onCheckedChange={setTemporalEnsemble}
+                        className="data-[state=checked]:bg-primary"
+                      />
+                      <Label htmlFor="deploy-temporal-ensemble">
+                        {t("studio.deploy.advanced.temporalEnsemble")}
+                      </Label>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {t("studio.deploy.advanced.temporalEnsembleHint")}
+                    </p>
+                    {temporalEnsemble ? (
+                      <div className="space-y-2">
+                        <Label htmlFor="deploy-temporal-ensemble-coeff">
+                          {t("studio.deploy.advanced.coeffLabel")}
+                        </Label>
+                        <NumberInput
+                          id="deploy-temporal-ensemble-coeff"
+                          integer={false}
+                          step="0.001"
+                          min={0}
+                          value={temporalEnsembleCoeff}
+                          onChange={setTemporalEnsembleCoeff}
+                          placeholder={t(
+                            "studio.deploy.advanced.coeffPlaceholder",
+                            { value: DEFAULT_TEMPORAL_ENSEMBLE_COEFF },
+                          )}
+                          aria-invalid={temporalEnsembleInvalid}
+                          className={cn(
+                            "w-40",
+                            temporalEnsembleInvalid && "border-destructive",
+                          )}
+                        />
+                        {temporalEnsembleInvalid ? (
+                          <p className="text-xs text-destructive">
+                            {t("studio.deploy.advanced.coeffInvalid")}
+                          </p>
+                        ) : (
                           <p className="text-xs text-muted-foreground">
-                            {t("studio.deploy.cameras.captures", {
-                              width: dims.width,
-                              height: dims.height,
+                            {t("studio.deploy.advanced.coeffHint", {
+                              value: DEFAULT_TEMPORAL_ENSEMBLE_COEFF,
                             })}
                           </p>
-                          {boundCamera &&
-                          (boundCamera.width !== dims.width ||
-                            boundCamera.height !== dims.height) ? (
-                            <p className="text-xs text-muted-foreground">
-                              {t("studio.deploy.cameras.mismatch", {
-                                name: boundCamera.name,
-                                width: boundCamera.width,
-                                height: boundCamera.height,
-                              })}
-                            </p>
-                          ) : null}
-                          {boundCamera && !connected ? (
-                            <p className="text-xs text-destructive">
-                              {t("studio.deploy.cameras.disconnected")}
-                            </p>
-                          ) : null}
-                        </div>
-                        <Select
-                          value={value ?? undefined}
-                          onValueChange={(v) => onCameraBindingChange(m.requestKey, v)}
-                        >
-                          <SelectTrigger className="w-52">
-                            <SelectValue
-                              placeholder={t("studio.deploy.cameras.select")}
-                            />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {robotCameras.length === 0 ? (
-                              <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                                {t("studio.deploy.cameras.robotHasNone")}
-                              </div>
-                            ) : (
-                              robotCameras.map((cam) => (
-                                <SelectItem key={cam.name} value={cam.name}>
-                                  {cam.name} — {cam.width}×{cam.height}
-                                </SelectItem>
-                              ))
-                            )}
-                          </SelectContent>
-                        </Select>
-                        <CameraThumbnail
-                          cameraIndex={
-                            boundCamera && connected
-                              ? resolveCameraIndex(boundCamera, availableCameras)
-                              : undefined
-                          }
-                          uniqueId={boundCamera?.unique_id}
-                          paused={submitting || inferenceActive}
-                        />
+                        )}
                       </div>
-                    );
-                  })}
+                    ) : null}
+                  </section>
                 </div>
-              )}
-          </FormSection>
-
-          {/* Advanced parameters — same AdvancedSection trigger and inner
-              eyebrow/label/help-text rhythm as the Train form's AdvancedCard,
-              so the two panels read as one form. ACT-only for now: temporal
-              ensembling is an ACT config field, so for every other policy type
-              the block has nothing to hold and stays hidden. ------------- */}
-          {isAct ? (
-            <AdvancedSection
-              open={advancedOpen}
-              onOpenChange={setAdvancedOpen}
-              summary={t("studio.deploy.advanced.summary")}
-            >
-              <div className="space-y-6">
-                <section className="space-y-3">
-                  <h4 className={eyebrow}>
-                    {t("studio.deploy.advanced.actionSelection")}
-                  </h4>
-                  <div className="flex items-center gap-3">
-                    <Switch
-                      id="deploy-temporal-ensemble"
-                      checked={temporalEnsemble}
-                      onCheckedChange={setTemporalEnsemble}
-                      className="data-[state=checked]:bg-primary"
-                    />
-                    <Label htmlFor="deploy-temporal-ensemble">
-                      {t("studio.deploy.advanced.temporalEnsemble")}
-                    </Label>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {t("studio.deploy.advanced.temporalEnsembleHint")}
-                  </p>
-                  {temporalEnsemble ? (
-                    <div className="space-y-2">
-                      <Label htmlFor="deploy-temporal-ensemble-coeff">
-                        {t("studio.deploy.advanced.coeffLabel")}
-                      </Label>
-                      <NumberInput
-                        id="deploy-temporal-ensemble-coeff"
-                        integer={false}
-                        step="0.001"
-                        min={0}
-                        value={temporalEnsembleCoeff}
-                        onChange={setTemporalEnsembleCoeff}
-                        placeholder={t(
-                          "studio.deploy.advanced.coeffPlaceholder",
-                          { value: DEFAULT_TEMPORAL_ENSEMBLE_COEFF },
-                        )}
-                        aria-invalid={temporalEnsembleInvalid}
-                        className={cn(
-                          "w-40",
-                          temporalEnsembleInvalid && "border-destructive",
-                        )}
-                      />
-                      {temporalEnsembleInvalid ? (
-                        <p className="text-xs text-destructive">
-                          {t("studio.deploy.advanced.coeffInvalid")}
-                        </p>
-                      ) : (
-                        <p className="text-xs text-muted-foreground">
-                          {t("studio.deploy.advanced.coeffHint", {
-                            value: DEFAULT_TEMPORAL_ENSEMBLE_COEFF,
-                          })}
-                        </p>
-                      )}
-                    </div>
-                  ) : null}
-                </section>
-              </div>
-            </AdvancedSection>
-          ) : null}
-        </div>
-      ) : null}
+              </AdvancedSection>
+            ) : null}
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
 
       {/* Deploy-started milestone — the effect above latches this true the
           first time the live InferenceSessionDialog closes after handleStart
@@ -1992,14 +2355,16 @@ const DeployPanel: React.FC = () => {
         />
       )}
 
-      {/* Actions — pinned directly above the skill library. Side by side so
-          the row sits level with Collect's and Train's single Start.
-          No Stop here: a live rollout owns the InferenceSessionDialog, which
-          is modal and carries its own Stop. A second stop control sitting on
-          a panel the operator cannot see during a run was dead weight the
-          rest of the time, and enabled only in the one state where it was
-          unreachable. -------------------------------------------------- */}
-      <div ref={actionsRef} className="mt-auto flex flex-col gap-2 pt-2">
+      {/* Actions — directly under the form at the panel's normal gap-5 rhythm;
+          the library below carries the column's stretch, so this row no longer
+          needs mt-auto.
+
+          The verbs ARE the actions: pressing one selects that run mode and
+          launches it in the same gesture, so there is nothing left in a
+          position to be wrong about. And no Stop beside them — see the note at
+          `selectedSkillLabel` for why the panel's own stop was dropped rather
+          than kept. ------------------------------------------------------- */}
+      <div ref={actionsRef} className="flex flex-col gap-2">
         <RunVerbs
           active={runMode}
           onArm={armRunMode}
@@ -2015,15 +2380,25 @@ const DeployPanel: React.FC = () => {
       </div>
 
       {/* Model / policy library — imported models + uploaded Hub repos.
-          Picking a card selects it as the skill above (step null → the
-          checkpoint loader falls back to the latest). mt-0 keeps it glued to
-          the actions block above, which carries the panel's mt-auto. */}
-      <LibrarySection className="mt-0">
+          Picking a card selects it as the skill in the form above (step null →
+          the checkpoint loader falls back to the latest). LibrarySection's own
+          stretch now stands (no mt-0 override): the opener and Start row
+          top-pack, the free space falls between them and this, and the library
+          sits at the column foot so its "Show all" footer lines up with
+          Collect's and Train's. Its body is a scrolling viewport, so expanding
+          scrolls inside it and the footer never moves. */}
+      <LibrarySection>
         <ModelsLibrary
+          open={libraryOpen}
+          onOpenChange={setLibraryOpen}
           onPick={(job, step) => {
             setPendingStep(step);
             setSelectedJob(job);
             setSelectedModelId(job.id);
+            // …and, like a prefill, slide the form open onto it: the skill a
+            // card selects is only configurable in there, so leaving the form
+            // shut would make the click look like it did nothing.
+            toggleForm(true);
           }}
         />
       </LibrarySection>

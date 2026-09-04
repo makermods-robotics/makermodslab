@@ -170,6 +170,40 @@ FOLLOWER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "follower_port.txt")
 # Robot config records (per-robot JSON metadata)
 ROBOTS_PATH = os.path.join(MAKERMODSLAB_HOME, "robots")
 
+# LiveKit CLOUD credentials for remote inference (makermodslab.drtc). A dotenv
+# file holding LIVEKIT_URL / LIVEKIT_ROOM / LIVEKIT_API_KEY / LIVEKIT_API_SECRET.
+# It lives beside the rest of our persistent state rather than in the package
+# so a wheel install and a source checkout read the same credentials, and so
+# `.env` never lands inside site-packages.
+#
+# It is the FALLBACK, not the primary path: when this process runs the bundled
+# SFU (`makermodslab --sfu`, see sfu.py) the session mints its own url, room
+# and token in-process and never reads this file. It is also the only file left
+# in the chain — the cwd `.env` / `.env.local` rungs and the `livekit.local.env`
+# override the retired tools/drtc scripts wrote are gone (S3.6), so the whole
+# precedence is now: process environment, then this file.
+DRTC_ENV_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/livekit.env")
+
+# Remote-inference session logs, one file per run (remote_inference._LOG_DIR
+# appends "sessions/"). The directory predates the bundled SFU, when the
+# retired tools/drtc scripts also logged livekit-server and cloudflared here.
+DRTC_LOG_DIR = os.path.expanduser("~/.cache/huggingface/lerobot/logs/drtc")
+
+# The Modal app the GPU launcher last started: {app_id, profile, started_at}.
+#
+# It exists because a Modal app OUTLIVES the local `modal run` client that
+# started it: the client tears the app down only on SIGINT (it disconnects from
+# its `except KeyboardInterrupt`), so a client that dies to SIGTERM/SIGKILL — a
+# uvicorn --reload restart, a Ctrl-C on the dev launcher, a hard kill — leaves
+# an A100 billing until Modal's own heartbeat timeout reaps it minutes later.
+# Recording the app id on disk is what lets a LATER process (this one after a
+# restart) run `modal app stop` for a client nobody can reach any more.
+#
+# Deliberately tiny and disposable: it names no credential, and losing it costs
+# at most one orphan reap. Written when the launcher first sees the app id in
+# the child's output, cleared once the app is confirmed stopped.
+DRTC_GPU_APP_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/drtc_gpu_app.json")
+
 # Staging root for bimanual (BiSO) sessions. lerobot's BiSO devices take ONE
 # calibration_dir + ONE base id and load each sub-arm as "<base>_left.json" /
 # "<base>_right.json" — there is no way to point left/right at differently named

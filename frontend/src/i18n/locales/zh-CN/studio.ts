@@ -122,17 +122,12 @@ export default {
       episodeSubsetOfTotal:
         "将使用 {{total}} 个回合中的 {{used}} 个进行训练 — 可在「我的库」中该数据集的查看器里调整。",
       choose: "选择数据集",
+      pick: "选择数据集",
       useHub: "使用 Hub 上的 <0>{{repoId}}</0>",
       useHubHint: "公开数据集 — 训练时按需拉取。",
       noMatches:
         "没有匹配的数据集。输入完整的 <0>org/name</0> id 即可使用任意公开的 Hugging Face 数据集。",
       hint: "你自己的数据集，或任意公开的 Hugging Face 数据集。",
-      row: {
-        episodes: "{{episodes}} 片段",
-        hub: "Hub",
-        weighted: "带权重",
-        weightedTitle: "该数据集带有按回合的采样权重，训练时部分回合会被更频繁地采样",
-      },
     },
     startingPoint: {
       label: "起点",
@@ -167,12 +162,15 @@ export default {
 
   deploy: {
     title: "运行",
+    entry: "运行策略",
+    policy: {
+      label: "策略 *",
+    },
     picker: {
       placeholder: "选择策略",
       loading: "正在加载策略…",
       empty: "还没有已训练或已导入的策略",
       error: "无法加载策略。请检查服务器后重试。",
-      failedBadge: "运行失败",
       hubDegraded: "无法连接 Hub — 正在显示本地策略和上次的 Hub 列表。",
       import: "导入策略",
     },
@@ -181,7 +179,8 @@ export default {
       local: "本地",
       both: "本地 · hub",
     },
-    intro: "在机器人上运行该策略，然后开始推理。",
+    // 运行表单的一句话说明，位置和语气与「训练」面板一致。
+    intro: "选择策略及其检查点，设置运行时长，检查摄像头 — 然后开始。",
     noRobot: "选择要运行的机器人 — 使用本窗口右上角的机器人菜单。",
     robotNotReady_other:
       "<0>{{name}}</0>{{gap}}。请先打开机器人设置，然后再运行推理。（推理只使用从臂 — 无需配置主臂。）",
@@ -204,6 +203,11 @@ export default {
         title: "给它打分",
         what: "反复执行该任务，由你为每次尝试评判，汇总为成功率。",
         commitment: "片段之间需要上手 — 由你复位现场并为每次尝试评分",
+      },
+      remote: {
+        title: "远程运行",
+        what: "机械臂在本机运行，策略在远程 GPU 上通过 LiveKit 房间运行。",
+        commitment: "需要在另一个终端里运行 GPU 侧",
       },
       coach: {
         title: "人在回路",
@@ -236,6 +240,8 @@ export default {
     checkpoint: {
       label: "检查点",
       none: "该策略暂无可用的检查点。",
+      // 未选择策略前，禁用状态下拉框里的占位文字。
+      pickPolicyFirst: "请先选择策略",
     },
     armMismatch: {
       bimanualCheckpoint:
@@ -247,6 +253,10 @@ export default {
       label: "任务描述",
       placeholder: "例如：拿起红色方块",
       hint: "该策略以语言为条件（{{policyType}}）。",
+      hintUnknown:
+        "只有以语言为条件的策略才会使用该字段 — 选择策略后即可确认。",
+      hintNotConditioned:
+        "该策略（{{policyType}}）不以语言为条件 — 会忽略该字段。",
       // 当任务描述是从该检查点自己的训练数据集自动填入时，追加在 hint 之后。
       // 前面的空格由调用方补上。
       prefilled: "已根据它训练所用的数据集自动填入。",
@@ -298,6 +308,13 @@ export default {
       disconnected: "已断开 — 请重新连接后再开始",
       select: "选择摄像头",
       robotHasNone: "该机器人没有摄像头 — 请在机器人设置中添加",
+      noRobot: "请选择机器人以查看其摄像头。",
+      unmatched:
+        "策略需要摄像头 <0>{{name}}</0>，但该机器人没有名为“{{name}}”的摄像头 — 请在机器人设置中重命名。",
+      unmatchedRemote:
+        "策略需要摄像头 <0>{{name}}</0>，该机器人没有同名摄像头 — 请在上方选择由哪个摄像头承担该角色。",
+      resolutionMismatch:
+        "<0>{{name}}</0> 在机器人设置中为 {{robotWidth}}×{{robotHeight}}，而策略是在 {{policyWidth}}×{{policyHeight}} 下训练的 — 运行时按策略的分辨率采集。",
     },
     thumbnail: {
       released: "已释放",
@@ -322,6 +339,8 @@ export default {
       // {{count}} 是片段数 / 纠正次数目标，是数字，因此没有复数形式。
       eval: "打分 · {{count}}",
       coach: "人在回路 · {{count}}",
+      // 远程运行只跑一次，和 `single` 一样，因此没有计数。
+      remote: "远程运行",
     },
     // 某个动词无法运行的原因；以键的形式提供，好让 deployGuards.ts 不含文案。
     blocked: {
@@ -335,6 +354,11 @@ export default {
       taskRequired: "请先描述任务 — 该策略以语言为条件。",
       leaderMissing: "指导需要一条主臂 — 请在机器人设置中补上它的端口和标定。",
       coachTaskRequired: "请先描述任务 — 它会随每次纠正一起保存。",
+      transportNotReady: "远程传输尚未就绪 — 请在下方的远程运行区块中检查。",
+      remoteArmUnsupported:
+        "远程运行目前仅支持单臂 SO-101。双臂配置和 CAN 机械臂尚不支持。",
+      remoteEngineUnsupported:
+        "实时分块只适用于流式策略。请把动作块引擎切换回“自适应同步”。",
     },
     actions: {
       start: "开始推理",

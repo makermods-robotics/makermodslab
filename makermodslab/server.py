@@ -38,7 +38,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub.errors import HfHubHTTPError
-from pydantic import BaseModel, Field, StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
@@ -51,9 +51,18 @@ from lerobot.policies.factory import make_policy_config
 # lookup at call time, not a bound name frozen at import).
 from . import (
     datasets as dataset_browser,
+    # The GPU half of a remote-inference run, as a LAB-LEVEL resource (S3.8):
+    # it shells out to the `modal` CLI, imports nothing from `drtc/`, and is
+    # deliberately not a session — see its module docstring.
+    modal_launcher,
     models as model_browser,
     record as record_state,
     remote_host,
+    # The ROBOT half of the same run. Imported as a module (beside the two
+    # handlers pulled in below) because `shutdown_event` calls
+    # `stop_for_shutdown` on it — the child holds an energized arm and does not
+    # die with this process.
+    remote_inference,
     remote_teleoperate,
     rollout as rollout_state,
     session_events,
@@ -146,6 +155,15 @@ from .record import (
     handle_upload_status,
     stop_and_wait as stop_recording_and_wait,
 )
+
+# Remote inference (DRTC). The module guards its own optional-extra imports
+# (aiohttp / dotenv / livekit.api / drtc._env are one try/except that degrades
+# to `_extra_missing()`), so importing it at server module scope cannot break a
+# no-extra install — and nothing under `makermodslab.drtc` is reached at boot.
+from .remote_inference import (
+    handle_remote_inference_status,
+    handle_remote_inference_transport,
+)
 from .replay import (
     ReplayRequest,
     handle_replay_status,
@@ -224,6 +242,11 @@ from .schemas.remote import (
 from .schemas.sessions import (
     CoachingCommandResponse,
     CurrentSessionResponse,
+    GpuLaunchResponse,
+    GpuStatusResponse,
+    GpuTargetsResponse,
+    RemoteInferenceStatusResponse,
+    RemoteInferenceTransportStatusResponse,
     SessionCoachingBody,
     SessionCoachingResponse,
     SessionHeartbeatBody,
@@ -1058,9 +1081,9 @@ def start_session(body: SessionStartBody):
     fields and cameras resolve server-side from the saved robot record, and
     `options` carries only the kind-specific fields (see schemas/sessions.py).
 
-    Startable kinds: teleoperation, recording, inference, replay,
-    calibration, auto_calibration. Only wiggle still starts through its
-    legacy flow endpoint (seconds of open-loop motion, no stop handler) —
+    Startable kinds: teleoperation, recording, inference, remote_inference,
+    replay, calibration, auto_calibration. Only wiggle still starts through
+    its legacy flow endpoint (seconds of open-loop motion, no stop handler) —
     the identity tracker observes it all the same. Calibration's mid-session
     wizard controls (complete-calibration-step, the status polls) stay on
     their existing endpoints, like recording's pause/rerecord.
@@ -1143,6 +1166,224 @@ def coaching_command(session_id: str, body: SessionCoachingBody):
     change commands whichever session happens to be current instead of failing.
     """
     return handle_coaching_command_for_session(session_id, body.command)
+
+
+# --- Remote inference (DRTC): status + transport (v1-only surface) ---
+#
+# No start/stop verbs live here: a remote-inference session starts through
+# POST /api/v1/sessions with kind "remote_inference" and stops through
+# /sessions/{id}/stop, like every other robot-driving kind. What is left is two
+# reads. The third route this group used to carry — clear-local-override —
+# retired with the shell SFU scripts in S3.6: the Lab hosts the SFU itself now
+# (--sfu), so there is no dotenv file outliving a script to delete.
+
+
+@v1_router.get(
+    "/remote-inference-status",
+    response_model=RemoteInferenceStatusResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_status():
+    """Live telemetry of the remote-inference session: phase, elapsed/duration,
+    the child's 1 Hz STATS sample, and the transport it actually resolved.
+
+    Poll at 1 Hz — the rate the child emits at. Metrics are deliberately NOT
+    pushed on the websocket: `holds` climbing and `degrade` mean the run is
+    losing quality and the operator's response is "stop it", which is not a
+    millisecond decision; and a droppable hint channel drops under queue
+    pressure, which is exactly when a run is in trouble. Only real transitions
+    ride `session_changed`.
+
+    `stats` is null until the first sample lands (and stays null for a run that
+    never connected); every key WITHIN a sample is always present, null where
+    unknown — a dropped or malformed line degrades to "no sample this second",
+    never to a half-populated one the UI would render as real. No exclusion
+    mode: those nulls are meaningful (see RemoteInferenceStats).
+
+    Pollable unconditionally: when idle it answers
+    `remote_inference_active=false` with null stats/transport, mirroring
+    /inference-status.
+    """
+    return handle_remote_inference_status()
+
+
+@v1_router.get(
+    "/remote-inference/transport",
+    response_model=RemoteInferenceTransportStatusResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_transport():
+    """What transport a remote-inference child would resolve RIGHT NOW, and
+    whether anything is answering on it. Read-only; touches no hardware and
+    starts nothing.
+
+    Two transports, one shape. When this process runs the Lab's own SFU
+    (`makermodslab --sfu`) the url, room and credentials come from sfu.py
+    in-process and livekit.env is never read; the `sfu_*` block then carries
+    what the panel needs for the GPU side's command line — including the key
+    NAME and the file the secret lives in, never the secret. Otherwise the
+    LiveKit Cloud credentials are resolved through `drtc._env.read_env()`,
+    never `load_env()`: load_env writes os.environ, and a server that has
+    stamped a url into its own environment can never re-resolve it.
+
+    `endpoint_reachable` / `operator_present` come from one `list_participants`
+    call behind remote_inference._probe_room, bounded at 3s, and are null when
+    that probe did not run at all. A missing [drtc] extra is REPORTED here
+    rather than raised: the panel's job is to tell the user what to install,
+    and the install command must name the PRIMARY CHECKOUT — an editable
+    install run from a worktree silently re-points every other session's
+    makermodslab.
+
+    Deliberately NOT refused while a session is live. Unlike
+    /arms/release-torque this reads dotenv files and asks the SFU who is in a
+    room; it touches nothing the running child owns, and a live child already
+    pinned its transport at spawn (READY echoes the effective values).
+    """
+    return handle_remote_inference_transport()
+
+
+# --- Remote inference: the GPU half (modal_launcher.py, v1-only surface) ---
+#
+# A LAB-LEVEL RESOURCE, not a session, and that is the whole design decision of
+# S3.8 (docs/drtc/SLICE3.md "S3.8 as built"). The GPU holds no hardware, so:
+# these are their own verbs rather than a `launch_gpu` field on
+# `RemoteInferenceOptions` — that would hold `robot.busy.remote_inference` for
+# the 1-3 minute cold start while the arm sat completely free; stopping a
+# session does NOT stop the GPU (a lease expiry is a safety stop whose one job
+# is de-energizing an arm, and it must not grow a network call); and the GPU
+# reaching `ready` does NOT gate the arm — `_probe_room` still does, because it
+# observes the room rather than a log line.
+
+
+class GpuStartBody(BaseModel):
+    """The GPU side of the remote-run form. Field-for-field the subset of
+    `RemoteInferenceOptions` the container needs, with the same defaults: the
+    two halves are launched from one object precisely so horizon / fps / codec
+    / s_min cannot disagree (Portal fingerprints the wire schema and drops a
+    mismatched stream in silence).
+
+    `extra="forbid"` like every options model — a typo'd knob is a loud 422,
+    never a silently ignored one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    engine: Literal["sync", "rtc"] = "sync"
+    # Required in practice: `--policy-path` has no default in either wrapper,
+    # so an empty one is refused (gpu.launch_failed) BEFORE the spawn rather
+    # than arriving as a Click usage error 90s into a cold-start log.
+    policy_hub_id: str = ""
+    task: str = ""
+    horizon: int = 16
+    fps: int = 30
+    video_codec: Literal["H264", "MJPEG"] = "H264"
+    s_min: int = 4
+    # WHICH WORKSPACE PAYS. Both optional, and empty means exactly what S3.8
+    # did: the `modal` CLI resolves the profile and the environment itself
+    # (MODAL_ENVIRONMENT, then the active local profile, then the workspace
+    # default). A client that never sends them sees no change.
+    #
+    # Free-form strings rather than a Literal because the valid set is THIS
+    # MACHINE's, read from the CLI at request time — see
+    # GET /remote-inference/gpu/targets. Unknown values are refused there and
+    # again in `modal_launcher.check_target`, before anything is spawned.
+    profile: str = ""
+    environment: str = ""
+
+
+@v1_router.get(
+    "/remote-inference/gpu/targets",
+    response_model=GpuTargetsResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_gpu_targets(profile: str = ""):
+    """This machine's Modal profiles, and one profile's environments.
+
+    What the two pickers above Start GPU are built from, so a launch can be
+    billed to a chosen workspace WITHOUT `modal profile activate` — that
+    rewrites ~/.modal.toml, which every other terminal on this machine shares,
+    and a web request has no business doing that. The profile rides the child's
+    MODAL_PROFILE instead, and the environment rides `modal run --env`.
+
+    `profile` picks whose environments to list (empty: the active one), because
+    `modal environment list` only ever describes one profile's workspace.
+
+    Read-only and never 500: two bounded `modal … list --json` subprocesses, no
+    mutating subcommand, and ~/.modal.toml — which holds every profile's
+    token_id and token_secret — is never opened. A missing CLI, an expired
+    token or a listing this build cannot parse come back as a coded `error` in
+    the body, because a failed listing is not a failed launch: with no selection
+    the CLI still resolves the target on its own."""
+    return modal_launcher.list_targets(profile)
+
+
+@v1_router.post(
+    "/remote-inference/gpu/start",
+    response_model=GpuLaunchResponse,
+    tags=["sessions"],
+)
+def start_remote_inference_gpu(body: GpuStartBody):
+    """Launch the policy server on Modal, attached, from this machine.
+
+    Attached on purpose (no `--detach`): the local `modal run` process is the
+    app's lifeline, so stopping it stops the app — which is the cost-safety
+    property, and it means the GPU dies with the Lab. Detached would buy
+    "survives a restart" in exchange for orphaned A100s nobody knows about.
+
+    The API secret is NEVER in the command line: both wrappers' `main()` falls
+    back to LIVEKIT_API_KEY / LIVEKIT_API_SECRET from the environment, and the
+    launcher passes them there instead of in argv, which is world-readable in
+    `ps` on this machine.
+
+    Deliberately NOT refused while a local training run holds this machine: a
+    Modal A100 is not this machine's GPU.
+    """
+    return modal_launcher.start(
+        engine=body.engine,
+        policy_hub_id=body.policy_hub_id,
+        task=body.task,
+        horizon=body.horizon,
+        fps=body.fps,
+        video_codec=body.video_codec,
+        s_min=body.s_min,
+        profile=body.profile,
+        environment=body.environment,
+    )
+
+
+@v1_router.post(
+    "/remote-inference/gpu/stop",
+    response_model=GpuStatusResponse,
+    tags=["sessions"],
+)
+def stop_remote_inference_gpu():
+    """Stop the GPU policy server (SIGTERM→SIGKILL over its process group).
+
+    Returns while the group is still going down, in state `stopping`; the
+    launcher's own stdout pump lands it in `idle`. 409 `gpu.not_running` when
+    there is nothing to stop. Never touches the arm — a live remote-inference
+    session keeps running and its watchdogs report the empty room, which is a
+    better diagnosis than a stop the user did not ask for."""
+    return modal_launcher.stop()
+
+
+@v1_router.get(
+    "/remote-inference/gpu",
+    response_model=GpuStatusResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_gpu():
+    """The GPU launcher's state: idle | starting | ready | failed | stopping,
+    plus the container's own phase, the room it was pinned to, the log path and
+    the idle auto-stop countdown.
+
+    Pollable unconditionally, and a poll is also one of the two things (with
+    the log pump) that can notice a cold start that overran or a ready GPU
+    nobody is using — neither deadline needs a thread of its own.
+
+    `state == "ready"` is a HINT derived from the container's stdout, never the
+    authority: the gate on energizing the arm stays the session's own room
+    probe."""
+    return modal_launcher.status()
 
 
 @router.get("/health", response_model=HealthResponse, tags=["system"])
@@ -3254,9 +3495,11 @@ def get_checkpoint_policy_config(job_id: str, step: int):
     """Return the UX-relevant slice of a checkpoint's pretrained_model config:
     policy_type, image_features (per-camera height/width), requires_task, the
     flat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference
-    modal uses to flag a single-arm/bimanual mismatch, and trained_on_robot_type
-    (the arm the checkpoint was trained on, for the fine-tune panel's cross-arm
-    warning; null when it can't be established)."""
+    modal uses to flag a single-arm/bimanual mismatch, the n_action_steps /
+    chunk_size geometry (n_action_steps is the ceiling on a remote-inference
+    horizon), and trained_on_robot_type (the arm the checkpoint was trained on,
+    for the fine-tune panel's cross-arm warning; null when it can't be
+    established)."""
     try:
         return job_registry.get_policy_config_summary(job_id, step)
     except JobNotFoundError as exc:
@@ -4725,6 +4968,13 @@ def migrate_state_home():
 def startup_event():
     """One-time startup diagnostics surfaced in the server terminal."""
     warn_if_cuda_mismatch()
+    # A Modal app OUTLIVES the `modal run` client that started it (the client
+    # only tells Modal to stop on SIGINT), so a Lab that was hard-killed —
+    # SIGKILL, a crash, a power cut — can leave an A100 billing with nobody
+    # attached. If the last run left an app id on disk and nothing is running
+    # here, stop it. On a background thread, best-effort, and it never blocks
+    # or refuses a launch; what it did shows up as the idle status's message.
+    modal_launcher.reap_orphan_app_async()
 
 
 @app.on_event("startup")
@@ -4774,6 +5024,30 @@ async def shutdown_event():
     # reload that this same process survives.
     job_registry.shutdown()
 
+    # THEN the GPU, before anything else here spends its (bounded but real)
+    # time, because this is the one child that is BILLED BY THE MINUTE and the
+    # one whose death has to be a specific signal. `modal run` tears its app
+    # down from `except KeyboardInterrupt` and nowhere else, so the client has
+    # to receive a SIGINT and be given a moment to make that call; if this
+    # process leaves first — a uvicorn --reload restart on any save under
+    # makermodslab/, a Ctrl-C on the dev launcher, a `makermodslab --stop` —
+    # the client is orphaned or killed and a Modal A100 keeps running for the
+    # 5-7 minutes Modal's own heartbeat timeout takes to notice.
+    #
+    # Synchronous (in a thread) rather than fire-and-forget, for the same
+    # reason: a stop that outlives the process it runs in is not a stop. It
+    # costs ~2s when a GPU is up and returns immediately when none is.
+    #
+    # Ahead of the arm stops below on purpose. A remote run whose policy
+    # vanishes for the second or two this takes is a robot side that stops
+    # receiving actions and holds — and it is being stopped moments later
+    # anyway, by the same handler, with its own return-to-rest.
+    try:
+        if await asyncio.to_thread(modal_launcher.stop_for_shutdown):
+            logger.info("Stopped the GPU policy server on shutdown")
+    except Exception:
+        logger.exception("Failed to stop the GPU policy server during shutdown")
+
     # Stop the AVFoundation pump first so its next tick can't interleave with
     # shutdown (and so --reload restarts don't log a destroyed-pending-task).
     if _avf_pump_task is not None:
@@ -4796,6 +5070,18 @@ async def shutdown_event():
     # ever has real work — gathered concurrently anyway, both because it's
     # cheap and as a defensive measure if that invariant is ever violated,
     # rather than paying each stop's worst case one after another.
+    #
+    # REMOTE INFERENCE belongs here rather than beside the GPU stop above, and
+    # it is the sharpest case on the list: its child is spawned with
+    # `start_new_session=True`, so the SIGTERM/SIGINT that ends this worker
+    # never reaches it, and it ignores stdin EOF by design — `STOP` on that
+    # stdin is the ONLY thing that makes it return the arm before releasing
+    # torque. It is deliberately AFTER the GPU stop (which has already
+    # completed above, awaited, so the two never overlap): the child losing its
+    # policy for a second is a robot side that stops receiving actions and
+    # holds, which is exactly the state a return-to-rest wants to start from,
+    # whereas stopping the arm first would leave a GPU billing while we waited
+    # out its return.
     results = await asyncio.gather(
         asyncio.to_thread(stop_teleoperation_and_wait),
         asyncio.to_thread(stop_recording_and_wait),
@@ -4803,6 +5089,7 @@ async def shutdown_event():
         asyncio.to_thread(auto_calibration_batch_manager.stop_and_wait),
         asyncio.to_thread(handle_stop_inference),
         asyncio.to_thread(stop_replay_and_wait),
+        asyncio.to_thread(remote_inference.stop_for_shutdown),
         return_exceptions=True,
     )
     labels = (
@@ -4812,6 +5099,7 @@ async def shutdown_event():
         "auto-calibration batch",
         "inference",
         "replay",
+        "remote inference",
     )
     for label, result in zip(labels, results, strict=True):
         if isinstance(result, Exception):

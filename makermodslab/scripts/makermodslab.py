@@ -24,7 +24,9 @@ and starts uvicorn with --reload. Opens the browser to :8080.
 --sfu (either mode): also runs a LiveKit SFU (`livekit-server`, from PATH)
 alongside, bound where the API is bound, and hands the app the key file so
 /api/v1/sfu/token can sign room tokens. The launcher — not the app — owns
-that child: uvicorn --reload restarts the app process on every save.
+that child: uvicorn --reload restarts the app process on every save. In --dev
+mode --bind is honoured for the SFU ALONE (Vite and uvicorn stay on
+localhost), because a remote peer has to reach its signalling port.
 """
 
 import argparse
@@ -55,6 +57,16 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 FRONTEND_PATH = PROJECT_ROOT / "frontend"
 FRONTEND_DIST = FRONTEND_PATH / "dist"
 FRONTEND_PACKAGE_JSON = FRONTEND_PATH / "package.json"
+FRONTEND_LOCKFILE = FRONTEND_PATH / "package-lock.json"
+# npm writes this at the END of every successful install; it is the only
+# on-disk record that node_modules reflects the lockfile.
+FRONTEND_INSTALLED_LOCKFILE = FRONTEND_PATH / "node_modules" / ".package-lock.json"
+# `--no-audit` / `--no-fund`: a warm install's two registry round trips that
+# install nothing — and the audit POST is the one that hung a `--dev` start
+# for minutes on 2026-09-03 (npm's per-request timeout is 5 min, x3 with
+# retries) with a complete node_modules on disk. `--prefer-offline` serves
+# whatever the cache already holds without a freshness check.
+NPM_INSTALL_ARGS = ("npm", "install", "--no-audit", "--no-fund", "--prefer-offline")
 BACKEND_PORT = 8000
 FRONTEND_DEV_PORT = 8080
 ENTRY_POINT_NAMES = ("makermodslab", "makermodslab-station")
@@ -275,13 +287,52 @@ def _find_makermodslab_pids() -> tuple[dict[int, str], dict[int, tuple[int, str]
     return kill_targets, strangers
 
 
-def _terminate_tree(pid: int, timeout: int = 5) -> None:
-    """Terminate a process and every descendant.
+# How long the LEADER of a tree gets to take its own descendants down before
+# we start signalling them ourselves.
+#
+# It exists for exactly one grandchild: the `modal run` client under the
+# backend. That client stops its Modal app only when it receives SIGINT, and
+# the app's own process is on a GPU somebody is paying for — so the app's fate
+# is decided inside the backend's shutdown handler
+# (`modal_launcher.stop_for_shutdown`), not by a signal from here. SIGTERMing
+# the whole tree at once, which is what this function used to do, killed the
+# client BEFORE the handler could reach it and left an A100 billing for
+# minutes. Signalling the leader alone and waiting is what gives the handler
+# its chance.
+#
+# 10s covers the handler's realistic cost (a SIGINT teardown of the GPU client
+# is ~2s, bounded at 5s, plus uvicorn's own bounded graceful shutdown) with
+# margin, and costs NOTHING in the common case: the wait returns as soon as the
+# tree is gone, which for a Lab with no GPU running is immediate.
+# 22 s, not 10: the worker's own shutdown can legitimately take that long
+# — the GPU stop is bounded at 5 s, a remote-inference return-to-rest at
+# 15 s, uvicorn's own drain ~1-2 s — and a grace shorter than the sum
+# SIGTERMs the tree (the DRTC child included: it escapes the process
+# GROUP, not the psutil parent walk) mid-return, which is exactly the
+# torque-on cut-off the ordered shutdown exists to prevent. `wait_procs`
+# returns the moment the tree is gone, so a healthy shutdown never pays
+# this; only a wedged backend takes 22 s instead of 10 s to be force-killed.
+_LEADER_GRACE_S = 22.0
+
+
+def _terminate_tree(pid: int, timeout: int = 5, grace: float = _LEADER_GRACE_S) -> None:
+    """Terminate a process and every descendant, leader first.
 
     Dev mode's children are themselves process trees (npm -> node -> vite, and
     uvicorn --reload -> reloader -> worker). Signalling only the direct child
-    leaves grandchildren orphaned still holding :8000/:8080, so walk the whole
-    tree: terminate → wait → kill any survivors.
+    leaves grandchildren orphaned still holding :8000/:8080, so the whole tree
+    is walked — but in TWO steps, because some grandchildren need their parent
+    to shut them down rather than a signal from here (see `_LEADER_GRACE_S`):
+
+      1. terminate the leader alone and wait up to `grace` for the tree to go
+         quiet by itself. A well-behaved leader (uvicorn, npm) takes its own
+         children with it, and this returns as soon as it has.
+      2. whatever is still alive gets the old treatment: terminate → wait →
+         kill any survivors. Ports never stay held because a child ignored
+         its parent.
+
+    The descendant list is snapshotted BEFORE step 1: once the leader exits,
+    an orphaned grandchild is no longer reachable through it.
     """
     try:
         parent = psutil.Process(pid)
@@ -289,6 +340,12 @@ def _terminate_tree(pid: int, timeout: int = 5) -> None:
         return
     procs = parent.children(recursive=True)
     procs.append(parent)
+    with contextlib.suppress(psutil.NoSuchProcess):
+        parent.terminate()
+    if grace > 0:
+        _gone, alive = psutil.wait_procs(procs, timeout=grace)
+        if not alive:
+            return
     for proc in procs:
         with contextlib.suppress(psutil.NoSuchProcess):
             proc.terminate()
@@ -325,6 +382,11 @@ def _run_stop() -> None:
         return
     for pid, reason in kill_targets.items():
         logger.info("🛑 Stopping pid %d (%s)...", pid, reason)
+        # With the leader grace, so `--stop` behaves exactly like a Ctrl-C:
+        # the app (or the reload supervisor above it) gets to run its own
+        # shutdown handler, which is the only thing that stops a Modal GPU app
+        # properly. livekit-server exits on SIGTERM at once, so it pays nothing
+        # for the wait.
         _terminate_tree(pid)
     logger.info("✅ MakerMods Lab stopped.")
 
@@ -370,7 +432,7 @@ def _require_livekit_server() -> str:
     sys.exit(1)
 
 
-def _start_sfu(binary: str, host: str) -> subprocess.Popen:
+def _start_sfu(binary: str, host: str, external_ip: bool = False) -> subprocess.Popen:
     """Spawn livekit-server bound like the API, wait for its signalling port,
     and export the app-side settings (key file + port) into THIS process's
     environment — which both the prod uvicorn (same process) and the dev
@@ -380,12 +442,18 @@ def _start_sfu(binary: str, host: str) -> subprocess.Popen:
     `makermodslab --stop` hint rather than a livekit bind error. The child
     gets its own session so Ctrl+C reaches it through _terminate_tree and
     never as a stray SIGINT that races our own shutdown.
+
+    `external_ip` (--sfu-external-ip) is passed straight to
+    `sfu.render_config`, and exported so the app can REPORT it: a Modal
+    container reaches the signalling URL over the tailnet but has to
+    hole-punch for media, and only the STUN-discovered public candidate that
+    flag turns on is punchable from there.
     """
     for name, port in (("SFU signalling", sfu.SFU_HTTP_PORT), ("SFU ICE/TCP", sfu.SFU_TCP_PORT)):
         _ensure_port_available(name, port, host)
     key_file = LIVEKIT_KEY_FILE
     load_or_create_livekit_keys(key_file)
-    config_text = sfu.render_config(bind_host=host, key_file=key_file)
+    config_text = sfu.render_config(bind_host=host, key_file=key_file, external_ip=external_ip)
     Path(LIVEKIT_CONFIG_FILE).parent.mkdir(parents=True, exist_ok=True)
     Path(LIVEKIT_CONFIG_FILE).write_text(config_text)
 
@@ -403,9 +471,13 @@ def _start_sfu(binary: str, host: str) -> subprocess.Popen:
         sys.exit(1)
     os.environ[sfu.ENV_KEY_FILE] = key_file
     os.environ[sfu.ENV_PORT] = str(sfu.SFU_HTTP_PORT)
-    # In-process participants (a hosting session) dial the SFU on the bind
-    # host; the wildcard bind is reachable on loopback.
+    # Participants on this machine (a hosting session's in-process worker, the
+    # remote-inference child) dial the SFU on the bind host; the wildcard bind
+    # is reachable on loopback.
     os.environ[sfu.ENV_HOST] = "127.0.0.1" if host == "0.0.0.0" else host  # noqa: S104
+    os.environ[sfu.ENV_EXTERNAL_IP] = "1" if external_ip else "0"
+    if external_ip:
+        logger.info("   SFU advertising its STUN-discovered public IP (--sfu-external-ip)")
     logger.info(
         "   SFU ports: %d/tcp (signalling), %d/tcp + %d/udp (media) — open these for remote peers",
         sfu.SFU_HTTP_PORT,
@@ -447,6 +519,7 @@ def _run_prod(
     no_ui: bool = False,
     host: str | None = None,
     sfu_bin: str | None = None,
+    sfu_external_ip: bool = False,
 ):
     """Serve built frontend from backend on a single port.
 
@@ -466,7 +539,7 @@ def _run_prod(
     if host is None:
         host = "0.0.0.0" if lan else "127.0.0.1"  # noqa: S104  # nosec B104 — binds all interfaces only behind the explicit --lan opt-in; loopback otherwise
     _ensure_port_available("Backend", BACKEND_PORT, host)
-    sfu_proc = _start_sfu(sfu_bin, host) if sfu_bin else None
+    sfu_proc = _start_sfu(sfu_bin, host, sfu_external_ip) if sfu_bin else None
     if host == "127.0.0.1":
         logger.info("🚀 Starting MakerMods Lab on http://localhost:%d ...", BACKEND_PORT)
         if not no_ui:
@@ -531,8 +604,48 @@ def _run_prod(
             logger.info("  ✅ LiveKit SFU stopped")
 
 
-def _run_dev(sfu_bin: str | None = None):
-    """Vite dev server (HMR) + uvicorn --reload (+ the LiveKit SFU with --sfu)."""
+def _frontend_deps_current(frontend_path: Path = FRONTEND_PATH) -> bool:
+    """True when node_modules already reflects the lockfile, so `npm install`
+    has nothing to do.
+
+    The signal is npm's own: it rewrites `node_modules/.package-lock.json` as
+    the last step of every successful install, so that file being newer than
+    both `package.json` and `package-lock.json` means nothing has changed
+    since the tree was last installed. Anything that touches either manifest
+    — an edit, a merge, a checkout of another branch — bumps its mtime past
+    the marker and the install runs again. A missing marker (fresh clone,
+    deleted node_modules, an install that died midway) always installs.
+
+    Deliberately an mtime check and not a content one: the marker holds only
+    the INSTALLED subset (platform-specific optional deps are absent by
+    design), so a package-set comparison would report "stale" forever on
+    macOS. mtime is what npm itself uses to decide the tree is warm.
+    """
+    marker = frontend_path / "node_modules" / ".package-lock.json"
+    try:
+        stamp = marker.stat().st_mtime
+        for name in ("package.json", "package-lock.json"):
+            if (frontend_path / name).stat().st_mtime > stamp:
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def _run_dev(
+    sfu_bin: str | None = None,
+    sfu_external_ip: bool = False,
+    sfu_host: str = "127.0.0.1",
+):
+    """Vite dev server (HMR) + uvicorn --reload (+ the LiveKit SFU with --sfu).
+
+    `sfu_host` is the ONE thing `--bind` still means in dev mode. Vite and
+    uvicorn stay on loopback — Vite serves localhost only — but the SFU is not
+    a web server for this browser: a remote peer (a Modal container) has to
+    reach its SIGNALLING port, and a loopback bind makes a dev session
+    LiveKit-Cloud-only. So `--bind` is honoured for the SFU alone, and defaults
+    to loopback like everything else here.
+    """
     # --dev needs the frontend *source* (Vite config, package.json), which
     # only exists in a git checkout. A non-editable `uv tool install`
     # resolves PROJECT_ROOT into site-packages, where the shipped wheel has
@@ -550,8 +663,11 @@ def _run_dev(sfu_bin: str | None = None):
     _ensure_port_available("Frontend", FRONTEND_DEV_PORT)
     _ensure_port_available("Backend", BACKEND_PORT)
 
-    logger.info("📦 Installing frontend deps...")
-    subprocess.run(["npm", "install"], check=True, cwd=FRONTEND_PATH)
+    if _frontend_deps_current():
+        logger.info("📦 Frontend deps are current — skipping npm install.")
+    else:
+        logger.info("📦 Installing frontend deps...")
+        subprocess.run(list(NPM_INSTALL_ARGS), check=True, cwd=FRONTEND_PATH)
 
     logger.info("🎨 Starting Vite dev server (port %d)...", FRONTEND_DEV_PORT)
     frontend_process = subprocess.Popen(
@@ -564,7 +680,10 @@ def _run_dev(sfu_bin: str | None = None):
 
     if not _wait_for_port(FRONTEND_DEV_PORT):
         logger.error("❌ Frontend never came up")
-        _terminate_tree(frontend_process.pid)
+        # No leader grace here or below: `npm run dev` routinely leaves vite
+        # behind rather than taking it down, and nothing under it needs a
+        # shutdown handler of its own.
+        _terminate_tree(frontend_process.pid, grace=0.0)
         sys.exit(1)
 
     # Before the backend spawn: _start_sfu exports the app-side env the
@@ -572,9 +691,9 @@ def _run_dev(sfu_bin: str | None = None):
     children: list[tuple[str, subprocess.Popen]] = [("frontend", frontend_process)]
     if sfu_bin:
         try:
-            children.insert(0, ("sfu", _start_sfu(sfu_bin, "127.0.0.1")))
+            children.insert(0, ("sfu", _start_sfu(sfu_bin, sfu_host, sfu_external_ip)))
         except SystemExit:
-            _terminate_tree(frontend_process.pid)
+            _terminate_tree(frontend_process.pid, grace=0.0)
             raise
 
     logger.info("🚀 Starting backend (port %d) with --reload...", BACKEND_PORT)
@@ -610,15 +729,23 @@ def _run_dev(sfu_bin: str | None = None):
     logger.info("   Frontend: http://localhost:%d", FRONTEND_DEV_PORT)
     logger.info("   Backend:  http://localhost:%d", BACKEND_PORT)
     if sfu_bin:
-        logger.info("   SFU:      ws://localhost:%d", sfu.SFU_HTTP_PORT)
+        logger.info("   SFU:      ws://%s:%d", sfu.public_host(sfu_host), sfu.SFU_HTTP_PORT)
 
     def shutdown(signum, frame):
         logger.info("🛑 Shutting down...")
         # Walk each child's whole process tree (npm -> node -> vite, uvicorn
         # --reload -> reloader -> worker) so no grandchild outlives Ctrl+C and
         # keeps holding :8000/:8080 (or :7880).
+        #
+        # The backend goes FIRST (it is `children[0]`) and with the leader
+        # grace, because its own shutdown handler is the only thing that can
+        # stop a Modal GPU app properly — a SIGTERM straight to the `modal run`
+        # grandchild leaves an A100 billing (see `_LEADER_GRACE_S`). The
+        # frontend gets no grace: `npm run dev` routinely leaves vite behind
+        # rather than taking it with it, so waiting on that tree would add ten
+        # seconds to every Ctrl-C and change nothing.
         for name, p in children:
-            _terminate_tree(p.pid)
+            _terminate_tree(p.pid, grace=0.0 if name == "frontend" else _LEADER_GRACE_S)
             logger.info(f"  ✅ {name} stopped")
         sys.exit(0)
 
@@ -684,6 +811,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--sfu-external-ip",
+        action="store_true",
+        help=(
+            "With --sfu: let the SFU STUN-discover this machine's public IP and advertise it as "
+            "an ICE candidate, instead of pinning the bound address. Needed for a peer with no "
+            "route to the bound address (a Modal container reaching the signalling URL over the "
+            "tailnet but hole-punching for media); needs UDP 7882 reachable here"
+        ),
+    )
+    parser.add_argument(
         "--host",
         nargs="?",
         const="",
@@ -723,6 +860,8 @@ def main():
     # Same fail-fast rule as --bind: a missing livekit-server is a one-line
     # exit before anything starts, never a half-started stack.
     sfu_bin = _require_livekit_server() if args.sfu else None
+    if args.sfu_external_ip and not args.sfu:
+        logger.warning("--sfu-external-ip does nothing without --sfu")
     if args.host is not None:
         if not args.sfu and not os.environ.get(sfu.ENV_URL):
             logger.error(
@@ -761,10 +900,21 @@ def main():
         if args.lan:
             logger.warning("--lan is ignored in --dev mode (Vite serves localhost only)")
         if args.bind:
-            logger.warning("--bind is ignored in --dev mode (Vite serves localhost only)")
-        _run_dev(sfu_bin=sfu_bin)
+            logger.warning("--bind applies to the SFU only in --dev mode (Vite and uvicorn serve localhost)")
+        _run_dev(
+            sfu_bin=sfu_bin,
+            sfu_external_ip=args.sfu_external_ip,
+            # `bind_host` is None unless --bind was given and resolved.
+            sfu_host=bind_host or "127.0.0.1",
+        )
     else:
-        _run_prod(lan=args.lan, no_ui=args.no_ui, host=bind_host, sfu_bin=sfu_bin)
+        _run_prod(
+            lan=args.lan,
+            no_ui=args.no_ui,
+            host=bind_host,
+            sfu_bin=sfu_bin,
+            sfu_external_ip=args.sfu_external_ip,
+        )
 
 
 def station():

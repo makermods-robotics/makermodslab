@@ -109,6 +109,71 @@ def classify_outcome(work_completed: bool, error_text: str | None) -> str:
     return "ran_with_warning" if work_completed else "failed"
 
 
+# The remedy for each `transport.*` refusal (see api_errors.ErrorCode), as
+# prose the preflight appends to its message. Kept here, beside friendly_hint,
+# because it is the same job — a plain-language, actionable headline — and
+# because it must stay PURE: the one branch that depends on the machine's state
+# (is the Lab's own SFU the transport?) is passed IN rather than read here, so
+# the wording is unit-testable without touching the filesystem.
+_TRANSPORT_ENV_FILE = "~/.cache/huggingface/lerobot/livekit.env"
+
+
+def transport_hint(code: str, *, sfu: bool = False, room: str = "") -> str:
+    """What to do about a `transport.*` refusal. Always a non-empty sentence.
+
+    `sfu` is whether the transport in force is the Lab's OWN SFU
+    (`makermodslab --sfu`) rather than LiveKit Cloud. The two have disjoint
+    remedies — one is a process on this machine, the other a file of
+    credentials — and an "unreachable" that does not say which sends the
+    operator to check their internet connection when the answer was a flag
+    they did not pass.
+    """
+    code = str(code)
+    if code.endswith("extra_missing"):
+        # Never "run this here": an editable install re-points the shared venv
+        # at whatever directory it is run from, so a worktree install silently
+        # breaks every other session's `makermodslab`.
+        return (
+            "Install it from the PRIMARY checkout (never a git worktree — an editable install "
+            "re-points the shared virtualenv at whatever directory it runs from): "
+            "uv pip install -e '.[drtc]'"
+        )
+    if code.endswith("not_configured"):
+        return (
+            f"Put LIVEKIT_URL, LIVEKIT_ROOM, LIVEKIT_API_KEY and LIVEKIT_API_SECRET in "
+            f"{_TRANSPORT_ENV_FILE} (see docs/drtc/livekit.env.example)."
+        )
+    if code.endswith("unreachable"):
+        if sfu:
+            return (
+                "The Lab's SFU isn't answering — was the Lab started with `--sfu`? It runs as a "
+                "child of the launcher, so it stops with the Lab and a reload does not bring it "
+                "back on its own."
+            )
+        return (
+            "Check the URL and this machine's network. If the address should be a LiveKit Cloud "
+            f"project, check LIVEKIT_URL in {_TRANSPORT_ENV_FILE}; if it should be a local SFU, "
+            "start the Lab with `makermodslab --sfu` and it will mint its own."
+        )
+    if code.endswith("unauthorized"):
+        return (
+            f"LIVEKIT_API_KEY and LIVEKIT_API_SECRET in {_TRANSPORT_ENV_FILE} must be the pair "
+            "the LiveKit Cloud project issued. (Under the Lab's own SFU nothing reads that file: "
+            "the key pair is minted once into ~/.cache/huggingface/lerobot/livekit_keys.yaml and "
+            "the server signs with it directly.)"
+        )
+    if code.endswith("no_policy"):
+        where = f" '{room}'" if room else ""
+        return (
+            f"Three things do this: the GPU side was never started (modal run "
+            f"makermodslab/drtc/modal_policy.py); its Modal 'LiveKit-cloud' secret sets a "
+            f"LIVEKIT_ROOM different from{where or ' yours'} — the Lab cannot read that secret, so "
+            "this is the one mismatch it can't detect for you; or the container's TS_AUTHKEY "
+            "expired, so it never made it onto the tailnet to join at all."
+        )
+    return "Check the LiveKit transport settings and try again."
+
+
 def friendly_hint(error_text: str | None) -> str | None:
     """A plain-language, actionable headline for the common SO-101 and
     training failures, or None when the text doesn't match a known pattern.

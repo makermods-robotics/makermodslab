@@ -43,8 +43,19 @@ DOMAINS = frozenset(
         "checkpoint",
         "session",
         "node",
+        # The LiveKit path remote inference runs over (the SFU and the room).
+        # Its own level-1 domain by the same argument that earned `hub` one: it
+        # is an external service this node depends on. Folding it into
+        # `hardware.connect_failed` would lie (that is the serial bus), and so
+        # would `system.*` (it is not this process).
+        "transport",
         "system",
         "sfu",
+        # The remote GPU the policy runs on (modal_launcher.py), reached
+        # through the `modal` CLI. A second external service, with a remedy
+        # set of its own — see the ErrorCode comment for why neither
+        # `transport.*` nor `system.*` fits.
+        "gpu",
         "internal",
     ]
 )
@@ -61,6 +72,11 @@ BUSY_DISCRIMINANTS = frozenset(
         "recording",
         "teleoperation",
         "inference",
+        # Remote inference: a policy on a remote GPU driving this node's arm.
+        # Its own discriminant, not a flavour of `inference` — the two have
+        # different stop machinery, and the frontend's HOLDER_ACTIVITY_KEYS map
+        # points each discriminant at its own status endpoint.
+        "remote_inference",
         "replay",
         "calibration",
         "auto_calibration",
@@ -102,6 +118,10 @@ def _teleop_request():
         ("makermodslab.teleoperate.teleoperation_active", "robot.busy.teleoperation"),
         ("makermodslab.record.recording_active", "robot.busy.recording"),
         ("makermodslab.rollout.inference_active", "robot.busy.inference"),
+        (
+            "makermodslab.remote_inference.remote_inference_active",
+            "robot.busy.remote_inference",
+        ),
         ("makermodslab.replay.replay_active", "robot.busy.replay"),
         ("makermodslab.wiggle.wiggle_active", "robot.busy.wiggle"),
         ("makermodslab.remote_host.hosting_active", "robot.busy.hosting"),

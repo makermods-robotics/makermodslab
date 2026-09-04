@@ -178,6 +178,7 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
         calibrate as _calibrate,
         record as _record,
         remote_host as _remote_host,
+        remote_inference as _remote_inference,
         remote_teleoperate as _remote_teleoperate,
         rollout as _rollout,
         teleoperate as _teleoperate,
@@ -205,6 +206,13 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
                 "status_code": 409,
                 "message": "Inference is currently active. Stop it first.",
                 "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+            }
+        if _remote_inference.remote_inference_is_active():
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Remote inference is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
             }
         if _calibrate.calibration_is_active():
             return {

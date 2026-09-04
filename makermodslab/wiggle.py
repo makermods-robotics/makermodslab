@@ -124,6 +124,7 @@ async def wiggle_gripper(port: str) -> dict:
         calibrate as _calibrate,
         record as _record,
         remote_host as _remote_host,
+        remote_inference as _remote_inference,
         remote_teleoperate as _remote_teleoperate,
         replay as _replay,
         rollout as _rollout,
@@ -165,6 +166,12 @@ async def wiggle_gripper(port: str) -> dict:
             "success": False,
             "message": "Inference is currently active — wait for it to stop before wiggling.",
             "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+        }
+    if _remote_inference.remote_inference_is_active():
+        return {
+            "success": False,
+            "message": "Remote inference is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
         }
     if _calibrate.calibration_is_active():
         return {
