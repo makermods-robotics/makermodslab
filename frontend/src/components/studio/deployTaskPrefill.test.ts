@@ -5,7 +5,10 @@ import {
   classifyTaskLookup,
   defaultTaskFrom,
   effectiveTaskFor,
+  loadingDots,
   rankDatasetTasks,
+  TASK_LOADING_DOT_MS,
+  TASK_LOADING_MAX_MS,
   taskFieldVisible,
   taskIsAmbiguous,
   tasksFrom,
@@ -152,5 +155,51 @@ describe("tasksFrom", () => {
     expect(tasksFrom({ kind: "idle" })).toEqual([]);
     expect(tasksFrom({ kind: "unknown", reason: "not_found" })).toEqual([]);
     expect(tasksFrom({ kind: "loaded", tasks: ["a"] })).toEqual(["a"]);
+  });
+});
+
+describe("loadingDots", () => {
+  it("cycles one, two, three and back to one", () => {
+    expect([0, 1, 2, 3, 4, 5, 6].map(loadingDots)).toEqual([
+      ".",
+      "..",
+      "...",
+      ".",
+      "..",
+      "...",
+      ".",
+    ]);
+  });
+
+  it("keeps cycling far from zero, so a long wait never breaks the pattern", () => {
+    expect(loadingDots(1000)).toBe(loadingDots(1000 % 3));
+    expect(loadingDots(999)).toBe(".");
+  });
+});
+
+describe("loading timings", () => {
+  it("cycles all three dots several times within the animation's lifetime", () => {
+    // The dots have to read as an animation, not a flicker or a freeze: three
+    // steps per cycle, and enough cycles before it gives up that the field
+    // clearly looks busy rather than stuck.
+    const cycles = TASK_LOADING_MAX_MS / (TASK_LOADING_DOT_MS * 3);
+    expect(cycles).toBeGreaterThanOrEqual(4);
+    expect(TASK_LOADING_DOT_MS).toBeGreaterThanOrEqual(200);
+  });
+});
+
+describe("a lookup in flight contributes nothing", () => {
+  it("offers no tasks, no default, and no ambiguity while loading", () => {
+    // The field says it is loading; it must not also be quietly resolving to a
+    // suggestion, or blocking the launch on a choice it cannot show yet.
+    expect(tasksFrom({ kind: "loading" })).toEqual([]);
+    expect(defaultTaskFrom({ kind: "loading" })).toBe("");
+    expect(taskIsAmbiguous({ kind: "loading" }, "")).toBe(false);
+  });
+
+  it("still sends what the operator typed", () => {
+    expect(effectiveTaskFor("mine", { kind: "loading" }, true, "single")).toBe(
+      "mine",
+    );
   });
 });
