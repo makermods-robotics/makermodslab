@@ -1632,6 +1632,34 @@ def test_published_run_row_still_reports_its_local_side_as_a_run(registry) -> No
     assert row["local_kind"] == "run"
 
 
+def test_published_run_downloaded_back_keeps_its_trained_origin(registry, tmp_lerobot_home) -> None:
+    """A run the user trained, published, then downloaded back matches its own
+    repo_id in the downloaded-model scan. local_kind="run" is already sticky
+    against that fold; `origin` must be too — it is the provenance the library's
+    Trained/Imported filter reads (ModelsLibrary.tsx), and letting the
+    downloaded copy relabel it "downloaded" files the user's own training run
+    under "Imported"."""
+    from makermodslab.models import _local_models_root, list_all_models
+
+    _seed_run(registry, "run_d", steps=300, hf_repo_id="user/run_d", dataset="user/pick")
+    _make_model_checkpoint(_local_models_root(), "user/run_d", shape="tree", step=300)
+
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.is_dataset_private", return_value=False),
+        patch(
+            "makermodslab.models.list_hub_models",
+            return_value=[{"repo_id": "user/run_d", "last_modified": None}],
+        ),
+    ):
+        rows = list_all_models()
+
+    row = next(r for r in rows if r["id"] == "run_d")
+    assert row["source"] == "both"
+    assert row["local_kind"] == "run"
+    assert row["origin"] == "trained-local"
+
+
 def test_run_collapse_matches_hub_repo_case_insensitively(registry) -> None:
     """A user-typed repo id differing in case from the Hub's canonical listing
     must still collapse to ONE "both" row — the same fold every jobs-side dedup

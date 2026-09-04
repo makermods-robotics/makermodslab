@@ -1579,14 +1579,18 @@ def _build_listing() -> tuple[list[dict[str, Any]], dict[str, Any]]:
             ):
                 if item.get(key) is None:
                     continue
-                # ...EXCEPT local_kind, where "run" is sticky. A published run
-                # that the user also downloaded back matches this repo_id, but
-                # the row still carries the RUN's id (set by the collapse above),
-                # so its delete deletes the run dir — every checkpoint, published
-                # or not. Letting the downloaded copy relabel it "downloaded"
-                # would hand that destructive delete the reassuring "the Hub copy
-                # stays" dialog (see deleteSemantics.ts).
-                if key == "local_kind" and existing.get("local_kind") == "run":
+                # ...EXCEPT local_kind and origin, both sticky when the existing
+                # row is a run. A published run the user downloaded back matches
+                # this repo_id, but the row still carries the RUN's id and detail
+                # (set by the collapse above). local_kind stays "run" so its
+                # delete stays honest — letting the downloaded copy relabel it
+                # "downloaded" would hand a destructive run-dir delete the
+                # reassuring "the Hub copy stays" dialog (see deleteSemantics.ts).
+                # origin stays "trained-local"/"trained-cloud" because that is
+                # the provenance the library's Trained/Imported filter reads
+                # (ModelsLibrary.tsx): the weights were trained here, not pulled
+                # from the Hub, however they also happen to sit on disk now.
+                if existing.get("local_kind") == "run" and key in ("local_kind", "origin"):
                     continue
                 existing[key] = item[key]
             a = existing.get("last_modified") or ""
