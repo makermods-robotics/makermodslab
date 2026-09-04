@@ -19,6 +19,7 @@ import platform
 import re
 import shutil
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
@@ -26,7 +27,42 @@ logger = logging.getLogger(__name__)
 
 RobotSide = Literal["leader", "follower"]
 
-# Define the calibration config paths (shared between features)
+# ---------------------------------------------------------------------------
+# Where MakerMods Lab keeps ITS OWN state.
+#
+# lerobot owns ``~/.cache/huggingface/lerobot``: datasets, models, the
+# calibration libraries its device classes read, and training outputs (local
+# policies live there because they ARE models). Everything that is MakerMods
+# Lab's rather than lerobot's — robot records, saved ports, UI bookkeeping,
+# node identity, the bimanual staging area, and (next) extensions — lives under
+# this root instead, so a user finds the app's files under the app's name and
+# a lerobot cache wipe does not take the robot setup with it.
+#
+# ``MAKERMODSLAB_HOME`` overrides the root (containers, a shared machine, and
+# the test suite, which points it at a tmp dir before anything is imported).
+# An override also switches OFF the legacy migration below: whoever set it is
+# pointing at a place they chose, and silently moving old files there would
+# be a surprise — the test suite relies on exactly that to never touch a
+# developer's real state.
+# ---------------------------------------------------------------------------
+LEGACY_STATE_ROOT = os.path.expanduser("~/.cache/huggingface/lerobot")
+
+
+def resolve_makermodslab_home(env: Mapping[str, str] | None = None) -> str:
+    """The MakerMods Lab state root: ``$MAKERMODSLAB_HOME`` or ``~/.makermods/makermodslab``."""
+    env = os.environ if env is None else env
+    override = env.get("MAKERMODSLAB_HOME")
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    return os.path.expanduser(os.path.join("~", ".makermods", "makermodslab"))
+
+
+MAKERMODSLAB_HOME = resolve_makermodslab_home()
+HOME_IS_OVERRIDDEN = bool(os.environ.get("MAKERMODSLAB_HOME"))
+
+# Define the calibration config paths (shared between features). These stay
+# under lerobot's cache: lerobot's device classes read their calibration from
+# there, and the library IS lerobot calibration data.
 CALIBRATION_BASE_PATH_TELEOP = os.path.expanduser("~/.cache/huggingface/lerobot/calibration/teleoperators")
 CALIBRATION_BASE_PATH_ROBOTS = os.path.expanduser("~/.cache/huggingface/lerobot/calibration/robots")
 LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "so_leader")
@@ -125,12 +161,12 @@ def default_slot_config_name(record_name: str, mode: object, arm: str, arm_type:
 
 
 # Define port storage path
-PORT_CONFIG_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/ports")
+PORT_CONFIG_PATH = os.path.join(MAKERMODSLAB_HOME, "ports")
 LEADER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "leader_port.txt")
 FOLLOWER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "follower_port.txt")
 
 # Robot config records (per-robot JSON metadata)
-ROBOTS_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/robots")
+ROBOTS_PATH = os.path.join(MAKERMODSLAB_HOME, "robots")
 
 # Staging root for bimanual (BiSO) sessions. lerobot's BiSO devices take ONE
 # calibration_dir + ONE base id and load each sub-arm as "<base>_left.json" /
@@ -141,7 +177,7 @@ ROBOTS_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/robots")
 # root as "<base>_left.json"/"<base>_right.json" for lerobot to load. The copy is
 # unconditional every session (see stage_bimanual_calibrations) so a recalibrated
 # library file always refreshes its stale staging alias.
-MAKERMODSLAB_BISO_STAGING_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/makermodslab_biso")
+MAKERMODSLAB_BISO_STAGING_PATH = os.path.join(MAKERMODSLAB_HOME, "biso_staging")
 
 # Fallback base id when a bimanual start request carries no robot name (older
 # frontends). Filesystem-safe and stable; a single unnamed bimanual robot reuses
@@ -151,26 +187,26 @@ DEFAULT_BIMANUAL_BASE = "bimanual"
 # Hub-job ids the user dismissed from the jobs UI (JSON list of strings). The
 # HF Jobs API has no delete — a finished job stays in list_jobs() indefinitely
 # — so hiding a dead run from the untracked list must be persisted locally.
-DISMISSED_HUB_JOBS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/dismissed_hub_jobs.json")
+DISMISSED_HUB_JOBS_FILE = os.path.join(MAKERMODSLAB_HOME, "dismissed_hub_jobs.json")
 
 # Hub dataset repo ids the user typed straight into the picker and chose to keep
 # ("Use org/name"). They aren't in the user's own namespace listing and have no
 # local copy, so they'd vanish after selection unless we persist them here and
 # fold them back into the merged /datasets listing.
-SAVED_CUSTOM_DATASETS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/saved_custom_datasets.json")
+SAVED_CUSTOM_DATASETS_FILE = os.path.join(MAKERMODSLAB_HOME, "saved_custom_datasets.json")
 
 # Hub MODEL repo ids the user pinned via the "Add model" chooser — the models
 # mirror of SAVED_CUSTOM_DATASETS_FILE (same rationale: a foreign-namespace repo
 # with no local copy vanishes from the /models listing unless persisted here).
-SAVED_CUSTOM_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/saved_custom_models.json")
+SAVED_CUSTOM_MODELS_FILE = os.path.join(MAKERMODSLAB_HOME, "saved_custom_models.json")
 
 # Hub dataset/model repo ids the user removed from their pickers ("hidden").
 # Hiding NEVER touches the Hub repo — it only filters the merged listing, so a
 # repo the user's own namespace listing keeps returning stays gone until they
 # re-add it (re-pinning auto-unhides). Persisted like the dismissed hub jobs
 # (JSON list on disk, a set in memory).
-SAVED_HIDDEN_DATASETS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_datasets.json")
-SAVED_HIDDEN_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_models.json")
+SAVED_HIDDEN_DATASETS_FILE = os.path.join(MAKERMODSLAB_HOME, "hidden_datasets.json")
+SAVED_HIDDEN_MODELS_FILE = os.path.join(MAKERMODSLAB_HOME, "hidden_models.json")
 
 # Per-dataset episode indices the user excluded from training (curation, not
 # deletion — the episode stays on disk and in every listing/upload, it's just
@@ -178,18 +214,18 @@ SAVED_HIDDEN_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidd
 # JSON object keyed by repo_id -> list[int], unlike the flat repo-id lists
 # above, since the thing being persisted is per-dataset state, not membership
 # in one shared collection.
-EXCLUDED_EPISODES_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/excluded_episodes.json")
+EXCLUDED_EPISODES_FILE = os.path.join(MAKERMODSLAB_HOME, "excluded_episodes.json")
 
 # Stable per-install identity, minted on first read. The node registry uses it
 # to recognize a peer across restarts and address changes (a machine's IP or
 # MagicDNS name can change; its instance id doesn't).
-INSTANCE_ID_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/instance_id.txt")
+INSTANCE_ID_FILE = os.path.join(MAKERMODSLAB_HOME, "instance_id.txt")
 
 # The node registry's saved peer list: [{"url": ..., "name": ...}, ...]. Only
 # url + name are persisted — identity (instance_id/version/capabilities) is
 # deliberately NOT: a peer is re-verified against its live /api/v1/health on
 # load/probe, so stale identity can never be served from disk.
-NODES_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/nodes.json")
+NODES_FILE = os.path.join(MAKERMODSLAB_HOME, "nodes.json")
 
 # Tag stamped on every dataset pushed to the Hub from MakerMods Lab, so we can later
 # query the Hub for MakerMods Lab-produced datasets and compute usage metrics.
@@ -216,6 +252,67 @@ def with_makermodslab_tag(tags: list[str] | None) -> list[str]:
         if tag not in out:
             out.append(tag)
     return out
+
+
+# State that versions before the MAKERMODSLAB_HOME split wrote beside lerobot's
+# files: (name under LEGACY_STATE_ROOT, this module's attribute holding the new
+# path). The attribute is looked up AT CALL TIME so a redirected constant (the
+# test fixtures) is honoured. Calibration libraries and training outputs are
+# deliberately absent — they stay where lerobot reads them.
+_LEGACY_STATE_ENTRIES: tuple[tuple[str, str], ...] = (
+    ("ports", "PORT_CONFIG_PATH"),
+    ("robots", "ROBOTS_PATH"),
+    ("makermodslab_biso", "MAKERMODSLAB_BISO_STAGING_PATH"),
+    ("dismissed_hub_jobs.json", "DISMISSED_HUB_JOBS_FILE"),
+    ("saved_custom_datasets.json", "SAVED_CUSTOM_DATASETS_FILE"),
+    ("saved_custom_models.json", "SAVED_CUSTOM_MODELS_FILE"),
+    ("hidden_datasets.json", "SAVED_HIDDEN_DATASETS_FILE"),
+    ("hidden_models.json", "SAVED_HIDDEN_MODELS_FILE"),
+    ("excluded_episodes.json", "EXCLUDED_EPISODES_FILE"),
+    ("instance_id.txt", "INSTANCE_ID_FILE"),
+    ("nodes.json", "NODES_FILE"),
+)
+
+
+def migrate_legacy_state(legacy_root: str | None = None) -> list[str]:
+    """Move MakerMods Lab state written beside lerobot's cache into MAKERMODSLAB_HOME.
+
+    One-shot and idempotent: an entry moves only when it exists at the legacy
+    location and NOTHING exists at the new one. A destination that already
+    exists is the live state and wins — so an old version run after the split
+    cannot clobber newer files on the next upgrade, and a second call is a
+    no-op. A failed move is logged and skipped; the app then starts with that
+    entry at its defaults rather than refusing to start. Returns the
+    destinations written (for the startup log and the tests).
+
+    The caller decides WHEN this runs (server startup, before the first read
+    of any entry — every reader here is lazy) and whether it runs at all
+    (never under a ``MAKERMODSLAB_HOME`` override; see the note on
+    HOME_IS_OVERRIDDEN).
+    """
+    root = LEGACY_STATE_ROOT if legacy_root is None else legacy_root
+    moved: list[str] = []
+    for legacy_name, attr in _LEGACY_STATE_ENTRIES:
+        src = os.path.join(root, legacy_name)
+        dst = globals()[attr]
+        if not os.path.lexists(src) or os.path.lexists(dst):
+            continue
+        try:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.move(src, dst)
+        except OSError as exc:
+            logger.warning("Could not migrate %s -> %s: %s", src, dst, exc)
+            continue
+        moved.append(dst)
+    if moved:
+        logger.info(
+            "Moved %d MakerMods Lab state entr%s from %s to %s",
+            len(moved),
+            "y" if len(moved) == 1 else "ies",
+            root,
+            os.path.dirname(moved[0]) if len(moved) == 1 else MAKERMODSLAB_HOME,
+        )
+    return moved
 
 
 def _atomic_write_text(path: str, content: str) -> None:
