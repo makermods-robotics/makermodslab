@@ -119,6 +119,29 @@ _TS_SOCKS_PORT = 1055  # tailscaled's userspace SOCKS5 listener
 _TS_RELAY_PORT = 7880  # loopback port the policy dials instead of the tailnet
 _TS_SOCKET = "/tmp/tailscaled.sock"  # nosec B108 — tailscaled's own socket, inside a single-tenant Modal container
 _TS_HOSTNAME = "modal-policy"  # node name in the tailnet admin console
+# ONE node in the admin console, not one per launch. Tailscale identifies a node
+# by its NODE KEY, which lives in tailscaled's state file, so a stable identity
+# is simply a state file that outlives the container — hence a Modal Volume.
+# DEDICATED, not the 20 GB hf-cache: a 4 KB state commit must stay a 4 KB
+# commit. See _tailscale_up for the login sequence and the collision rule.
+_TS_STATE_VOLUME = "makermodslab-tailscale-state"
+_TS_STATE_DIR = "/tailscale"  # mount point (see _FN_KWARGS["volumes"], beside /cache)
+_TS_STATE_FILE = "/tailscale/tailscaled.state"  # the node key lives in here
+_TS_RESUME_TIMEOUT = 20.0  # bounded keyless `tailscale up` before falling back to the key
+
+ts_state = modal.Volume.from_name(_TS_STATE_VOLUME, create_if_missing=True)
+
+_TS_NO_AUTHKEY = (
+    "[tailscale] --tailscale needs TS_AUTHKEY in the container env, and it "
+    "isn't there. Create a REUSABLE, NON-EPHEMERAL auth key in the Tailscale "
+    "admin console (Settings -> Keys), then:\n"
+    "    modal secret create tailscale-auth TS_AUTHKEY=tskey-auth-...\n"
+    "and re-run with --tailscale (that flag routes to serve_ts, the twin "
+    "function this secret is attached to). NON-ephemeral is deliberate: the "
+    "control plane deletes an ephemeral node the moment it goes offline, which "
+    "would make the persisted node key dead on the next launch and register a "
+    "fresh modal-policy-N node instead of reusing this one."
+)
 
 
 def _looks_like_tailnet(host: str) -> bool:
@@ -129,25 +152,114 @@ def _looks_like_tailnet(host: str) -> bool:
         return host.endswith(".ts.net") or "." not in host
 
 
-def _tailscale_up(timeout: float = 90.0) -> None:
-    """Start userspace tailscaled and join the tailnet. Blocks until Running.
+def _ephemeral_node() -> bool:
+    """True when DRTC_TS_EPHEMERAL asks for the pre-2026-09-04 throwaway node.
 
-    Ephemeral-ness lives on the AUTH KEY, not the CLI: `tailscale up` has no
-    `--ephemeral` flag (checked against current Tailscale docs), so the key made
-    in the admin console must have "Ephemeral" ticked for dead containers to
-    disappear from the tailnet by themselves. `--state=mem:` keeps that honest by
-    persisting no node state in the container at all.
+    The escape hatch for a DELIBERATE parallel run: two containers sharing one
+    state file log in as the same node and the later one displaces the earlier
+    from the tailnet, so a second concurrent GPU has to be a different node.
+    Read from the container env; `main()` forwards the operator's own
+    `DRTC_TS_EPHEMERAL=1 modal run ...` into it as a remote kwarg, the same way
+    it forwards LIVEKIT_API_KEY (Modal does not ship the caller's environment).
+    """
+    return os.environ.get("DRTC_TS_EPHEMERAL", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _commit_ts_state(when: str) -> None:
+    """Persist /tailscale back to the Volume; never fatal.
+
+    A Modal Volume write is container-local until it is committed. The function
+    exiting normally flushes one too, but a run that is killed (the Lab's stop,
+    a `modal run` Ctrl-C, a container reap) never reaches that — and losing the
+    file loses the node identity, which is the whole point. A failed commit
+    costs one extra row in the admin console next launch, not the session.
+    """
+    if _ephemeral_node():
+        return
+    try:
+        ts_state.commit()
+    except Exception as exc:
+        print(f"[tailscale] state commit ({when}) failed: {exc}")
+    else:
+        print(f"[tailscale] node state committed ({when})")
+
+
+def _tailscale_up_cmd(authkey: str | None, timeout: float) -> subprocess.CompletedProcess[str]:
+    """Run `tailscale up`, with `--auth-key` only when one is actually being used.
+
+    The key is never printed and never returned: callers log a redacted line,
+    and the CompletedProcess deliberately carries a scrubbed `args`.
+    """
+    argv = [
+        "tailscale",
+        f"--socket={_TS_SOCKET}",
+        "up",
+        f"--hostname={_TS_HOSTNAME}",
+        # Don't rewrite the container's /etc/resolv.conf: MagicDNS here would
+        # only confuse Hugging Face / PyPI lookups. Tailnet names are resolved
+        # by tailscaled itself, via the SOCKS5 domain address type below.
+        "--accept-dns=false",
+        f"--timeout={int(timeout)}s",
+    ]
+    if authkey:
+        argv.insert(3, f"--auth-key={authkey}")
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout + 15)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            ["tailscale", "up"], 124, "", f"`tailscale up` did not return within {timeout + 15:.0f}s"
+        )
+    return subprocess.CompletedProcess(["tailscale", "up"], done.returncode, done.stdout, done.stderr)
+
+
+def _tailscale_up(timeout: float = 90.0) -> None:
+    """Start userspace tailscaled and join the tailnet as ONE stable node.
+
+    Blocks until the backend is Running.
+
+    Tailscale identifies a node by its NODE KEY, which lives in tailscaled's
+    state file — so "the same node every launch" is exactly "the same state file
+    every launch". Until 2026-09-04 this ran `--state=mem:`, deliberately
+    keeping no state at all so that dead containers left nothing behind; the
+    price was a fresh `modal-policy-N` row per launch (21 of them by the time
+    this changed). The state file now lives on a dedicated Modal Volume mounted
+    at /tailscale, and the login sequence is:
+
+      1. state file present -> `tailscale up --hostname=modal-policy` with NO
+         `--auth-key`, bounded to _TS_RESUME_TIMEOUT. This is the normal path
+         and it re-uses the saved node key.
+      2. anything less than rc=0 from that (an expired/stale node key, a
+         NeedsLogin that printed a login URL and then hit the timeout — we do
+         not try to tell them apart, the answer is the same) -> the original
+         `--auth-key` path, which is also what a first-ever run takes.
+
+    Two consequences worth knowing:
+
+      * the auth key must be REUSABLE and **NON-ephemeral**. `tailscale up` has
+        no `--ephemeral` flag (ephemeral-ness lives on the KEY), and the control
+        plane deletes an ephemeral node as soon as it goes offline — a persisted
+        node key for a deleted node is dead on the next launch and re-registers
+        as a new node, which is the row-per-launch problem again.
+      * two containers sharing this state log in as the SAME node, and the later
+        `tailscale up` displaces the earlier one from the tailnet. The Lab's
+        one-launcher gate and its orphan reaper make that rare;
+        `DRTC_TS_EPHEMERAL=1` is the escape hatch for a deliberate parallel run
+        (it restores `--state=mem:` and always-`--auth-key`, byte-for-byte the
+        old behaviour).
     """
     authkey = os.environ.get("TS_AUTHKEY")
-    if not authkey:
-        raise SystemExit(
-            "[tailscale] --tailscale needs TS_AUTHKEY in the container env, and it "
-            "isn't there. Create a REUSABLE + EPHEMERAL auth key in the Tailscale "
-            "admin console (Settings -> Keys), then:\n"
-            "    modal secret create tailscale-auth TS_AUTHKEY=tskey-auth-...\n"
-            "and re-run with --tailscale (that flag routes to serve_ts, the twin "
-            "function this secret is attached to)."
-        )
+    ephemeral = _ephemeral_node()
+    if ephemeral:
+        state = "mem:"
+        resume = False
+        print("[tailscale] DRTC_TS_EPHEMERAL=1: throwaway node (--state=mem:, always --auth-key)")
+    else:
+        state = _TS_STATE_FILE
+        Path(_TS_STATE_DIR).mkdir(parents=True, exist_ok=True)
+        resume = Path(_TS_STATE_FILE).exists()
+        print(f"[tailscale] node state {_TS_STATE_FILE}: {'found' if resume else 'not there yet'}")
+    if not authkey and not resume:
+        raise SystemExit(_TS_NO_AUTHKEY)
 
     print(f"[tailscale] starting tailscaled (userspace networking, socks5 on 127.0.0.1:{_TS_SOCKS_PORT})")
     proc = subprocess.Popen(
@@ -155,7 +267,7 @@ def _tailscale_up(timeout: float = 90.0) -> None:
             "tailscaled",
             "--tun=userspace-networking",
             f"--socks5-server=localhost:{_TS_SOCKS_PORT}",
-            "--state=mem:",
+            f"--state={state}",
             f"--socket={_TS_SOCKET}",
         ]
     )
@@ -175,27 +287,37 @@ def _tailscale_up(timeout: float = 90.0) -> None:
 
     # 2) join the tailnet. `tailscale up` blocks until the backend is Running, so
     #    this returning IS the "tailnet reachable" barrier the relay needs.
-    print(f"[tailscale] tailscale up --hostname={_TS_HOSTNAME} --auth-key=<redacted>")
-    up = subprocess.run(
-        [
-            "tailscale",
-            f"--socket={_TS_SOCKET}",
-            "up",
-            f"--auth-key={authkey}",
-            f"--hostname={_TS_HOSTNAME}",
-            # Don't rewrite the container's /etc/resolv.conf: MagicDNS here would
-            # only confuse Hugging Face / PyPI lookups. Tailnet names are resolved
-            # by tailscaled itself, via the SOCKS5 domain address type below.
-            "--accept-dns=false",
-            f"--timeout={int(timeout)}s",
-        ],
-        capture_output=True,
-        text=True,
-    )
+    up = None
+    if resume:
+        print(f"[tailscale] tailscale up --hostname={_TS_HOSTNAME} (resuming the saved node key)")
+        up = _tailscale_up_cmd(None, _TS_RESUME_TIMEOUT)
+        if up.returncode != 0:
+            print(
+                f"[tailscale] keyless resume failed (rc={up.returncode}): "
+                f"{up.stdout.strip()}{up.stderr.strip()} — falling back to the auth key"
+            )
+            up = None
+    if up is None:
+        if not authkey:
+            raise SystemExit(_TS_NO_AUTHKEY)
+        print(f"[tailscale] tailscale up --hostname={_TS_HOSTNAME} --auth-key=<redacted>")
+        up = _tailscale_up_cmd(authkey, timeout)
     if up.returncode != 0:
         raise RuntimeError(
             f"`tailscale up` failed (rc={up.returncode}): {up.stdout.strip()}{up.stderr.strip()}"
         )
+
+    # Backend is Running, so tailscaled has written the node key. Commit it now
+    # rather than at function exit: a killed container never reaches an exit.
+    if not ephemeral:
+        if Path(_TS_STATE_FILE).exists():
+            _commit_ts_state("after login")
+        else:
+            print(
+                f"[tailscale] WARNING: {_TS_STATE_FILE} was not written; the next launch "
+                "will register a new node. Is /tailscale mounted?"
+            )
+
     ip = subprocess.run(
         ["tailscale", f"--socket={_TS_SOCKET}", "ip", "-4"],
         capture_output=True,
@@ -458,7 +580,12 @@ _FN_KWARGS = {
     # caller has to the decorator (see makermodslab/modal_launcher.py).
     "gpu": os.environ.get("DRTC_GPU") or "A100",
     "timeout": 60 * 60 * 2,  # hard session cap; PORTAL_DURATION_SECONDS can end sooner
-    "volumes": {"/cache": hf_cache},  # persistent HF cache (see hf_cache / HF_HOME)
+    # /cache: persistent HF cache (see hf_cache / HF_HOME). /tailscale: the
+    # tailnet node key, on its OWN Volume so a 4 KB state commit never drags the
+    # 20 GB model cache with it (see _TS_STATE_FILE). Mounted on both twins —
+    # `serve` never writes it, and identical kwargs keep the two declarations
+    # from drifting.
+    "volumes": {"/cache": hf_cache, _TS_STATE_DIR: ts_state},
     # Region: place the GPU near the LiveKit Cloud edge the robot uses, so media
     # doesn't cross an ocean. For a robot in China, "ap-southeast" (Singapore)
     # gives the best reachability of Modal's Asia regions; "ap-northeast"
@@ -498,11 +625,20 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
     livekit_api_secret: str = "",
     livekit_room: str = "",
     tailscale: bool = False,
+    ts_ephemeral: bool = False,
 ) -> None:
     # Shipped via add_local_dir; imported HERE (not at module top) because this
     # wrapper is also evaluated locally by the modal CLI, whose interpreter has
     # no makermodslab on its path.
     from makermodslab.drtc import policy
+
+    # `DRTC_TS_EPHEMERAL=1 modal run ...` is set in the OPERATOR's shell; Modal
+    # does not ship the caller's environment, so main() resolves it locally and
+    # it arrives here as a kwarg. Re-exporting it into the container env keeps
+    # _ephemeral_node() the single reader (it is also honoured directly, for a
+    # secret or an image env that sets it container-side).
+    if ts_ephemeral:
+        os.environ["DRTC_TS_EPHEMERAL"] = "1"
 
     # Optional per-run LiveKit override: point this run at a different SFU than
     # the LiveKit-cloud secret — e.g. the LOCAL SFU exposed through a Cloudflare
@@ -559,6 +695,10 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
         "livekit_room": livekit_room,
         # Recorded so /reset replays onto the right twin (serve_ts vs serve).
         "tailscale": tailscale,
+        # So a /reset replays onto the same tailnet identity the run chose.
+        # A dict written before 2026-09-04 has no such key and reads back as
+        # False, i.e. the stable node — which is the right default.
+        "ts_ephemeral": ts_ephemeral,
     }
 
     # policy.py is CLI-only for behavior config (no env fallback), so forward every
@@ -592,7 +732,14 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
     if task:
         argv += ["--task", task]
     sys.argv = argv
-    asyncio.run(policy.main())
+    try:
+        asyncio.run(policy.main())
+    finally:
+        # Commit again on the way out: Tailscale rotates a node key periodically,
+        # and the rotated one is only ours if it reaches the Volume. Runs on the
+        # disconnect path AND on an exception, which is the case that matters.
+        if tailscale:
+            _commit_ts_state("shutdown")
 
 
 # TWO Modal functions, identical except that `serve_ts` also gets the
@@ -697,6 +844,12 @@ def main(  # nosec B107 — the empty `*_secret` defaults are "flag not passed",
     livekit_api_key = livekit_api_key or os.environ.get("LIVEKIT_API_KEY", "")
     livekit_api_secret = livekit_api_secret or os.environ.get("LIVEKIT_API_SECRET", "")
 
+    # Same channel, same reason: `DRTC_TS_EPHEMERAL=1 modal run ...` is read in
+    # THIS body (the operator's shell) and travels as a kwarg, because Modal
+    # does not ship the caller's environment into the container. Unset is the
+    # stable-node default; see _tailscale_up.
+    ts_ephemeral = _ephemeral_node()
+
     # --tailscale routes to the twin function that carries the tailscale-auth
     # secret; everything else is identical (see the note above serve()).
     fn = serve_ts if tailscale else serve
@@ -713,4 +866,5 @@ def main(  # nosec B107 — the empty `*_secret` defaults are "flag not passed",
         livekit_api_secret=livekit_api_secret,
         livekit_room=livekit_room,
         tailscale=tailscale,
+        ts_ephemeral=ts_ephemeral,
     )

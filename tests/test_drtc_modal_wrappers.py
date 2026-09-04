@@ -31,10 +31,18 @@ These files import `modal` at their top level and are not importable here, so
 this reads them as TEXT. That is a feature, not a workaround: the pins are
 string literals inside an image-builder expression, and comparing the strings is
 what actually catches a hand-edit.
+
+The same reading applies to the tailnet-identity tests at the bottom: the node
+key's home is a path literal and a Volume name inside a decorator kwarg, so the
+literals are the thing to assert. The one structural claim there — that
+`--state=mem:` survives ONLY under the `DRTC_TS_EPHEMERAL` opt-out — is checked
+with `ast` instead, because "in the else branch" is not something a regex can
+say honestly. `ast.parse` still does not import `modal`.
 """
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -147,3 +155,100 @@ def test_the_wrappers_forward_model_dtype(wrapper: Path) -> None:
     assert text.count('model_dtype: str = ""') == 2, wrapper.name
     assert "model_dtype=model_dtype," in text, wrapper.name
     assert 'argv += ["--model-dtype", model_dtype]' in text, wrapper.name
+
+
+# --- the tailnet node is ONE node -------------------------------------------
+# Tailscale identifies a node by its node key, which lives in tailscaled's state
+# file; the wrappers keep that file on a dedicated Modal Volume so every launch
+# rejoins as `modal-policy` instead of minting a `modal-policy-N`. Everything
+# below guards a piece of that arrangement whose loss is INVISIBLE at runtime —
+# a session with a lost state file connects perfectly well, it just leaves
+# another row in the admin console.
+_TS_BLOCK_BOUNDS = ("_TS_SOCKS_PORT = 1055", "async def _socks5_connect")
+
+
+def _tailscale_block(text: str) -> str:
+    """The hand-mirrored tailscale bootstrap, from the constants to the SOCKS client."""
+    start, end = (text.index(mark) for mark in _TS_BLOCK_BOUNDS)
+    return text[start:end]
+
+
+@pytest.mark.parametrize("wrapper", _WRAPPERS, ids=lambda p: p.name)
+def test_the_wrappers_persist_the_tailnet_node_key(wrapper: Path) -> None:
+    """State file on a DEDICATED Volume, mounted beside /cache, committed twice.
+
+    Dedicated matters: putting the node key on `hf-cache` would make every
+    4 KB state commit re-commit a 20 GB model cache. Mounted matters because
+    tailscaled writes the file whether or not anything persists it. And the
+    commits matter most of all — a Modal Volume write is container-local until
+    one happens, so without them the file dies with the container and we are
+    back to a row per launch.
+    """
+    text = wrapper.read_text(encoding="utf-8")
+    assert '_TS_STATE_FILE = "/tailscale/tailscaled.state"' in text, wrapper.name
+    assert '_TS_STATE_VOLUME = "makermodslab-tailscale-state"' in text, wrapper.name
+    assert "modal.Volume.from_name(_TS_STATE_VOLUME, create_if_missing=True)" in text, wrapper.name
+    assert 'tailscaled.state"' in text and 'f"--state={state}"' in text, wrapper.name
+    assert re.search(r'"volumes":\s*\{[^}]*_TS_STATE_DIR:\s*ts_state', text), (
+        f"{wrapper.name} no longer mounts the tailscale-state Volume in _FN_KWARGS"
+    )
+    # Once when the backend reports Running, once on the way out (a rotated node
+    # key is only ours if it reaches the Volume).
+    assert '_commit_ts_state("after login")' in text, wrapper.name
+    assert '_commit_ts_state("shutdown")' in text, wrapper.name
+
+
+@pytest.mark.parametrize("wrapper", _WRAPPERS, ids=lambda p: p.name)
+def test_state_mem_survives_only_as_the_ephemeral_opt_out(wrapper: Path) -> None:
+    """`--state=mem:` is the OLD behaviour and must be reachable only via the flag.
+
+    Asserted structurally rather than by grepping for the string: the docstrings
+    still discuss `--state=mem:` at length (they explain why it changed), so a
+    text search cannot distinguish prose from a regression. What must hold is
+    that the single `"mem:"` in `_tailscale_up` is the body of an `if` on the
+    `DRTC_TS_EPHEMERAL` answer, and that the Popen arg is the variable those
+    branches set.
+    """
+    tree = ast.parse(wrapper.read_text(encoding="utf-8"))
+    fn = next(
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_tailscale_up"
+    )
+    mem = [
+        node
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Constant)
+        and node.value.value == "mem:"
+    ]
+    assert len(mem) == 1, f"{wrapper.name}: expected one `mem:` assignment, found {len(mem)}"
+
+    branches = [node for node in ast.walk(fn) if isinstance(node, ast.If) and mem[0] in node.body]
+    assert len(branches) == 1, f"{wrapper.name}: the `mem:` assignment is not inside an if-branch"
+    assert ast.unparse(branches[0].test) == "ephemeral", wrapper.name
+    assert "ephemeral = _ephemeral_node()" in ast.unparse(fn), wrapper.name
+
+
+@pytest.mark.parametrize("wrapper", _WRAPPERS, ids=lambda p: p.name)
+def test_the_wrappers_read_the_ephemeral_opt_out(wrapper: Path) -> None:
+    """DRTC_TS_EPHEMERAL=1 is the escape hatch for a deliberate parallel run —
+    two containers sharing one state file log in as the same node and the later
+    one displaces the earlier. It is read in the container, and forwarded there
+    from the operator's shell by `main()` (Modal does not ship the caller's
+    environment), so both halves are asserted."""
+    text = wrapper.read_text(encoding="utf-8")
+    assert 'os.environ.get("DRTC_TS_EPHEMERAL", "")' in text, wrapper.name
+    assert 'os.environ["DRTC_TS_EPHEMERAL"] = "1"' in text, wrapper.name
+    assert "ts_ephemeral = _ephemeral_node()" in text, wrapper.name
+    assert "ts_ephemeral=ts_ephemeral," in text, wrapper.name
+
+
+def test_the_two_tailscale_blocks_are_identical() -> None:
+    """The wrappers are deliberate near-duplicates with no shared import path
+    into either image, so the tailscale bootstrap is a hand-mirrored copy — the
+    file itself says "fix bugs in both". Byte equality is the only thing that
+    actually holds that, and it subsumes every per-file assertion above."""
+    blocks = [_tailscale_block(w.read_text(encoding="utf-8")) for w in _WRAPPERS]
+    assert blocks[0] == blocks[1], (
+        "the tailscale block has drifted between modal_policy.py and "
+        "modal_policy_rtc.py; they must stay verbatim copies"
+    )

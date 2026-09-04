@@ -195,7 +195,7 @@ cannot be used because it resolves modules through the _local_ interpreter.
 | ---------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------- |
 | `LiveKit-cloud`  | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `LIVEKIT_ROOM` | always                                                              |
 | `huggingface`    | `HF_TOKEN`                                                             | private/gated checkpoints or base backbones (drop it if all public) |
-| `tailscale-auth` | `TS_AUTHKEY` (REUSABLE + EPHEMERAL)                                    | `--tailscale` only                                                  |
+| `tailscale-auth` | `TS_AUTHKEY` (REUSABLE, **non-ephemeral**)                              | `--tailscale` only                                                  |
 
 ```bash
 modal secret create LiveKit-cloud \
@@ -224,6 +224,50 @@ Each wrapper defines two otherwise-identical Modal functions, `serve` and
 `tailscale-auth` secret. They are unconditional on purpose — Modal evaluates the
 module both locally and in the container and the two dependency lists must
 match exactly.
+
+### One tailnet node, not one per launch
+
+The GPU joins the tailnet as a single node called `modal-policy`. Tailscale
+identifies a node by its **node key**, which lives in tailscaled's state file,
+so the mechanism is simply that the state file outlives the container: a
+dedicated Modal Volume, `makermodslab-tailscale-state`, mounted at `/tailscale`,
+and `tailscaled --state=/tailscale/tailscaled.state`. It is deliberately NOT the
+`hf-cache` Volume — a 4 KB state commit should not re-commit a 20 GB model
+cache. The Volume is created on first use (`create_if_missing=True`); there is
+nothing to set up by hand.
+
+Login goes: state file present → `tailscale up --hostname=modal-policy` with no
+`--auth-key`, bounded to 20 s, which re-uses the saved node key; anything other
+than success (expired node key, a `NeedsLogin` that printed a login URL and then
+timed out — the wrapper does not try to tell those apart) falls back to the
+`--auth-key` path, which is also what a first-ever run takes. The state is
+committed once the backend reports Running and again on the way out, so a
+rotated node key is kept.
+
+Two rules follow from that, and the first one is a change:
+
+- **The auth key must be REUSABLE and non-ephemeral.** Until 2026-09-04 this
+  page asked for REUSABLE + EPHEMERAL, which was right when the wrapper ran
+  `--state=mem:` and kept nothing. It is wrong now: the control plane *deletes*
+  an ephemeral node as soon as it goes offline, so the persisted node key is
+  dead on the next launch and the container re-registers as a new node. With an
+  ephemeral key you still get one node while the GPU stays online — and a new
+  one after every gap, which is the 21-rows-in-the-console problem again. Mint a
+  fresh key with **Ephemeral** unticked and **Reusable** ticked, then
+  `modal secret create tailscale-auth TS_AUTHKEY=tskey-auth-... --force`.
+- **Two containers sharing the state log in as the same node**, and the later
+  `tailscale up` displaces the earlier one from the tailnet. The Lab's
+  one-launcher gate and its orphan reaper make that rare, and
+  `DRTC_TS_EPHEMERAL=1` is the escape hatch for a run you deliberately want
+  beside another: it restores `--state=mem:` and always-`--auth-key`, i.e. the
+  pre-2026-09-04 behaviour, and gets its own throwaway `modal-policy-N` row.
+  Set it in your own shell — `DRTC_TS_EPHEMERAL=1 modal run …` — the wrapper's
+  `main()` reads it there and forwards it to the container as a kwarg (Modal
+  does not ship the caller's environment). Nothing in the Lab's launcher sets
+  it.
+
+The 21 `modal-policy-N` rows a pre-2026-09-04 tailnet accumulated can simply be
+deleted in the admin console; nothing references them.
 
 `modal_policy.py` additionally stashes each run's arguments in a `modal.Dict`
 and publishes a `/reset` GET endpoint that re-spawns the last run, for when the
