@@ -234,10 +234,71 @@ def test_get_local_dataset_info_reads_v2_tasks_jsonl(
     ]
 
 
+def test_count_task_episodes_abandons_a_partial_count(tmp_lerobot_home: Path) -> None:
+    """One unreadable chunk must void the WHOLE count, not subtract from it.
+
+    A subtotal is the dangerous answer here: the caller ranks tasks by these
+    numbers to pick which one to suggest, and on a real merged dataset the
+    margin between two near-identical task strings is one episode — so dropping
+    a chunk silently flips the winner while every number still looks plausible.
+    None says "unknown" out loud."""
+    from makermodslab.datasets import _count_task_episodes
+
+    meta = tmp_lerobot_home / "partial" / "meta"
+    (meta / "episodes" / "chunk-000").mkdir(parents=True)
+    pq.write_table(
+        pa.table({"tasks": [["alpha"], ["alpha"]]}),
+        meta / "episodes" / "chunk-000" / "file-000.parquet",
+    )
+    (meta / "episodes" / "chunk-000" / "file-001.parquet").write_text("not parquet")
+
+    assert _count_task_episodes(meta) is None
+
+
+def test_count_task_episodes_falls_back_when_the_parquet_dir_is_empty(
+    tmp_lerobot_home: Path,
+) -> None:
+    """An empty meta/episodes/ is not evidence of the v3.0 layout.
+
+    Returning from inside that branch used to make the v2.x episodes.jsonl path
+    unreachable for any dataset that merely had the directory, so its counts
+    silently became zero."""
+    from makermodslab.datasets import _count_task_episodes
+
+    meta = tmp_lerobot_home / "empty_dir" / "meta"
+    (meta / "episodes").mkdir(parents=True)
+    (meta / "episodes.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"episode_index": 0, "tasks": ["alpha"]}),
+                json.dumps({"episode_index": 1, "tasks": ["alpha"]}),
+            ]
+        )
+    )
+
+    assert _count_task_episodes(meta) == {"alpha": 2}
+
+
+def test_count_task_episodes_is_none_when_there_is_no_episode_metadata(
+    tmp_lerobot_home: Path,
+) -> None:
+    """Neither layout present ⇒ unknown, so the caller can distinguish it from a
+    real zero (a task listed in tasks.parquet that no episode uses)."""
+    from makermodslab.datasets import _count_task_episodes
+
+    meta = tmp_lerobot_home / "bare" / "meta"
+    meta.mkdir(parents=True)
+
+    assert _count_task_episodes(meta) is None
+
+
 def test_get_local_dataset_info_single_task_missing_episode_metadata(
     tmp_lerobot_home: Path,
 ) -> None:
-    """Task strings without episode metadata still render — counts degrade to 0."""
+    """Task strings without episode metadata still render — counts degrade to
+    None ("unknown"), NOT 0. 0 is reserved for a task no episode uses, and a
+    client ranks tasks by this number: letting unreadable metadata masquerade as
+    a real zero would let it silently decide which task sorts first."""
     from makermodslab.datasets import get_local_dataset_info
 
     d = _write_info(
@@ -252,7 +313,7 @@ def test_get_local_dataset_info_single_task_missing_episode_metadata(
 
     result = get_local_dataset_info("alice/solo")
     assert result is not None
-    assert result["tasks"] == [{"task": "only task", "num_episodes": 0}]
+    assert result["tasks"] == [{"task": "only task", "num_episodes": None}]
 
 
 def test_get_local_dataset_info_zero_episodes_and_no_cameras(
@@ -1950,6 +2011,32 @@ def _write_hub_meta(tmp_path: Path, payload: dict) -> Path:
     return p
 
 
+def _hub_download_stub(info_path: Path, meta_dir: Path | None = None):
+    """A `hf_hub_download` side_effect keyed on FILENAME.
+
+    get_hub_dataset_info fetches meta/info.json and then meta/tasks.* (see
+    _hub_task_strings), so a stub that returns one path for every filename would
+    hand the task reader the info file and quietly prove nothing. `meta_dir` is
+    where the task files live; omit it to model a repo that carries none, which
+    is how the Hub answers for a dataset with no task metadata."""
+
+    def _download(repo_id, *, filename, repo_type):  # noqa: ARG001 — mirrors the real signature
+        if filename == "meta/info.json":
+            return str(info_path)
+        if meta_dir is not None and (meta_dir / Path(filename).name).is_file():
+            return str(meta_dir / Path(filename).name)
+        raise FileNotFoundError(filename)
+
+    return _download
+
+
+def _info_json_calls(dl) -> int:
+    """How many times the stub was asked for meta/info.json — the call that
+    actually costs a round-trip per uncached summary. The task-file probes ride
+    along on the same fetch and would otherwise blur the caching assertions."""
+    return sum(1 for c in dl.call_args_list if c.kwargs.get("filename") == "meta/info.json")
+
+
 def test_get_hub_dataset_info_maps_meta(tmp_path: Path) -> None:
     from makermodslab import datasets as ds
 
@@ -1970,11 +2057,14 @@ def test_get_hub_dataset_info_maps_meta(tmp_path: Path) -> None:
     )
     with (
         patch("makermodslab.datasets.hf_hub_offline", return_value=False),
-        patch("makermodslab.datasets.hf_hub_download", return_value=str(meta)) as dl,
+        patch("makermodslab.datasets.hf_hub_download", side_effect=_hub_download_stub(meta)) as dl,
     ):
         row = ds.get_hub_dataset_info("alice/pick")
 
-    dl.assert_called_once_with("alice/pick", filename="meta/info.json", repo_type="dataset")
+    assert dl.call_args_list[0].kwargs["filename"] == "meta/info.json"
+    assert _info_json_calls(dl) == 1
+    # No task metadata in this repo, so the summary keeps an empty list — the
+    # populated case is test_get_hub_dataset_info_reads_task_strings below.
     assert row == {
         "repo_id": "alice/pick",
         "total_episodes": 12,
@@ -1986,6 +2076,60 @@ def test_get_hub_dataset_info_maps_meta(tmp_path: Path) -> None:
         "size_bytes": None,
         "source": "hub",
     }
+
+
+def test_get_hub_dataset_info_reads_task_strings(tmp_path: Path) -> None:
+    """A Hub-only dataset DOES carry its task strings: they live in one small
+    meta/tasks.parquet beside the meta/info.json already being fetched, so a
+    cloud-trained policy can offer the sentence it was trained on instead of
+    reporting that its dataset has none.
+
+    Counts come back None, not 0 — those live in the many-file episode
+    metadata, which this path deliberately does not fetch."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_dataset_info_cache()
+    meta = _write_hub_meta(tmp_path, {"total_episodes": 2, "total_frames": 60, "fps": 30})
+    pq.write_table(
+        pa.table({"task_index": [1, 0], "task": ["second", "first"]}),
+        tmp_path / "tasks.parquet",
+    )
+
+    with (
+        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
+        patch(
+            "makermodslab.datasets.hf_hub_download",
+            side_effect=_hub_download_stub(meta, meta_dir=tmp_path),
+        ),
+    ):
+        row = ds.get_hub_dataset_info("alice/pick")
+
+    assert row is not None
+    # Ordered by task_index, exactly as the local reader orders them.
+    assert row["tasks"] == [
+        {"task": "first", "num_episodes": None},
+        {"task": "second", "num_episodes": None},
+    ]
+
+
+def test_get_hub_dataset_info_survives_a_task_file_failure(tmp_path: Path) -> None:
+    """A task-file miss costs a log line, not the summary. The episode counts,
+    fps and cameras are the load-bearing half of this response and must still
+    arrive when the task probe finds nothing."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_dataset_info_cache()
+    meta = _write_hub_meta(tmp_path, {"total_episodes": 7, "total_frames": 210, "fps": 30})
+
+    with (
+        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
+        patch("makermodslab.datasets.hf_hub_download", side_effect=_hub_download_stub(meta)),
+    ):
+        row = ds.get_hub_dataset_info("alice/pick")
+
+    assert row is not None
+    assert row["total_episodes"] == 7
+    assert row["tasks"] == []
 
 
 def test_get_hub_dataset_info_excludes_non_video_camera_features(tmp_path: Path) -> None:
@@ -2046,14 +2190,17 @@ def test_get_hub_dataset_info_caches_success(tmp_path: Path) -> None:
     meta = _write_hub_meta(tmp_path, {"total_episodes": 1, "total_frames": 30, "fps": 30})
     with (
         patch("makermodslab.datasets.hf_hub_offline", return_value=False),
-        patch("makermodslab.datasets.hf_hub_download", return_value=str(meta)) as dl,
+        patch("makermodslab.datasets.hf_hub_download", side_effect=_hub_download_stub(meta)) as dl,
     ):
         ds.get_hub_dataset_info("alice/cached")
         ds.get_hub_dataset_info("alice/cached")
-        assert dl.call_count == 1
+        # Counted on meta/info.json alone: the task-file probes ride along on
+        # the same uncached fetch, so a raw call_count would grow with them and
+        # stop measuring what this test is about.
+        assert _info_json_calls(dl) == 1
         ds.invalidate_hub_dataset_info("alice/cached")
         ds.get_hub_dataset_info("alice/cached")
-        assert dl.call_count == 2
+        assert _info_json_calls(dl) == 2
 
 
 def test_datasets_info_endpoint_hub_fallback(
@@ -2866,12 +3013,16 @@ def test_hub_dataset_viewer_endpoints_404_without_video(
 
     with (
         patch("makermodslab.datasets.hf_hub_offline", return_value=False),
-        patch("makermodslab.datasets.hf_hub_download", return_value=str(meta)) as dl,
+        patch("makermodslab.datasets.hf_hub_download", side_effect=_hub_download_stub(meta)) as dl,
     ):
         resp = client.get("/datasets/episodes", params={"repo_id": "alice/no_video"})
 
     assert resp.status_code == 404
-    dl.assert_called_once()  # only the meta/info.json probe inside get_hub_dataset_info
+    # The point of this test is that NO episode/video chunk was fetched. The
+    # meta probes inside get_hub_dataset_info (info.json + the task files) are
+    # the cheap ones and are expected; a chunk fetch is the regression.
+    assert _info_json_calls(dl) == 1
+    assert not [c for c in dl.call_args_list if "episodes/" in c.kwargs.get("filename", "")]
 
 
 # --- Hub identity: resolve_hub_repo_id + hub_repo_exists --------------------

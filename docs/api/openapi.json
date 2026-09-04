@@ -622,7 +622,7 @@
         "type": "object"
       },
       "DatasetInfoResponse": {
-        "description": "datasets.py get_local_dataset_info / get_hub_dataset_info — both\nbranches carry every key. The hub summary degrades tasks to [] and\nsize_bytes to null (the repo isn't on disk). fps is `int | float` because\nit passes through from meta/info.json — a whole-number fps must stay the\ninteger the file holds, not become 30.0 on the wire.",
+        "description": "datasets.py get_local_dataset_info / get_hub_dataset_info — both\nbranches carry every key. The hub summary carries task STRINGS (one small\nfile next to meta/info.json) with null counts, and degrades size_bytes to\nnull (the repo isn't on disk). fps is `int | float` because\nit passes through from meta/info.json — a whole-number fps must stay the\ninteger the file holds, not become 30.0 on the wire.",
         "properties": {
           "cameras": {
             "items": {
@@ -852,11 +852,18 @@
         "type": "object"
       },
       "DatasetTaskCount": {
-        "description": "One entry of /datasets/info `tasks` (datasets.py get_local_dataset_info);\nnum_episodes is 0 when the per-episode count is unavailable.",
+        "description": "One entry of /datasets/info `tasks` (datasets.py get_local_dataset_info\n/ get_hub_dataset_info).\n\nnum_episodes is null when the count is UNKNOWN — episode metadata that\ncould not be read, or a Hub summary where the per-episode files were not\nfetched. It is 0 only for a task that really is used by no episode. The two\nwere previously indistinguishable, which let an unreadable file silently\ndecide which task a client ranked first; clients must not sort on null.",
         "properties": {
           "num_episodes": {
-            "title": "Num Episodes",
-            "type": "integer"
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Num Episodes"
           },
           "task": {
             "title": "Task",

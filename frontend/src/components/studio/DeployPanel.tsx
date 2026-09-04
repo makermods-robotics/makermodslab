@@ -1117,10 +1117,19 @@ const DeployPanel: React.FC = () => {
         if (cancelled) return;
         // Most-represented task first: if the operator has to choose, the one
         // the policy saw most is the likeliest answer and should be nearest.
-        const tasks = [...(info.tasks ?? [])]
-          .sort((a, b) => b.num_episodes - a.num_episodes)
-          .map((t) => t.task)
-          .filter(Boolean);
+        //
+        // Only when every count is KNOWN. A null is "we could not read the
+        // episode metadata" (or a Hub summary that never fetched it), and
+        // coercing that to 0 would let an unreadable file decide the ranking
+        // while every number still looked plausible — on a merged dataset the
+        // real margins are one episode wide. Unknown counts leave the server's
+        // own order (task_index) untouched, which is at least an order the data
+        // actually has.
+        const raw = [...(info.tasks ?? [])];
+        const ranked = raw.every((t) => t.num_episodes !== null)
+          ? raw.sort((a, b) => (b.num_episodes ?? 0) - (a.num_episodes ?? 0))
+          : raw;
+        const tasks = ranked.map((t) => t.task).filter(Boolean);
         // Offered as a PLACEHOLDER default (see `defaultTask`), not written
         // into the field: the operator should be able to tell the app's guess
         // from their own sentence, and clearing the box should fall back to the
