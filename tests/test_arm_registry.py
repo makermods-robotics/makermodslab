@@ -40,6 +40,7 @@ _ATTRIBUTE_TYPES: dict[str, type | tuple[type, ...]] = {
     "follower_library_attr": str,
     "follower_probe_protocol": (str, type(None)),
     "motion_identify_energizes_follower": bool,
+    "telemetry_kind": str,
 }
 
 
@@ -154,6 +155,13 @@ async def test_identify_by_motion_routes_to_the_family_detector(monkeypatch: pyt
         ("can", "teleop", ["/dev/y"], "maker"),
         ("can", "teleop", ["/dev/y"], "metal"),
     ]
+
+
+def test_telemetry_kind_is_one_of_the_two_the_frontend_renders() -> None:
+    """`joints` (URDF fractions) drives the 3D viewer; `joints_deg` feeds the
+    numeric readout in its slot. A family with a URDF says "urdf"."""
+    assert all(f.telemetry_kind in ("urdf", "degrees") for f in registry.families())
+    assert [f.telemetry_kind for f in registry.families()] == ["urdf", "degrees", "degrees"]
 
 
 def test_only_the_damiao_follower_refuses_the_motion_gesture() -> None:

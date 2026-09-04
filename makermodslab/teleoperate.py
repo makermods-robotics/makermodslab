@@ -948,11 +948,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                                 for bus, prefix in telemetry_targets:
                                     telemetry.sample(bus, prefix)
                                 last_current_sample_time = current_time
-                            if not family.uses_feetech_bus:
-                                # No Maker URDF ships yet, so `joints` stays
-                                # empty (the viewer has nothing to drive) and
-                                # the angles travel under `joints_deg` for the
-                                # numeric readout. See get_maker_joint_degrees.
+                            if family.telemetry_kind == "degrees":
+                                # No URDF ships for this family, so `joints`
+                                # stays empty (the viewer has nothing to drive)
+                                # and the angles travel under `joints_deg` for
+                                # the numeric readout. See get_maker_joint_degrees.
                                 joint_data = {
                                     "type": "joint_update",
                                     "joints": {},

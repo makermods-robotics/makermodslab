@@ -78,8 +78,14 @@ What the contract covers TODAY (refactor step "4a" of docs/extensions/plan.md):
   an interpolated MIT setpoint judged by convergence for the CAN arms, which
   have no brakes and drop under gravity if released anywhere but near rest.
 
-What step "4b" still adds (deliberately NOT declared yet): the telemetry
-kind the loops broadcast (URDF joints vs degrees by motor name).
+* telemetry — telemetry_kind, what the live loops broadcast for the
+  viewer: "urdf" (normalized joint fractions that drive the 3D model) or
+  "degrees" (angles by motor name for the numeric readout, because no URDF
+  ships for that family yet).
+
+Adding a family means adding a module here and registering it; nothing
+outside this package compares an arm type to a literal
+(tests/test_arm_registry.py sweeps every module for one).
 """
 
 from __future__ import annotations
@@ -109,6 +115,7 @@ REQUIRED_ATTRIBUTES: tuple[str, ...] = (
     "follower_library_attr",
     "follower_probe_protocol",
     "motion_identify_energizes_follower",
+    "telemetry_kind",
 )
 
 
@@ -176,6 +183,13 @@ class ArmFamily(ABC):
     # motion-identify gesture is refused for such a follower rather than run
     # behind the user's back; the leader side still works.
     motion_identify_energizes_follower: bool
+
+    # --- telemetry --------------------------------------------------------------
+    # What the teleop loop broadcasts each tick: "urdf" — normalized joint
+    # fractions under `joints`, driving the 3D viewer — or "degrees" — angles
+    # by motor name under `joints_deg`, for the numeric readout a family
+    # without a URDF gets (see teleoperate.get_maker_joint_degrees).
+    telemetry_kind: str
 
     def robot_config_types(self) -> frozenset[str]:
         """Every lerobot RobotConfig type string a follower of this family registers under."""

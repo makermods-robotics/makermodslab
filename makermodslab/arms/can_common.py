@@ -87,6 +87,10 @@ class CanArmFamily(ArmFamily):
 
     leader_library_attr = "MAKER_LEADER_CONFIG_PATH"
 
+    # No Maker or Metal URDF ships, so the viewer's slot shows the numeric
+    # readout fed by `joints_deg`.
+    telemetry_kind = "degrees"
+
     def _device_classes(self) -> CanDeviceClasses:  # pragma: no cover - abstract by convention
         """Import (lazily — python-can / motorbridge) and return this family's classes."""
         raise NotImplementedError

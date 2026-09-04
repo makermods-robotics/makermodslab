@@ -58,6 +58,8 @@ class SO101Family(ArmFamily):
     follower_probe_protocol = None
     motion_identify_energizes_follower = False
 
+    telemetry_kind = "urdf"
+
     def default_calibration_name(self, record_name: str) -> str:
         """Historical default: the bare record name, no family suffix."""
         return record_name
