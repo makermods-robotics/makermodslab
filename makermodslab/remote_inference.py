@@ -472,6 +472,19 @@ def _robot_request(request: RemoteInferenceRequest) -> InferenceRequest:
     `policy_ref` rides along because the model requires it; nothing on the
     robot-preparation path reads it. `coaching` and the eval fields keep their
     defaults — a remote run is neither.
+
+    `camera_dims` is deliberately NOT carried. For a local rollout the
+    checkpoint's image size must be the CAPTURE size, because nothing in
+    lerobot's standard rollout resizes frames. A remote run is different on
+    both ends: the robot child only encodes what the camera delivers, and
+    both GPU servers (`policy.py` / `policy_rtc.py`, `_build_batch`) resize
+    every decoded frame to the checkpoint's expected shape with
+    `F.interpolate` before inference. So the honest capture size here is the
+    robot record's own configured mode — a real mode the camera supports —
+    and overlaying the checkpoint's size only manufactures failures:
+    MolmoAct2 trains at 224×224, no UVC camera offers 224 wide, and lerobot's
+    `OpenCVCamera` raised `failed to set capture_width=224 (actual_width=352)`
+    on the bench (2026-09-03) for a run the GPU would have resized anyway.
     """
     return InferenceRequest(
         follower_port=request.follower_port,
@@ -481,7 +494,7 @@ def _robot_request(request: RemoteInferenceRequest) -> InferenceRequest:
         arm_type=request.arm_type,
         mode=request.mode,
         camera_bindings=dict(request.camera_bindings),
-        camera_dims=dict(request.camera_dims),
+        camera_dims={},
         checkpoint_state_dim=request.checkpoint_state_dim,
         skip_identity_check=request.skip_identity_check,
         task=request.task,

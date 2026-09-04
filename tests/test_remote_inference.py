@@ -287,25 +287,31 @@ def test_robot_sync_args_take_the_cameras_from_the_record_keyed_by_policy_name(
     assert "width: 640" in cam_arg
 
 
-def test_robot_sync_args_capture_at_the_checkpoints_resolution(
+def test_robot_sync_args_capture_at_the_records_resolution_not_the_checkpoints(
     tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Nothing resizes frames to the policy's input shape, so the checkpoint's
-    dims must win over the record's configured size."""
+    """The opposite of the local rollout's rule, on purpose. Locally nothing
+    resizes, so the checkpoint's dims must be the capture size. Remotely both
+    GPU servers resize every decoded frame to the checkpoint's shape, so the
+    capture size is the record's own configured mode — one the camera can
+    actually deliver. The bench case: MolmoAct2 at 224×224, a camera whose
+    nearest mode is 352×288, and lerobot's OpenCVCamera refusing the run."""
     from makermodslab.rollout import _single_robot_args
 
     _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "solo")
     req = _request(
         robot_name="solo",
         camera_bindings={"front": "wrist"},
-        camera_dims={"front": {"width": 320, "height": 240}},
+        camera_dims={"front": {"width": 224, "height": 224}},
     )
-    robot_args = _single_robot_args(ri._robot_request(req), "robot_a")
+    adapted = ri._robot_request(req)
+    assert adapted.camera_dims == {}
+    robot_args = _single_robot_args(adapted, "robot_a")
     cam_arg = next(a for a in robot_args if a.startswith("--robot.cameras="))
 
-    assert "width: 320" in cam_arg
-    assert "height: 240" in cam_arg
-    assert "width: 640" not in cam_arg
+    assert "width: 640" in cam_arg
+    assert "height: 480" in cam_arg
+    assert "width: 224" not in cam_arg
 
 
 def test_the_robot_request_adapter_carries_every_field_the_preflight_reads() -> None:
