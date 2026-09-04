@@ -32,22 +32,32 @@ export default {
     renameItem: "Rename robot…",
     deleteItem: "Delete robot…",
     teleop: "Teleop",
-    // The primary button on a follower-only station (Teleop's slot): host
-    // this robot for an operator elsewhere.
-    host: "Host",
     // The primary button on a leader-only controller (Teleop's slot): drive
     // a station's robot with this leader.
     drive: "Drive remote",
-    // The remote-teleoperation menu beside Teleop: host this robot for an
-    // operator elsewhere, or drive a station's robot with this leader.
+    // The remote-teleoperation menu beside Teleop: drive a station's robot
+    // with this leader. (Hosting is not started from the UI — a station is
+    // launched with `makermodslab --sfu --host <robot>`.)
     remote: "Remote",
     remoteTooltip: "Remote teleoperation over the network",
-    hostItem: "Available for remote teleop",
-    hostItemSub:
-      "Publish this robot's follower and cameras for an operator on another node.",
     remoteItem: "Drive a remote robot…",
     remoteItemSub:
       "Use this robot's leader arm to teleoperate a station that is hosting.",
+    // The status chip a station in station mode shows while it hosts: the
+    // prefix, then the phase, joined by " · ". The phase VALUES are data
+    // (remote_host.PHASES); {{operator}} is the seat holder's identity.
+    hosting: {
+      chip: "Hosting",
+      tooltip:
+        "This station is hosting {{robot}} for remote teleoperation — open the status view.",
+      phase: {
+        parked: "Parked",
+        engaging: "Engaging…",
+        engaged: "Engaged",
+        parking: "Parking…",
+      },
+      engagedBy: "Engaged by {{operator}}",
+    },
   },
   rename: {
     title: "Rename robot",
@@ -74,16 +84,6 @@ export default {
     // {{gap}} is the rendered setup-gap phrase below.
     disabledReason: "{{name}} {{gap}} — open Robot settings",
   },
-  // Station side of remote teleoperation (session kind `hosting`).
-  hosting: {
-    startedTitle: "Hosting started",
-    startedFallback: "{{name}} is available for remote teleoperation.",
-    startedWarningTitle: "Hosting started with a warning",
-    failedTitle: "Couldn't start hosting",
-    failedFallback: "Failed to start.",
-    // {{gap}} is the rendered follower-side setup-gap phrase.
-    disabledReason: "{{name}} {{gap}} — open Robot settings",
-  },
   // Operator side (session kind `remote_teleoperation`). The refusal lines
   // are display twins of the backend's error codes — matched on the code,
   // never on the prose. `makermodslab --sfu` is a CLI literal.
@@ -95,7 +95,7 @@ export default {
     installAction: "Install",
     refusal: {
       notHosting:
-        "That station isn't hosting. Ask for “Available for remote teleop” to be pressed there first.",
+        "That station isn't hosting. Start it there with makermodslab --sfu --host <robot> first.",
       nodeNotFound:
         "That station is no longer in the node registry. Refresh the list and pick it again.",
       nodeUnreachable:
@@ -106,6 +106,9 @@ export default {
         "This node isn't running the LiveKit SFU. Restart it with makermodslab --sfu.",
       extraMissing:
         "The remote-teleoperation extra isn't installed on this node.",
+      // 409 sfu.seat_taken: the station's single operator seat is held.
+      seatTaken:
+        "Someone else is driving this robot. Wait for them to stop, then try again.",
     },
   },
   // Layout chips beside a record's name wherever it is listed. The VALUES

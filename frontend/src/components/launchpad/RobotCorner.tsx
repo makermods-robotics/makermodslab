@@ -49,15 +49,15 @@ import TeleopDialog from "@/components/dialogs/TeleopDialog";
 import HostingDialog from "@/components/dialogs/HostingDialog";
 import RemoteTeleopDialog from "@/components/dialogs/RemoteTeleopDialog";
 import RemoteExtraInstallDialog from "@/components/dialogs/RemoteExtraInstallDialog";
-import { ToastAction } from "@/components/ui/toast";
 import RobotConfigDialog from "@/components/dialogs/RobotConfigDialog";
 import RobotLayoutChip from "@/components/launchpad/RobotLayoutChip";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
+import { useHostingStatus } from "@/hooks/useHostingStatus";
 import { useRobots, RobotRecord, RobotMode, ArmType } from "@/hooks/useRobots";
 import { ApiError } from "@/lib/apiClient";
 import { startSession, formatSessionHeld } from "@/lib/sessionApi";
-import { formatRemoteRefusal } from "@/lib/remoteApi";
+import type { HostingPhase } from "@/lib/remoteApi";
 import { tabOwnerId } from "@/lib/sessionOwner";
 import { formatRobotSetupGap, robotLayoutReady } from "@/lib/robotSetupGap";
 import { useLanguage } from "@/contexts/LanguageContext";
@@ -78,6 +78,15 @@ const StatusDot: React.FC<{ ready: boolean; className?: string }> = ({
     )}
   />
 );
+
+// Static catalog keys per hosting phase (never a runtime-built template) so
+// keyUsage.test.ts can verify each one; the phase VALUE is data.
+const HOSTING_PHASE_KEYS: Record<HostingPhase, string> = {
+  parked: "robot.corner.hosting.phase.parked",
+  engaging: "robot.corner.hosting.phase.engaging",
+  engaged: "robot.corner.hosting.phase.engaged",
+  parking: "robot.corner.hosting.phase.parking",
+};
 
 /**
  * The robot corner — Layout D's always-visible robot control, one pill
@@ -114,12 +123,14 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
   // Session identity from POST /api/v1/sessions — TeleopDialog heartbeats it
   // and stops it by id.
   const [teleopSessionId, setTeleopSessionId] = useState<string | null>(null);
-  // Remote teleoperation, both sides: hosting this robot's follower for an
-  // operator elsewhere (HostingDialog, by session id), and driving a hosting
-  // station with this robot's leader (RemoteTeleopDialog owns its own start).
-  const [hostStarting, setHostStarting] = useState(false);
+  // Remote teleoperation, both sides. Hosting is never STARTED here — a
+  // station is launched with `makermodslab --sfu --host <robot>` and hosts
+  // from startup — so this corner only surfaces a live hosting session as a
+  // status chip that opens HostingDialog (the status view). Driving a
+  // hosting station with this robot's leader is RemoteTeleopDialog, which
+  // owns its own start.
   const [hostOpen, setHostOpen] = useState(false);
-  const [hostSessionId, setHostSessionId] = useState<string | null>(null);
+  const { status: hostingStatus } = useHostingStatus();
   const [remoteOpen, setRemoteOpen] = useState(false);
   const [remoteInstallOpen, setRemoteInstallOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
@@ -238,74 +249,6 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
     }
   };
 
-  // Host this robot for remote teleoperation: same sessions surface, kind
-  // `hosting`. Fixed defaults for the loop pace and wire codec (both data —
-  // the codec id is what the operator's side copies from the descriptor).
-  const handleHost = async (robot: RobotRecord) => {
-    setHostStarting(true);
-    try {
-      const { session, warnings } = await startSession(baseUrl, fetchWithHeaders, {
-        kind: "hosting",
-        robot: robot.name,
-        owner: tabOwnerId(),
-        options: { fps: 30, video_codec: "H264" },
-      });
-      setHostSessionId(session.id);
-      if (warnings?.length) {
-        toast({
-          title: t("robot.hosting.startedWarningTitle"),
-          description: warnings.join(" "),
-          duration: 10000,
-        });
-      } else {
-        toast({
-          title: t("robot.hosting.startedTitle"),
-          description: t("robot.hosting.startedFallback", { name: robot.name }),
-        });
-      }
-      setHostOpen(true);
-    } catch (e) {
-      // Coded refusals (session.held, sfu.disabled, system.extra_missing)
-      // render their localized line; the extra-missing one offers the
-      // install flow. Anything else shows the server's own prose.
-      const refusal = formatRemoteRefusal(t, e, t("robot.hosting.failedFallback"));
-      if (refusal) {
-        toast({
-          title: t("robot.hosting.failedTitle"),
-          description: refusal.message,
-          variant: "destructive",
-          action: refusal.needsInstall ? (
-            <ToastAction
-              altText={t("robot.remote.installAction")}
-              onClick={() => setRemoteInstallOpen(true)}
-            >
-              {t("robot.remote.installAction")}
-            </ToastAction>
-          ) : undefined,
-        });
-      } else {
-        toast({
-          title: t("common.connectionError.title"),
-          description: t("common.connectionError.description"),
-          variant: "destructive",
-        });
-      }
-    } finally {
-      setHostStarting(false);
-    }
-  };
-
-  // Hosting drives the follower(s) only — gate on follower_ready, like
-  // inference and replay, so a missing leader can't block it.
-  const hostDisabledReason = !selectedRecord
-    ? t("robot.corner.selectFirst")
-    : !selectedRecord.follower_ready
-      ? t("robot.hosting.disabledReason", {
-          name: selectedRecord.name,
-          gap: formatRobotSetupGap(t, selectedRecord, "follower"),
-        })
-      : null;
-
   // Remote teleoperation drives with the LEADER only — a record with no
   // follower is fine. Gate on leader_ready, the leader-side twin of
   // follower_ready, and diagnose the gap in the same scope.
@@ -328,19 +271,35 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
       : null;
 
   // The arm LAYOUT decides which actions exist at all. Local teleop needs a
-  // pair on this machine; hosting needs a follower; driving a remote robot
-  // needs a leader. An action the layout makes impossible is HIDDEN rather
-  // than disabled — a station has no leader to set up, so "needs its leader"
-  // would be a dead end, not a hint. The primary slot (Teleop's) goes to the
-  // one action a single-arm layout is for: Host on a station, Drive remote on
-  // a controller. The Remote menu then only exists for a pair, where both of
-  // its items are live; on a single-arm layout its one remaining item IS the
-  // primary button.
+  // pair on this machine; driving a remote robot needs a leader. An action
+  // the layout makes impossible is HIDDEN rather than disabled — a station
+  // has no leader to set up, so "needs its leader" would be a dead end, not
+  // a hint. The primary slot (Teleop's) goes to Drive remote on a
+  // leader-only controller; a follower-only station has no local action at
+  // all (it is hosted from the command line — the chip above says so). The
+  // Remote menu exists for a pair, where Teleop holds the primary slot.
   const arms = selectedRecord?.arms ?? "both";
   const showTeleop = arms === "both";
-  const showHost = arms !== "leader";
   const showRemote = arms !== "follower";
   const showRemoteMenu = showTeleop;
+
+  // The live hosting session, if this station has one. The chip reads
+  // "Hosting · <phase>" (or "· Engaged by <operator>" — the identity is
+  // data) and opens the status view. Kept fresh by a light poll plus the
+  // session_changed hint for kind `hosting`.
+  const hosting =
+    hostingStatus?.hosting_active && hostingStatus.hosting
+      ? hostingStatus.hosting
+      : null;
+  const hostingPhaseLabel = hosting
+    ? hosting.phase === "engaged" && hosting.active_operator
+      ? t("robot.corner.hosting.engagedBy", {
+          operator: hosting.active_operator,
+        })
+      : t(HOSTING_PHASE_KEYS[hosting.phase] as never, {
+          defaultValue: hosting.phase,
+        })
+    : null;
 
   /** One rounded secondary pill in the cluster's action position. */
   const actionButton = (
@@ -523,6 +482,39 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
         </DropdownMenuContent>
       </DropdownMenu>
 
+      {hosting && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setHostOpen(true)}
+              className="h-7 gap-1.5 rounded-full px-2.5"
+            >
+              <span
+                aria-hidden
+                className={cn(
+                  "h-2 w-2 shrink-0 rounded-full",
+                  hosting.phase === "engaged"
+                    ? "animate-pulse bg-destructive"
+                    : hosting.phase === "parked"
+                      ? "bg-ok"
+                      : "animate-pulse bg-warn",
+                )}
+              />
+              <span className="max-w-[220px] truncate">
+                {t("robot.corner.hosting.chip")}
+                {" · "}
+                {hostingPhaseLabel}
+              </span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">
+            {t("robot.corner.hosting.tooltip", { robot: hosting.robot })}
+          </TooltipContent>
+        </Tooltip>
+      )}
+
       {showTeleop
         ? actionButton(
             t("robot.corner.teleop"),
@@ -532,23 +524,16 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
             () => selectedRecord && handleTeleop(selectedRecord),
             null,
           )
-        : arms === "follower"
+        : arms === "leader"
           ? actionButton(
-              t("robot.corner.host"),
-              <Radio className="h-3.5 w-3.5" />,
-              hostStarting,
-              hostDisabledReason,
-              () => selectedRecord && handleHost(selectedRecord),
-              t("robot.corner.hostItemSub"),
-            )
-          : actionButton(
               t("robot.corner.drive"),
               <Radio className="h-3.5 w-3.5" />,
               false,
               remoteDisabledReason,
               () => setRemoteOpen(true),
               t("robot.corner.remoteItemSub"),
-            )}
+            )
+          : null}
 
       {showRemoteMenu && (
         <DropdownMenu>
@@ -559,13 +544,9 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
                   size="sm"
                   variant="secondary"
                   className="h-7 gap-1.5 rounded-full px-2.5"
-                  disabled={!selectedRecord || hostStarting}
+                  disabled={!selectedRecord}
                 >
-                  {hostStarting ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Radio className="h-3.5 w-3.5" />
-                  )}
+                  <Radio className="h-3.5 w-3.5" />
                   {t("robot.corner.remote")}
                   <ChevronDown className="h-3 w-3 text-muted-foreground" />
                 </Button>
@@ -578,18 +559,6 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
             </TooltipContent>
           </Tooltip>
           <DropdownMenuContent align="end" className="w-80">
-            {showHost && (
-              <DropdownMenuItem
-                disabled={!!hostDisabledReason || hostStarting}
-                onSelect={() => selectedRecord && handleHost(selectedRecord)}
-                className="flex-col items-start gap-0.5"
-              >
-                <span>{t("robot.corner.hostItem")}</span>
-                <span className="text-xs text-muted-foreground">
-                  {hostDisabledReason ?? t("robot.corner.hostItemSub")}
-                </span>
-              </DropdownMenuItem>
-            )}
             {showRemote && (
               <DropdownMenuItem
                 disabled={!!remoteDisabledReason}
@@ -620,11 +589,7 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
         sessionId={teleopSessionId}
       />
 
-      <HostingDialog
-        open={hostOpen}
-        onOpenChange={setHostOpen}
-        sessionId={hostSessionId}
-      />
+      <HostingDialog open={hostOpen} onOpenChange={setHostOpen} />
 
       <RemoteTeleopDialog
         open={remoteOpen}

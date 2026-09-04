@@ -172,15 +172,30 @@ export default {
       disconnected: "The arm was disconnected cleanly.",
     },
   },
-  // Station side of remote teleoperation — the floating viewer while this
-  // robot is hosted. Robot names, operator identities and room names are data.
+  // Station side of remote teleoperation — the status view of a station-mode
+  // host. Robot names, operator identities and room names are data; the
+  // phase VALUES (remote_host.PHASES) are data too, only the labels localize.
   hosting: {
     title: "Hosting for remote teleop",
     titleWithRobot: "Hosting {{robot}} for remote teleop",
-    stop: "Stop",
+    // The stop: hands the arm back to whoever is at the station.
+    release: "Release for local use",
     releaseNow: "Release now",
     releasingBanner:
       "Returning the arm to rest before releasing torque. Press Release now to skip the return.",
+    // Shown only when the descriptor says station_mode.
+    stationModeNote:
+      "Station mode: hosting re-arms itself a few seconds after any local session ends.",
+    // The dialog is open but no hosting session is live right now.
+    inactive:
+      "Not hosting right now — a local session has the arm, or hosting stopped.",
+    phaseLabel: "Arm",
+    phase: {
+      parked: "Parked",
+      engaging: "Engaging…",
+      engaged: "Engaged",
+      parking: "Parking…",
+    },
     operatorLabel: "Operator",
     waitingOperator: "Waiting for an operator…",
     roomLabel: "Room",
@@ -205,15 +220,37 @@ export default {
     refreshStations: "Refresh stations",
     stationsLoading: "Looking for stations…",
     stationsEmpty:
-      "No station is hosting right now. On the station, press “Available for remote teleop”, then refresh.",
+      "No station is hosting right now. Start one with makermodslab --sfu --host <robot>, then refresh.",
     // {{robot}} is the hosted robot's name.
     hostingRobot: "Hosting {{robot}}",
     // Why a station row is greyed out: its hosted arm's family differs from
     // the local record's, which the server would refuse as a schema mismatch.
     armMismatch: "Different arm family",
+    // The station's seat state on a picker row. {{operator}} is the seat
+    // holder's identity (data); a seated station is greyed out with the
+    // second line.
+    rowParked: "Parked",
+    rowEngagedBy: "Engaged by {{operator}}",
+    seatTaken: "Someone else is driving",
     start: "Start",
     starting: "Starting…",
     stop: "Stop",
+    // Home parks the station's arm and holds it; Engage re-energizes it.
+    home: "Home",
+    homeHint: "Park the station's arm and hold it there.",
+    engage: "Engage",
+    engageHint: "Re-energize the station's arm with a soft start.",
+    // The live phase of the station's arm, from station_phase.
+    stationPhaseLabel: "Station arm",
+    stationPhase: {
+      parked: "Parked",
+      engaging: "Engaging…",
+      engaged: "Engaged",
+      parking: "Parking…",
+      // station_phase is null: the station could not be read.
+      unknown: "Unknown",
+    },
+    softStart: "Soft start…",
     stationLabel: "Station",
     roomLabel: "Room",
     cameras: "Cameras",
@@ -241,6 +278,8 @@ export default {
       stopped: "Remote teleoperation stopped",
       checkArm: "Check the arm",
       disconnected: "The leader arm was disconnected cleanly.",
+      // Home / Engage answered success=false; the reason is server prose.
+      commandRefused: "The station refused the command",
     },
   },
   // Install flow for the `remote` optional extra (mirrors the training and

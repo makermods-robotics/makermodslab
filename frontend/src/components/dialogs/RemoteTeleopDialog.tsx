@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Loader2, RefreshCw, VideoOff } from "lucide-react";
+import { Home, Loader2, Power, RefreshCw, VideoOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ToastAction } from "@/components/ui/toast";
 import UrdfViewer from "@/components/UrdfViewer";
@@ -19,6 +19,10 @@ import {
   formatRemoteRefusal,
   getRemoteTeleoperationStatus,
   remoteCameraUrl,
+  remoteEngage,
+  remoteHome,
+  type HostingPhase,
+  type RemoteCommandResponse,
   type RemoteTeleoperationStatus,
 } from "@/lib/remoteApi";
 import { startSession, stopSession } from "@/lib/sessionApi";
@@ -89,6 +93,17 @@ const RemoteCameraTile: React.FC<{ name: string }> = ({ name }) => {
   );
 };
 
+// Static catalog keys per station phase (never a runtime-built template) so
+// keyUsage.test.ts can verify each one; the phase VALUE is data. `unknown`
+// is station_phase === null — the station could not be read.
+const STATION_PHASE_KEYS: Record<HostingPhase | "unknown", string> = {
+  parked: "dialogs.remoteTeleop.stationPhase.parked",
+  engaging: "dialogs.remoteTeleop.stationPhase.engaging",
+  engaged: "dialogs.remoteTeleop.stationPhase.engaged",
+  parking: "dialogs.remoteTeleop.stationPhase.parking",
+  unknown: "dialogs.remoteTeleop.stationPhase.unknown",
+};
+
 /**
  * Whether a station's hosted arm belongs to a different family than the
  * local record's. The server refuses that pairing (robot.schema_mismatch),
@@ -112,13 +127,17 @@ const StationRow: React.FC<{
   const { t } = useTranslation();
   const hosted = node.capabilities?.hosting;
   const mismatch = armFamilyDiffers(node, localArmType);
+  // The station's single seat is held: shown, but not startable — the server
+  // would answer 409 sfu.seat_taken. The holder's identity is data.
+  const seated = hosted?.active_operator ?? null;
+  const disabled = mismatch || seated !== null;
   return (
     <button
       type="button"
       role="radio"
       aria-checked={checked}
-      aria-disabled={mismatch || undefined}
-      disabled={mismatch}
+      aria-disabled={disabled || undefined}
+      disabled={disabled}
       onClick={onPick}
       className={cn(
         "flex w-full items-center gap-2.5 bg-background px-3 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50",
@@ -149,11 +168,29 @@ const StationRow: React.FC<{
         {hosted ? (
           <span className="truncate text-xs text-muted-foreground">
             {t("dialogs.remoteTeleop.hostingRobot", { robot: hosted.robot })}
+            {seated !== null ? (
+              <>
+                {" · "}
+                {t("dialogs.remoteTeleop.rowEngagedBy", { operator: seated })}
+              </>
+            ) : hosted.phase === "parked" ? (
+              <>
+                {" · "}
+                {t("dialogs.remoteTeleop.rowParked")}
+              </>
+            ) : null}
             {mismatch ? (
               <>
                 {" · "}
                 <span className="text-warn">
                   {t("dialogs.remoteTeleop.armMismatch")}
+                </span>
+              </>
+            ) : seated !== null ? (
+              <>
+                {" · "}
+                <span className="text-warn">
+                  {t("dialogs.remoteTeleop.seatTaken")}
                 </span>
               </>
             ) : null}
@@ -178,10 +215,12 @@ const StationRow: React.FC<{
  * registry's peers that are hosting right now), then — once the session
  * starts — TeleopDialog's floating viewer fed by the WS broadcast (which
  * carries the REMOTE follower's joints in the local shape), the station's
- * cameras re-streamed as MJPEG, and the transport round-trip readout. Stop
- * is single-press (there is no follower here to return to rest). Every
- * in-app exit stops the session once by id; a browser-level leave is the
- * lease's job.
+ * cameras re-streamed as MJPEG, the station arm's live phase, and the
+ * transport round-trip readout. Joining engages the station automatically;
+ * Home parks its arm and holds it, Engage re-energizes it (soft start). Stop
+ * is single-press (there is no follower here to return to rest) and parks
+ * the station at once. Every in-app exit stops the session once by id; a
+ * browser-level leave is the lease's job.
  *
  * Mounted only while open (the shell below) so the registry poll runs only
  * while the picker is on screen.
@@ -217,13 +256,18 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
   const station = stations.find((n) => n.instance_id === stationId) ?? null;
   const stationMismatch =
     !!station && armFamilyDiffers(station, robot?.arm_type);
+  const stationSeated =
+    (station?.capabilities?.hosting?.active_operator ?? null) !== null;
   const [hostedArmType, setHostedArmType] = useState<ArmType | undefined>();
+  // Home / Engage in flight — one at a time.
+  const [commanding, setCommanding] = useState<"home" | "engage" | null>(null);
 
   useSessionHeartbeat(sessionId, tabOwnerId(), live && finished === null);
   useUnloadWarning(live && finished === null);
 
   const handleStart = async () => {
-    if (!robot || !stationId || !station || stationMismatch) return;
+    if (!robot || !stationId || !station || stationMismatch || stationSeated)
+      return;
     setStarting(true);
     try {
       const { session, warnings } = await startSession(baseUrl, fetchWithHeaders, {
@@ -316,6 +360,39 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
     };
   }, [live, baseUrl, fetchWithHeaders]);
 
+  // Home parks the station's arm and HOLDS it parked; Engage re-energizes it
+  // with a soft start. Both answer 200 either way — a refusal is
+  // success=false with the station's reason (server prose, verbatim).
+  const sendCommand = async (
+    name: "home" | "engage",
+    send: () => Promise<RemoteCommandResponse>,
+  ) => {
+    if (commanding) return;
+    setCommanding(name);
+    try {
+      const reply = await send();
+      if (!reply.success) {
+        toast({
+          title: t("dialogs.remoteTeleop.toast.commandRefused"),
+          description: reply.message,
+          variant: "destructive",
+        });
+      }
+    } catch {
+      toast({
+        title: t("common.connectionError.title"),
+        description: t("common.connectionError.description"),
+        variant: "destructive",
+      });
+    } finally {
+      setCommanding(null);
+    }
+  };
+  const handleHome = () =>
+    sendCommand("home", () => remoteHome(baseUrl, fetchWithHeaders));
+  const handleEngage = () =>
+    sendCommand("engage", () => remoteEngage(baseUrl, fetchWithHeaders));
+
   const stopRemote = useCallback(async () => {
     if (stoppedRef.current || !sessionId) return;
     stoppedRef.current = true;
@@ -379,6 +456,11 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
   const metrics = status?.metrics ?? null;
   const ms = (v: number | null | undefined) =>
     v == null ? "—" : `${Math.round(v)} ms`;
+  // The station's live phase; null (unreadable) renders as "Unknown" and
+  // enables neither command.
+  const stationPhase: HostingPhase | null = status?.station_phase ?? null;
+  const canHome = stationPhase === "engaged" || stationPhase === "engaging";
+  const canEngage = stationPhase === "parked";
 
   const viewer = (jointsKey: "joints" | "joints_right") =>
     readoutOnly ? (
@@ -404,13 +486,45 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
         <span className="text-sm font-semibold text-foreground">{title}</span>
         <RobotLayoutChip arms={robot?.arms} />
         {live ? (
-          <Button
-            size="sm"
-            onClick={handleStop}
-            className="ml-auto bg-destructive text-destructive-foreground hover:bg-destructive/90"
-          >
-            {t("dialogs.remoteTeleop.stop")}
-          </Button>
+          <div className="ml-auto flex items-center gap-1.5">
+            <Button
+              size="sm"
+              variant="secondary"
+              title={t("dialogs.remoteTeleop.homeHint")}
+              disabled={!canHome || commanding !== null || finished !== null}
+              onClick={handleHome}
+              className="gap-1.5"
+            >
+              {commanding === "home" ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Home className="h-3.5 w-3.5" />
+              )}
+              {t("dialogs.remoteTeleop.home")}
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              title={t("dialogs.remoteTeleop.engageHint")}
+              disabled={!canEngage || commanding !== null || finished !== null}
+              onClick={handleEngage}
+              className="gap-1.5"
+            >
+              {commanding === "engage" ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Power className="h-3.5 w-3.5" />
+              )}
+              {t("dialogs.remoteTeleop.engage")}
+            </Button>
+            <Button
+              size="sm"
+              onClick={handleStop}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {t("dialogs.remoteTeleop.stop")}
+            </Button>
+          </div>
         ) : (
           <Button
             size="sm"
@@ -468,7 +582,9 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
           <div className="flex justify-end">
             <Button
               size="sm"
-              disabled={!robot || !station || stationMismatch || starting}
+              disabled={
+                !robot || !station || stationMismatch || stationSeated || starting
+              }
               onClick={handleStart}
             >
               {starting ? (
@@ -525,6 +641,30 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
 
           {/* Station name, room and the metrics are data — verbatim. */}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            <span className="flex items-center gap-1.5">
+              <span
+                aria-hidden
+                className={cn(
+                  "h-2 w-2 rounded-full",
+                  stationPhase === "engaged"
+                    ? "bg-ok"
+                    : stationPhase === "engaging" || stationPhase === "parking"
+                      ? "animate-pulse bg-warn"
+                      : "bg-muted-foreground/60",
+                )}
+              />
+              <span>{t("dialogs.remoteTeleop.stationPhaseLabel")}:</span>
+              <span className="font-medium text-foreground">
+                {t(STATION_PHASE_KEYS[stationPhase ?? "unknown"] as never, {
+                  defaultValue: stationPhase ?? "",
+                })}
+              </span>
+              {stationPhase === "engaging" ? (
+                <span className="text-warn">
+                  {t("dialogs.remoteTeleop.softStart")}
+                </span>
+              ) : null}
+            </span>
             <span className="flex items-center gap-1.5">
               <span>{t("dialogs.remoteTeleop.stationLabel")}:</span>
               <span className="font-mono text-foreground">

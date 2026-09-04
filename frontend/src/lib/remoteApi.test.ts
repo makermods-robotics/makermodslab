@@ -15,7 +15,7 @@ describe("formatRemoteRefusal", () => {
   it("maps each remote-teleop refusal code to its catalog line", () => {
     expect(formatRemoteRefusal(t, refusal("node.not_hosting"), "fb")).toEqual({
       message:
-        "That station isn't hosting. Ask for “Available for remote teleop” to be pressed there first.",
+        "That station isn't hosting. Start it there with makermodslab --sfu --host <robot> first.",
       needsInstall: false,
     });
     expect(
@@ -24,6 +24,17 @@ describe("formatRemoteRefusal", () => {
     expect(
       formatRemoteRefusal(t, refusal("sfu.disabled"), "fb")?.message,
     ).toMatch(/makermodslab --sfu/);
+  });
+
+  it("renders the taken seat as a friendly refusal, never the holder id", () => {
+    const taken = new ApiError("seat", 409, "seat held by op-1", "sfu.seat_taken", {
+      holder: "op-1",
+    });
+    expect(formatRemoteRefusal(t, taken, "fb")).toEqual({
+      message:
+        "Someone else is driving this robot. Wait for them to stop, then try again.",
+      needsInstall: false,
+    });
   });
 
   it("flags system.extra_missing so the caller offers the install flow", () => {

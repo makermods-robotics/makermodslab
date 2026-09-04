@@ -24,6 +24,12 @@ export interface HostingCamera {
   height: number;
 }
 
+/** The station's resting/engaged state machine (remote_host.PHASES):
+ * `parked` — arm at rest with torque off, room open, listening;
+ * `engaging` — the 1 s soft start; `engaged` — following the seated
+ * operator; `parking` — returning to rest. Ids are data, matched on. */
+export type HostingPhase = "parked" | "engaging" | "engaged" | "parking";
+
 /** What an operator needs to join this station's room. Every field is data
  * (robot name, room, motor names, codec id) — rendered verbatim. */
 export interface HostingDescriptor {
@@ -39,6 +45,10 @@ export interface HostingDescriptor {
   joint_ranges_deg: Record<string, number>;
   /** The operator currently driving, or null while the station waits. */
   active_operator: string | null;
+  phase: HostingPhase;
+  /** True when the process was started with `--host`: hosting re-arms
+   * itself a few seconds after any local session ends. */
+  station_mode: boolean;
 }
 
 export interface HostingStatus {
@@ -73,6 +83,9 @@ export interface RemoteTeleoperationMetrics {
 export interface RemoteTeleoperationStatus {
   remote_teleoperation_active: boolean;
   station: RemoteStation | null;
+  /** The station's live phase (its descriptor, re-read at most once a
+   * second by the server); null when the station could not be read. */
+  station_phase: HostingPhase | null;
   room: string | null;
   /** Camera names the station publishes — each one is re-streamed at
    * `remoteCameraUrl(baseUrl, name)`. Names are data. */
@@ -106,6 +119,40 @@ export async function getRemoteTeleoperationStatus(
     fetcher,
     "/api/v1/remote-teleoperation",
     { signal, action: "Get remote teleoperation status" },
+  );
+}
+
+/** Home / Engage from the operator side. Always a 200: a refusal is
+ * `success: false` with the reason in `message` (server prose, verbatim). */
+export interface RemoteCommandResponse {
+  success: boolean;
+  message: string;
+}
+
+/** Park the station's arm (return to rest, torque off) and HOLD it parked
+ * until Engage. Only the seated operator's request is honoured. */
+export async function remoteHome(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<RemoteCommandResponse> {
+  return apiRequest<RemoteCommandResponse>(
+    baseUrl,
+    fetcher,
+    "/api/v1/remote-teleoperation/home",
+    { method: "POST", action: "Home remote arm" },
+  );
+}
+
+/** Re-energize the station's arm after a Home, with a soft start. */
+export async function remoteEngage(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<RemoteCommandResponse> {
+  return apiRequest<RemoteCommandResponse>(
+    baseUrl,
+    fetcher,
+    "/api/v1/remote-teleoperation/engage",
+    { method: "POST", action: "Engage remote arm" },
   );
 }
 
@@ -157,6 +204,8 @@ const REFUSAL_KEYS: Record<string, string> = {
   "node.unreachable": "robot.remote.refusal.nodeUnreachable",
   [`robot.schema_mismatch`]: "robot.remote.refusal.schemaMismatch",
   "sfu.disabled": "robot.remote.refusal.sfuDisabled",
+  // The station's single operator seat is held by someone else (409).
+  "sfu.seat_taken": "robot.remote.refusal.seatTaken",
   "system.extra_missing": "robot.remote.refusal.extraMissing",
 };
 
