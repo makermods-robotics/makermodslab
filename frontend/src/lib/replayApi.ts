@@ -133,10 +133,15 @@ export async function importDataset(
   });
 }
 
-/** One task string with how many episodes use it (0 = count unavailable). */
+/** One task string with how many episodes use it.
+ *
+ * `null` means UNKNOWN — episode metadata that could not be read, or a Hub
+ * summary whose per-episode files were never fetched. `0` means the task is
+ * genuinely used by no episode. Never sort on null: an unreadable file must not
+ * get to decide which task ranks first. */
 export interface DatasetTask {
   task: string;
-  num_episodes: number;
+  num_episodes: number | null;
 }
 
 export interface DatasetInfo {

@@ -98,7 +98,10 @@ const TaskList: React.FC<{ tasks: DatasetTask[] }> = ({ tasks }) => {
         <span className="min-w-0 truncate" title={task}>
           {task}
         </span>
-        {num_episodes > 0 && (
+        {/* null is "count unknown" (unreadable episode metadata, or a Hub
+            summary that never fetched it) — say nothing rather than "0
+            episodes", which would be a claim we can't make. */}
+        {num_episodes !== null && num_episodes > 0 && (
           <span className="shrink-0 text-muted-foreground">
             · {t("landing.datasetInfo.tasks.episodeCount", { n: num_episodes })}
           </span>
@@ -122,11 +125,15 @@ const TaskList: React.FC<{ tasks: DatasetTask[] }> = ({ tasks }) => {
               <span className="min-w-0 flex-1 truncate" title={task}>
                 {task}
               </span>
-              <span className="shrink-0 text-muted-foreground">
-                {t("landing.datasetInfo.tasks.episodeCount", {
-                  n: num_episodes,
-                })}
-              </span>
+              {/* Same as above: an unknown count renders as nothing, keeping
+                  the row's task text without asserting an episode figure. */}
+              {num_episodes !== null && (
+                <span className="shrink-0 text-muted-foreground">
+                  {t("landing.datasetInfo.tasks.episodeCount", {
+                    n: num_episodes,
+                  })}
+                </span>
+              )}
             </li>
           ))}
         </ul>
