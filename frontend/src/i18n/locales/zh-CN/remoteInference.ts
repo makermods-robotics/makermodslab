@@ -48,6 +48,18 @@ export default {
     gpuLabel: "GPU",
     gpuHint:
       "策略服务运行所用的 Modal GPU。越大越快、每小时也越贵；它是继精度之后的第二根杠杆，而且无论如何都在计费。",
+    // 写在被禁用的下拉框旁边，因为这个原因属于“当前这个检查点”。
+    precisionUnavailable:
+      "该检查点没有可覆盖的精度设置 —— 它按保存时的精度加载。",
+    // 流步数参数（S3.8f）。
+    flowStepsLabel: "流步数",
+    // 只有这一个选项是文案：它表示不传任何标志。第二种写法里的数字是该检查点
+    // 实际会用的步数，属于数据 —— 由服务端算出，不在本文件里写死。
+    flowStepsCheckpoint: "检查点默认值",
+    flowStepsCheckpointKnown: "检查点默认值（{{steps}}）",
+    flowStepsHint:
+      "模型为生成一个动作块要推理多少遍。次数越少越快、动作也越粗糙 —— 这是缩短等待最便宜的办法，也是最先牺牲质量的办法。MolmoAct2 用 10 次；在 horizon 30、30 fps 下，它在 GPU 上的耗时目前约 880 毫秒，而预算是 777 毫秒。",
+    flowStepsUnavailable: "该检查点不是分步生成动作的，因此没有可缩短的步数。",
   },
   // 按角色绑定摄像头。只有当检查点的某个摄像头在机器人上找不到同名摄像头时才会出现。
   cameraRoles: {

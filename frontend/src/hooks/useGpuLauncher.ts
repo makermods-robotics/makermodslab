@@ -64,6 +64,28 @@ export interface GpuStatus {
    * are DATA: a torch dtype name and a Modal GPU spec, never translated. */
   model_dtype: string | null;
   gpu: string | null;
+  /** Whether each per-checkpoint knob actually reached the wire.
+   *
+   * A knob is DROPPED when the target checkpoint's config has no field for it
+   * — a precision remembered from a MolmoAct2 run, still selected when the
+   * operator switches to SmolVLA, whose config has no `model_dtype`. The value
+   * above is the ASK (so a form comparing itself against this record still
+   * matches after a drop); these say whether it went. False beside an empty
+   * value is simply "nobody chose one". */
+  model_dtype_applied: boolean;
+  /** Steps per chunk AS ASKED. Null while idle AND when nothing was asked — an
+   * int has no empty string the way `model_dtype` has one, so those two share
+   * a value and `flow_steps_applied` separates a drop from a non-choice. */
+  flow_steps: number | null;
+  flow_steps_applied: boolean;
+  /** WHAT THE CONTAINER SAID IT IS RUNNING ON — e.g. "NVIDIA A100-SXM4-40GB
+   * (39.6 GiB)", from the policy server's own `[policy] device:` line. Null
+   * while idle and until that line arrives.
+   *
+   * The only EVIDENCE here about hardware: `gpu` above is what the launch
+   * ASKED Modal for, which is a different fact and was the one being read as
+   * this. DATA — a vendor device string, never translated. */
+  device_name: string | null;
   /** Survives an idle transition: after a failure this is the most useful
    * thing left. A path — data. */
   log_path: string | null;
@@ -105,6 +127,12 @@ export interface GpuStartRequest {
    * `DEFAULT_GPU` instead — which IS that pin today — so the choice is visible
    * rather than implied. Wire values. */
   gpu: GpuType | "";
+  /** How many flow-matching / denoising steps the sampler takes per chunk.
+   * Null ⇒ no `--flow-steps` flag at all, i.e. the checkpoint's own count —
+   * null is to this field what `""` is to `model_dtype`. Also what the panel
+   * sends when the selected checkpoint's config says the knob does not apply,
+   * whatever this browser remembered. */
+  flow_steps: number | null;
 }
 
 /** The precisions the launcher will pass to `--model-dtype`, mirroring
@@ -131,6 +159,15 @@ export type GpuType = (typeof GPU_TYPES)[number];
  * panel preselects it and SENDS it, so a run that touches neither knob is the
  * same run S3.8 launched. */
 export const DEFAULT_GPU: GpuType = "A100";
+
+/** The step counts the picker offers, inside the launcher's own 1-20 band
+ * (`modal_launcher.FLOW_STEPS_MIN/MAX`, where an off-band value is refused).
+ *
+ * A short list rather than a number field: this knob is pulled to SPEND LESS
+ * time per chunk, the published defaults are 8 (MolmoAct2's own
+ * `num_flow_timesteps`) and 10 (everything else's), and the interesting
+ * answers are all below them. Numbers — data, shown verbatim. */
+export const FLOW_STEPS = [2, 3, 4, 6, 8, 10] as const;
 
 /** One row of `modal profile list --json`. All three are DATA — a profile name
  * and a workspace name are identifiers, never prose. */
@@ -483,6 +520,7 @@ export function useGpuTargets(enabled: boolean): UseGpuTargets {
  * them to another Lab would carry a bill with them. */
 const MODEL_DTYPE_KEY = "makermodslab.gpuModelDtype";
 const GPU_KEY = "makermodslab.gpuType";
+const FLOW_STEPS_KEY = "makermodslab.gpuFlowSteps";
 
 export interface UseGpuKnobs {
   /** Empty means "as the checkpoint saved it" — no flag is sent. */
@@ -491,8 +529,70 @@ export interface UseGpuKnobs {
    * always says which GPU it wants rather than inheriting a pin that could be
    * re-pinned under it. */
   gpu: GpuType;
+  /** Null means "as the checkpoint samples it" — no flag is sent. */
+  flowSteps: number | null;
   setModelDtype: (value: ModelDtype) => void;
   setGpu: (value: GpuType) => void;
+  setFlowSteps: (value: number | null) => void;
+}
+
+/**
+ * Which of the two per-CHECKPOINT knobs the selected checkpoint can actually
+ * use, and the number to show beside "Checkpoint default".
+ *
+ * Fail-OPEN, and that is the whole rule: a null config (not loaded, not
+ * readable, a checkpoint this build has never seen) reports both as available,
+ * because "not established" is not "inapplicable" — it is the same answer
+ * `modal_launcher.resolve_knobs` gives when it cannot read the config, and the
+ * container has its own check either way. Disabling a select on a config that
+ * merely has not arrived would be a knob the operator cannot reach for a
+ * reason they cannot see.
+ *
+ * `flowStepsDefault` is null both for a checkpoint with no such knob and for
+ * one that saved no value — MolmoAct2 saves `num_inference_steps: null` and
+ * the number that applies lives in its backbone's own config. So it means "no
+ * number to print", never "no default", and `flowSteps` (a separate field for
+ * exactly this reason) is what says whether the knob applies.
+ */
+export interface GpuKnobSupport {
+  modelDtype: boolean;
+  flowSteps: boolean;
+  flowStepsDefault: number | null;
+}
+
+export function gpuKnobSupport(
+  config: {
+    supports_model_dtype?: boolean;
+    supports_flow_steps?: boolean;
+    flow_steps_default?: number | null;
+  } | null,
+): GpuKnobSupport {
+  return {
+    // `?? true` covers a server too old to report the field as well as a
+    // missing config — same fail-open reason.
+    modelDtype: config?.supports_model_dtype ?? true,
+    flowSteps: config?.supports_flow_steps ?? true,
+    flowStepsDefault: config?.flow_steps_default ?? null,
+  };
+}
+
+/** What a launch (and the pasted `modal run` line) actually sends: the
+ * remembered picks with any knob the checkpoint cannot use BLANKED.
+ *
+ * The picks are remembered per browser and the checkpoint changes under them,
+ * so the remembered answer to a question about another checkpoint has to be
+ * dropped HERE too, not only server-side — otherwise the panel would keep
+ * showing, and the copyable line would keep carrying, a flag that is not
+ * going out. */
+export function effectiveGpuKnobs(
+  knobs: UseGpuKnobs,
+  support: GpuKnobSupport,
+): { modelDtype: ModelDtype; gpu: GpuType; flowSteps: number | null } {
+  return {
+    modelDtype: support.modelDtype ? knobs.modelDtype : "",
+    gpu: knobs.gpu,
+    flowSteps: support.flowSteps ? knobs.flowSteps : null,
+  };
 }
 
 /**
@@ -511,6 +611,8 @@ export interface UseGpuKnobs {
  * must not leave the panel showing something a launch would refuse.
  */
 export function useGpuKnobs(): UseGpuKnobs {
+  // A remembered value outside the current list falls back silently, the rule
+  // `useGpuTargets` applies to a renamed profile.
   const [modelDtype, setModelDtypeState] = useState<ModelDtype>(() => {
     const stored = read(MODEL_DTYPE_KEY);
     return (MODEL_DTYPES as readonly string[]).includes(stored)
@@ -529,10 +631,20 @@ export function useGpuKnobs(): UseGpuKnobs {
     setModelDtypeState(value);
   }, []);
 
+  const [flowSteps, setFlowStepsState] = useState<number | null>(() => {
+    const stored = Number(read(FLOW_STEPS_KEY));
+    return (FLOW_STEPS as readonly number[]).includes(stored) ? stored : null;
+  });
+
   const setGpu = useCallback((value: GpuType) => {
     write(GPU_KEY, value);
     setGpuState(value);
   }, []);
 
-  return { modelDtype, gpu, setModelDtype, setGpu };
+  const setFlowSteps = useCallback((value: number | null) => {
+    write(FLOW_STEPS_KEY, value == null ? "" : String(value));
+    setFlowStepsState(value);
+  }, []);
+
+  return { modelDtype, gpu, flowSteps, setModelDtype, setGpu, setFlowSteps };
 }

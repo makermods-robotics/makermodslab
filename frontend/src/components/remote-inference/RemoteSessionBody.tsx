@@ -179,6 +179,13 @@ const RemoteSessionBody: React.FC<{
    * DATA — Modal's own name, shown verbatim. Null ⇒ the line is omitted
    * rather than guessed at. */
   gpuProfile: string | null;
+  /** What the container ITSELF reported it is running on — e.g. "NVIDIA
+   * A100-SXM4-40GB (39.6 GiB)". The only EVIDENCE about the hardware: the GPU
+   * beside the profile is what the launch ASKED Modal for, and until this line
+   * existed nothing anywhere could tell the two apart. Null until the policy
+   * server prints it, which is when the billing line simply says less rather
+   * than guessing. DATA — a vendor device string, never translated. */
+  gpuDeviceName: string | null;
   onStop: () => void;
   stopping: boolean;
   /** Close the dialog once the run has ended. */
@@ -186,7 +193,15 @@ const RemoteSessionBody: React.FC<{
   /** "Policy failing? Coach it" — offered only when the launcher knows which
    * policy to hand on (a deploy prefill). Null hides the button. */
   onCoach: (() => void) | null;
-}> = ({ status, gpuProfile, onStop, stopping, onClose, onCoach }) => {
+}> = ({
+  status,
+  gpuProfile,
+  gpuDeviceName,
+  onStop,
+  stopping,
+  onClose,
+  onCoach,
+}) => {
   const { t } = useTranslation();
   const stats = status.stats;
 
@@ -404,7 +419,13 @@ const RemoteSessionBody: React.FC<{
               is being billed, and guessing at that is worse than silence. The
               profile name is Modal's own — data. */}
           {gpuProfile ? (
-            <span className="text-xs text-muted-foreground">
+            // `title` rather than a second line: the card is dense, and this
+            // is the answer to a question only asked when the billing line
+            // looks wrong ("is it really on the card I picked?").
+            <span
+              className="text-xs text-muted-foreground"
+              title={gpuDeviceName ?? undefined}
+            >
               {t("remoteInference.status.gpuBilling", { profile: gpuProfile })}
             </span>
           ) : null}

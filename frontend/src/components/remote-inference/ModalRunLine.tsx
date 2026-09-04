@@ -4,7 +4,11 @@ import { Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import type { RemoteInferenceTransportStatus } from "@/hooks/useRemoteInferenceTransport";
-import type { UseGpuKnobs } from "@/hooks/useGpuLauncher";
+import {
+  effectiveGpuKnobs,
+  type GpuKnobSupport,
+  type UseGpuKnobs,
+} from "@/hooks/useGpuLauncher";
 import {
   buildModalRunLine,
   LOCAL_SECRET_PLACEHOLDER,
@@ -43,6 +47,9 @@ const ModalRunLine: React.FC<{
   /** Precision + GPU type, so the pasted line loads the same weights on the
    * same hardware Start GPU would. */
   knobs: UseGpuKnobs;
+  /** Which of them the selected checkpoint can use, so a knob its config has
+   * no field for never appears in a line the operator is about to paste. */
+  knobSupport: GpuKnobSupport;
 }> = ({
   config,
   transport,
@@ -51,10 +58,12 @@ const ModalRunLine: React.FC<{
   profile,
   environment,
   knobs,
+  knobSupport,
 }) => {
   const { t } = useTranslation();
   const { toast } = useToast();
 
+  const effective = effectiveGpuKnobs(knobs, knobSupport);
   const line = buildModalRunLine({
     policyHubId: config.policyHubId.trim() || hubIdDefault,
     // The engine picks WHICH wrapper this line runs. The two GPU servers
@@ -65,8 +74,10 @@ const ModalRunLine: React.FC<{
     // The GPU side's own two. The dtype is a flag; the GPU type is an
     // assignment in front of the command, because the wrapper's decorator is
     // evaluated at import and no flag could reach it.
-    modelDtype: knobs.modelDtype,
-    gpu: knobs.gpu,
+    modelDtype: effective.modelDtype,
+    // A flag too, right after the precision.
+    flowSteps: effective.flowSteps,
+    gpu: effective.gpu,
     horizon: config.horizon,
     fps: config.fps,
     videoCodec: config.videoCodec,

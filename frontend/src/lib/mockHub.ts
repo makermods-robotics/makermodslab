@@ -360,6 +360,13 @@ const policyConfig = (policy: string): PolicyConfigSummary => ({
   // Mirrors the server's table (jobs.policy_type_supports_rtc): the VLAs run
   // Real-Time Chunking, ACT and the other regression policies don't.
   supports_rtc: policy === "smolvla" || policy === "pi05",
+  // The two GPU-launch knobs, as the real route reports them. Only MolmoAct2
+  // carries `model_dtype`, so mock mode always exercises the DISABLED
+  // precision select — which is the state the bench failure came from. The
+  // flow families sample in steps; ACT does not.
+  supports_model_dtype: false,
+  supports_flow_steps: policy === "smolvla" || policy === "pi05",
+  flow_steps_default: policy === "smolvla" ? 10 : policy === "pi05" ? 10 : null,
   state_dim: 6,
   action_dim: 6,
   // Chunk geometry, as the real route reports it. ACT's config defaults are

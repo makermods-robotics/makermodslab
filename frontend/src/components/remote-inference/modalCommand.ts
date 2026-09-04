@@ -42,6 +42,12 @@ export interface ModalRunLineInput {
   /** The precision the checkpoint is loaded at. Empty ⇒ NO flag, which is the
    * dtype the checkpoint was saved with — not a default this line picks. */
   modelDtype: string;
+  /** How many flow-matching / denoising steps the sampler takes per chunk.
+   * Null ⇒ NO flag, which is the checkpoint's own count — null is to this
+   * field what `""` is to `modelDtype`. It is also null whenever the selected
+   * checkpoint's config has no such field, so a remembered pick for another
+   * policy never appears in a line the operator is about to paste. */
+  flowSteps: number | null;
   /** The Modal GPU to run on. It cannot be a flag: `_FN_KWARGS["gpu"]` is
    * evaluated when `modal run` imports the wrapper, before Click parses
    * anything — so it is emitted as an env-var ASSIGNMENT prefixing the
@@ -147,6 +153,11 @@ export function buildModalRunLine(input: ModalRunLineInput): string {
     // signatures put it. Omitted when unset, like --task: unset is not a
     // default, it is the dtype the checkpoint was saved with.
     ...(modelDtype ? [`--model-dtype ${modelDtype}`] : []),
+    // Right after it, the order the two knobs were added in — and omitted the
+    // same way, for a stronger reason: 0 is not a step count any sampler would
+    // take (the pin raises on it), so the flag's absence is the only way to
+    // say "leave the checkpoint's own".
+    ...(input.flowSteps ? [`--flow-steps ${input.flowSteps}`] : []),
     `--horizon ${input.horizon}`,
     `--fps ${input.fps}`,
     // RTC only. The sync wrapper has no --s-min flag at all, so emitting it

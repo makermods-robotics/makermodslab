@@ -64,6 +64,7 @@ import {
   useRemoteInferenceTransport,
 } from "@/hooks/useRemoteInferenceTransport";
 import {
+  gpuKnobSupport,
   useGpuKnobs,
   useGpuLauncher,
   useGpuTargets,
@@ -494,6 +495,13 @@ const DeployPanel: React.FC = () => {
 
   /** The checkpoint's own chunk width — the CEILING on the horizon. */
   const checkpointHorizon = policyConfig?.n_action_steps ?? null;
+  // Which of the two GPU-side knobs THIS checkpoint can use. Derived rather
+  // than stored: the picks are remembered per browser and the checkpoint
+  // changes under them, so the answer has to follow the selection — a
+  // precision picked for MolmoAct2 and left selected for SmolVLA (whose config
+  // has no `model_dtype`) cost a cold start ending in the container's refusal.
+  // Fail-open while the config is still loading; the server drops what it must.
+  const knobSupport = gpuKnobSupport(policyConfig);
 
   // ONE engine for both places a run can happen. It lives on `remoteConfig`
   // because the GPU card and the generated `modal run` line are built from that
@@ -2061,6 +2069,7 @@ const DeployPanel: React.FC = () => {
                   launcher={gpu}
                   targets={gpuTargets}
                   knobs={gpuKnobs}
+                  knobSupport={knobSupport}
                   config={remoteConfig}
                   hubIdDefault={hubIdDefault}
                   // The SAME string the start request sends, so the GPU side
@@ -2080,11 +2089,13 @@ const DeployPanel: React.FC = () => {
                   profile={gpuTargets.profile}
                   environment={gpuTargets.environment}
                   knobs={gpuKnobs}
+                  knobSupport={knobSupport}
                 />
                 <RemoteAdvancedSection
                   config={remoteConfig}
                   onChange={setRemoteConfig}
                   knobs={gpuKnobs}
+                  knobSupport={knobSupport}
                   checkpointHorizon={checkpointHorizon}
                   open={transportAdvancedOpen}
                   onOpenChange={setTransportAdvancedOpen}

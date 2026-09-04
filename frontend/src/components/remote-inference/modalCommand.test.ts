@@ -33,10 +33,12 @@ const cloud: ModalRunLineInput = {
   // is what every assertion below the target block assumes.
   profile: "",
   environment: "",
-  // Neither GPU-side knob chosen either: no --model-dtype flag (the dtype the
-  // checkpoint was saved with) and no DRTC_GPU assignment (the wrapper's own
-  // pin). That is what keeps every verbatim line below byte-for-byte pre-S3.8e.
+  // No GPU-side knob chosen either: no --model-dtype flag (the dtype the
+  // checkpoint was saved with), no --flow-steps (its own sampler count) and no
+  // DRTC_GPU assignment (the wrapper's own pin). That is what keeps every
+  // verbatim line below byte-for-byte pre-S3.8e.
   modelDtype: "",
+  flowSteps: null,
   gpu: "",
 };
 
@@ -246,6 +248,30 @@ describe("what the pasted line runs as, and what it runs on", () => {
     expect(line.startsWith("modal run makermodslab/")).toBe(true);
     expect(line).not.toContain("DRTC_GPU");
     expect(line).not.toContain("--model-dtype");
+  });
+
+  // The third knob (S3.8f). A flag like the precision, right after it.
+  it("passes the flow steps as a flag, right after the precision", () => {
+    const line = buildModalRunLine({
+      ...rtcCloud,
+      modelDtype: "bfloat16",
+      flowSteps: 4,
+    });
+    expect(line).toBe(
+      "modal run makermodslab/drtc/modal_policy_rtc.py " +
+        "--policy-path makermods/pick-place " +
+        "--model-dtype bfloat16 --flow-steps 4 " +
+        "--horizon 50 --fps 30 --s-min 4 --video-codec H264 " +
+        "--livekit-room portal-lerobot-inference",
+    );
+  });
+
+  it("omits the flow-steps flag when nothing is chosen", () => {
+    // 0 is not a step count any sampler would take — the pin raises on it — so
+    // the flag's ABSENCE is the only way to say "the checkpoint's own".
+    expect(buildModalRunLine({ ...cloud, flowSteps: null })).not.toContain(
+      "--flow-steps",
+    );
   });
 });
 

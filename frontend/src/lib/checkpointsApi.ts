@@ -27,6 +27,26 @@ export interface PolicyConfigSummary {
    * type newer than the server's table — and must be read as "offer it and let
    * the server decide", never as "no". */
   supports_rtc: boolean | null;
+  /** Whether the two GPU-launch knobs apply to THIS checkpoint, so the remote
+   * panel can disable a select with a reason instead of sending a value the
+   * launcher would drop.
+   *
+   * `supports_model_dtype` is "this config carries a `model_dtype` field" — in
+   * the current pin only MolmoAct2 does, which is exactly the trap: a precision
+   * picked for a MolmoAct2 run is remembered per browser and is still selected
+   * when the operator switches to SmolVLA. Optional here for a server too old
+   * to report it, and the client must read a missing one as "offer it". */
+  supports_model_dtype?: boolean;
+  /** Whether the checkpoint's family samples its actions in steps at all
+   * (smolvla, pi0, pi05, MolmoAct2 do; ACT and pi0_fast do not). Separate from
+   * the default below because null there is BOTH "no such knob" and "the knob
+   * exists and this checkpoint saved nothing". */
+  supports_flow_steps?: boolean;
+  /** The steps-per-chunk this checkpoint would run with, when its config says.
+   * Null means "no number to show", never "no default": MolmoAct2 saves
+   * `num_inference_steps: null` and the number that then applies (10) lives in
+   * its backbone's own config, which the server cannot see from here. */
+  flow_steps_default?: number | null;
   // Flat proprioceptive state / action widths from the checkpoint. For an
   // SO-101 arm this is 6 (one per joint); a bimanual-trained checkpoint carries
   // 12 (two arms). The inference modal compares state_dim against the selected

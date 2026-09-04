@@ -18,10 +18,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type {
-  UseGpuKnobs,
-  UseGpuLauncher,
-  UseGpuTargets,
+import {
+  effectiveGpuKnobs,
+  type GpuKnobSupport,
+  type UseGpuKnobs,
+  type UseGpuLauncher,
+  type UseGpuTargets,
 } from "@/hooks/useGpuLauncher";
 import { MODAL_WRAPPERS } from "./modalCommand";
 import type { RemoteRunConfig } from "./remoteRunConfig";
@@ -66,6 +68,12 @@ const GpuLaunchSection: React.FC<{
    * they are not on `config`: the arm neither knows nor cares what dtype the
    * policy loaded at. */
   knobs: UseGpuKnobs;
+  /** Which of them the SELECTED checkpoint can use. A knob its config has no
+   * field for is blanked here rather than sent: the picks are remembered per
+   * browser while the checkpoint changes under them, and the server would drop
+   * it anyway — sending it would only make the panel's own record of the
+   * launch disagree with what went out. */
+  knobSupport: GpuKnobSupport;
   config: RemoteRunConfig;
   /** The Hub id to launch with when the field is left empty. */
   hubIdDefault: string;
@@ -80,6 +88,7 @@ const GpuLaunchSection: React.FC<{
   launcher,
   targets,
   knobs,
+  knobSupport,
   config,
   hubIdDefault,
   task,
@@ -103,6 +112,7 @@ const GpuLaunchSection: React.FC<{
   const canPick = listing != null && listing.error == null;
   const running = state !== "idle" && state !== "failed";
 
+  const effective = effectiveGpuKnobs(knobs, knobSupport);
   const startBody = {
     engine: config.engine,
     policy_hub_id: hubId,
@@ -119,8 +129,12 @@ const GpuLaunchSection: React.FC<{
     // SENDS it, so the launch names the hardware rather than inheriting it.
     // The precision is the exception — empty is a real answer there ("as the
     // checkpoint saved it") and it is sent as empty.
-    model_dtype: knobs.modelDtype,
-    gpu: knobs.gpu,
+    model_dtype: effective.modelDtype,
+    gpu: effective.gpu,
+    // Null is this field's "": the checkpoint's own step count, and no flag.
+    // Also what a knob this checkpoint cannot use collapses to, whatever the
+    // browser remembered for the last one.
+    flow_steps: effective.flowSteps,
   };
   const launch = () => void start(startBody);
   const taskMissing = taskRequired && task.trim() === "";
@@ -158,6 +172,11 @@ const GpuLaunchSection: React.FC<{
           // confused with it — see the two comparisons below.
           model_dtype: status.model_dtype ?? null,
           gpu: status.gpu ?? null,
+          // Undefined on a server too old to echo it; null is ALSO "nothing
+          // was asked", so the comparison below treats both as unknown — a
+          // launch that sent no step count ran the checkpoint's own, which is
+          // what this form's default names.
+          flow_steps: status.flow_steps ?? null,
         }
       : null;
   const reference: {
@@ -170,6 +189,7 @@ const GpuLaunchSection: React.FC<{
     s_min: number | null;
     model_dtype: string | null;
     gpu: string | null;
+    flow_steps: number | null;
   } | null = echoed ?? launched;
   const drifted: string[] = [];
   if (reference && up) {
@@ -201,6 +221,14 @@ const GpuLaunchSection: React.FC<{
     // ran on the wrapper's pin, which is the value this form's default names —
     // so calling that drift would warn about a GPU that is the same GPU.
     if (reference.gpu && reference.gpu !== startBody.gpu) drifted.push("gpu");
+    // Same reading as the GPU's, and for the same reason: a null echo is a run
+    // that took the checkpoint's own step count, which is what this form's
+    // default asks for — calling that drift would warn about no difference.
+    if (
+      reference.flow_steps != null &&
+      reference.flow_steps !== startBody.flow_steps
+    )
+      drifted.push("flow_steps");
   }
   const restart = async () => {
     await stop();
@@ -444,6 +472,7 @@ const GpuLaunchSection: React.FC<{
                     echo means the checkpoint's own, which is not a value. */}
                 {reference.gpu ? ` · ${reference.gpu}` : ""}
                 {reference.model_dtype ? ` · ${reference.model_dtype}` : ""}
+                {reference.flow_steps ? ` · ${reference.flow_steps} steps` : ""}
               </span>
             </span>
           </p>

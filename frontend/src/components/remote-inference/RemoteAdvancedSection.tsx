@@ -11,8 +11,11 @@ import {
 } from "@/components/ui/select";
 import { AdvancedSection } from "@/components/studio/panel/primitives";
 import {
+  effectiveGpuKnobs,
+  FLOW_STEPS,
   GPU_TYPES,
   MODEL_DTYPES,
+  type GpuKnobSupport,
   type GpuType,
   type ModelDtype,
   type UseGpuKnobs,
@@ -41,6 +44,10 @@ import { VIDEO_CODECS, type RemoteRunConfig } from "./remoteRunConfig";
  * sentinel and the mapping happens at the boundary — it never leaves this
  * file, and it is never sent. */
 const CHECKPOINT_DTYPE = "__checkpoint__";
+/** Same trick for the step count, whose "leave it alone" is `null` rather than
+ * `""` — Radix still refuses an empty option value, and `null` is not a string
+ * at all. Mapped at the boundary; never sent. */
+const CHECKPOINT_FLOW_STEPS = "__checkpoint__";
 
 const RemoteAdvancedSection: React.FC<{
   config: RemoteRunConfig;
@@ -49,6 +56,14 @@ const RemoteAdvancedSection: React.FC<{
    * `RemoteRunConfig` goes to BOTH halves of the run, and these two go only to
    * the GPU. */
   knobs: UseGpuKnobs;
+  /** Which of the two per-checkpoint knobs the SELECTED checkpoint can use,
+   * and the number to show beside "Checkpoint default". The picks are
+   * remembered per browser while the checkpoint changes under them, so a knob
+   * its config has no field for is disabled here and blanked on the wire —
+   * before this, a precision picked for MolmoAct2 and left selected for
+   * SmolVLA cost a cold start ending in the container's own refusal.
+   * Fail-open: a config that has not arrived reports both as available. */
+  knobSupport: GpuKnobSupport;
   /** The checkpoint's `n_action_steps` — how many steps it actually returns
    * per chunk, and therefore the CEILING on the horizon. Null when its config
    * doesn't say, which is when the engine defaults stand alone. */
@@ -60,6 +75,7 @@ const RemoteAdvancedSection: React.FC<{
   config,
   onChange,
   knobs,
+  knobSupport,
   checkpointHorizon,
   open,
   onOpenChange,
@@ -76,8 +92,15 @@ const RemoteAdvancedSection: React.FC<{
   // interpolated rather than concatenated with translated words so a translator
   // still owns the whole sentence. The precision appears only when it was
   // chosen: unset is the checkpoint's own, which is not a value to display.
+  //
+  // Built from what will ACTUALLY be sent, not from what is remembered: a knob
+  // this checkpoint cannot use is blanked, and a summary claiming it would be
+  // describing a flag that is not going out.
+  const effective = effectiveGpuKnobs(knobs, knobSupport);
   const extra =
-    ` · ${knobs.gpu}` + (knobs.modelDtype ? ` · ${knobs.modelDtype}` : "");
+    ` · ${effective.gpu}` +
+    (effective.modelDtype ? ` · ${effective.modelDtype}` : "") +
+    (effective.flowSteps ? ` · ${effective.flowSteps} steps` : "");
   // Every other value on the line is live and is DATA too — the codec id is the
   // wire value, the numbers are the ones that go out. `s_min` only reaches the
   // wire for rtc, so it is only claimed there.
@@ -220,8 +243,8 @@ const RemoteAdvancedSection: React.FC<{
                 {t("remoteInference.form.precisionLabel")}
               </Label>
               <Select
-                value={knobs.modelDtype || CHECKPOINT_DTYPE}
-                disabled={disabled}
+                value={effective.modelDtype || CHECKPOINT_DTYPE}
+                disabled={disabled || !knobSupport.modelDtype}
                 onValueChange={(v) =>
                   knobs.setModelDtype(
                     v === CHECKPOINT_DTYPE ? "" : (v as ModelDtype),
@@ -245,6 +268,61 @@ const RemoteAdvancedSection: React.FC<{
                   ))}
                 </SelectContent>
               </Select>
+              {/* Said where the disabled control is, not in the group hint:
+                  the reason belongs to THIS checkpoint, and the operator is
+                  looking at a select that will not open. */}
+              {!knobSupport.modelDtype ? (
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  {t("remoteInference.form.precisionUnavailable")}
+                </p>
+              ) : null}
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="remote-flow-steps" className="text-xs">
+                {t("remoteInference.form.flowStepsLabel")}
+              </Label>
+              <Select
+                value={
+                  effective.flowSteps == null
+                    ? CHECKPOINT_FLOW_STEPS
+                    : String(effective.flowSteps)
+                }
+                disabled={disabled || !knobSupport.flowSteps}
+                onValueChange={(v) =>
+                  knobs.setFlowSteps(
+                    v === CHECKPOINT_FLOW_STEPS ? null : Number(v),
+                  )
+                }
+              >
+                <SelectTrigger id="remote-flow-steps">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {/* Prose, like the precision's first option: it stands for
+                      sending no flag at all. The NUMBER in it is data, shown
+                      only when the checkpoint's config actually carries one —
+                      MolmoAct2 saves none, and inventing 10 (which lives in
+                      its backbone's config) would be a guess. */}
+                  <SelectItem value={CHECKPOINT_FLOW_STEPS}>
+                    {knobSupport.flowStepsDefault != null
+                      ? t("remoteInference.form.flowStepsCheckpointKnown", {
+                          steps: knobSupport.flowStepsDefault,
+                        })
+                      : t("remoteInference.form.flowStepsCheckpoint")}
+                  </SelectItem>
+                  {/* Step counts — numbers, their own labels. */}
+                  {FLOW_STEPS.map((steps) => (
+                    <SelectItem key={steps} value={String(steps)}>
+                      {steps}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {!knobSupport.flowSteps ? (
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  {t("remoteInference.form.flowStepsUnavailable")}
+                </p>
+              ) : null}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="remote-gpu" className="text-xs">
@@ -271,6 +349,9 @@ const RemoteAdvancedSection: React.FC<{
           </div>
           <p className="text-xs leading-relaxed text-muted-foreground">
             {t("remoteInference.form.precisionHint")}
+          </p>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t("remoteInference.form.flowStepsHint")}
           </p>
         </div>
       </div>

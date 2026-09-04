@@ -1744,3 +1744,170 @@ suite): both name the state path and the Volume, `--state=mem:` survives only
 inside the `DRTC_TS_EPHEMERAL` branch, both read the variable, and the whole
 tailscale block is asserted BYTE-IDENTICAL between the two files — which is the
 real guard, given the block is a hand-mirrored duplicate.
+
+---
+
+## S3.8f as built (2026-09-04) — what it ran on, and a knob that stops costing launches
+
+Three things, all from one bench hour: nobody could prove which GPU a launch got,
+a remembered Precision pick failed a launch of a different policy, and the one
+lever that would actually fit MolmoAct2 inside its budget did not exist.
+
+### The device line, because nothing could say what it ran on
+
+The panel said "A100". It was a hardcoded label. The Lab ASKS Modal for a GPU by
+name (`DRTC_GPU`, S3.8e) and Modal's client says nothing back about what it gave;
+the operator's belief that the GPU select "did not take effect" could not be
+checked against anything, in either direction.
+
+So both policy servers now print exactly one line, right after `pick_device` and
+**before the weights load**:
+
+```
+[policy] device: NVIDIA A100-SXM4-40GB (39.6 GiB)
+[policy] device: cpu
+```
+
+`describe_device` is a five-line helper beside `pick_device` in each file
+(hand-mirrored, like the tailscale block). Off CUDA it is just the device
+string — there is no VRAM figure to give and inventing one is worse than
+silence. Before the weights, because that is also before the first thing that
+can go wrong on the wrong card: an OOM at float32 reads very differently once
+the line above it names a 24 GB board.
+
+`modal_launcher.parse_device_name` lifts it back out of the log stream in
+`_handle_line`, next to `parse_app_id`, and `status()` reports it as
+`device_name` (null until the line arrives). It is **evidence**; `gpu` beside it
+is what was *asked for*. Those are two different facts and the whole bug was
+that one was being read as the other. `RemoteSessionBody`'s billing line carries
+it as a `title`, which is where an operator looks only when the line already
+looks wrong.
+
+### A remembered knob must not fail a launch of a different policy
+
+The failure, exactly: Precision is remembered per browser (`useGpuKnobs`). The
+operator picked `bfloat16` for MolmoAct2, switched to SmolVLA, and the wrapper
+refused `--model-dtype` **after a paid cold start**, because `SmolVLAConfig` has
+no `model_dtype` field. A remembered answer to a question about ANOTHER
+checkpoint cost a launch.
+
+Fixed on both ends, and the backend end is the load-bearing one:
+
+`modal_launcher.resolve_knobs` reads the target's own saved `config.json` before
+the spawn — `jobs.read_pretrained_config`, the same few-KB reader every
+checkpoint-side preflight uses, so a hub id, a step-suffixed ref and a local dir
+all work — and DROPS a knob the config has no field for. Not passed, not
+refused. The status gains `model_dtype_applied` / `flow_steps_applied`, and one
+`logger.info` says which knob was ignored and why.
+
+The rule that took the most thought is the failure case: **an unreadable config
+passes both knobs through unchanged.** `None` from the reader is "not
+established" — a private repo, no network, a path that is not there yet — and
+never "inapplicable". Dropping on it would silently run something other than
+what was asked the first time the Hub is slow; refusing on it would make an
+offline moment a launch failure. The container keeps its own check, which is
+what makes a drop here an optimization rather than the authority. The read is
+skipped entirely when neither knob is set, so a launch with nothing to decide
+pays nothing.
+
+The status echoes the **ask**, not the resolved value. A panel comparing its
+form against the record has to still match after a drop; a dropped knob that
+read as drift would offer a restart that dropped it again.
+
+The policy-config route gains `supports_model_dtype`, `supports_flow_steps` and
+`flow_steps_default`, so the panel disables a select with a reason instead of
+sending a value that will be dropped. `supports_flow_steps` is its own field and
+not derivable from the default, for a reason that is the whole trap of this
+knob — see below.
+
+### Flow steps, and the field name that is a trap
+
+`flow_steps` (1-20, null = the checkpoint's own) reaches both policy servers as
+`--flow-steps N` and overrides the sampler's step count in `load_policy`, the
+same way and in the same place `--model-dtype` overrides the precision: before
+the weights, opt-in, never silent.
+
+WHICH field it writes is per family, and the table is
+`utils.system.POLICY_FLOW_STEPS_FIELDS`, verified against the pinned fork's own
+source rather than from memory:
+
+| family | field | default |
+| --- | --- | --- |
+| smolvla | `num_steps` | 10 |
+| pi0 / pi05 | `num_inference_steps` | 10 |
+| **molmoact2** | **`num_inference_steps`** | **saved `None`, applies as 10** |
+| act, pi0_fast | — | — |
+
+MolmoAct2 is the trap and it is worth stating plainly, because the names invite
+the opposite answer. **`num_flow_timesteps` (default 8) is a TRAINING knob** —
+how many flow timesteps are sampled per example to build the loss
+(`_prepare_flow_matching_tensors`, and the joint-flow loss) — and is never read
+on an inference path. `predict_action_chunk` reads
+`kwargs.get("num_steps", config.num_inference_steps)` and hands it down to
+`generate_actions_from_inputs`, which resolves `num_steps or
+self.config.flow_matching_num_steps` against the **backbone's** HF config
+(default **10**). The RTC path resolves it identically, and nothing in
+`lerobot/rollout` passes `num_steps`, so the config field is what applies.
+
+MolmoAct2's real inference default is therefore **10, not 8** — and 10 is not
+in the checkpoint's config.json at all, it is the pin's own backbone default.
+Which leaves a choice, and the first answer was the wrong one: reporting
+"unknown" is technically true and useless, because the number the operator is
+about to compare their pick against is a documented constant sitting in the
+pinned source. So `policy_flow_steps_default` fills it in —
+`utils.system.MOLMOACT2_FLOW_STEPS_DEFAULT`, cited to
+`configuration_molmoact2.py` and flagged for re-checking on a pin bump — and
+the picker says "Checkpoint default (10)". A SAVED value still wins, and a
+hand-edited non-null garbage value still reads as unknown; only null (or an
+absent key) takes the fallback, because that is exactly the state the
+container's own `num_steps or …` resolves.
+
+`supports_flow_steps` stays a separate field regardless: null in the default
+still means both "no such knob" (ACT) and "the knob exists and nothing here can
+resolve a number" (a pi05 whose `num_inference_steps` is null — its class
+default is not in the file either), and the panel has to tell those apart to
+know whether to disable the select.
+
+`pi0_fast` is deliberately absent from the table: it decodes action TOKENS
+autoregressively and has no denoising loop, so there is no field to point at and
+the knob is correctly reported as inapplicable.
+
+### The panel
+
+A "Flow steps" select under Advanced beside Precision — Checkpoint default
+(carrying the number whenever the route can name one), 2, 3, 4, 6, 8, 10 — remembered
+per browser like the others, on the Advanced summary line, in the drift warning,
+and on the manual `modal run` line as `--flow-steps N`. Both per-checkpoint
+selects render **disabled with a one-line reason** when the selected
+checkpoint's config says the knob does not apply, and `effectiveGpuKnobs` blanks
+that field on the wire and in the copyable line regardless of what the browser
+remembered — `gpuKnobSupport` is fail-OPEN, so a config that has not arrived
+disables nothing.
+
+### Checks
+
+`ruff check` / `ruff format --check` clean; the full pytest suite green. New
+tests in the existing styles: the launcher's device-line parse, the drop (and
+the pass-through on an unreadable config), `--flow-steps` on argv only when set,
+an off-band count refused before the spawn; the `utils.system` table against the
+pin; the policy-config route's three new fields; `modalCommand.test.ts` for the
+flag. Frontend lint at the 38-problem / 4-error baseline, both typecheck
+projects clean, vitest and the build green.
+
+### The wrappers, landed second
+
+`drtc/modal_policy.py` and `drtc/modal_policy_rtc.py` were fenced off while the
+rest of this slice was written, so `--flow-steps` reached them in a follow-up.
+The threading is mechanical and mirrors `model_dtype` link for link — a
+`local_entrypoint` parameter (`flow_steps: int = 0`, since an int has no empty
+string), the `fn.remote` kwarg, and `argv += ["--flow-steps", str(flow_steps)]`
+beside the `--model-dtype` line — plus the sync wrapper's `run_config["last"]`
+entry, so a `/reset` replays the run's step count instead of quietly reverting
+to the checkpoint's. `serve` / `serve_ts` take `**kwargs` and needed nothing.
+
+The link that had to exist is the `local_entrypoint` parameter, and its absence
+was not a silently ignored flag: `build_argv` emits `--flow-steps N`
+unconditionally once the knob is set, so a wrapper without the parameter dies
+on a Click usage error — after the cold start is paid for.
+`test_the_wrappers_forward_flow_steps` asserts all three links in each file, the
+same way `test_the_wrappers_forward_model_dtype` does.

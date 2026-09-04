@@ -60,6 +60,22 @@ export default {
     gpuLabel: "GPU",
     gpuHint:
       "The Modal GPU the policy server runs on. Bigger is faster and dearer per hour; it is the second lever after precision, and it is billed either way.",
+    // Said where the disabled select is, because the reason belongs to THIS
+    // checkpoint. No policy type is named: the fact the operator needs is that
+    // this one has no such setting, not which family it belongs to.
+    precisionUnavailable:
+      "This checkpoint has no precision setting to override — it is loaded the way it was saved.",
+    // The flow-steps knob (S3.8f).
+    flowStepsLabel: "Flow steps",
+    // Prose, like the precision's first option: it stands for passing no flag.
+    // The second form carries the number this checkpoint will actually run at,
+    // which is data — the server works it out, never this file.
+    flowStepsCheckpoint: "Checkpoint default",
+    flowStepsCheckpointKnown: "Checkpoint default ({{steps}})",
+    flowStepsHint:
+      "How many passes the model makes to shape one chunk of movement. Fewer is faster and coarser — the cheapest way to cut the wait, and the first one to cost quality. MolmoAct2 runs 10, and its work on the GPU currently takes about 880 ms against a 777 ms budget at horizon 30 and 30 fps.",
+    flowStepsUnavailable:
+      "This checkpoint does not build its actions in steps, so there is nothing to shorten.",
   },
   // The per-role camera picker. It appears ONLY for checkpoint cameras that
   // matched nothing by name, so most runs never see it.
