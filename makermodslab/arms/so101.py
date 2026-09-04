@@ -53,6 +53,11 @@ class SO101Family(ArmFamily):
     leader_library_attr = "LEADER_CONFIG_PATH"
     follower_library_attr = "FOLLOWER_CONFIG_PATH"
 
+    # Leader and follower are the same Feetech bus: nothing to tell them apart
+    # by protocol, so the SO-101 identifies by the hand-swing gesture only.
+    follower_probe_protocol = None
+    motion_identify_energizes_follower = False
+
     def default_calibration_name(self, record_name: str) -> str:
         """Historical default: the bare record name, no family suffix."""
         return record_name
@@ -66,6 +71,13 @@ class SO101Family(ArmFamily):
         from lerobot.teleoperators.so_leader import SO101LeaderConfig
 
         return SO101LeaderConfig(port=port, id=config_id)
+
+    async def identify_by_motion(self, device_type: str, ports: list[str] | None = None) -> dict:
+        # Both halves speak Feetech serial on motor id 1, so the side asked
+        # about changes nothing — identify.py watches the same register either way.
+        from .. import identify
+
+        return await identify.identify_arm_by_motion(ports)
 
     def build_single_configs(self, request: Any, cameras: dict | None, leader_id: str, follower_id: str):
         from lerobot.robots.so_follower import SO101FollowerConfig

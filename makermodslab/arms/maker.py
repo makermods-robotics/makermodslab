@@ -40,6 +40,11 @@ class MakerFamily(CanArmFamily):
 
     follower_library_attr = "MAKER_FOLLOWER_CONFIG_PATH"
 
+    # RobStride frames; the probe is strictly read-only, so the gesture that
+    # tells a bimanual rig's two followers apart is safe to watch.
+    follower_probe_protocol = "robstride"
+    motion_identify_energizes_follower = False
+
     def _device_classes(self) -> CanDeviceClasses:
         from lerobot.robots.bi_maker_follower import BiMakerFollowerConfig
         from lerobot.robots.maker_follower import MakerFollowerConfig, MakerFollowerConfigBase

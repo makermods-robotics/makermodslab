@@ -45,6 +45,12 @@ class MetalFamily(CanArmFamily):
 
     follower_library_attr = "METAL_FOLLOWER_CONFIG_PATH"
 
+    # Damiao frames — and the handshake that opens the bus IS the enable
+    # command, so watching this follower's joints would energize it
+    # mid-gesture. Identify a bimanual Metal rig by its leaders instead.
+    follower_probe_protocol = "damiao"
+    motion_identify_energizes_follower = True
+
     def _device_classes(self) -> CanDeviceClasses:
         from lerobot.robots.bi_metal_follower import BiMetalFollowerConfig
         from lerobot.robots.metal_follower import MetalFollowerConfig, MetalFollowerConfigBase

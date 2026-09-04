@@ -38,6 +38,8 @@ _ATTRIBUTE_TYPES: dict[str, type | tuple[type, ...]] = {
     "robot_type_markers": tuple,
     "leader_library_attr": str,
     "follower_library_attr": str,
+    "follower_probe_protocol": (str, type(None)),
+    "motion_identify_energizes_follower": bool,
 }
 
 
@@ -102,6 +104,65 @@ def test_the_can_followers_zero_poses_are_opposites_on_the_gripper() -> None:
     assert maker.zero_pose_instructions("teleop") == metal.zero_pose_instructions("teleop")
 
 
+@pytest.mark.asyncio
+async def test_probe_ports_exists_exactly_for_families_with_a_probe_protocol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CAN family's probe is maker_ports' probe spoken in ITS protocol; the
+    SO-101 (one Feetech bus for both halves) answers a refusal that names the
+    gesture as the alternative, in the same response shape."""
+    from makermodslab import maker_ports
+
+    seen: list[tuple[list[str] | None, str]] = []
+
+    async def fake_probe(ports, arm_type="maker"):
+        seen.append((ports, arm_type))
+        return {"success": True, "follower_ports": ["/dev/f"], "leader_ports": [], "unknown_ports": []}
+
+    monkeypatch.setattr(maker_ports, "probe_maker_ports", fake_probe)
+    for family in registry.families():
+        result = await family.probe_ports(["/dev/x"])
+        assert set(result) >= {"success", "follower_ports", "leader_ports", "unknown_ports"}
+        if family.follower_probe_protocol is None:
+            assert result["success"] is False and "motion" in result["message"]
+            assert result["unknown_ports"] == ["/dev/x"]
+        else:
+            assert result["success"] is True
+    assert seen == [(["/dev/x"], "maker"), (["/dev/x"], "metal")]
+
+
+@pytest.mark.asyncio
+async def test_identify_by_motion_routes_to_the_family_detector(monkeypatch: pytest.MonkeyPatch) -> None:
+    from makermodslab import identify, maker_ports
+
+    calls: list[tuple] = []
+
+    async def fake_so(ports=None):
+        calls.append(("so", ports))
+        return {"success": True}
+
+    async def fake_can(device_type, ports=None, arm_type="maker"):
+        calls.append(("can", device_type, ports, arm_type))
+        return {"success": True}
+
+    monkeypatch.setattr(identify, "identify_arm_by_motion", fake_so)
+    monkeypatch.setattr(maker_ports, "identify_maker_arm_by_motion", fake_can)
+    for family in registry.families():
+        await family.identify_by_motion("teleop", ["/dev/y"])
+    assert calls == [
+        ("so", ["/dev/y"]),
+        ("can", "teleop", ["/dev/y"], "maker"),
+        ("can", "teleop", ["/dev/y"], "metal"),
+    ]
+
+
+def test_only_the_damiao_follower_refuses_the_motion_gesture() -> None:
+    """The fact maker_ports.identify_maker_arm_by_motion refuses on: the
+    Damiao handshake energizes the follower, RobStride and Feetech do not."""
+    assert [f.motion_identify_energizes_follower for f in registry.families()] == [False, False, True]
+    assert [f.follower_probe_protocol for f in registry.families()] == [None, "robstride", "damiao"]
+
+
 def test_library_dirs_are_resolved_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None:
     """The test fixtures redirect calibration libraries by monkeypatching the
     config constants; a family that captured the path at import would silently
@@ -157,6 +218,9 @@ def test_an_incomplete_family_is_refused_naming_the_gaps(monkeypatch: pytest.Mon
             raise NotImplementedError
 
         def single_leader_config(self, port, config_id):
+            raise NotImplementedError
+
+        async def identify_by_motion(self, device_type, ports=None):
             raise NotImplementedError
 
         def build_single_configs(self, request, cameras, leader_id, follower_id):

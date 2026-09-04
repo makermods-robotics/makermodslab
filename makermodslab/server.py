@@ -60,6 +60,7 @@ from . import (
 # Import our custom calibration functionality
 from .__version__ import __version__
 from .api_errors import ApiError, ErrorCode, install_error_handlers
+from .arms import registry as arm_registry
 from .auto_calibrate import (
     AutoCalibrationBatchRequest,
     AutoCalibrationRequest,
@@ -80,7 +81,6 @@ from .dagger_protocol import (
     CMD_RESUME,
     CMD_TAKEOVER,
 )
-from .identify import identify_arm_by_motion
 from .jobs import (
     _KNOWN_FOUNDATION_BASE_REPO_IDS,
     CHECKPOINTS_STAGING_SUFFIX,
@@ -103,7 +103,6 @@ from .jobs import (
     job_registry,
     training_is_active,
 )
-from .maker_ports import identify_maker_arm_by_motion, probe_maker_ports
 from .merge import MergeRequest, handle_merge_status, handle_start_merge
 from .motor_power import read_supply_voltage
 from .nodes import (
@@ -3992,7 +3991,7 @@ async def probe_maker_arm_ports(request: MakerProbePortsRequest):
     it again (the Damiao handshake is the enable command — see
     maker_ports._open_metal_follower_bus).
     """
-    return await probe_maker_ports(request.ports, request.arm_type)
+    return await arm_registry.get(request.arm_type).probe_ports(request.ports)
 
 
 # exclude_none: success carries `port`, failure omits it entirely (never null),
@@ -4012,7 +4011,7 @@ async def identify_maker_arm(request: MakerIdentifyArmRequest):
     right. The user swings one arm's base and we report the port that saw it.
     Read-only — no motor writes.
     """
-    return await identify_maker_arm_by_motion(request.device_type, request.ports, request.arm_type)
+    return await arm_registry.get(request.arm_type).identify_by_motion(request.device_type, request.ports)
 
 
 @v1_router.post("/arms/release-torque", response_model=ReleaseCanTorqueResponse, tags=["system"])
@@ -4033,7 +4032,8 @@ async def release_can_torque(request: ReleaseCanTorqueRequest):
 async def identify_arm(request: IdentifyArmRequest):
     """The inverse of /wiggle: the user swings an arm's base (shoulder pan) by
     hand and we report which port saw the motion. Read-only — no motor writes."""
-    return await identify_arm_by_motion(request.ports)
+    # The SO-101's two halves share one bus driver, so the side is immaterial.
+    return await arm_registry.default().identify_by_motion("robot", request.ports)
 
 
 # exclude_none: success carries `voltage`, failure carries `message` — never

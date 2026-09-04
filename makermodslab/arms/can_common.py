@@ -102,6 +102,16 @@ class CanArmFamily(ArmFamily):
     def single_leader_config(self, port: str, config_id: str):
         return self._device_classes().teleop(port=port, id=config_id)
 
+    async def probe_ports(self, ports: list[str] | None = None) -> dict:
+        from .. import maker_ports
+
+        return await maker_ports.probe_maker_ports(ports, self.id)
+
+    async def identify_by_motion(self, device_type: str, ports: list[str] | None = None) -> dict:
+        from .. import maker_ports
+
+        return await maker_ports.identify_maker_arm_by_motion(device_type, ports, self.id)
+
     def build_single_configs(self, request: Any, cameras: dict | None, leader_id: str, follower_id: str):
         # The follower config's defaults carry the CAN wiring (slcan @ 1 Mbps,
         # the per-joint ids, soft limits and MIT gains); only the adapter port

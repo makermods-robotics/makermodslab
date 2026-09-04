@@ -56,11 +56,17 @@ What the contract covers TODAY (refactor step "4a" of docs/extensions/plan.md):
   calibration and crash recovery connect ONE arm with (no leader/follower
   pair, no cameras).
 
-What step "4b" still adds (deliberately NOT declared yet): port probing and
-motion identify, the pre-torque preflight (identity fingerprint, motor-power
-cap), the stop-path pair return_to_rest / release_torque, and the telemetry
-kind the loops broadcast (URDF joints vs degrees by motor name). Until then
-those flows keep their own per-family modules.
+* port detection — probe_ports (which ports answer which protocol, no user
+  gesture; only the CAN families have one, because their two halves speak
+  different protocols) and identify_by_motion (the hand-swing gesture that
+  tells one arm from its twin), with the two facts the CAN probes branch on:
+  follower_probe_protocol and motion_identify_energizes_follower.
+
+What step "4b" still adds (deliberately NOT declared yet): the pre-torque
+preflight (identity fingerprint, motor-power cap), the stop-path pair
+return_to_rest / release_torque, and the telemetry kind the loops broadcast
+(URDF joints vs degrees by motor name). Until then those flows keep their
+own per-family modules.
 """
 
 from __future__ import annotations
@@ -88,6 +94,8 @@ REQUIRED_ATTRIBUTES: tuple[str, ...] = (
     "robot_type_markers",
     "leader_library_attr",
     "follower_library_attr",
+    "follower_probe_protocol",
+    "motion_identify_energizes_follower",
 )
 
 
@@ -143,6 +151,18 @@ class ArmFamily(ABC):
     # silently ignore the patch.
     leader_library_attr: str
     follower_library_attr: str
+
+    # --- port detection ---------------------------------------------------------
+    # The protocol the follower probe speaks ("robstride", "damiao"), or None
+    # for a family whose two halves share one protocol and so cannot be told
+    # apart by asking — the SO-101's leader and follower are both Feetech
+    # serial, which is why it identifies by gesture instead.
+    follower_probe_protocol: str | None
+    # True when merely OPENING the follower's bus to watch its joints would
+    # energize the motors (the Damiao handshake is the enable command). The
+    # motion-identify gesture is refused for such a follower rather than run
+    # behind the user's back; the leader side still works.
+    motion_identify_energizes_follower: bool
 
     def robot_config_types(self) -> frozenset[str]:
         """Every lerobot RobotConfig type string a follower of this family registers under."""
@@ -201,6 +221,33 @@ class ArmFamily(ABC):
     def single_leader_config(self, port: str, config_id: str):
         """A config for ONE leader arm, alone — the family's own preset, so the
         calibration file this run writes carries THIS follower's joint ranges."""
+
+    # --- port detection ---------------------------------------------------------
+
+    async def probe_ports(self, ports: list[str] | None = None) -> dict:
+        """Classify ports by which protocol answers on them, with no user gesture.
+
+        Same response shape as maker_ports.probe_maker_ports. A family without
+        a protocol probe answers a plain refusal naming the alternative.
+        """
+        return {
+            "success": False,
+            "follower_ports": [],
+            "leader_ports": [],
+            "unknown_ports": list(ports or []),
+            "message": (
+                f"Protocol probing is not available for the {self.short_label}: its leader and follower "
+                "speak the same protocol. Identify the arm by motion instead."
+            ),
+        }
+
+    @abstractmethod
+    async def identify_by_motion(self, device_type: str, ports: list[str] | None = None) -> dict:
+        """Report which port saw a hand gesture. Read-only on every family.
+
+        ``device_type`` is "robot" (the follower) or "teleop" (the leader);
+        a family whose two halves share one bus driver may ignore it.
+        """
 
     # --- device construction -------------------------------------------------
 
