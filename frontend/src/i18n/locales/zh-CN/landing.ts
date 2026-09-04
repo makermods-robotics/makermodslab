@@ -20,12 +20,6 @@ export default {
     empty: "还没有数据集。使用“添加数据集”来录制、下载或导入。",
     deleteAria: "删除 {{repoId}}",
   },
-  modelPicker: {
-    searchPlaceholder: "搜索模型…",
-    loading: "正在加载模型…",
-    empty: "还没有模型。使用“添加模型”来训练、下载或导入。",
-    deleteAria: "删除 {{name}}",
-  },
   addDatasetFromHub: {
     title: "从 Hugging Face 添加数据集",
     description:
