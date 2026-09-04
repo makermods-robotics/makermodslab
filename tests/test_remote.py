@@ -778,3 +778,108 @@ def test_changing_the_hosted_robot_is_refused_while_an_operator_drives(
     assert resp.json()["code"] == "session.held"
     # Re-choosing the robot already hosted is a no-op, not a refusal.
     assert client.put("/api/v1/station/robot", json={"robot": "arm1"}).status_code == 200
+
+
+def test_remote_inference_start_preempts_a_parked_unseated_hosting_session(
+    client, tmp_lerobot_home, _idle, monkeypatch
+) -> None:
+    """Standalone remote inference on a station: it is a flow started at the
+    station like any other, so a parked, unseated host yields to it and the
+    supervisor re-arms hosting once it ends. Only the gate is under test."""
+    from makermodslab import sessions
+
+    _make_robot("bench", leader=False, follower=True)
+    monkeypatch.setattr(remote_host, "hosting_active", True)
+    monkeypatch.setattr(remote_host, "phase", "parked")
+    monkeypatch.setattr(remote_host, "seat", remote_host.SeatMonitor())
+    yielded: list[bool] = []
+
+    def fake_yield(timeout_s: float = 10.0) -> bool:
+        yielded.append(True)
+        monkeypatch.setattr(remote_host, "hosting_active", False)
+        return True
+
+    monkeypatch.setattr(remote_host, "yield_for_local", fake_yield)
+    monkeypatch.setattr(
+        sessions,
+        "_dispatch_start",
+        lambda kind, request, ws: {"success": False, "message": "stub", "status_code": 418},
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "remote_inference",
+            "robot": "bench",
+            "options": {"policy_ref": "outputs/train/run/checkpoints/last", "policy_hub_id": "org/policy"},
+        },
+    )
+    assert yielded == [True]
+    assert resp.status_code == 418, resp.json()
+
+
+# --- shutdown -----------------------------------------------------------------
+#
+# server.shutdown_event stops the station supervisor FIRST (so it cannot
+# re-arm hosting while the process winds down), then gathers every session
+# kind's bounded stop — hosting and remote teleoperation included.
+
+
+def test_stop_station_mode_switches_the_supervisor_off(monkeypatch) -> None:
+    monkeypatch.setattr(remote_host, "station_mode", True)
+    remote_host.stop_station_mode()
+    assert remote_host.station_mode is False
+
+
+def test_stop_hosting_for_shutdown_is_a_no_op_when_idle(monkeypatch) -> None:
+    monkeypatch.setattr(remote_host, "hosting_active", False)
+    monkeypatch.setattr(remote_host, "hosting_thread", None)
+    assert remote_host.stop_hosting_for_shutdown() is False
+
+
+def test_stop_hosting_for_shutdown_runs_the_normal_stop(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(remote_host, "hosting_active", True)
+    monkeypatch.setattr(remote_host, "hosting_thread", None)
+    monkeypatch.setattr(remote_host, "handle_stop_hosting", lambda: calls.append("stop") or {"success": True})
+    assert remote_host.stop_hosting_for_shutdown() is True
+    assert calls == ["stop"]
+
+
+def test_stop_hosting_for_shutdown_forces_the_release_past_the_return_ceiling(monkeypatch) -> None:
+    """An engaged arm gets its return-to-rest (the worker's own park path),
+    bounded by RETURN_CEILING_S; a worker still alive past that is released
+    the way a second Stop press does it."""
+
+    class StuckWorker:
+        joins: list[float | None] = []
+
+        def is_alive(self) -> bool:
+            return not remote_host._release_now.is_set()
+
+        def join(self, timeout: float | None = None) -> None:
+            self.joins.append(timeout)
+
+    worker = StuckWorker()
+    monkeypatch.setattr(remote_host, "hosting_active", True)
+    monkeypatch.setattr(remote_host, "hosting_thread", worker)
+    monkeypatch.setattr(remote_host, "handle_stop_hosting", lambda: {"success": True, "releasing": True})
+    remote_host._release_now.clear()
+    try:
+        assert remote_host.stop_hosting_for_shutdown() is True
+        assert remote_host._release_now.is_set()
+        assert worker.joins[0] == pytest.approx(remote_host.RETURN_CEILING_S + 5.0)
+        assert worker.joins[1] == pytest.approx(5.0)
+    finally:
+        remote_host._release_now.clear()
+
+
+def test_remote_teleoperation_stop_for_shutdown_is_the_normal_stop(monkeypatch) -> None:
+    from makermodslab import remote_teleoperate as rt
+
+    monkeypatch.setattr(rt, "remote_teleoperation_active", False)
+    assert rt.stop_for_shutdown() is False
+    called: list[int] = []
+    monkeypatch.setattr(rt, "remote_teleoperation_active", True)
+    monkeypatch.setattr(rt, "handle_stop_remote_teleoperation", lambda: called.append(1) or {"success": True})
+    assert rt.stop_for_shutdown() is True
+    assert called == [1]
