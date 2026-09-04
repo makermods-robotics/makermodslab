@@ -1252,10 +1252,35 @@
             "title": "Fps",
             "type": "integer"
           },
+          "gpu": {
+            "default": "",
+            "enum": [
+              "",
+              "A10G",
+              "L4",
+              "A100",
+              "A100-80GB",
+              "H100",
+              "H200"
+            ],
+            "title": "Gpu",
+            "type": "string"
+          },
           "horizon": {
             "default": 16,
             "title": "Horizon",
             "type": "integer"
+          },
+          "model_dtype": {
+            "default": "",
+            "enum": [
+              "",
+              "float32",
+              "bfloat16",
+              "float16"
+            ],
+            "title": "Model Dtype",
+            "type": "string"
           },
           "policy_hub_id": {
             "default": "",
@@ -1352,6 +1377,17 @@
             ],
             "title": "Fps"
           },
+          "gpu": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gpu"
+          },
           "hint": {
             "anyOf": [
               {
@@ -1417,6 +1453,17 @@
               }
             ],
             "title": "Message"
+          },
+          "model_dtype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Dtype"
           },
           "phase": {
             "anyOf": [
@@ -1525,6 +1572,8 @@
           "fps",
           "video_codec",
           "s_min",
+          "model_dtype",
+          "gpu",
           "log_path",
           "started_at",
           "elapsed_s",

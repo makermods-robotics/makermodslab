@@ -628,6 +628,22 @@ class GpuStatusResponse(BaseModel):
     # (`modal_launcher.build_argv` omits the flag otherwise), which is why the
     # panel compares it only when the engine is rtc.
     s_min: int | None
+    # WHAT IT RUNS AS and WHAT IT RUNS ON, as launched; null only while idle
+    # (S3.8e). Both are DATA — `bfloat16` is a torch dtype name and `A100-80GB`
+    # a Modal GPU spec, matched verbatim on both sides and never translated.
+    #
+    # The empty string is a REAL value for both, unlike `profile` above: it
+    # means the checkpoint's own saved dtype (no `--model-dtype` flag was
+    # passed) and the wrapper's own pinned GPU (no `DRTC_GPU` was exported).
+    # That is why they are echoed as sent rather than folded into null — a
+    # client comparing its form against this record is comparing against what
+    # the launch actually said.
+    model_dtype: str | None
+    # Named for Modal's own `@app.function(gpu=…)` kwarg, which is what it
+    # becomes. It cannot ride the command line at all: the wrapper's decorator
+    # is evaluated at import, before `modal run` parses a flag, so the launcher
+    # exports it as DRTC_GPU in the child's environment.
+    gpu: str | None
     # Survives an idle transition on purpose: after a failure the log is the
     # most useful thing left. Null before the first launch since boot.
     log_path: str | None

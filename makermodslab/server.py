@@ -1271,6 +1271,24 @@ class GpuStartBody(BaseModel):
     # again in `modal_launcher.check_target`, before anything is spawned.
     profile: str = ""
     environment: str = ""
+    # WHAT IT RUNS AS and WHAT IT RUNS ON (S3.8e). Both empty is S3.8's
+    # behaviour byte for byte — the checkpoint's own saved dtype, and the
+    # wrapper's own pinned GPU — so a client that never sends them sees no
+    # change.
+    #
+    # Literals here, unlike `profile` / `environment` above, because these two
+    # sets are STATIC rather than this machine's: they are annotated with the
+    # launcher's own types so the allowlist is written down once
+    # (`modal_launcher.GpuChoice` / `.ModelDtypeChoice`). `modal_launcher`
+    # checks them AGAIN before spawning, because `start()` is a plain function
+    # and a pydantic field cannot guard the callers that skip this model.
+    #
+    # A precision that is not the saved one replaces the config's `model_dtype`
+    # before the weights load; the GPU type cannot ride argv at all (the
+    # wrapper's `@app.function(gpu=…)` is evaluated at import) and travels as
+    # DRTC_GPU in the child env.
+    model_dtype: modal_launcher.ModelDtypeChoice = ""
+    gpu: modal_launcher.GpuChoice = ""
 
 
 @v1_router.get(
@@ -1330,6 +1348,8 @@ def start_remote_inference_gpu(body: GpuStartBody):
         s_min=body.s_min,
         profile=body.profile,
         environment=body.environment,
+        model_dtype=body.model_dtype,
+        gpu=body.gpu,
     )
 
 

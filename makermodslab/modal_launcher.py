@@ -94,6 +94,28 @@ here. The two listing commands (`modal profile list --json`,
 `modal environment list --json`) carry names and workspaces only, and are the
 launcher's one and only view of what this machine can bill.
 
+Precision and GPU type (S3.8e)
+------------------------------
+Two knobs that decide whether a policy fits its latency budget at all — a
+MolmoAct2 checkpoint saved in `float32` measured ~1 s/chunk on an A100, over the
+867 ms an rtc run has to spend. They travel by DIFFERENT mechanisms, and the
+difference is not stylistic:
+
+- ``model_dtype`` is a wrapper FLAG (``--model-dtype``), passed only when set;
+  unset means the checkpoint's own saved dtype, untouched.
+- the ``gpu`` type CANNOT be a flag. ``_FN_KWARGS["gpu"]`` is evaluated when
+  `modal run` IMPORTS the wrapper module on this machine — before Click has
+  parsed anything — so by the time a flag could be read the function is already
+  declared. It therefore rides the child env as ``DRTC_GPU``, which both
+  wrappers read at import (``os.environ.get("DRTC_GPU") or "<pin>"``), and an
+  unset one leaves each wrapper's own pin standing.
+
+:data:`GPU_TYPES` is a CLOSED allowlist and this module is where it is checked:
+an off-list value is a `gpu.launch_failed` in a millisecond rather than a Modal
+error ninety seconds into a cold-start log, and the check lives here rather than
+only in the request model because the legacy callers of :func:`start` do not go
+through one.
+
 What is deliberately NOT tested
 -------------------------------
 The real `modal run` subprocess, Modal authentication, cold-start timing, the
@@ -120,7 +142,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal, get_args
 
 from . import remote_inference
 from .api_errors import ApiError, ErrorCode
@@ -156,6 +178,36 @@ WRAPPERS: dict[str, Path] = {
     "sync": _DRTC_DIR / "modal_policy.py",
     "rtc": _DRTC_DIR / "modal_policy_rtc.py",
 }
+
+# --- what a launch may ask for (S3.8e) ---------------------------------------
+
+# The GPU types a launch may name — CLOSED, and the ONE place the set is
+# written down: `GpuStartBody` annotates its field with this type rather than
+# repeating it, and the panel's picker mirrors it.
+#
+# Closed because the value never reaches a flag we could watch fail: it becomes
+# `_FN_KWARGS["gpu"]` at the wrapper's IMPORT, so a typo is a Modal error deep
+# in a cold-start log, and a plausible-looking wrong answer ("A100-40GB") is an
+# hour billed on hardware nobody chose. `""` is a member because it is a valid
+# thing to ask for — "whatever the wrapper pins" — and ordering runs small to
+# large, which is also the money order the picker shows them in.
+GpuChoice = Literal["", "A10G", "L4", "A100", "A100-80GB", "H100", "H200"]
+# The same set without the "leave it alone" member: what a refusal lists.
+GPU_TYPES: tuple[str, ...] = tuple(g for g in get_args(GpuChoice) if g)
+
+# The precisions `--model-dtype` accepts. Empty (the default) passes NO flag at
+# all, which is the checkpoint's own saved dtype — see SLICE3 "`--model-dtype`,
+# and why it is opt-in". The wrapper refuses an unknown one too, but it does so
+# in the container, so a name that cannot be right is worth a millisecond here
+# instead of a cold start.
+ModelDtypeChoice = Literal["", "float32", "bfloat16", "float16"]
+MODEL_DTYPES: tuple[str, ...] = tuple(d for d in get_args(ModelDtypeChoice) if d)
+
+# The env var the child reads its GPU type from. NOT a flag: both wrappers
+# evaluate `_FN_KWARGS` when `modal run` imports them on this machine, which
+# happens before Click parses anything — so there is no flag that could still
+# reach the decorator. Unset leaves each wrapper's own pin standing.
+ENV_GPU = "DRTC_GPU"
 
 # --- timings -----------------------------------------------------------------
 
@@ -523,6 +575,42 @@ def check_target(profile: str, environment: str) -> None:
         )
 
 
+def check_knobs(model_dtype: str, gpu: str) -> None:
+    """Refuse a precision or a GPU type this launcher will not send (S3.8e).
+
+    A PURE input check, and the first thing `start` does after the Hub id,
+    because neither value fails in a place worth waiting for: an off-list `gpu`
+    reaches Modal as `_FN_KWARGS["gpu"]` at the wrapper's import and an unknown
+    dtype dies inside the container before the weights load. Both are minutes
+    away from a refusal that belongs in a millisecond.
+
+    It lives HERE rather than only on `GpuStartBody` because the request model
+    is not the only caller — `start()` is a plain function, and a Literal on a
+    pydantic field cannot guard the ones that do not go through it.
+
+    Empty is valid for both and means "do not decide": the checkpoint's own
+    saved dtype, and the wrapper's own pinned GPU.
+    """
+    dtype = model_dtype.strip()
+    if dtype and dtype not in MODEL_DTYPES:
+        allowed = ", ".join(f"`{d}`" for d in MODEL_DTYPES)
+        raise ApiError(
+            400,
+            f"`{dtype}` isn't a precision this launcher can ask for. Use one of: {allowed} — "
+            "or leave it empty to load the checkpoint at the dtype it was saved with.",
+            code=ErrorCode.GPU_LAUNCH_FAILED,
+        )
+    want_gpu = gpu.strip()
+    if want_gpu and want_gpu not in GPU_TYPES:
+        allowed = ", ".join(f"`{g}`" for g in GPU_TYPES)
+        raise ApiError(
+            400,
+            f"`{want_gpu}` isn't a GPU type this launcher can ask Modal for. Use one of: "
+            f"{allowed} — or leave it empty to run on the wrapper's own pinned GPU.",
+            code=ErrorCode.GPU_LAUNCH_FAILED,
+        )
+
+
 # --- the transport plan ------------------------------------------------------
 
 
@@ -595,6 +683,7 @@ def build_argv(
     s_min: int,
     modal_bin: str,
     environment: str = "",
+    model_dtype: str = "",
 ) -> list[str]:
     """The `modal run` command, as a LIST — never a string, never a shell.
 
@@ -607,6 +696,15 @@ def build_argv(
 
     - `--task` is OMITTED when empty rather than passed as `""`, matching the
       generated line so the two remain comparable.
+    - `--model-dtype` is omitted the same way, and for a stronger reason: unset
+      is not a default this side gets to choose, it is the checkpoint's own
+      saved dtype. It sits between --task and --horizon because that is where
+      it sits in both wrappers' `local_entrypoint` signature, and this list
+      reads in that order deliberately.
+    - the GPU TYPE is deliberately NOT here either, and unlike the profile it
+      could not be: `_FN_KWARGS["gpu"]` is evaluated when `modal run` imports
+      the wrapper, before any flag is parsed. It rides `DRTC_GPU` in the child
+      env (`child_env`).
     - `--s-min` is rtc-ONLY: `modal_policy.py` has no such flag, so emitting it
       there is a Click usage error, not a defaulted run.
     - `--env` is a `modal run` OPTION and therefore goes BEFORE the wrapper
@@ -635,6 +733,7 @@ def build_argv(
         "--policy-path",
         policy_hub_id,
         *(["--task", task] if task else []),
+        *(["--model-dtype", model_dtype] if model_dtype else []),
         "--horizon",
         str(horizon),
         "--fps",
@@ -657,6 +756,7 @@ def child_env(
     env: Mapping[str, str] | None = None,
     *,
     profile: str = "",
+    gpu: str = "",
 ) -> dict[str, str]:
     """The environment the `modal run` child inherits.
 
@@ -669,6 +769,12 @@ def child_env(
     terminal on this machine shares. Empty leaves the variable alone (rather
     than setting it empty, which the CLI would read as a profile named ""),
     so the CLI's own resolution stands.
+
+    `gpu` is here for a HARDER reason than the profile's: it has no flag to be
+    passed as. Both wrappers build `_FN_KWARGS["gpu"]` at module import — which
+    `modal run` performs on this machine, before Click parses a single flag —
+    so an env var read at that same moment is the only channel that exists.
+    Empty leaves it alone, and each wrapper's own pin stands.
     """
     base = dict(os.environ if env is None else env)
     base["PYTHONUNBUFFERED"] = "1"
@@ -676,6 +782,8 @@ def child_env(
     base["LIVEKIT_API_SECRET"] = plan.api_secret
     if profile:
         base["MODAL_PROFILE"] = profile
+    if gpu:
+        base[ENV_GPU] = gpu
     return base
 
 
@@ -967,6 +1075,15 @@ _horizon: int | None = None
 _fps: int | None = None
 _video_codec: str | None = None
 _s_min: int | None = None
+# The two S3.8e knobs AS LAUNCHED, echoed for the same reason as the tuple
+# above — the panel's drift warning compares the form against the SERVER's
+# record. Both are strings whose EMPTY value is meaningful and is not a
+# non-choice the way an unchosen `_profile` is: "" is "the checkpoint's own
+# dtype" and "the wrapper's own pin", i.e. what was actually launched. So they
+# follow `_task`'s convention (raw, null only while idle) rather than
+# `_profile`'s `or None`.
+_model_dtype: str | None = None
+_gpu: str | None = None
 _log_path: str | None = None
 _started_at: float | None = None  # wall clock, for display
 _started_mono: float | None = None  # monotonic, for elapsed + the cold-start bound
@@ -1017,7 +1134,7 @@ def _go_idle_locked() -> None:
     global _state, _proc, _phase, _engine, _policy_hub_id, _room
     global _started_at, _started_mono, _idle_since, _last_line, _drain_deadline
     global _profile, _environment, _app_id
-    global _task, _horizon, _fps, _video_codec, _s_min
+    global _task, _horizon, _fps, _video_codec, _s_min, _model_dtype, _gpu
     _state = STATE_IDLE
     _proc = None
     _phase = None
@@ -1032,6 +1149,8 @@ def _go_idle_locked() -> None:
     _fps = None
     _video_codec = None
     _s_min = None
+    _model_dtype = None
+    _gpu = None
     _started_at = None
     _started_mono = None
     _idle_since = None
@@ -1421,6 +1540,8 @@ def start(
     s_min: int = 4,
     profile: str = "",
     environment: str = "",
+    model_dtype: str = "",
+    gpu: str = "",
 ) -> dict[str, Any]:
     """Launch the GPU policy server. Returns `{started, message, gpu}`.
 
@@ -1438,11 +1559,18 @@ def start(
     machine's own listings first: an A100-hour billed to the wrong workspace is
     not recoverable, so "we could not confirm the target" refuses in a
     millisecond rather than spending ninety seconds finding out.
+
+    `model_dtype` / `gpu` say WHAT IT RUNS AS and WHAT IT RUNS ON (S3.8e), and
+    both empty is S3.8's behaviour byte for byte: the checkpoint's saved dtype,
+    and the wrapper's own pinned GPU. They leave here by different doors — the
+    dtype as a flag, the GPU as `DRTC_GPU` in the child env, because the
+    wrapper's `@app.function(gpu=…)` is decided at import — but they are
+    checked together, before anything else touches the disk or the network.
     """
     global _state, _proc, _phase, _engine, _policy_hub_id, _room
     global _started_at, _started_mono, _log_path, _message, _hint, _last_line, _idle_since
     global _stop_outcome, _code, _drain_deadline, _profile, _environment, _app_id
-    global _task, _horizon, _fps, _video_codec, _s_min
+    global _task, _horizon, _fps, _video_codec, _s_min, _model_dtype, _gpu
 
     with _state_lock:
         if _state in (STATE_STARTING, STATE_READY, STATE_STOPPING):
@@ -1460,6 +1588,13 @@ def start(
             "The GPU needs a Hub policy id to load — fill in the Hub policy id field.",
             code=ErrorCode.GPU_LAUNCH_FAILED,
         )
+
+    # Pure input, so it is refused before the PATH lookup, the listing and the
+    # transport: neither of these two fails anywhere an operator would see it
+    # in time (see `check_knobs`).
+    want_dtype = model_dtype.strip()
+    want_gpu = gpu.strip()
+    check_knobs(want_dtype, want_gpu)
 
     modal_bin = find_modal()
     if modal_bin is None:
@@ -1511,10 +1646,11 @@ def start(
         s_min=s_min,
         modal_bin=modal_bin,
         environment=want_environment,
+        model_dtype=want_dtype,
     )
     log_handle, path = _open_log()
     try:
-        proc = _popen(argv, child_env(plan, profile=want_profile))
+        proc = _popen(argv, child_env(plan, profile=want_profile, gpu=want_gpu))
     except Exception as exc:
         with contextlib.suppress(Exception):
             log_handle.close()
@@ -1549,6 +1685,10 @@ def start(
         _fps = fps
         _video_codec = video_codec
         _s_min = s_min
+        # Raw, not `or None`: "" is a real answer here ("as the checkpoint
+        # saved it", "on the wrapper's pin") rather than an absent choice.
+        _model_dtype = want_dtype
+        _gpu = want_gpu
         _log_path = str(path)
         _started_at = time.time()
         _started_mono = _clock()
@@ -1562,7 +1702,15 @@ def start(
         payload = _status_locked()
     # The command, WITHOUT the credentials — they are in the env by design and
     # this line is what an operator compares against the panel's manual one.
-    logger.info("Launching the GPU policy server: %s", " ".join(argv))
+    # `DRTC_GPU` is written as the assignment that PREFIXES it, because that is
+    # both how it travels (child env, no flag exists) and how the panel's
+    # generated line renders it — so the two stay comparable character for
+    # character. The precision is already in argv as `--model-dtype`.
+    logger.info(
+        "Launching the GPU policy server: %s%s",
+        f"{ENV_GPU}={want_gpu} " if want_gpu else "",
+        " ".join(argv),
+    )
     _start_pump(proc, log_handle)
     return {
         "started": True,
@@ -1758,6 +1906,12 @@ def _status_locked() -> dict[str, Any]:
         # value is what a switch to rtc WOULD have used — the panel compares it
         # only when the engine is rtc, for the same reason.
         "s_min": _s_min,
+        # What it runs AS and what it runs ON (S3.8e), as launched; null only
+        # while idle. Empty string is a real answer — "the dtype the checkpoint
+        # saved" and "the wrapper's own pinned GPU" — so it is echoed as sent
+        # rather than folded into null the way an unchosen profile is.
+        "model_dtype": _model_dtype,
+        "gpu": _gpu,
         "log_path": _log_path,
         "started_at": _started_at,
         "elapsed_s": elapsed,

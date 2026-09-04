@@ -412,7 +412,12 @@ app = modal.App("lerobot-drtc-full-policy")
 # GPU/region/timeout knobs stay in ONE place.
 _FN_KWARGS = {
     "image": image,
-    "gpu": "A100",  # pinned per SWEEP.md: inference is the largest e2e term, cost is not the constraint
+    # Pinned per SWEEP.md: inference is the largest e2e term, cost is not the
+    # constraint. DRTC_GPU overrides it per launch — this dict is evaluated when
+    # `modal run` IMPORTS this file on the operator's own machine, before Click
+    # parses a flag, so an env var is the only channel a caller has to the
+    # decorator (see makermodslab/modal_launcher.py).
+    "gpu": os.environ.get("DRTC_GPU") or "A100",
     "timeout": 60 * 60 * 2,
     "volumes": {"/cache": hf_cache},
     "region": "us-west",

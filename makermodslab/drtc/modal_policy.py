@@ -450,7 +450,13 @@ app = modal.App("lerobot-drtc-policy")
 # GPU/region/timeout knobs stay in ONE place.
 _FN_KWARGS = {
     "image": image,
-    "gpu": "A100",  # A10G suffices for small policies (ACT); large VLAs (pi0 / SmolVLA) need A100 VRAM
+    # A10G suffices for small policies (ACT); large VLAs (pi0 / SmolVLA) need
+    # A100 VRAM — so "A100" is the pin, and it is what a hand-typed `modal run`
+    # gets. DRTC_GPU is how the Lab's launcher overrides it per launch: this
+    # dict is evaluated when `modal run` IMPORTS this file on the operator's own
+    # machine, before Click parses a flag, so an env var is the only channel a
+    # caller has to the decorator (see makermodslab/modal_launcher.py).
+    "gpu": os.environ.get("DRTC_GPU") or "A100",
     "timeout": 60 * 60 * 2,  # hard session cap; PORTAL_DURATION_SECONDS can end sooner
     "volumes": {"/cache": hf_cache},  # persistent HF cache (see hf_cache / HF_HOME)
     # Region: place the GPU near the LiveKit Cloud edge the robot uses, so media

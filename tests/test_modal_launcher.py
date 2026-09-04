@@ -280,6 +280,112 @@ def test_an_unchosen_profile_leaves_the_variable_alone():
     assert inherited["MODAL_PROFILE"] == "from-the-shell"
 
 
+# --- precision and the GPU type (S3.8e) --------------------------------------
+
+
+def test_the_precision_is_a_flag_and_only_when_it_is_set():
+    """Unset is not a default this side picks — it is the dtype the checkpoint
+    was saved with, and the only way to ask for that is to pass nothing."""
+    argv = ml.build_argv(_plan(), **_ARGS, engine="sync", model_dtype="bfloat16")
+    assert argv[argv.index("--model-dtype") + 1] == "bfloat16"
+    # Where both wrappers' local_entrypoint signatures put it, so the list
+    # reads in the order the function declares.
+    assert argv.index("--task") < argv.index("--model-dtype") < argv.index("--horizon")
+
+    for unset in (
+        ml.build_argv(_plan(), **_ARGS, engine="sync"),
+        ml.build_argv(_plan(), **_ARGS, engine="rtc", model_dtype=""),
+    ):
+        assert "--model-dtype" not in unset
+
+
+def test_the_gpu_type_travels_in_the_child_env_because_no_flag_could_reach_it():
+    """`_FN_KWARGS["gpu"]` is evaluated when `modal run` IMPORTS the wrapper on
+    this machine — before Click parses anything — so the decorator is already
+    built by the time a flag could be read. `DRTC_GPU` is the only channel."""
+    plan = _plan()
+    for engine in ("sync", "rtc"):
+        argv = ml.build_argv(plan, **_ARGS, engine=engine)
+        assert "--gpu" not in argv
+        assert "H100" not in " ".join(argv)
+
+    env = ml.child_env(plan, env={"PATH": "/usr/bin"}, gpu="H100")
+    assert env["DRTC_GPU"] == "H100"
+
+
+def test_an_unchosen_gpu_leaves_the_variable_alone():
+    """Empty means "whatever the wrapper pins", which is what NOT exporting it
+    gets — `DRTC_GPU=""` would have each wrapper's `or` fall through anyway,
+    but a variable we set is a variable we have to explain."""
+    env = ml.child_env(_plan(), env={"PATH": "/usr/bin"})
+    assert "DRTC_GPU" not in env
+
+    inherited = ml.child_env(_plan(), env={"DRTC_GPU": "from-the-shell"})
+    assert inherited["DRTC_GPU"] == "from-the-shell"
+
+
+def test_an_off_list_gpu_refuses_before_anything_is_spawned(spawned):
+    """The allowlist is closed because the value fails somewhere nobody is
+    watching: it reaches Modal at the wrapper's import, and a plausible wrong
+    answer is an hour billed on hardware nobody chose."""
+    with pytest.raises(ApiError) as excinfo:
+        ml.start(engine="sync", policy_hub_id="someone/p", gpu="A100-40GB")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.code == ErrorCode.GPU_LAUNCH_FAILED
+    # The message names the way out, not just the refusal.
+    assert "`A100-80GB`" in excinfo.value.detail and "`H100`" in excinfo.value.detail
+    assert spawned["popen"] == []
+
+
+def test_an_off_list_precision_refuses_before_anything_is_spawned(spawned):
+    """The wrapper refuses an unknown dtype too — but in the container, after a
+    cold start. A name that cannot be right is worth a millisecond here."""
+    with pytest.raises(ApiError) as excinfo:
+        ml.start(engine="rtc", policy_hub_id="someone/p", model_dtype="bf16")
+
+    assert excinfo.value.code == ErrorCode.GPU_LAUNCH_FAILED
+    assert "`bfloat16`" in excinfo.value.detail
+    assert spawned["popen"] == []
+
+
+def test_the_two_knobs_reach_the_flag_the_env_and_the_status(spawned, fake_clock):
+    ml.start(
+        engine="sync",
+        policy_hub_id="someone/p",
+        model_dtype=" bfloat16 ",  # stripped, like the profile
+        gpu=" H100 ",
+    )
+
+    argv, env = spawned["popen"][0]
+    assert argv[argv.index("--model-dtype") + 1] == "bfloat16"
+    assert env["DRTC_GPU"] == "H100"
+    status = ml.status()
+    assert status["model_dtype"] == "bfloat16"
+    assert status["gpu"] == "H100"
+
+
+def test_an_unchosen_knob_is_echoed_as_launched_not_as_a_non_choice(spawned, fake_clock, monkeypatch):
+    """`task`'s convention, not `profile`'s: "" is a REAL answer here — the
+    dtype the checkpoint saved, and the wrapper's own pin — so it is echoed as
+    sent. Null means idle, and nothing else."""
+    # The child inherits os.environ, so a developer shell that already exports
+    # DRTC_GPU would otherwise decide the assertion below.
+    monkeypatch.delenv("DRTC_GPU", raising=False)
+    idle = ml.status()
+    assert idle["model_dtype"] is None and idle["gpu"] is None
+
+    ml.start(engine="sync", policy_hub_id="someone/p")
+    assert ml.status()["model_dtype"] == ""
+    assert ml.status()["gpu"] == ""
+    _, env = spawned["popen"][0]
+    assert "DRTC_GPU" not in env
+
+    ml.stop()
+    ml._handle_exit(spawned["proc"], -2)
+    assert ml.status()["gpu"] is None
+
+
 # --- the two listings --------------------------------------------------------
 
 _PROFILE_ROWS = [
@@ -666,6 +772,8 @@ def test_the_status_dict_always_carries_every_key(spawned, fake_clock):
         "fps",
         "video_codec",
         "s_min",
+        "model_dtype",
+        "gpu",
         "log_path",
         "started_at",
         "elapsed_s",
