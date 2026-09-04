@@ -1043,6 +1043,11 @@ def start_station_mode(robot_name: str | None, websocket_manager=None) -> thread
         announced_idle = False
         while station_mode:
             time.sleep(delay)
+            # Re-check after the sleep: a shutdown that switched the
+            # supervisor off mid-sleep must not re-arm hosting on the
+            # arm the gather has just parked and released.
+            if not station_mode:
+                break
             delay = _STATION_RETRY_S
             if hosting_active or held_by() is not None:
                 continue
