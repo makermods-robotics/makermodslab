@@ -90,3 +90,64 @@ describe("a fully configured panel launches every mode", () => {
     expect(deployBlockedReason(mode, ok)).toBeNull();
   });
 });
+
+describe("several tasks are refused rather than guessed between", () => {
+  // A merged dataset carries every task string of its inputs, and nothing
+  // distinguishes them well enough to pick one: measured on real merged
+  // datasets, two near-identical sentences sat 99 vs 100 episodes apart. The
+  // panel used to send whichever had one more episode, and on a coaching run
+  // that string is then stamped into every recorded frame.
+  it("blocks every mode for a language-conditioned policy", () => {
+    for (const mode of MODES) {
+      const reason = deployBlockedReason(mode, {
+        ...ok,
+        requiresTask: true,
+        task: "",
+        taskAmbiguous: true,
+      });
+      expect(reason).toMatch(/blocked\.taskAmbiguous/);
+    }
+  });
+
+  it("blocks coaching even for a policy that never reads the task", () => {
+    const reason = deployBlockedReason("coach", {
+      ...ok,
+      requiresTask: false,
+      task: "",
+      taskAmbiguous: true,
+    });
+    expect(reason).toMatch(/blocked\.taskAmbiguous/);
+  });
+
+  it("does not block a plain run whose policy ignores the task", () => {
+    // The field is not even on screen there, so there is nothing to resolve and
+    // refusing would be a dead end.
+    for (const mode of ["single", "eval"] as DeployRunMode[]) {
+      expect(
+        deployBlockedReason(mode, {
+          ...ok,
+          requiresTask: false,
+          task: "",
+          taskAmbiguous: true,
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("clears once the operator picks one", () => {
+    for (const mode of MODES) {
+      expect(
+        deployBlockedReason(mode, {
+          ...ok,
+          requiresTask: true,
+          task: "the chosen one",
+          taskAmbiguous: false,
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("is absent by default, so existing callers are unaffected", () => {
+    expect(deployBlockedReason("coach", { ...ok })).toBeNull();
+  });
+});

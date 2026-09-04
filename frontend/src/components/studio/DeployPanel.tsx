@@ -49,6 +49,15 @@ import { SkillItem } from "@/lib/modelsApi";
 import { useSkills } from "@/hooks/useSkills";
 import { importSourceForModel } from "@/lib/inferenceLaunch";
 import { deployBlockedReason } from "./deployGuards";
+import {
+  classifyTaskLookup,
+  defaultTaskFrom,
+  effectiveTaskFor,
+  taskFieldVisible,
+  taskIsAmbiguous,
+  tasksFrom,
+  type TaskPrefillState,
+} from "./deployTaskPrefill";
 import DisplayName from "@/components/library/DisplayName";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import ModelsLibrary from "@/components/jobs/ModelsLibrary";
@@ -541,7 +550,9 @@ const DeployPanel: React.FC = () => {
   // doesn't fail loudly — it just makes the policy worse in ways that look
   // like the policy being bad. So a single unambiguous task is filled in, and
   // several are offered as choices rather than guessed between.
-  const [datasetTasks, setDatasetTasks] = useState<string[]>([]);
+  const [taskPrefill, setTaskPrefill] = useState<TaskPrefillState>({
+    kind: "idle",
+  });
   // Inference engine A/B. "sync" is the server default and the historical
   // behaviour; "rtc" is experimental (see InferenceSessionOptions).
   const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
@@ -1000,12 +1011,6 @@ const DeployPanel: React.FC = () => {
     (robot?.mode === "bimanual" &&
       (!robot?.right_leader_port || !robot?.right_leader_config));
   const coachLeaderMissing = runMode === "coach" && leaderMissing;
-  // Coaching writes the task string into every recorded frame, so the server
-  // refuses an empty one for ANY policy — including one that doesn't condition
-  // on language and therefore never showed the field. That combination gave a
-  // green panel, an enabled Start, and a 400 naming a control the operator
-  // could not make appear.
-  const coachTaskMissing = task.trim() === "";
 
   // Everything a launch needs that does NOT depend on which verb was pressed.
   const canStartAnyMode =
@@ -1040,6 +1045,7 @@ const DeployPanel: React.FC = () => {
       // The effective value: an empty box that falls back to a real default is
       // not a missing task, and blocking on it would be a dead end.
       task: effectiveTask,
+      taskAmbiguous,
     });
     return key === null ? null : t(key as never);
   };
@@ -1089,8 +1095,15 @@ const DeployPanel: React.FC = () => {
   // The task the checkpoint was trained on, most-represented first. Same
   // placeholder contract as the name above: shown greyed, sent when the field
   // is left empty, and restored the moment the operator clears what they typed.
-  const defaultTask = datasetTasks[0] ?? "";
-  const effectiveTask = task.trim() || defaultTask;
+  const datasetTasks = tasksFrom(taskPrefill);
+  const defaultTask = defaultTaskFrom(taskPrefill);
+  const taskAmbiguous = taskIsAmbiguous(taskPrefill, task);
+  const effectiveTask = effectiveTaskFor(
+    task,
+    taskPrefill,
+    !!policyConfig?.requires_task,
+    runMode,
+  );
 
   // Prefill the task from the dataset the selected checkpoint was trained on.
   // Typing it by hand means retyping a sentence that already exists, and a
@@ -1107,7 +1120,7 @@ const DeployPanel: React.FC = () => {
     const repoId =
       policyConfig?.dataset_repo_id ?? selectedJob?.config?.dataset_repo_id;
     if (!repoId || repoId === "(imported)") {
-      setDatasetTasks([]);
+      setTaskPrefill({ kind: "idle" });
       return;
     }
     let cancelled = false;
@@ -1115,30 +1128,17 @@ const DeployPanel: React.FC = () => {
       try {
         const info = await getDatasetInfo(baseUrl, fetchWithHeaders, repoId);
         if (cancelled) return;
-        // Most-represented task first: if the operator has to choose, the one
-        // the policy saw most is the likeliest answer and should be nearest.
-        //
-        // Only when every count is KNOWN. A null is "we could not read the
-        // episode metadata" (or a Hub summary that never fetched it), and
-        // coercing that to 0 would let an unreadable file decide the ranking
-        // while every number still looked plausible — on a merged dataset the
-        // real margins are one episode wide. Unknown counts leave the server's
-        // own order (task_index) untouched, which is at least an order the data
-        // actually has.
-        const raw = [...(info.tasks ?? [])];
-        const ranked = raw.every((t) => t.num_episodes !== null)
-          ? raw.sort((a, b) => (b.num_episodes ?? 0) - (a.num_episodes ?? 0))
-          : raw;
-        const tasks = ranked.map((t) => t.task).filter(Boolean);
-        // Offered as a PLACEHOLDER default (see `defaultTask`), not written
-        // into the field: the operator should be able to tell the app's guess
-        // from their own sentence, and clearing the box should fall back to the
-        // guess rather than to nothing.
-        setDatasetTasks(tasks);
-      } catch {
-        // A Hub-only or missing dataset simply has no tasks to offer; the
-        // field stays as the user left it.
-        if (!cancelled) setDatasetTasks([]);
+        // Ranking and the placeholder contract both live in deployTaskPrefill,
+        // where they can be tested: the default is offered GREYED rather than
+        // written into the field, so the operator can tell the app's guess from
+        // their own sentence and clearing the box falls back to the guess.
+        setTaskPrefill(classifyTaskLookup(info));
+      } catch (e) {
+        // NOT "this dataset has no task" — that is a claim, and a failed lookup
+        // is not evidence for it. A deleted or renamed dataset (404) and an
+        // unreachable one say different things to an operator, so both are
+        // carried through as `unknown` with the reason attached.
+        if (!cancelled) setTaskPrefill(classifyTaskLookup(e, true));
       }
     })();
     return () => {
@@ -1603,7 +1603,7 @@ const DeployPanel: React.FC = () => {
                   meant a plain ACT checkpoint gave a green panel, an enabled
                   Start, and then a 400 naming a field that was not on screen
                   and could not be made to appear. */}
-              {policyConfig.requires_task || runMode === "coach" ? (
+              {taskFieldVisible(!!policyConfig.requires_task, runMode) ? (
                 <div className="space-y-2">
                   <Label htmlFor="deploy-task">
                     {t("studio.deploy.task.label")}
@@ -1618,8 +1618,22 @@ const DeployPanel: React.FC = () => {
                     // shown greyed in the same slot the REAL inherited task
                     // uses is indistinguishable from one. When the lineage
                     // yields nothing, say so instead.
+                    // Three different situations used to render the same
+                    // "no task found" sentence, and only one of them was true:
+                    // a dataset that really lists none, a lookup that 404'd,
+                    // and a lookup that failed. Each says something different
+                    // about what the operator should do next.
                     placeholder={
-                      defaultTask || t("studio.deploy.task.placeholderNone")
+                      defaultTask ||
+                      (taskPrefill.kind === "unknown"
+                        ? t(
+                            taskPrefill.reason === "not_found"
+                              ? "studio.deploy.task.placeholderMissing"
+                              : "studio.deploy.task.placeholderUnreadable",
+                          )
+                        : taskAmbiguous
+                          ? t("studio.deploy.task.placeholderChoose")
+                          : t("studio.deploy.task.placeholderNone"))
                     }
                   />
                   <p className="text-xs text-muted-foreground">
