@@ -134,6 +134,7 @@ from .utils.config import (
     validate_dataset_repo_id,
 )
 from .utils.errors import friendly_hint, is_cleanup_error
+from .utils.system import molmoact2_device_warning, molmoact2_rtc_conflict, policy_inference_args
 
 logger = logging.getLogger(__name__)
 
@@ -2071,6 +2072,23 @@ def _classify_outcome(rc: int | None, rollout_started: bool, error_text: str | N
     return "failed"
 
 
+def _checkpoint_policy_config(policy_path: str) -> dict[str, Any]:
+    """The checkpoint's own `config.json`, or `{}` when it can't be read.
+
+    `policy_path` is always a resolved LOCAL `pretrained_model` dir by the time
+    the command builders run (`_resolve_policy_path` downloads Hub refs first),
+    so this is one small file read with no network. Empty on ANY failure —
+    missing file, unreadable JSON, a dir that isn't a checkpoint — because every
+    consumer's fallback is "add no extra flags", which is exactly the behaviour
+    that predates this and keeps the unit tests' fake paths working.
+    """
+    try:
+        raw = json.loads((Path(policy_path) / "config.json").read_text())
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
 def _rollout_cli_args(request: InferenceRequest, policy_path: str, robot_args: list[str]) -> list[str]:
     """The rollout flags, without the interpreter/module prefix.
 
@@ -2084,8 +2102,21 @@ def _rollout_cli_args(request: InferenceRequest, policy_path: str, robot_args: l
     added for one is never missing from the other. Coaching mode is the third
     front-end (`makermodslab.dagger_runner`) and layers `--strategy.*` /
     `--dataset.*` / `--teleop.*` on top; `robot_args` carries the teleop block
-    for it, built alongside the `--robot.*` block in `_prepare_robot`."""
+    for it, built alongside the `--robot.*` block in `_prepare_robot`.
+
+    Raises ValueError when the requested engine cannot drive the checkpoint at
+    all (RTC on a discrete MolmoAct2 — see `molmoact2_rtc_conflict`). The
+    startup worker turns that into a normal startup failure, which is strictly
+    better than the alternative: lerobot raises the same refusal itself, but
+    only after loading a multi-GB VLM onto the accelerator."""
     coaching = request.coaching
+    # The checkpoint's own saved config — read once here so both the required
+    # `--policy.*` flags and the engine check below answer from the same file.
+    policy_config = _checkpoint_policy_config(policy_path)
+    if not coaching and request.inference_engine == "rtc":
+        conflict = molmoact2_rtc_conflict(policy_config)
+        if conflict:
+            raise ValueError(conflict)
     args = [
         # Coaching replaces the strategy wholesale (see `_coaching_cli_args`);
         # every other run is a plain autonomous rollout.
@@ -2145,6 +2176,15 @@ def _rollout_cli_args(request: InferenceRequest, policy_path: str, robot_args: l
             f"--policy.temporal_ensemble_coeff={request.temporal_ensemble_coeff}",
             "--policy.n_action_steps=1",
         ]
+    # Per-policy-type flags this lerobot pin REQUIRES (see
+    # utils/system.policy_inference_args). Empty for every policy but MolmoAct2
+    # today, whose `inference_action_mode` has no usable default: the config
+    # field is None unless the checkpoint saved one, and the policy raises on
+    # None rather than picking a head. Appended last so it can never be
+    # shadowed by an earlier `--policy.*` in this list, and read from the
+    # checkpoint rather than hardcoded so a discrete checkpoint keeps its own
+    # choice.
+    args += policy_inference_args(policy_config)
     return args
 
 
@@ -2970,6 +3010,27 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
         logger.info("Inference startup abandoned during model download (stop requested)")
         return
 
+    # 1b. Checkpoint-derived checks, now that the config.json is on disk and
+    #     BEFORE step 2 opens the serial bus. `_rollout_cli_args` raises on the
+    #     same engine conflict — that is the guarantee every front-end funnels
+    #     through — but it runs after the preflight, so relying on it alone
+    #     would energize an arm for a session that could never start.
+    policy_config = _checkpoint_policy_config(policy_path)
+    if not request.coaching and request.inference_engine == "rtc":
+        conflict = molmoact2_rtc_conflict(policy_config)
+        if conflict:
+            logger.info("Refusing inference start: %s", conflict)
+            _fail_startup(conflict)
+            return
+    # Warn-but-allow, like the arm-identity findings below and surfaced through
+    # the same `meta["warning"]`: nothing in this pin REQUIRES CUDA, so this is
+    # an expectation-setter, not a gate (see molmoact2_device_warning).
+    startup_warnings: list[str] = []
+    device_warning = molmoact2_device_warning(policy_config, _detect_device())
+    if device_warning:
+        logger.warning("%s", device_warning)
+        startup_warnings.append(device_warning)
+
     # 2. Preflight + stage the arm (opens the serial bus). This is the first
     #    robot-touching step, deliberately AFTER the download.
     try:
@@ -3049,10 +3110,13 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
                 "log_path": str(log_path),
                 "phase": carried_phase,
             }
-            # Warn-but-allow arm-identity findings, surfaced once via the status
-            # payload now that the POST returned before the preflight ran.
-            if identity_warnings:
-                meta["warning"] = " ".join(identity_warnings)
+            # Warn-but-allow findings, surfaced once via the status payload now
+            # that the POST returned before the preflight ran: the pre-download
+            # ones from step 1b, then the arm-identity ones from the preflight.
+            # Joined into the one `warning` string the status payload has always
+            # carried, so no client has to learn a new shape to see both.
+            if warnings := [*startup_warnings, *identity_warnings]:
+                meta["warning"] = " ".join(warnings)
             _inference_meta = meta
             # This run now owns a log file. Recorded outside the meta too, so it
             # survives the meta being cleared at session end and the endpoint can
