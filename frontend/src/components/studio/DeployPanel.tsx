@@ -1130,8 +1130,9 @@ const DeployPanel: React.FC = () => {
 
   // Drop the operator's typed overrides when the POLICY changes.
   //
-  // `task` and `coachDatasetName` are this panel's only raw text state, and
-  // typed text BEATS the derived default (`effectiveTask` / `effectiveCoachName`
+  // `task` and `coachDatasetName` are this panel's only free-text fields (every
+  // other input here is a number, a boolean or a fixed choice), and typed text
+  // BEATS the derived default (`effectiveTask` / `effectiveCoachName`
   // both read `typed.trim() || default`). Without this reset a sentence typed
   // for one policy rides silently along to the next one and suppresses that
   // policy's own prefill — and the task string is not cosmetic: it reaches
@@ -1156,8 +1157,9 @@ const DeployPanel: React.FC = () => {
   // StudioOverlay never unmounts — Launchpad renders it unconditionally and
   // open/close only slides it with a transform — so panel state survives a
   // close/reopen by design. That is right for the robot picker and the camera
-  // bindings, and wrong for these two: they are the only fields whose staleness
-  // is written to disk, and reopening the studio tomorrow must not silently
+  // bindings, and wrong for these two: a stale duration or episode count only
+  // shapes the next run, while a stale task or corrections name MISLABELS what
+  // that run writes to disk. Reopening the studio tomorrow must not silently
   // re-arm yesterday's sentence against whatever policy is selected then.
   useEffect(() => {
     if (!open) {
