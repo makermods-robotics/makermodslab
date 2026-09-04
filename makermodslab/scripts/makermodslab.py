@@ -280,13 +280,44 @@ def _find_makermodslab_pids() -> tuple[dict[int, str], dict[int, tuple[int, str]
     return kill_targets, strangers
 
 
-def _terminate_tree(pid: int, timeout: int = 5) -> None:
-    """Terminate a process and every descendant.
+# How long the LEADER of a tree gets to take its own descendants down before
+# we start signalling them ourselves.
+#
+# It exists for exactly one grandchild: the `modal run` client under the
+# backend. That client stops its Modal app only when it receives SIGINT, and
+# the app's own process is on a GPU somebody is paying for — so the app's fate
+# is decided inside the backend's shutdown handler
+# (`modal_launcher.stop_for_shutdown`), not by a signal from here. SIGTERMing
+# the whole tree at once, which is what this function used to do, killed the
+# client BEFORE the handler could reach it and left an A100 billing for
+# minutes. Signalling the leader alone and waiting is what gives the handler
+# its chance.
+#
+# 10s covers the handler's realistic cost (a SIGINT teardown of the GPU client
+# is ~2s, bounded at 5s, plus uvicorn's own bounded graceful shutdown) with
+# margin, and costs NOTHING in the common case: the wait returns as soon as the
+# tree is gone, which for a Lab with no GPU running is immediate.
+_LEADER_GRACE_S = 10.0
+
+
+def _terminate_tree(pid: int, timeout: int = 5, grace: float = _LEADER_GRACE_S) -> None:
+    """Terminate a process and every descendant, leader first.
 
     Dev mode's children are themselves process trees (npm -> node -> vite, and
     uvicorn --reload -> reloader -> worker). Signalling only the direct child
-    leaves grandchildren orphaned still holding :8000/:8080, so walk the whole
-    tree: terminate → wait → kill any survivors.
+    leaves grandchildren orphaned still holding :8000/:8080, so the whole tree
+    is walked — but in TWO steps, because some grandchildren need their parent
+    to shut them down rather than a signal from here (see `_LEADER_GRACE_S`):
+
+      1. terminate the leader alone and wait up to `grace` for the tree to go
+         quiet by itself. A well-behaved leader (uvicorn, npm) takes its own
+         children with it, and this returns as soon as it has.
+      2. whatever is still alive gets the old treatment: terminate → wait →
+         kill any survivors. Ports never stay held because a child ignored
+         its parent.
+
+    The descendant list is snapshotted BEFORE step 1: once the leader exits,
+    an orphaned grandchild is no longer reachable through it.
     """
     try:
         parent = psutil.Process(pid)
@@ -294,6 +325,12 @@ def _terminate_tree(pid: int, timeout: int = 5) -> None:
         return
     procs = parent.children(recursive=True)
     procs.append(parent)
+    with contextlib.suppress(psutil.NoSuchProcess):
+        parent.terminate()
+    if grace > 0:
+        _gone, alive = psutil.wait_procs(procs, timeout=grace)
+        if not alive:
+            return
     for proc in procs:
         with contextlib.suppress(psutil.NoSuchProcess):
             proc.terminate()
@@ -330,6 +367,11 @@ def _run_stop() -> None:
         return
     for pid, reason in kill_targets.items():
         logger.info("🛑 Stopping pid %d (%s)...", pid, reason)
+        # With the leader grace, so `--stop` behaves exactly like a Ctrl-C:
+        # the app (or the reload supervisor above it) gets to run its own
+        # shutdown handler, which is the only thing that stops a Modal GPU app
+        # properly. livekit-server exits on SIGTERM at once, so it pays nothing
+        # for the wait.
         _terminate_tree(pid)
     logger.info("✅ MakerMods Lab stopped.")
 
@@ -616,7 +658,10 @@ def _run_dev(
 
     if not _wait_for_port(FRONTEND_DEV_PORT):
         logger.error("❌ Frontend never came up")
-        _terminate_tree(frontend_process.pid)
+        # No leader grace here or below: `npm run dev` routinely leaves vite
+        # behind rather than taking it down, and nothing under it needs a
+        # shutdown handler of its own.
+        _terminate_tree(frontend_process.pid, grace=0.0)
         sys.exit(1)
 
     # Before the backend spawn: _start_sfu exports the app-side env the
@@ -626,7 +671,7 @@ def _run_dev(
         try:
             children.insert(0, ("sfu", _start_sfu(sfu_bin, sfu_host, sfu_external_ip)))
         except SystemExit:
-            _terminate_tree(frontend_process.pid)
+            _terminate_tree(frontend_process.pid, grace=0.0)
             raise
 
     logger.info("🚀 Starting backend (port %d) with --reload...", BACKEND_PORT)
@@ -669,8 +714,16 @@ def _run_dev(
         # Walk each child's whole process tree (npm -> node -> vite, uvicorn
         # --reload -> reloader -> worker) so no grandchild outlives Ctrl+C and
         # keeps holding :8000/:8080 (or :7880).
+        #
+        # The backend goes FIRST (it is `children[0]`) and with the leader
+        # grace, because its own shutdown handler is the only thing that can
+        # stop a Modal GPU app properly — a SIGTERM straight to the `modal run`
+        # grandchild leaves an A100 billing (see `_LEADER_GRACE_S`). The
+        # frontend gets no grace: `npm run dev` routinely leaves vite behind
+        # rather than taking it with it, so waiting on that tree would add ten
+        # seconds to every Ctrl-C and change nothing.
         for name, p in children:
-            _terminate_tree(p.pid)
+            _terminate_tree(p.pid, grace=0.0 if name == "frontend" else _LEADER_GRACE_S)
             logger.info(f"  ✅ {name} stopped")
         sys.exit(0)
 

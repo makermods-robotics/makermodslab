@@ -4743,6 +4743,13 @@ def delete_robot(name: str):
 def startup_event():
     """One-time startup diagnostics surfaced in the server terminal."""
     warn_if_cuda_mismatch()
+    # A Modal app OUTLIVES the `modal run` client that started it (the client
+    # only tells Modal to stop on SIGINT), so a Lab that was hard-killed —
+    # SIGKILL, a crash, a power cut — can leave an A100 billing with nobody
+    # attached. If the last run left an app id on disk and nothing is running
+    # here, stop it. On a background thread, best-effort, and it never blocks
+    # or refuses a launch; what it did shows up as the idle status's message.
+    modal_launcher.reap_orphan_app_async()
 
 
 # Strong reference so the loop's task set can't drop the pump mid-flight.
@@ -4780,6 +4787,30 @@ async def shutdown_event():
     # regardless — the exit-status file + TailingJobRunner still cover a worker
     # reload that this same process survives.
     job_registry.shutdown()
+
+    # THEN the GPU, before anything else here spends its (bounded but real)
+    # time, because this is the one child that is BILLED BY THE MINUTE and the
+    # one whose death has to be a specific signal. `modal run` tears its app
+    # down from `except KeyboardInterrupt` and nowhere else, so the client has
+    # to receive a SIGINT and be given a moment to make that call; if this
+    # process leaves first — a uvicorn --reload restart on any save under
+    # makermodslab/, a Ctrl-C on the dev launcher, a `makermodslab --stop` —
+    # the client is orphaned or killed and a Modal A100 keeps running for the
+    # 5-7 minutes Modal's own heartbeat timeout takes to notice.
+    #
+    # Synchronous (in a thread) rather than fire-and-forget, for the same
+    # reason: a stop that outlives the process it runs in is not a stop. It
+    # costs ~2s when a GPU is up and returns immediately when none is.
+    #
+    # Ahead of the arm stops below on purpose. A remote run whose policy
+    # vanishes for the second or two this takes is a robot side that stops
+    # receiving actions and holds — and it is being stopped moments later
+    # anyway, by the same handler, with its own return-to-rest.
+    try:
+        if await asyncio.to_thread(modal_launcher.stop_for_shutdown):
+            logger.info("Stopped the GPU policy server on shutdown")
+    except Exception:
+        logger.exception("Failed to stop the GPU policy server during shutdown")
 
     # Stop the AVFoundation pump first so its next tick can't interleave with
     # shutdown (and so --reload restarts don't log a destroyed-pending-task).

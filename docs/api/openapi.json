@@ -1293,6 +1293,17 @@
       "GpuStatusResponse": {
         "description": "GET /api/v1/remote-inference/gpu — shape authority:\nmodal_launcher.status().\n\nModelled EXACTLY, with no exclusion mode: the launcher funnels every branch\nthrough one builder (`_status_locked`) that emits every key, null where\nunknown, which is what lets a `response_model` sit on it without\nmaterializing absences as lies.\n\nThe GPU is a LAB-LEVEL RESOURCE, not a session — it holds no hardware, has\nno lease, and stopping it is not a safety action. That is why it has its\nown three routes rather than a field on `RemoteInferenceOptions`: a 1-3\nminute cold start inside `handle_start_remote_inference` would hold the\n`robot.busy.remote_inference` discriminant while the arm sat completely\nfree.",
         "properties": {
+          "app_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "App Id"
+          },
           "code": {
             "anyOf": [
               {
@@ -1330,6 +1341,17 @@
             ],
             "title": "Environment"
           },
+          "fps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fps"
+          },
           "hint": {
             "anyOf": [
               {
@@ -1340,6 +1362,17 @@
               }
             ],
             "title": "Hint"
+          },
+          "horizon": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Horizon"
           },
           "idle_stop_in_s": {
             "anyOf": [
@@ -1429,6 +1462,17 @@
             ],
             "title": "Room"
           },
+          "s_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "S Min"
+          },
           "started_at": {
             "anyOf": [
               {
@@ -1443,6 +1487,28 @@
           "state": {
             "title": "State",
             "type": "string"
+          },
+          "task": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task"
+          },
+          "video_codec": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Video Codec"
           }
         },
         "required": [
@@ -1453,6 +1519,12 @@
           "room",
           "profile",
           "environment",
+          "app_id",
+          "task",
+          "horizon",
+          "fps",
+          "video_codec",
+          "s_min",
           "log_path",
           "started_at",
           "elapsed_s",

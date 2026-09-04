@@ -152,6 +152,21 @@ DRTC_ENV_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/livekit.env")
 # retired tools/drtc scripts also logged livekit-server and cloudflared here.
 DRTC_LOG_DIR = os.path.expanduser("~/.cache/huggingface/lerobot/logs/drtc")
 
+# The Modal app the GPU launcher last started: {app_id, profile, started_at}.
+#
+# It exists because a Modal app OUTLIVES the local `modal run` client that
+# started it: the client tears the app down only on SIGINT (it disconnects from
+# its `except KeyboardInterrupt`), so a client that dies to SIGTERM/SIGKILL — a
+# uvicorn --reload restart, a Ctrl-C on the dev launcher, a hard kill — leaves
+# an A100 billing until Modal's own heartbeat timeout reaps it minutes later.
+# Recording the app id on disk is what lets a LATER process (this one after a
+# restart) run `modal app stop` for a client nobody can reach any more.
+#
+# Deliberately tiny and disposable: it names no credential, and losing it costs
+# at most one orphan reap. Written when the launcher first sees the app id in
+# the child's output, cleared once the app is confirmed stopped.
+DRTC_GPU_APP_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/drtc_gpu_app.json")
+
 # Staging root for bimanual (BiSO) sessions. lerobot's BiSO devices take ONE
 # calibration_dir + ONE base id and load each sub-arm as "<base>_left.json" /
 # "<base>_right.json" — there is no way to point left/right at differently named

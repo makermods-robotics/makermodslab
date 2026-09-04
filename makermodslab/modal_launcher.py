@@ -39,11 +39,28 @@ from the container's own stdout; the only gate on energizing the arm remains
 reformatted log line is a misleading panel, not a wrong energization.
 
 Attached, never `--detach`. The local `modal run` process is the app's
-lifeline, so killing its process group stops the app — the cost-safety property
-this whole slice wants, and it composes with `rollout._terminate_tree`'s
-SIGTERM→SIGKILL-over-the-group discipline for free. The trade, stated plainly:
-the GPU dies with the Lab. That is acceptable because the robot session dies
-with it too, and the child's own `finally:` returns the arm to rest first.
+lifeline. The trade, stated plainly: the GPU dies with the Lab. That is
+acceptable because the robot session dies with it too, and the child's own
+`finally:` returns the arm to rest first.
+
+Why the stop is SIGINT first (S3.8c)
+------------------------------------
+"Killing the client stops the app" was the assumption S3.8 shipped on, and it
+is FALSE. In the `modal` client (`modal/runner.py::_run_app`) the app-stop RPC
+— `AppClientDisconnect`, which terminates an ephemeral app's tasks — is sent
+from `except KeyboardInterrupt` and from the exception paths. There is no
+SIGTERM handler. So a client killed with SIGTERM/SIGKILL, which is what
+`rollout._terminate_tree` does, dies WITHOUT telling Modal anything, and the
+container keeps running (and billing) until Modal's client-heartbeat timeout
+reaps it — measured at 5-7 minutes, three times on 2026-09-03.
+
+Hence :func:`_graceful_terminate`: SIGINT to the child's process group first
+(what a terminal's Ctrl-C would deliver), a bounded wait, and only then the
+existing SIGTERM→SIGKILL escalation. And hence the app-id record: when the
+client did NOT get to make that call, `modal app stop --yes <app id>` is the
+only remaining way to stop the app, and it needs an id that a dead process
+cannot tell us — so it is parsed from the log and persisted the moment it
+appears.
 
 The secret never reaches argv
 -----------------------------
@@ -94,7 +111,9 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -105,8 +124,8 @@ from typing import IO, Any
 
 from . import remote_inference
 from .api_errors import ApiError, ErrorCode
-from .rollout import _terminate_tree
-from .utils.config import DRTC_LOG_DIR
+from .rollout import _signal_group, _terminate_tree
+from .utils.config import DRTC_GPU_APP_FILE, DRTC_LOG_DIR, _atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +171,19 @@ _GPU_IDLE_STOP_S = 600.0
 # How long a terminate may take before the group is SIGKILLed (rollout's own
 # default, restated so the number is visible next to the ones above).
 _TERMINATE_TIMEOUT_S = 5.0
+# How long the `modal run` client gets to shut its APP down after SIGINT,
+# before the SIGTERM→SIGKILL escalation takes over. The client sends
+# `AppClientDisconnect` immediately (observed: it prints "Stopping app" and is
+# gone within ~2 s) and only then waits on the final log stream, which Modal
+# bounds itself at its own `logs_timeout` (10 s by default). So this bound has
+# to cover the RPC, not the log drain: 5 s is 2.5x the observed exit and still
+# leaves the whole stop inside the panel's poll interval. Escalating past it is
+# safe rather than lossy — `_settle_app` then stops the app over the API.
+_SIGINT_GRACE_S = 5.0
+# The bound on the `modal app stop --yes <app id>` fallback. It is one API call
+# with no log stream behind it; anything slower is a Modal outage, and the
+# right answer there is a logged line, not a stop that never returns.
+_APP_STOP_TIMEOUT_S = 15.0
 # The two listings behind the profile / environment pickers. They sit inside a
 # GET the panel calls on open, so the bound is short: an unreachable Modal must
 # cost the operator a coded line, not a hung panel. `environment list` talks to
@@ -173,6 +205,11 @@ _STOP_DRAIN_TIMEOUT_S = 10.0
 # One log file per launch, a SIBLING of the session logs — a GPU log can never
 # be mistaken for a session's (same argument `remote_inference._LOG_DIR` makes).
 _LOG_DIR = Path(DRTC_LOG_DIR) / "gpu"
+# Where the running app's id is remembered ACROSS PROCESSES, so a restart can
+# still stop what the last one launched. A module-level Path rather than the
+# raw constant so a test can redirect it in one line (nothing here may ever
+# write into the developer's real cache).
+_APP_RECORD_FILE = Path(DRTC_GPU_APP_FILE)
 # How much of the tail `classify_failure` reads. Modal prints its traceback and
 # its own error banner at the very end; forty lines covers both without holding
 # a whole cold start's chatter in memory.
@@ -656,6 +693,123 @@ def parse_phase(line: str) -> str | None:
     return phase
 
 
+# --- the app id: parsing it, keeping it, using it ----------------------------
+
+# The client prints its app page as one of the very first lines:
+#
+#     ✓ Initialized. View run at
+#     https://modal.com/apps/makermods/main/ap-QfTK2AxcfbJnnY1kLS7Y22
+#
+# Note the WRAP: Rich breaks that sentence, so the url lands on a line of its
+# own and "View run at" is NOT on it. Anchoring on the url is therefore the
+# only anchor that works — and it is the stricter one anyway, because it can
+# never mistake an `ap-…`-looking token in a traceback for an app id.
+_APP_ID_RE = re.compile(r"modal\.com/apps/\S*?(ap-[A-Za-z0-9]+)")
+
+
+def parse_app_id(line: str) -> str | None:
+    """The Modal app id in one log line, or None.
+
+    Pure, like `parse_phase`, and matched ANYWHERE in the line for the same
+    reason: Modal decorates and wraps its output freely.
+    """
+    match = _APP_ID_RE.search(line)
+    return match.group(1) if match else None
+
+
+def _write_app_record(app_id: str, profile: str | None, started_at: float | None) -> None:
+    """Remember the running app across processes. Best-effort, never raises.
+
+    A failed write costs an orphan reap after a hard kill, which is strictly
+    better than a launch that refuses because a cache file is unwritable.
+    """
+    try:
+        _atomic_write_text(
+            str(_APP_RECORD_FILE),
+            json.dumps({"app_id": app_id, "profile": profile or "", "started_at": started_at}, indent=2),
+        )
+    except Exception:
+        logger.warning("Couldn't record the GPU app id at %s", _APP_RECORD_FILE, exc_info=True)
+
+
+def read_app_record() -> dict[str, Any] | None:
+    """The persisted `{app_id, profile, started_at}`, or None.
+
+    Forgiving by design: a missing file, unreadable JSON or a row without a
+    usable app id all read as "nothing to reap". Nothing downstream may treat
+    this file as authoritative — it is a HINT that an app may still be up.
+    """
+    try:
+        payload = json.loads(_APP_RECORD_FILE.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    app_id = str(payload.get("app_id") or "").strip()
+    if not app_id:
+        return None
+    started = payload.get("started_at")
+    return {
+        "app_id": app_id,
+        "profile": str(payload.get("profile") or ""),
+        "started_at": float(started) if isinstance(started, (int, float)) else None,
+    }
+
+
+def _clear_app_record(app_id: str) -> None:
+    """Forget the app, but ONLY if the file still names this one.
+
+    The guard is the race with a relaunch: a stop's settle runs on its own
+    thread and a new launch may already have written its own id by the time it
+    gets here. Deleting that would leave the NEW app unreapable.
+    """
+    current = read_app_record()
+    if current is None or current["app_id"] != app_id:
+        return
+    with contextlib.suppress(OSError):
+        _APP_RECORD_FILE.unlink()
+
+
+def stop_app(app_id: str, profile: str = "") -> tuple[bool, str]:
+    """`modal app stop --yes <app id>` — the only way to stop an app whose
+    client is already gone. Returns `(stopped, detail)`.
+
+    `--yes` is not optional: without it the CLI prompts, and a server has no
+    terminal, so it aborts with "no interactive terminal detected". `profile`
+    rides `MODAL_PROFILE` exactly as a launch and a listing do — an app id
+    belongs to ONE workspace, so stopping it from the wrong profile is a 404,
+    not a no-op.
+
+    Bounded and non-raising: every caller is a best-effort cleanup path.
+    "App is already stopped." is SUCCESS — it is the outcome we wanted.
+    """
+    modal_bin = find_modal()
+    if modal_bin is None:
+        return False, f"the `modal` command isn't on this machine's PATH ({INSTALL_HINT})"
+    env = dict(os.environ)
+    if profile:
+        env["MODAL_PROFILE"] = profile
+    try:
+        proc = subprocess.run(  # noqa: S603 — a fixed argv, no shell
+            [modal_bin, "app", "stop", "--yes", app_id],
+            capture_output=True,
+            text=True,
+            timeout=_APP_STOP_TIMEOUT_S,
+            env=env,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"`modal app stop` didn't answer within {int(_APP_STOP_TIMEOUT_S)}s"
+    except OSError as exc:
+        return False, f"couldn't run `{modal_bin}`: {exc}"
+    if proc.returncode == 0:
+        return True, "stopped"
+    text = f"{proc.stderr or ''}\n{proc.stdout or ''}"
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    detail = lines[-1][:_TARGETS_DETAIL_CHARS] if lines else f"exit code {proc.returncode}"
+    return False, detail
+
+
 # --- failure classification --------------------------------------------------
 
 # Substrings, lowercased, that make a failure diagnosable. Kept as data so the
@@ -737,6 +891,21 @@ _room: str | None = None
 # it be chosen at all.
 _profile: str | None = None
 _environment: str | None = None
+# The Modal app id, as printed by the client on its second line. The ONE piece
+# of state that outlives this process (see `_APP_RECORD_FILE`), because it is
+# the only handle on an app whose client is gone.
+_app_id: str | None = None
+# The transport tuple AS LAUNCHED. Echoed in the status so the drift warning
+# compares the form against the SERVER's record rather than the tab's memory —
+# which is what makes it fire after a reload, and for a GPU another tab
+# started. Half of it (horizon/fps/codec/s_min) is the Portal wire schema, so a
+# disagreement is a stream dropped in silence, not an error; `task` steers the
+# policy itself.
+_task: str | None = None
+_horizon: int | None = None
+_fps: int | None = None
+_video_codec: str | None = None
+_s_min: int | None = None
 _log_path: str | None = None
 _started_at: float | None = None  # wall clock, for display
 _started_mono: float | None = None  # monotonic, for elapsed + the cold-start bound
@@ -786,7 +955,8 @@ def _go_idle_locked() -> None:
     """
     global _state, _proc, _phase, _engine, _policy_hub_id, _room
     global _started_at, _started_mono, _idle_since, _last_line, _drain_deadline
-    global _profile, _environment
+    global _profile, _environment, _app_id
+    global _task, _horizon, _fps, _video_codec, _s_min
     _state = STATE_IDLE
     _proc = None
     _phase = None
@@ -795,6 +965,12 @@ def _go_idle_locked() -> None:
     _room = None
     _profile = None
     _environment = None
+    _app_id = None
+    _task = None
+    _horizon = None
+    _fps = None
+    _video_codec = None
+    _s_min = None
     _started_at = None
     _started_mono = None
     _idle_since = None
@@ -883,9 +1059,11 @@ def _handle_line(proc: subprocess.Popen, line: str) -> None:
     run's state. `_proc` is cleared the moment a launch stops owning the slot,
     so a stale pump matches nothing.
     """
-    global _phase, _state, _last_line, _idle_since
+    global _phase, _state, _last_line, _idle_since, _app_id
     text = line.rstrip()
     phase = parse_phase(line)
+    app_id = parse_app_id(line)
+    record: tuple[str, str | None, float | None] | None = None
     with _state_lock:
         if _proc is not proc:
             return
@@ -894,12 +1072,21 @@ def _handle_line(proc: subprocess.Popen, line: str) -> None:
         _tail.append(text)
         if text:
             _last_line = text
+        if app_id is not None and app_id != _app_id:
+            # The first line of the run that matters after this process dies.
+            _app_id = app_id
+            record = (app_id, _profile, _started_at)
         if phase is not None:
             _phase = phase
             if phase in _READY_PHASES and _state == STATE_STARTING:
                 _state = STATE_READY
                 _idle_since = _clock()
                 logger.info("GPU policy server is in room %s", _room)
+    if record is not None:
+        # Outside the lock: a disk write has no business inside it, and the
+        # record is a hint whose freshness is measured in minutes.
+        logger.info("GPU app id: %s", record[0])
+        _write_app_record(*record)
     # Both bounded checks the plan puts on the two things that already wake:
     # this pump, and a status poll. Deliberately not a thread — there is
     # nothing to watch that does not already wake one of those two.
@@ -915,8 +1102,19 @@ def _handle_exit(proc: subprocess.Popen, rc: int | None) -> None:
     next start. **It never stops a remote-inference session** — the session's
     own watchdogs own that, and they measure the room rather than a proxy for
     it (see the module docstring).
+
+    It also decides, from the exit code alone, whether the app record can be
+    forgotten. A client that exited NORMALLY (rc >= 0 — completion, or an
+    uncaught exception) ran its own disconnect, so its app is going down and
+    the record would only make the next boot claim it reaped an orphan it
+    never had. A client killed by a SIGNAL this launcher did not send (rc < 0,
+    someone's `kill -9`) made no such call, so the record is exactly what the
+    next boot needs. A stop we asked for is not decided here at all —
+    `_settle_app` owns that record, and clearing it from both places would
+    race the API stop that may still need it.
     """
     global _state, _message, _hint, _code, _proc
+    clear_record: str | None = None
     with _state_lock:
         if _proc is not proc:
             # A newer launch owns the slot, or this pump was orphaned by the
@@ -932,6 +1130,8 @@ def _handle_exit(proc: subprocess.Popen, rc: int | None) -> None:
                 _go_idle_locked()
             return
         was_ready = _state == STATE_READY
+        if rc is not None and rc >= 0:
+            clear_record = _app_id
         _proc = None
         _state = STATE_FAILED
         if was_ready:
@@ -943,6 +1143,8 @@ def _handle_exit(proc: subprocess.Popen, rc: int | None) -> None:
         else:
             code, _message, _hint = classify_failure("\n".join(_tail), rc, phase=_phase)
             _code = str(code)
+    if clear_record:
+        _clear_app_record(clear_record)
     if not was_ready:
         logger.warning("GPU launch failed (rc=%s): %s", rc, _message)
 
@@ -956,25 +1158,115 @@ _ABANDONED_NOTE = (
 )
 
 
-def _terminate_and_watch(proc: subprocess.Popen) -> None:
-    """Kill the group, then start the clock on the pump's EOF.
+def _graceful_terminate(proc: subprocess.Popen) -> bool:
+    """SIGINT the client's group, wait a bounded moment, THEN escalate.
 
-    `_terminate_tree` returns only once the process is gone (SIGTERM, then
-    SIGKILL). What can STILL hang after that is the stdout pipe — an un-reaped
-    grandchild holding its write end leaves `readline` blocked forever — so the
-    pump may never run its finalizer and `stopping` would be permanent. Arming
-    the drain deadline here rather than at the stop REQUEST is deliberate: the
-    bound is on the drain, not on the kill, which has a ceiling of its own.
+    Returns True only when the client exited on the SIGINT alone — i.e. when
+    it had the chance to run its `except KeyboardInterrupt` and tell Modal to
+    stop the app. Every other outcome is False and means `_settle_app` has to
+    stop the app over the API instead.
+
+    Three cases, and they are all the same three the old SIGTERM-only path had
+    — it just never distinguished them:
+
+    - **already gone.** Nothing to signal, and no way to know whether the
+      client made its call; treated as NOT clean, because `modal app stop` on
+      an already-stopped app is free and a leaked A100 is not.
+    - **exits within `_SIGINT_GRACE_S`.** The good path. The client printed
+      "Stopping app", sent `AppClientDisconnect`, and the app is going down.
+    - **still there.** Escalate through `rollout._terminate_tree` exactly as
+      before (SIGTERM → SIGKILL over the group). Deliberately layered in FRONT
+      of that function rather than inside it: other runners depend on its
+      current behaviour, and none of them has an app on a remote machine.
+
+    SIGINT goes to the GROUP, not the leader, because that is what a terminal
+    delivers on Ctrl-C — the exact signal path Modal's own client is written
+    against. `_signal_group` refuses to signal our own group, so a stand-in
+    that isn't a real Popen falls through to the escalation rather than
+    SIGINTing the server.
+    """
+    with contextlib.suppress(Exception):
+        if proc.poll() is not None:
+            return False
+    if _signal_group(proc, signal.SIGINT):
+        try:
+            proc.wait(timeout=_SIGINT_GRACE_S)
+            return True
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "The `modal run` client did not exit %.0fs after SIGINT — escalating, "
+                "and its app will be stopped over the API",
+                _SIGINT_GRACE_S,
+            )
+        except Exception:
+            pass
+    _terminate_tree(proc, timeout=_TERMINATE_TIMEOUT_S)
+    return False
+
+
+def _settle_app(app_id: str | None, profile: str | None, *, client_exited_cleanly: bool) -> None:
+    """Make sure the Modal APP is stopped, not just the local client.
+
+    The clean case is nothing at all: the client's own disconnect is the
+    authority, and a second `modal app stop` would only add a subprocess to
+    the stop path. Every other case runs it, because the alternative is an
+    A100 billing for the 5-7 minutes Modal's heartbeat timeout takes to notice
+    nobody is attached.
+
+    Never raises, and never blocks a state transition: the caller has already
+    armed the drain deadline by the time this runs.
+    """
+    if not app_id:
+        if not client_exited_cleanly:
+            logger.warning(
+                "The GPU client was killed before it named its Modal app, so the app could not "
+                "be stopped from here — check `modal app list` if a run is still billing."
+            )
+        return
+    if client_exited_cleanly:
+        _clear_app_record(app_id)
+        return
+    stopped, detail = stop_app(app_id, profile or "")
+    if stopped:
+        logger.info("Stopped Modal app %s over the API (its client never got to)", app_id)
+        _clear_app_record(app_id)
+    else:
+        logger.error(
+            "Could not stop Modal app %s: %s. It may still be billing — run "
+            "`modal app stop %s` in a terminal.",
+            app_id,
+            detail,
+            app_id,
+        )
+
+
+def _terminate_and_watch(proc: subprocess.Popen) -> None:
+    """Stop the client, start the clock on the pump's EOF, then settle the app.
+
+    `_graceful_terminate` returns only once the process is gone (SIGINT, then
+    SIGTERM, then SIGKILL). What can STILL hang after that is the stdout pipe —
+    an un-reaped grandchild holding its write end leaves `readline` blocked
+    forever — so the pump may never run its finalizer and `stopping` would be
+    permanent. Arming the drain deadline here rather than at the stop REQUEST
+    is deliberate: the bound is on the drain, not on the kill, which has a
+    ceiling of its own.
+
+    `_settle_app` comes AFTER the arming, deliberately: its subprocess must not
+    lengthen the window in which the launcher reports `stopping`.
     """
     global _drain_deadline
+    with _state_lock:
+        app_id, profile = _app_id, _profile
+    clean = False
     try:
-        _terminate_tree(proc, timeout=_TERMINATE_TIMEOUT_S)
+        clean = _graceful_terminate(proc)
     finally:
         with _state_lock:
             # Only if this stop is still the live one: a pump that finalized
             # while we were killing has already moved the state on.
             if _proc is proc and _state == STATE_STOPPING:
                 _drain_deadline = _clock() + _STOP_DRAIN_TIMEOUT_S
+    _settle_app(app_id, profile, client_exited_cleanly=clean)
 
 
 def _terminate_async(proc: subprocess.Popen) -> None:
@@ -1088,7 +1380,8 @@ def start(
     """
     global _state, _proc, _phase, _engine, _policy_hub_id, _room
     global _started_at, _started_mono, _log_path, _message, _hint, _last_line, _idle_since
-    global _stop_outcome, _code, _drain_deadline, _profile, _environment
+    global _stop_outcome, _code, _drain_deadline, _profile, _environment, _app_id
+    global _task, _horizon, _fps, _video_codec, _s_min
 
     with _state_lock:
         if _state in (STATE_STARTING, STATE_READY, STATE_STOPPING):
@@ -1183,6 +1476,18 @@ def start(
         # which is a different fact from "we picked the empty one".
         _profile = want_profile or None
         _environment = want_environment or None
+        # Not known until the client prints its app page (a second or two in),
+        # so a stop this early has nothing to stop over the API — which is
+        # exactly what `_settle_app` says out loud when it happens.
+        _app_id = None
+        # The transport tuple AS LAUNCHED, so the panel's drift warning can
+        # compare against what this SERVER started rather than what some tab
+        # remembers starting.
+        _task = task
+        _horizon = horizon
+        _fps = fps
+        _video_codec = video_codec
+        _s_min = s_min
         _log_path = str(path)
         _started_at = time.time()
         _started_mono = _clock()
@@ -1236,6 +1541,114 @@ def stop() -> dict[str, Any]:
     return payload
 
 
+def stop_for_shutdown() -> bool:
+    """Stop the GPU on the way down — SYNCHRONOUSLY, and SIGINT first.
+
+    The shutdown twin of `stop()`, and the reason it exists is the ordering:
+    every other stop path can return while the kill runs on its own thread,
+    because this process will still be here to finish it. On the way out it
+    will not be, and a `modal run` client that outlives its parent by a
+    millisecond is a client that never gets its SIGINT — which is precisely
+    how a `--reload` save left an A100 running.
+
+    Returns whether there was anything to stop. Never raises (it is called from
+    a shutdown handler) and never returns an ApiError: "nothing running" is not
+    an exceptional condition here, it is the normal one.
+
+    Bounded: `_SIGINT_GRACE_S` for the client's own teardown, then at most two
+    `_TERMINATE_TIMEOUT_S` escalations, then at most `_APP_STOP_TIMEOUT_S` for
+    the API fallback — and the typical cost is the ~2 s the client takes to
+    disconnect. The drain deadline is not waited for at all: the pump is a
+    daemon thread and this process is leaving.
+    """
+    global _state, _stop_outcome, _drain_deadline, _message, _hint
+    with _state_lock:
+        proc = _proc
+        if proc is None:
+            return False
+        _stop_outcome = STATE_IDLE
+        _state = STATE_STOPPING
+        _drain_deadline = None
+        _message = None
+        _hint = None
+    logger.info("Stopping the GPU policy server before shutdown")
+    try:
+        _terminate_and_watch(proc)
+    except Exception:
+        logger.exception("Failed to stop the GPU policy server during shutdown")
+    return True
+
+
+# --- the orphan reaper -------------------------------------------------------
+# The other half of "a Modal app outlives its client": when this process is not
+# the one that lost it. A record left on disk with no client here means the
+# last run's app may still be up, and only an explicit `modal app stop` can end
+# it now.
+
+# Once per PROCESS. Not a lock-free bool by accident — it is read and written
+# under `_state_lock` with the decision it guards.
+_reaped = False
+
+
+def _reap_orphan_app() -> None:
+    """Stop an app the last process left behind, and say so. Best-effort.
+
+    Runs on its own thread (see :func:`reap_orphan_app_async`) so a Modal API
+    call can never sit inside a request or a boot. Three ways it declines, all
+    silent: no record on disk, a launch already owns the slot (the record is
+    THAT launch's), or it has already run in this process.
+
+    A failure is reported the same way a success is — in the idle status's
+    `message` — because "an app may still be billing and I could not stop it"
+    is exactly the sentence an operator needs to see. It never blocks or
+    refuses a launch: the launcher's state is untouched except for that line.
+    """
+    global _message
+    record = read_app_record()
+    if record is None:
+        return
+    with _state_lock:
+        if _proc is not None:
+            # A live launch owns the slot, so this record describes IT.
+            return
+    app_id = record["app_id"]
+    when = record["started_at"]
+    stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(when)) if when else "an earlier run"
+    logger.info("Reaping a GPU app left behind by an earlier run: %s", app_id)
+    stopped, detail = stop_app(app_id, record["profile"])
+    if stopped:
+        _clear_app_record(app_id)
+        note = f"Stopped an orphaned GPU app {app_id} from {stamp} — it outlived the Lab that started it."
+    else:
+        note = (
+            f"A GPU app from {stamp} ({app_id}) may still be running, and stopping it from here "
+            f"failed: {detail}. Run `modal app stop {app_id}` in a terminal."
+        )
+        logger.error(note)
+    with _state_lock:
+        # Only onto an idle panel: a launch that started while we were talking
+        # to Modal owns the message line, and its own prose matters more.
+        if _state == STATE_IDLE:
+            _message = note
+
+
+def reap_orphan_app_async() -> None:
+    """Kick :func:`_reap_orphan_app` once per process, off the caller's thread.
+
+    Called from the server's startup event rather than at module import or on
+    the first status poll: import-time subprocesses would fire in tests, SDK
+    clients and `makermodslab --stop`, and a GET must not carry a Modal API
+    call. Startup is also early enough that the message is already in the very
+    first status the panel reads, which is the point of surfacing it.
+    """
+    global _reaped
+    with _state_lock:
+        if _reaped:
+            return
+        _reaped = True
+    threading.Thread(target=_reap_orphan_app, name="modal-launcher-reap", daemon=True).start()
+
+
 def status() -> dict[str, Any]:
     """The launcher's state — see `schemas/sessions.GpuStatusResponse`.
 
@@ -1267,6 +1680,23 @@ def _status_locked() -> dict[str, Any]:
         # reason the choice exists.
         "profile": _profile,
         "environment": _environment,
+        # The Modal app this run created, null until its client prints the app
+        # page (and while idle). It is what `modal app stop` takes, so an
+        # operator whose Lab died mid-run can stop the app by hand from it.
+        "app_id": _app_id,
+        # The transport tuple AS LAUNCHED, null while idle. The panel compares
+        # the form against THESE — a server-side record survives a page reload
+        # and describes a GPU another tab started, neither of which a tab's own
+        # memory of its last start can do.
+        "task": _task,
+        "horizon": _horizon,
+        "fps": _fps,
+        "video_codec": _video_codec,
+        # Echoed for both engines, as launched. It only reaches the wire for
+        # `rtc` (`build_argv` omits the flag otherwise), so a `sync` run's
+        # value is what a switch to rtc WOULD have used — the panel compares it
+        # only when the engine is rtc, for the same reason.
+        "s_min": _s_min,
         "log_path": _log_path,
         "started_at": _started_at,
         "elapsed_s": elapsed,

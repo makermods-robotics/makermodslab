@@ -42,6 +42,21 @@ export interface GpuStatus {
    * resolution — a different fact from an empty selection. Names, so DATA. */
   profile: string | null;
   environment: string | null;
+  /** The Modal app this run created ("ap-…"), from the client's own "View run
+   * at" url. Null while idle and until that line arrives. It is what `modal
+   * app stop` takes — shown so an operator can stop a run by hand. DATA. */
+  app_id: string | null;
+  /** The transport tuple AS LAUNCHED, null while idle. The SERVER's record of
+   * what the running GPU was started with: half of it is the Portal wire
+   * schema (a disagreement drops every packet in silence) and `task` steers
+   * the policy. The drift warning compares the form against these, which is
+   * what makes it survive a page reload and cover a GPU another tab started.
+   * `s_min` is echoed for both engines but only reaches the wire for rtc. */
+  task: string | null;
+  horizon: number | null;
+  fps: number | null;
+  video_codec: string | null;
+  s_min: number | null;
   /** Survives an idle transition: after a failure this is the most useful
    * thing left. A path — data. */
   log_path: string | null;
@@ -186,8 +201,9 @@ export interface UseGpuLauncher {
    * up so the panel can warn when the form drifts away from it — the
    * transport knobs are half of a fingerprint the running server holds, and a
    * mismatch is a run that receives nothing, not an error. Null after a
-   * reload or for a GPU started elsewhere (the status echoes only engine and
-   * Hub id today), and cleared by a stop. */
+   * reload or for a GPU started elsewhere, and cleared by a stop — which is
+   * exactly why it is now only the FALLBACK: the status echoes the tuple the
+   * server itself launched with, and that record survives both. */
   launched: GpuStartRequest | null;
 }
 

@@ -608,6 +608,26 @@ class GpuStatusResponse(BaseModel):
     # and environment names are never translated.
     profile: str | None
     environment: str | None
+    # The Modal app this run created ("ap-…"), parsed from the client's own
+    # "View run at …" url. Null while idle and until that line arrives. It is
+    # the argument `modal app stop` takes — which is how the Lab stops an app
+    # whose client it had to kill, and how an operator stops one by hand.
+    app_id: str | None
+    # The transport tuple AS LAUNCHED, null while idle. Half of it is the
+    # Portal wire schema (horizon/fps/video_codec/s_min — a disagreement drops
+    # every packet in silence rather than erroring) and `task` steers the
+    # policy itself, so the panel warns when the form drifts away from these.
+    # Echoing them SERVER-SIDE is what makes that warning survive a page
+    # reload and cover a GPU another tab started; before it, the comparison
+    # could only be made against the launching tab's own memory.
+    task: str | None
+    horizon: int | None
+    fps: int | None
+    video_codec: str | None
+    # As launched, for both engines. It only reaches the wire for `rtc`
+    # (`modal_launcher.build_argv` omits the flag otherwise), which is why the
+    # panel compares it only when the engine is rtc.
+    s_min: int | None
     # Survives an idle transition on purpose: after a failure the log is the
     # most useful thing left. Null before the first launch since boot.
     log_path: str | None

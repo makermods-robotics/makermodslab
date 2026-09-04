@@ -29,6 +29,10 @@ pass the secret as a flag, and does pass it in the environment.
 
 from __future__ import annotations
 
+import signal
+import subprocess
+import types
+
 import pytest
 
 from makermodslab import modal_launcher as ml, remote_inference as ri
@@ -82,8 +86,15 @@ def _plan(*, needs_tailscale: bool = True, url: str = "ws://100.64.0.1:7880") ->
 
 
 @pytest.fixture(autouse=True)
-def _fresh_launcher():
-    """Every test starts and ends with an idle launcher and the real clock."""
+def _fresh_launcher(tmp_path, monkeypatch):
+    """Every test starts and ends with an idle launcher and the real clock.
+
+    It also redirects the persisted app-id record into tmp_path FOR EVERY TEST
+    in this module — not just the ones that exercise it. The real file lives in
+    the developer's `~/.cache/huggingface/lerobot/`, and a test that wrote
+    there would be interfering with the machine's actual state.
+    """
+    monkeypatch.setattr(ml, "_APP_RECORD_FILE", tmp_path / "gpu_app.json")
     ml._go_idle_locked()
     ml._tail.clear()
     ml._log_path = None
@@ -92,9 +103,11 @@ def _fresh_launcher():
     ml._stop_outcome = ml.STATE_IDLE
     ml._code = None
     ml._drain_deadline = None
+    ml._reaped = False
     yield
     ml._go_idle_locked()
     ml._tail.clear()
+    ml._reaped = False
 
 
 @pytest.fixture
@@ -647,6 +660,12 @@ def test_the_status_dict_always_carries_every_key(spawned, fake_clock):
         "room",
         "profile",
         "environment",
+        "app_id",
+        "task",
+        "horizon",
+        "fps",
+        "video_codec",
+        "s_min",
         "log_path",
         "started_at",
         "elapsed_s",
@@ -1046,3 +1065,412 @@ def test_the_drain_is_armed_only_after_the_kill_returns(monkeypatch, spawned, fa
 
     ml._terminate_and_watch(spawned["proc"])
     assert ml._drain_deadline == fake_clock() + ml._STOP_DRAIN_TIMEOUT_S
+
+
+# --- S3.8c: the app outlives its client --------------------------------------
+# The premise the whole section rests on, verified in the installed client's
+# source (`modal/runner.py::_run_app`): the app-stop RPC is sent from `except
+# KeyboardInterrupt` and from the exception paths, and there is NO SIGTERM
+# handler. A client killed the way S3.8 killed it therefore leaves the app —
+# and the A100 under it — running until Modal's heartbeat timeout notices.
+
+
+class SignalledPopen:
+    """A fake `modal run` client that records the signals it was sent.
+
+    `dies_on` names the first signal it obeys ("SIGINT", "SIGTERM", or None for
+    a process that ignores everything); `wait` behaves accordingly, so a test
+    can assert the ORDER of the escalation without a real process, a real
+    signal, or a sleep.
+    """
+
+    def __init__(self, dies_on: str | None = "SIGINT") -> None:
+        self.dies_on = dies_on
+        self.signals: list[str] = []
+        self.returncode: int | None = None
+        self.stdout = None
+        self.pid = 4242
+
+    def receive(self, name: str) -> None:
+        self.signals.append(name)
+        if name == self.dies_on:
+            self.returncode = -2 if name == "SIGINT" else -15
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("modal", timeout or 0)
+        return self.returncode
+
+
+@pytest.fixture
+def signalled(monkeypatch):
+    """A client whose group signals are recorded, with the escalation stubbed.
+
+    `_signal_group` (rollout's, imported by the launcher) and `_terminate_tree`
+    are both replaced, so nothing here can signal a real process — the test
+    asserts on what WOULD have been sent, in order.
+    """
+    proc = SignalledPopen()
+
+    def _sig(p, signum):
+        p.receive(signal.Signals(signum).name)
+        return True
+
+    def _tree(p, timeout=None):
+        p.receive("SIGTERM")
+        if p.returncode is None:
+            p.receive("SIGKILL")
+            p.returncode = -9
+
+    monkeypatch.setattr(ml, "_signal_group", _sig)
+    monkeypatch.setattr(ml, "_terminate_tree", _tree)
+    return proc
+
+
+def test_the_stop_sends_sigint_first_and_waits_for_the_client_to_disconnect(signalled, monkeypatch):
+    """SIGINT is the ONLY signal that makes the client stop its Modal app, so
+    it goes first and the client is given a bounded moment to act on it."""
+    stops: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        ml, "stop_app", lambda app_id, profile="": (stops.append((app_id, profile)), (True, "s"))[1]
+    )
+
+    assert ml._graceful_terminate(signalled) is True
+    # SIGINT alone: no escalation, because the client did exit.
+    assert signalled.signals == ["SIGINT"]
+    # And no API call — the client's own disconnect is the authority.
+    assert stops == []
+
+
+def test_a_client_that_ignores_sigint_is_escalated_and_its_app_stopped_over_the_api(monkeypatch):
+    proc = SignalledPopen(dies_on="SIGTERM")
+    order: list[str] = []
+
+    def _sig(p, signum):
+        order.append(signal.Signals(signum).name)
+        p.receive(signal.Signals(signum).name)
+        return True
+
+    def _tree(p, timeout=None):
+        order.append("terminate_tree")
+        p.receive("SIGTERM")
+
+    monkeypatch.setattr(ml, "_signal_group", _sig)
+    monkeypatch.setattr(ml, "_terminate_tree", _tree)
+
+    assert ml._graceful_terminate(proc) is False
+    # The existing SIGTERM->SIGKILL escalation is still there, and still comes
+    # from rollout's `_terminate_tree` — this adds a step in FRONT of it.
+    assert order == ["SIGINT", "terminate_tree"]
+
+
+def test_an_already_dead_client_is_never_signalled_but_its_app_is_still_stopped(monkeypatch):
+    """We cannot know whether a client that died on its own made the call, and
+    `modal app stop` on an already-stopped app is free."""
+    proc = SignalledPopen()
+    proc.returncode = 1
+    monkeypatch.setattr(ml, "_signal_group", lambda p, s: pytest.fail("nothing to signal"))
+    monkeypatch.setattr(ml, "_terminate_tree", lambda p, timeout=None: pytest.fail("nothing to kill"))
+
+    assert ml._graceful_terminate(proc) is False
+
+
+def test_the_settle_stops_the_app_only_when_the_client_did_not(monkeypatch):
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        ml, "stop_app", lambda app_id, profile="": (calls.append((app_id, profile)), (True, "stopped"))[1]
+    )
+
+    ml._settle_app("ap-1", "makermods", client_exited_cleanly=True)
+    assert calls == []
+
+    ml._settle_app("ap-1", "makermods", client_exited_cleanly=False)
+    assert calls == [("ap-1", "makermods")]
+
+
+def test_a_stop_whose_client_was_killed_stops_the_app_with_the_launch_s_profile(
+    spawned, fake_clock, monkeypatch
+):
+    """End to end through the real `_terminate_and_watch`: the profile that
+    billed the launch is the profile the stop is made against, because an app
+    id belongs to ONE workspace."""
+    monkeypatch.setattr(
+        ml,
+        "list_targets",
+        lambda profile="": {
+            "profiles": [{"name": "makermods", "workspace": "w", "active": True}],
+            "environments": [],
+            "profile": "makermods",
+            "error": None,
+        },
+    )
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        ml, "stop_app", lambda app_id, profile="": (calls.append((app_id, profile)), (True, "stopped"))[1]
+    )
+    monkeypatch.setattr(ml, "_graceful_terminate", lambda proc: False)
+
+    ml.start(engine="sync", policy_hub_id="someone/p", profile="makermods")
+    ml._handle_line(spawned["proc"], "https://modal.com/apps/makermods/main/ap-QfTK2AxcfbJnnY1kLS7Y22\n")
+    ml.stop()
+    ml._terminate_and_watch(spawned["proc"])
+
+    assert calls == [("ap-QfTK2AxcfbJnnY1kLS7Y22", "makermods")]
+    # And the record is gone, so nothing reaps an app that is already stopped.
+    assert ml.read_app_record() is None
+
+
+# --- the app id --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # The shape the client ACTUALLY prints: Rich wraps the sentence, so
+        # "View run at" is on the line before and the url is alone on its own.
+        "https://modal.com/apps/makermods/main/ap-QfTK2AxcfbJnnY1kLS7Y22\n",
+        "✓ Initialized. View run at https://modal.com/apps/ws/env/ap-QfTK2AxcfbJnnY1kLS7Y22",
+        "  │ https://modal.com/apps/ws/env/ap-QfTK2AxcfbJnnY1kLS7Y22 │",
+    ],
+)
+def test_the_app_id_is_read_off_the_run_url_however_it_is_wrapped(line):
+    assert ml.parse_app_id(line) == "ap-QfTK2AxcfbJnnY1kLS7Y22"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "[policy] connected as 'policy'",
+        "Traceback: ap-something is not an app id here",
+        "",
+    ],
+)
+def test_a_line_without_a_run_url_names_no_app(line):
+    assert ml.parse_app_id(line) is None
+
+
+def test_the_app_id_reaches_the_status_and_the_record(spawned, fake_clock):
+    ml.start(engine="sync", policy_hub_id="someone/p")
+    assert ml.status()["app_id"] is None
+
+    ml._handle_line(spawned["proc"], "https://modal.com/apps/makermods/main/ap-y9x9NllbdwdEqmvNqA8by8\n")
+    assert ml.status()["app_id"] == "ap-y9x9NllbdwdEqmvNqA8by8"
+
+    record = ml.read_app_record()
+    assert record["app_id"] == "ap-y9x9NllbdwdEqmvNqA8by8"
+    assert record["started_at"] is not None
+
+
+def test_the_record_is_only_cleared_by_the_app_it_names(spawned, fake_clock):
+    """The race with a relaunch: a stop settling late must not delete the id of
+    the app that started after it."""
+    ml._write_app_record("ap-new", "makermods", 1.0)
+    ml._clear_app_record("ap-old")
+    assert ml.read_app_record()["app_id"] == "ap-new"
+
+    ml._clear_app_record("ap-new")
+    assert ml.read_app_record() is None
+
+
+def test_a_record_this_build_cannot_read_is_simply_nothing_to_reap():
+    ml._APP_RECORD_FILE.write_text("{not json")
+    assert ml.read_app_record() is None
+    ml._APP_RECORD_FILE.write_text('{"profile": "makermods"}')
+    assert ml.read_app_record() is None
+
+
+# --- the orphan reaper -------------------------------------------------------
+
+
+def test_the_reaper_stops_an_app_the_last_process_left_behind(monkeypatch):
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        ml, "stop_app", lambda app_id, profile="": (calls.append((app_id, profile)), (True, "stopped"))[1]
+    )
+    ml._write_app_record("ap-orphan", "makermods", 1_788_486_546.0)
+
+    ml._reap_orphan_app()
+
+    assert calls == [("ap-orphan", "makermods")]
+    # The operator learns it happened, on the idle panel that would otherwise
+    # say nothing at all.
+    assert "ap-orphan" in ml.status()["message"]
+    assert ml.read_app_record() is None
+
+
+def test_the_reaper_does_nothing_without_a_record(monkeypatch):
+    monkeypatch.setattr(ml, "stop_app", lambda *a, **k: pytest.fail("nothing to stop"))
+    ml._reap_orphan_app()
+    assert ml.status()["message"] is None
+
+
+def test_the_reaper_never_touches_a_live_launch_s_app(spawned, fake_clock, monkeypatch):
+    """The record belongs to the launch that is RUNNING here; stopping it would
+    be the reaper killing a healthy GPU."""
+    monkeypatch.setattr(ml, "stop_app", lambda *a, **k: pytest.fail("that app is ours and alive"))
+    ml.start(engine="sync", policy_hub_id="someone/p")
+    ml._handle_line(spawned["proc"], "https://modal.com/apps/makermods/main/ap-live\n")
+
+    ml._reap_orphan_app()
+
+
+def test_a_reap_that_fails_says_so_and_still_leaves_the_lab_launchable(spawned, fake_clock, monkeypatch):
+    monkeypatch.setattr(ml, "stop_app", lambda app_id, profile="": (False, "connection refused"))
+    ml._write_app_record("ap-stuck", "", 1_788_486_546.0)
+
+    ml._reap_orphan_app()
+
+    message = ml.status()["message"]
+    assert "ap-stuck" in message and "connection refused" in message
+    # The record survives a failed stop — the app may still be up, and the next
+    # boot should try again.
+    assert ml.read_app_record()["app_id"] == "ap-stuck"
+    # And nothing about it blocks a launch.
+    assert ml.start(engine="sync", policy_hub_id="someone/p")["started"] is True
+
+
+def test_the_reap_is_kicked_once_per_process(monkeypatch):
+    """Once per PROCESS: a poll that re-ran it would be a Modal API call per
+    poll, and a second reap has nothing left to find anyway."""
+    started: list[str] = []
+
+    class _Thread:
+        def __init__(self, **kwargs):
+            self._name = kwargs["name"]
+
+        def start(self):
+            started.append(self._name)
+
+    # The module's own `threading` reference, not the real module.
+    monkeypatch.setattr(ml, "threading", types.SimpleNamespace(Thread=_Thread, Lock=ml.threading.Lock))
+
+    ml.reap_orphan_app_async()
+    ml.reap_orphan_app_async()
+
+    assert started == ["modal-launcher-reap"]
+
+
+# --- `modal app stop` --------------------------------------------------------
+
+
+def test_the_app_stop_is_non_interactive_and_carries_the_profile(monkeypatch):
+    """Without `--yes` the CLI prompts, and a server has no terminal — it would
+    abort with "no interactive terminal detected"."""
+    seen: dict[str, object] = {}
+
+    class _Done:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["env"] = kwargs["env"]
+        seen["timeout"] = kwargs["timeout"]
+        return _Done()
+
+    monkeypatch.setattr(ml, "find_modal", lambda: "/usr/bin/modal")
+    monkeypatch.setattr(ml.subprocess, "run", _run)
+
+    assert ml.stop_app("ap-1", "makermods") == (True, "stopped")
+    assert seen["argv"] == ["/usr/bin/modal", "app", "stop", "--yes", "ap-1"]
+    assert seen["env"]["MODAL_PROFILE"] == "makermods"
+    assert seen["timeout"] == ml._APP_STOP_TIMEOUT_S
+
+
+def test_an_app_stop_failure_quotes_the_cli_and_never_raises(monkeypatch):
+    class _Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "Error: App ap-1 not found in environment main\n"
+
+    monkeypatch.setattr(ml, "find_modal", lambda: "/usr/bin/modal")
+    monkeypatch.setattr(ml.subprocess, "run", lambda argv, **kw: _Failed())
+
+    stopped, detail = ml.stop_app("ap-1")
+    assert stopped is False
+    assert "not found" in detail
+
+
+def test_no_cli_means_no_app_stop_and_a_reason(monkeypatch):
+    monkeypatch.setattr(ml, "find_modal", lambda: None)
+    stopped, detail = ml.stop_app("ap-1")
+    assert stopped is False
+    assert "PATH" in detail
+
+
+# --- the shutdown stop -------------------------------------------------------
+
+
+def test_the_shutdown_stop_is_synchronous_and_reports_whether_it_did_anything(
+    spawned, fake_clock, monkeypatch
+):
+    """Fire-and-forget is exactly wrong on the way out: a kill that outlives
+    the process it runs in never happens, which is how a --reload save left an
+    A100 running."""
+    assert ml.stop_for_shutdown() is False  # nothing running
+
+    watched: list[object] = []
+    monkeypatch.setattr(ml, "_terminate_and_watch", lambda proc: watched.append(proc))
+    ml.start(engine="sync", policy_hub_id="someone/p")
+
+    assert ml.stop_for_shutdown() is True
+    assert watched == [spawned["proc"]]  # ON THIS THREAD, not a daemon one
+    assert ml.status()["state"] == "stopping"
+
+
+# --- the status echo ---------------------------------------------------------
+
+
+def test_the_status_echoes_the_transport_tuple_it_launched_with(spawned, fake_clock):
+    """So the panel's drift warning can compare the form against the SERVER's
+    record — which survives a page reload and describes a GPU another tab
+    started, neither of which a tab's own memory can do."""
+    idle = ml.status()
+    assert idle["horizon"] is None and idle["fps"] is None and idle["s_min"] is None
+    assert idle["task"] is None and idle["video_codec"] is None
+
+    ml.start(
+        engine="rtc",
+        policy_hub_id="someone/p",
+        task="Put the lego brick in the box",
+        horizon=50,
+        fps=20,
+        video_codec="MJPEG",
+        s_min=6,
+    )
+    status = ml.status()
+    assert status["task"] == "Put the lego brick in the box"
+    assert status["horizon"] == 50
+    assert status["fps"] == 20
+    assert status["video_codec"] == "MJPEG"
+    assert status["s_min"] == 6
+
+    ml.stop()
+    ml._handle_exit(spawned["proc"], -2)
+    assert ml.status()["horizon"] is None
+
+
+def test_a_client_that_exited_on_its_own_leaves_no_record_to_reap(spawned, fake_clock):
+    """A normal exit (rc >= 0) means the client ran its OWN disconnect, so its
+    app is going down. Keeping the record would make the next boot announce an
+    orphan it never had."""
+    ml.start(engine="sync", policy_hub_id="someone/p")
+    ml._handle_line(spawned["proc"], "https://modal.com/apps/makermods/main/ap-selfexit\n")
+    assert ml.read_app_record() is not None
+
+    ml._handle_exit(spawned["proc"], 1)  # an uncaught exception: modal stopped its app
+    assert ml.read_app_record() is None
+
+
+def test_a_client_someone_else_killed_keeps_its_record_for_the_next_boot(spawned, fake_clock):
+    """rc < 0 is a SIGNAL death this launcher did not ask for (a `kill -9`), so
+    no disconnect was sent and the app may well still be up."""
+    ml.start(engine="sync", policy_hub_id="someone/p")
+    ml._handle_line(spawned["proc"], "https://modal.com/apps/makermods/main/ap-killed\n")
+
+    ml._handle_exit(spawned["proc"], -9)
+    assert ml.read_app_record()["app_id"] == "ap-killed"

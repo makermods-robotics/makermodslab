@@ -674,38 +674,101 @@ def test_ensure_port_available_passes_when_free(monkeypatch: pytest.MonkeyPatch)
     launcher._ensure_port_available("Backend", 8000)
 
 
-def test_terminate_tree_terminates_parent_and_children(
+class _TreeProc:
+    """A process tree stand-in that records what it was sent."""
+
+    def __init__(self, pid: int, log: list[tuple[str, int]], kids: list[int] | None = None) -> None:
+        self.pid = pid
+        self._log = log
+        self._kids = kids or []
+
+    def children(self, recursive: bool = False) -> list:
+        return [_TreeProc(k, self._log) for k in self._kids]
+
+    def terminate(self) -> None:
+        self._log.append(("terminate", self.pid))
+
+    def kill(self) -> None:
+        self._log.append(("kill", self.pid))
+
+
+def test_terminate_tree_gives_the_leader_its_grace_before_walking_the_tree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Tree teardown terminates the parent AND every descendant (so npm/vite
-    and uvicorn reload workers can't outlive the parent and hold the ports)."""
+    """The leader is signalled ALONE first, and a tree that goes quiet within
+    the grace is never walked.
+
+    That step exists for one grandchild: the `modal run` client under the
+    backend. It stops its Modal app only when its own parent's shutdown handler
+    SIGINTs it — a SIGTERM straight from here kills it first and leaves an A100
+    billing for minutes. A well-behaved leader takes its children with it, so
+    this also costs nothing when there is no GPU to stop.
+    """
     import makermodslab.scripts.makermodslab as launcher
 
-    terminated: list[int] = []
-    killed: list[int] = []
+    sent: list[tuple[str, int]] = []
+    waits: list[float] = []
 
-    class _TreeProc:
-        def __init__(self, pid: int, kids: list[int] | None = None) -> None:
-            self.pid = pid
-            self._kids = kids or []
+    def _wait(procs, timeout=None):
+        waits.append(timeout)
+        return (procs, [])  # everything exited within the grace
 
-        def children(self, recursive: bool = False) -> list:
-            return [_TreeProc(k) for k in self._kids]
-
-        def terminate(self) -> None:
-            terminated.append(self.pid)
-
-        def kill(self) -> None:  # pragma: no cover - alive list is empty here
-            killed.append(self.pid)
-
-    monkeypatch.setattr(launcher.psutil, "Process", lambda pid: _TreeProc(pid, kids=[2, 3]))
-    monkeypatch.setattr(launcher.psutil, "wait_procs", lambda procs, timeout=None: (procs, []))
+    monkeypatch.setattr(launcher.psutil, "Process", lambda pid: _TreeProc(pid, sent, kids=[2, 3]))
+    monkeypatch.setattr(launcher.psutil, "wait_procs", _wait)
 
     launcher._terminate_tree(1)
 
-    # Parent (1) plus both children (2, 3) all get terminate(); nothing killed.
-    assert sorted(terminated) == [1, 2, 3]
-    assert killed == []
+    assert sent == [("terminate", 1)]
+    assert waits == [launcher._LEADER_GRACE_S]
+
+
+def test_terminate_tree_still_walks_the_tree_when_the_grace_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The grace is a courtesy, never a licence to leak: a descendant that
+    outlived its parent still gets terminate → wait → kill, so nothing keeps
+    holding :8000/:8080."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    sent: list[tuple[str, int]] = []
+    survivors: list[_TreeProc] = []
+
+    def _wait(procs, timeout=None):
+        if timeout == launcher._LEADER_GRACE_S:
+            return ([], procs)  # nothing exited on the leader's signal alone
+        return ([], survivors)
+
+    monkeypatch.setattr(launcher.psutil, "Process", lambda pid: _TreeProc(pid, sent, kids=[2, 3]))
+    monkeypatch.setattr(launcher.psutil, "wait_procs", _wait)
+    launcher._terminate_tree(1)
+
+    # The leader once for its grace, then the whole snapshot — parent included.
+    assert sent == [("terminate", 1), ("terminate", 2), ("terminate", 3), ("terminate", 1)]
+
+    sent.clear()
+    survivors.append(_TreeProc(3, sent))
+    launcher._terminate_tree(1)
+    assert ("kill", 3) in sent
+
+
+def test_terminate_tree_with_no_grace_signals_everything_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`grace=0` is the old behaviour, kept for `npm run dev`: npm routinely
+    leaves vite behind rather than taking it down, so waiting on that tree
+    would add the whole grace to every Ctrl-C and change nothing."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    sent: list[tuple[str, int]] = []
+    monkeypatch.setattr(launcher.psutil, "Process", lambda pid: _TreeProc(pid, sent, kids=[2, 3]))
+    monkeypatch.setattr(launcher.psutil, "wait_procs", lambda procs, timeout=None: (procs, []))
+
+    launcher._terminate_tree(1, grace=0.0)
+
+    # The leader's own signal and the tree walk are back to back, with no wait
+    # between them (the leader is signalled twice; SIGTERM is idempotent).
+    assert {pid for _op, pid in sent} == {1, 2, 3}
+    assert all(op == "terminate" for op, _pid in sent)
 
 
 # --- --sfu: fail-fast binary check, handoff to the run functions, --stop identity

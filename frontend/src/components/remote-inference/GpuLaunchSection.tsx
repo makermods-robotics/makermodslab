@@ -102,21 +102,57 @@ const GpuLaunchSection: React.FC<{
   // move on without it. Everything below is part of the Portal wire schema
   // (a disagreement drops every packet in silence) or steers the policy
   // itself, so any drift while the GPU is up is worth a loud line and a
-  // one-press restart. Compared against what THIS tab launched: a GPU started
-  // elsewhere echoes only engine and Hub id, and a partial comparison would
-  // say "matches" about knobs it never checked.
+  // one-press restart.
+  //
+  // The reference is the SERVER's own echo of what it launched with, and this
+  // tab's memory of its last start only as the fallback. That ordering is the
+  // whole point: `launched` is null after a page reload and for a GPU another
+  // tab (or an SDK client) started, which is precisely when a stale form is
+  // most likely — and a partial comparison would say "matches" about knobs it
+  // never checked, so the echo is used only when the whole tuple is there.
   const up = state === "starting" || state === "ready";
+  const echoed =
+    status &&
+    status.engine != null &&
+    status.policy_hub_id != null &&
+    status.horizon != null &&
+    status.fps != null &&
+    status.video_codec != null
+      ? {
+          engine: status.engine,
+          policy_hub_id: status.policy_hub_id,
+          task: status.task ?? "",
+          horizon: status.horizon,
+          fps: status.fps,
+          video_codec: status.video_codec,
+          s_min: status.s_min,
+        }
+      : null;
+  const reference: {
+    engine: string;
+    policy_hub_id: string;
+    task: string;
+    horizon: number;
+    fps: number;
+    video_codec: string;
+    s_min: number | null;
+  } | null = echoed ?? launched;
   const drifted: string[] = [];
-  if (launched && up) {
-    if (launched.engine !== startBody.engine) drifted.push("engine");
-    if (launched.policy_hub_id !== startBody.policy_hub_id)
+  if (reference && up) {
+    if (reference.engine !== startBody.engine) drifted.push("engine");
+    if (reference.policy_hub_id !== startBody.policy_hub_id)
       drifted.push("policy");
-    if (launched.task !== startBody.task) drifted.push("task");
-    if (launched.horizon !== startBody.horizon) drifted.push("horizon");
-    if (launched.fps !== startBody.fps) drifted.push("fps");
-    if (launched.video_codec !== startBody.video_codec) drifted.push("codec");
+    if (reference.task !== startBody.task) drifted.push("task");
+    if (reference.horizon !== startBody.horizon) drifted.push("horizon");
+    if (reference.fps !== startBody.fps) drifted.push("fps");
+    if (reference.video_codec !== startBody.video_codec) drifted.push("codec");
     // s_min only exists on the wire for rtc; sync ignores it on both sides.
-    if (startBody.engine === "rtc" && launched.s_min !== startBody.s_min)
+    // Null (an older server that echoes no tuple) is "unknown", not "differs".
+    if (
+      startBody.engine === "rtc" &&
+      reference.s_min != null &&
+      reference.s_min !== startBody.s_min
+    )
       drifted.push("s_min");
   }
   const restart = async () => {
@@ -336,7 +372,7 @@ const GpuLaunchSection: React.FC<{
         </div>
       ) : null}
 
-      {drifted.length > 0 && launched ? (
+      {drifted.length > 0 && reference ? (
         <div className="space-y-1.5 rounded-md border border-warn/40 p-2">
           <p className="flex items-start gap-1.5 text-xs leading-relaxed text-warn">
             <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
@@ -347,9 +383,11 @@ const GpuLaunchSection: React.FC<{
                 fields: drifted.join(", "),
               })}{" "}
               <span className="font-mono">
-                {launched.engine} · h{launched.horizon} · {launched.fps} fps ·{" "}
-                {launched.video_codec}
-                {launched.engine === "rtc" ? ` · s_min ${launched.s_min}` : ""}
+                {reference.engine} · h{reference.horizon} · {reference.fps} fps
+                · {reference.video_codec}
+                {reference.engine === "rtc" && reference.s_min != null
+                  ? ` · s_min ${reference.s_min}`
+                  : ""}
               </span>
             </span>
           </p>
