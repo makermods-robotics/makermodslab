@@ -130,14 +130,15 @@ import { useOnceFlag } from "@/lib/onboarding/storage";
  * imported Hub model) on the corner robot. Every "Run on robot" action lands
  * here via `useStudio().deployPrefill`.
  *
- * This is a PARALLEL surface to the legacy `InferenceModal` (still used by
- * JobsSection + the Landing Models panel through `useInferenceLaunch`). To keep
- * those consumers untouched and avoid drift, the checkpoint/policy-config
- * fetch, the bimanual `left_` camera-prefix round-trip, the state_dim 6-vs-12
- * arm-count guard and the start flow are ported VERBATIM from
- * `components/landing/InferenceModal.tsx` (only the palette becomes token
- * classes). The Hub lazy-import reuses `useInferenceLaunch().importSource` so
- * the husk-repo messaging is identical, not re-implemented.
+ * This began as a parallel surface to a legacy `InferenceModal`, which it was
+ * ported from verbatim — the checkpoint/policy-config fetch, the bimanual
+ * `left_` camera-prefix round-trip, the state_dim 6-vs-12 arm-count guard, the
+ * camera thumbnails and the start flow. That modal has since been removed: it
+ * had no remaining consumers once every "Run on robot" action routed here, so
+ * this is now the ONLY inference launch surface and the notes below about
+ * keeping the two in step are history, not a constraint. The Hub lazy-import
+ * still reuses `useInferenceLaunch().importSource` so the husk-repo messaging
+ * is shared rather than re-implemented.
  *
  * Cameras are the one place this panel deliberately left the modal behind: the
  * ported per-feature binding dropdowns are gone, replaced by Collect's
@@ -206,9 +207,9 @@ const FIELD_TRIGGER = "h-10 w-full text-sm";
  * One camera as the panel sees it. The BiSO prefix round-trip lives here so the
  * future per-arm routing work has a single obvious place to extend.
  *
- * (Verbatim port of InferenceModal's CameraMapping / cameraMappings — see that
- * file's doc comment for the full BiSO `left_` prefix rationale. Kept here so
- * the legacy modal stays untouched for its existing consumers.)
+ * (Verbatim port of the since-removed InferenceModal's CameraMapping /
+ * cameraMappings. This is now the only copy, so the BiSO `left_` prefix
+ * rationale is spelled out where it is used rather than cross-referenced.)
  */
 interface CameraMapping {
   /** Checkpoint feature key — the key into `policyConfig.image_features`. */
@@ -335,7 +336,7 @@ const DeployPanel: React.FC = () => {
     setLibraryOpen(!open);
   }, []);
 
-  // --- Inference config state (ported from InferenceModal) ---------------
+  // --- Inference config state (ported from the removed InferenceModal) ---
   const [checkpoints, setCheckpoints] = useState<JobCheckpoint[]>([]);
   // Keyed on `ref`, NOT step. The picker lists a whole resume lineage, and a
   // rewind (resuming from an ancestor's checkpoint) legitimately produces two
