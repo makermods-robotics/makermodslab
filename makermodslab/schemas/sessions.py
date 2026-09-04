@@ -644,6 +644,37 @@ class GpuStatusResponse(BaseModel):
     # is evaluated at import, before `modal run` parses a flag, so the launcher
     # exports it as DRTC_GPU in the child's environment.
     gpu: str | None
+    # Whether each per-checkpoint knob actually reached the wire (S3.8f).
+    #
+    # A knob is DROPPED when the target checkpoint's own config has no field
+    # for it — a precision remembered from a MolmoAct2 run, still selected when
+    # the operator switches to SmolVLA, whose config has no `model_dtype` at
+    # all. Before this that was a paid cold start ending in the container's own
+    # refusal; now the launcher drops it and says so here.
+    #
+    # The value above is the ASK, so a client comparing its form against this
+    # record still matches after a drop (a dropped knob must not read as
+    # drift). These two say whether it went. False beside an EMPTY value is
+    # simply "nobody chose one".
+    model_dtype_applied: bool
+    # How many flow-matching / denoising steps the sampler takes per chunk, as
+    # ASKED. Null while idle AND when nothing was asked — an int has no empty
+    # string the way `model_dtype` has one, so those two share a value and
+    # `flow_steps_applied` is what separates a drop from a non-choice.
+    #
+    # Which config field it writes is per family and is resolved inside the
+    # container (`utils.system.policy_flow_steps_field`): `num_steps` for
+    # smolvla, `num_inference_steps` for pi0/pi05/MolmoAct2.
+    flow_steps: int | None
+    flow_steps_applied: bool
+    # WHAT THE CONTAINER SAID IT IS RUNNING ON — e.g. "NVIDIA A100-SXM4-40GB
+    # (39.6 GiB)", parsed out of the policy server's own `[policy] device:`
+    # line. Null while idle and until that line arrives.
+    #
+    # The only EVIDENCE in this payload about hardware: `gpu` above is what the
+    # launch asked Modal for, which is a different fact and was the one being
+    # read as this. DATA — a vendor device string, never translated.
+    device_name: str | None
     # Survives an idle transition on purpose: after a failure the log is the
     # most useful thing left. Null before the first launch since boot.
     log_path: str | None

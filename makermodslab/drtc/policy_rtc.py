@@ -84,6 +84,7 @@ CLI knobs:
   --raw-cache-size            LRU size for the raw-chunk cache (default 32)
   --task                      REQUIRED for a language-conditioned policy
   --model-dtype               override the checkpoint's saved precision (opt-in)
+  --flow-steps                override the sampler's steps per chunk (opt-in)
 
 Why the interesting decisions are not made in this file
 -------------------------------------------------------
@@ -113,7 +114,11 @@ from livekit.portal import Observation, Operator, OperatorConfig, VideoCodec, fr
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 
-from ..utils.system import molmoact2_inference_action_mode, policy_requires_task
+from ..utils.system import (
+    molmoact2_inference_action_mode,
+    policy_flow_steps_field,
+    policy_requires_task,
+)
 from ._common import load_env, mint_token, required_env
 from ._schema_rtc import (
     CHUNK_NAME,
@@ -138,6 +143,33 @@ def pick_device(requested: str) -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def describe_device(device: torch.device) -> str:
+    """What the container is actually running on, as one short string.
+
+    The ONLY place a GPU type is ever established rather than assumed. Nothing
+    else in the stack can say it: the Lab asks Modal for a GPU by name and
+    Modal's own client prints nothing about what it gave us, so a panel that
+    claimed "A100" was reading a hardcoded label, not the hardware. This asks
+    the device.
+
+    Printed by `main` as `[policy] device: …` BEFORE the weights load, which is
+    also before the first thing that can go wrong on the wrong card (an OOM at
+    float32 on a 24 GB board reads very differently once the line above it says
+    which board it was). `modal_launcher.parse_device_name` parses it back out
+    of the log and puts it in the GPU status.
+
+    Off CUDA it is just the device string — there is no VRAM figure to give and
+    inventing one would be worse than silence.
+
+    Hand-mirrored from `policy.py`; change one, change the other.
+    """
+    if device.type != "cuda":
+        return str(device)
+    index = device.index or 0
+    total_gib = torch.cuda.get_device_properties(index).total_memory / (1024**3)
+    return f"{torch.cuda.get_device_name(index)} ({total_gib:.1f} GiB)"
 
 
 def enable_rtc(
@@ -221,7 +253,13 @@ def enable_rtc(
     return ok
 
 
-def load_policy(policy_path: str, device: torch.device, task: str = "", model_dtype: str = ""):
+def load_policy(
+    policy_path: str,
+    device: torch.device,
+    task: str = "",
+    model_dtype: str = "",
+    flow_steps: int = 0,
+):
     """Load any lerobot policy + its pre/post processors from a checkpoint.
 
     Three things happen BEFORE the weights load, and the ordering is the point —
@@ -239,6 +277,13 @@ def load_policy(policy_path: str, device: torch.device, task: str = "", model_dt
       has to happen here: the dtype is read while the base model is being
       constructed, so assigning it afterwards would change nothing. Never a
       default and never silent (see the flag's help).
+    * **``--flow-steps``, when passed, replaces the sampler's step count.**
+      Which FIELD that is depends on the family (`num_steps` for smolvla,
+      `num_inference_steps` for pi0/pi05/MolmoAct2) and the answer comes from
+      ``utils.system.policy_flow_steps_field`` — the same table the Lab drops
+      the knob by, so the two cannot disagree about whether a checkpoint has
+      one. Here too it must land before the weights: the count is read by the
+      sampler off the config the policy was constructed with.
     * **A missing ``inference_action_mode`` is filled in, and only a missing
       one.** ``utils.system.molmoact2_inference_action_mode`` decides, again so
       the Lab and the GPU answer identically.
@@ -277,6 +322,24 @@ def load_policy(policy_path: str, device: torch.device, task: str = "", model_dt
             "(operator opt-in; without the flag the checkpoint's own value is used as saved)"
         )
         policy_cfg.model_dtype = model_dtype
+        overridden = True
+
+    if flow_steps > 0:
+        field = policy_flow_steps_field(policy_type)
+        if field is None or not hasattr(policy_cfg, field):
+            raise SystemExit(
+                f"--flow-steps={flow_steps} was passed, but {type(policy_cfg).__name__} "
+                f"('{policy_type}') has no flow-matching step count to set — this policy does "
+                "not sample its actions that way. Drop the flag rather than have it be "
+                "silently ignored."
+            )
+        print(
+            f"[policy] --flow-steps: OVERRIDING the checkpoint's {field}="
+            f"{getattr(policy_cfg, field)!r} with {flow_steps} before weights load "
+            "(operator opt-in; fewer steps is less GPU work per chunk and a coarser "
+            "action trajectory)"
+        )
+        setattr(policy_cfg, field, flow_steps)
         overridden = True
 
     # A GAP FILL, never an override. `MolmoAct2Config.inference_action_mode`
@@ -492,6 +555,16 @@ async def main() -> None:
         "cannot keep up.",
     )
     parser.add_argument(
+        "--flow-steps",
+        type=int,
+        default=0,
+        help="Override how many flow-matching / denoising steps the sampler takes per "
+        "chunk (smolvla's num_steps, pi0/pi05/MolmoAct2's num_inference_steps). "
+        "OPT-IN: 0 or unset means the checkpoint's own value. Fewer steps is less GPU "
+        "work per chunk and a coarser action trajectory — the cheapest latency lever "
+        "there is, and the first one to cost quality.",
+    )
+    parser.add_argument(
         "--fps", type=int, default=30, help="Control/stream frequency. MUST match robot --fps."
     )
     parser.add_argument(
@@ -556,8 +629,18 @@ async def main() -> None:
     raw_cache_size = args.raw_cache_size
 
     device = pick_device(args.device)
+    # WHAT IT IS ACTUALLY RUNNING ON, before anything can fail on it. One line,
+    # fixed shape, parsed back by `modal_launcher.parse_device_name` — the only
+    # evidence anywhere that the GPU a launch asked Modal for is the GPU it got.
+    print(f"[policy] device: {describe_device(device)}")
     print(f"[policy] loading '{args.policy_path}' on {device} ...")
-    policy, pre, post = load_policy(args.policy_path, device, task=args.task, model_dtype=args.model_dtype)
+    policy, pre, post = load_policy(
+        args.policy_path,
+        device,
+        task=args.task,
+        model_dtype=args.model_dtype,
+        flow_steps=args.flow_steps,
+    )
 
     # Enable RTC in-painting. execution_horizon default = H - s_min (the RTC
     # constraint region); per-request overlap_end from the robot overrides it.

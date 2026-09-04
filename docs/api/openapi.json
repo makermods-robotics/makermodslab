@@ -351,6 +351,17 @@
             ],
             "title": "Chunk Size"
           },
+          "flow_steps_default": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flow Steps Default"
+          },
           "image_features": {
             "additionalProperties": {
               "$ref": "#/components/schemas/CheckpointImageFeature"
@@ -395,6 +406,14 @@
             ],
             "title": "State Dim"
           },
+          "supports_flow_steps": {
+            "title": "Supports Flow Steps",
+            "type": "boolean"
+          },
+          "supports_model_dtype": {
+            "title": "Supports Model Dtype",
+            "type": "boolean"
+          },
           "supports_rtc": {
             "anyOf": [
               {
@@ -423,6 +442,9 @@
           "image_features",
           "requires_task",
           "supports_rtc",
+          "supports_model_dtype",
+          "supports_flow_steps",
+          "flow_steps_default",
           "state_dim",
           "action_dim",
           "n_action_steps",
@@ -1247,6 +1269,19 @@
             "title": "Environment",
             "type": "string"
           },
+          "flow_steps": {
+            "anyOf": [
+              {
+                "maximum": 20.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flow Steps"
+          },
           "fps": {
             "default": 30,
             "title": "Fps",
@@ -1340,6 +1375,17 @@
             ],
             "title": "Code"
           },
+          "device_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device Name"
+          },
           "elapsed_s": {
             "title": "Elapsed S",
             "type": "number"
@@ -1365,6 +1411,21 @@
               }
             ],
             "title": "Environment"
+          },
+          "flow_steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flow Steps"
+          },
+          "flow_steps_applied": {
+            "title": "Flow Steps Applied",
+            "type": "boolean"
           },
           "fps": {
             "anyOf": [
@@ -1464,6 +1525,10 @@
               }
             ],
             "title": "Model Dtype"
+          },
+          "model_dtype_applied": {
+            "title": "Model Dtype Applied",
+            "type": "boolean"
           },
           "phase": {
             "anyOf": [
@@ -1574,6 +1639,10 @@
           "s_min",
           "model_dtype",
           "gpu",
+          "model_dtype_applied",
+          "flow_steps",
+          "flow_steps_applied",
+          "device_name",
           "log_path",
           "started_at",
           "elapsed_s",

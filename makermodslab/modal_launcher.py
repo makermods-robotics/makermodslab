@@ -116,6 +116,43 @@ error ninety seconds into a cold-start log, and the check lives here rather than
 only in the request model because the legacy callers of :func:`start` do not go
 through one.
 
+Flow steps, and a knob that must not fail a launch (S3.8f)
+----------------------------------------------------------
+``flow_steps`` is the third knob and the cheapest latency lever a flow policy
+has: the action expert is re-run once per integration step, so halving the
+count roughly halves the GPU term of the round trip. It is a wrapper FLAG
+(``--flow-steps``) like the precision, opt-in the same way, and the FIELD it
+writes differs per family — resolved by ``utils.system.policy_flow_steps_field``
+inside the container, never guessed here.
+
+The lesson that shaped both of them is S3.8e's, learned on a bench: the panel
+REMEMBERS these picks per browser, so a precision chosen for MolmoAct2 is still
+selected when the operator switches to SmolVLA — and `SmolVLAConfig` has no
+`model_dtype`, so the wrapper refused the flag ninety seconds and one cold start
+later. A remembered answer to a question about ANOTHER checkpoint must not cost
+a launch.
+
+So :func:`resolve_knobs` reads the target checkpoint's own saved config BEFORE
+the spawn and DROPS a knob the config has no field for, recording the drop in
+`model_dtype_applied` / `flow_steps_applied` and saying so in one log line. The
+rule when the config cannot be read at all — a private repo, no network, a
+local path that is not there yet — is to PASS THE KNOB THROUGH UNCHANGED: an
+unreadable config is "not established", never "inapplicable", and refusing (or
+silently dropping) on it would turn an offline moment into a launch that
+quietly ran something other than what was asked for. The container still has
+its own check, which is what makes dropping here safe rather than authoritative.
+
+The device line
+---------------
+Nothing in this stack could say what hardware a run actually got. The Lab ASKS
+Modal for a GPU by name; Modal's client says nothing back about what it gave,
+and the panel's "A100" was a hardcoded label. Both policy servers now print
+``[policy] device: <name> (<n> GiB)`` right after they pick a device and before
+the weights load; :func:`parse_device_name` lifts it out of the log stream and
+`status()` reports it as `device_name`. It is EVIDENCE, unlike `gpu` (which is
+only what was asked for) — and, like every other line-derived value here, a
+hint about a container rather than an authority over the arm.
+
 What is deliberately NOT tested
 -------------------------------
 The real `modal run` subprocess, Modal authentication, cold-start timing, the
@@ -146,8 +183,10 @@ from typing import IO, Any, Literal, get_args
 
 from . import remote_inference
 from .api_errors import ApiError, ErrorCode
+from .jobs import read_pretrained_config
 from .rollout import _signal_group, _terminate_tree
 from .utils.config import DRTC_GPU_APP_FILE, DRTC_LOG_DIR, _atomic_write_text
+from .utils.system import policy_flow_steps_field, policy_supports_model_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +247,19 @@ MODEL_DTYPES: tuple[str, ...] = tuple(d for d in get_args(ModelDtypeChoice) if d
 # happens before Click parses anything — so there is no flag that could still
 # reach the decorator. Unset leaves each wrapper's own pin standing.
 ENV_GPU = "DRTC_GPU"
+
+# The band `--flow-steps` may name (S3.8f). A RANGE rather than an allowlist,
+# because unlike a GPU spec or a dtype name every integer in it is meaningful:
+# the sampler simply integrates that many times.
+#
+# 1 is the floor the pin itself enforces (`generate_actions_from_inputs` raises
+# on `num_steps <= 0`). 20 is a ceiling on the ASK, not a claim about quality:
+# this knob exists to spend LESS time per chunk, the published defaults are 8-10,
+# and a fat-fingered 200 is a chunk that arrives long after the arm needed it —
+# which presents as a session that receives nothing, not as an error. An
+# operator who genuinely wants more can run the wrapper by hand.
+FLOW_STEPS_MIN = 1
+FLOW_STEPS_MAX = 20
 
 # --- timings -----------------------------------------------------------------
 
@@ -575,8 +627,8 @@ def check_target(profile: str, environment: str) -> None:
         )
 
 
-def check_knobs(model_dtype: str, gpu: str) -> None:
-    """Refuse a precision or a GPU type this launcher will not send (S3.8e).
+def check_knobs(model_dtype: str, gpu: str, flow_steps: int = 0) -> None:
+    """Refuse a precision, a GPU type or a step count this launcher won't send.
 
     A PURE input check, and the first thing `start` does after the Hub id,
     because neither value fails in a place worth waiting for: an off-list `gpu`
@@ -588,8 +640,15 @@ def check_knobs(model_dtype: str, gpu: str) -> None:
     is not the only caller — `start()` is a plain function, and a Literal on a
     pydantic field cannot guard the ones that do not go through it.
 
-    Empty is valid for both and means "do not decide": the checkpoint's own
-    saved dtype, and the wrapper's own pinned GPU.
+    Empty is valid for all three and means "do not decide": the checkpoint's own
+    saved dtype, the wrapper's own pinned GPU, and the sampler's own step count
+    (`flow_steps=0`, since an int has no empty string — see `GpuStartBody`,
+    where the wire value is `null`).
+
+    The step count is a RANGE check, not a membership one, and it is the only
+    one of the three whose off-band value would not fail anywhere at all: the
+    container takes any positive int happily, and a chunk that takes four times
+    too long presents as a session receiving nothing rather than as an error.
     """
     dtype = model_dtype.strip()
     if dtype and dtype not in MODEL_DTYPES:
@@ -609,6 +668,107 @@ def check_knobs(model_dtype: str, gpu: str) -> None:
             f"{allowed} — or leave it empty to run on the wrapper's own pinned GPU.",
             code=ErrorCode.GPU_LAUNCH_FAILED,
         )
+    if flow_steps and not (FLOW_STEPS_MIN <= flow_steps <= FLOW_STEPS_MAX):
+        raise ApiError(
+            400,
+            f"{flow_steps} isn't a number of flow-matching steps this launcher will ask for. "
+            f"Use {FLOW_STEPS_MIN}-{FLOW_STEPS_MAX} — or leave it unset to run the checkpoint's "
+            "own step count.",
+            code=ErrorCode.GPU_LAUNCH_FAILED,
+        )
+
+
+@dataclass(frozen=True)
+class KnobPlan:
+    """What a launch will actually send for the two per-checkpoint knobs.
+
+    `*_applied` is "this launch SENT the flag", not "the operator asked for
+    it": both are False for a knob nobody chose, and the way to read a DROP is
+    a requested value beside a False — which is exactly what the status echoes,
+    since it echoes what was ASKED (so a form comparing itself against the
+    record still matches) beside whether it went.
+    """
+
+    model_dtype: str
+    model_dtype_applied: bool
+    flow_steps: int
+    flow_steps_applied: bool
+
+
+def resolve_knobs(
+    policy_hub_id: str,
+    model_dtype: str,
+    flow_steps: int,
+    read_config: Callable[[str], dict[str, Any] | None] | None = None,
+) -> KnobPlan:
+    """Decide, per CHECKPOINT, which knobs this launch may still send (S3.8f).
+
+    The panel remembers these picks per browser, so a precision chosen for a
+    MolmoAct2 checkpoint is still selected when the operator switches to
+    SmolVLA — whose config has no `model_dtype` at all. Before this, that was a
+    paid cold start ending in the wrapper's own `SystemExit`. A remembered
+    answer to a question about ANOTHER checkpoint must not cost a launch.
+
+    So the target's own saved `config.json` is read first (a few KB, the same
+    `read_pretrained_config` every checkpoint-side preflight uses, which is why
+    a hub id, a step-suffixed ref and a local dir all work), and a knob whose
+    field the config does not carry is DROPPED — not passed, not refused.
+
+    **An unreadable config passes both knobs through unchanged.** None from the
+    reader means "not established" — a private repo, no network, a path that
+    does not exist yet — and it is never "inapplicable". Dropping on it would
+    silently run something other than what was asked for the first time the Hub
+    is slow; refusing on it would make an offline moment a launch failure. The
+    container still checks, which is what makes a drop here an optimization
+    rather than the authority.
+
+    `read_config` is injected so the tests never touch the Hub — the same seam
+    `find_modal` and `_clock` use. It defaults to None rather than to the
+    function itself because a default argument is bound ONCE at import: with
+    the function as the default, `monkeypatch.setattr(ml, …)` would rebind a
+    name nothing reads and the test would quietly make a network call.
+    """
+    read = read_pretrained_config if read_config is None else read_config
+    want_dtype = model_dtype.strip()
+    want_steps = flow_steps if flow_steps and flow_steps > 0 else 0
+    if not want_dtype and not want_steps:
+        return KnobPlan("", False, 0, False)
+
+    try:
+        cfg = read(policy_hub_id)
+    except Exception:  # noqa: BLE001 — a knob check must never fail a launch
+        logger.info("Couldn't read the checkpoint config for %s; knobs pass through", policy_hub_id)
+        cfg = None
+    if cfg is None:
+        return KnobPlan(want_dtype, bool(want_dtype), want_steps, bool(want_steps))
+
+    policy_type = cfg.get("type")
+    dtype_applied = bool(want_dtype) and policy_supports_model_dtype(cfg)
+    if want_dtype and not dtype_applied:
+        logger.info(
+            "Ignoring model_dtype=%s for %s: a '%s' checkpoint has no model_dtype field, so its "
+            "precision is not configurable that way. Launching at the checkpoint's own precision.",
+            want_dtype,
+            policy_hub_id,
+            policy_type,
+        )
+    steps_field = policy_flow_steps_field(policy_type)
+    steps_applied = bool(want_steps) and steps_field is not None and steps_field in cfg
+    if want_steps and not steps_applied:
+        logger.info(
+            "Ignoring flow_steps=%s for %s: a '%s' checkpoint has no flow-matching step count to "
+            "set, so it does not sample its actions that way. Launching at the checkpoint's own "
+            "step count.",
+            want_steps,
+            policy_hub_id,
+            policy_type,
+        )
+    return KnobPlan(
+        want_dtype if dtype_applied else "",
+        dtype_applied,
+        want_steps if steps_applied else 0,
+        steps_applied,
+    )
 
 
 # --- the transport plan ------------------------------------------------------
@@ -684,6 +844,7 @@ def build_argv(
     modal_bin: str,
     environment: str = "",
     model_dtype: str = "",
+    flow_steps: int = 0,
 ) -> list[str]:
     """The `modal run` command, as a LIST — never a string, never a shell.
 
@@ -701,6 +862,10 @@ def build_argv(
       saved dtype. It sits between --task and --horizon because that is where
       it sits in both wrappers' `local_entrypoint` signature, and this list
       reads in that order deliberately.
+    - `--flow-steps` is omitted for the same reason and one more: 0 is not a
+      step count any sampler would take (the pin raises on it), so there is no
+      value that could stand for "leave it alone" other than the flag's
+      absence. It sits after --model-dtype, the order the two were added in.
     - the GPU TYPE is deliberately NOT here either, and unlike the profile it
       could not be: `_FN_KWARGS["gpu"]` is evaluated when `modal run` imports
       the wrapper, before any flag is parsed. It rides `DRTC_GPU` in the child
@@ -734,6 +899,7 @@ def build_argv(
         policy_hub_id,
         *(["--task", task] if task else []),
         *(["--model-dtype", model_dtype] if model_dtype else []),
+        *(["--flow-steps", str(flow_steps)] if flow_steps else []),
         "--horizon",
         str(horizon),
         "--fps",
@@ -823,6 +989,33 @@ def parse_app_id(line: str) -> str | None:
     """
     match = _APP_ID_RE.search(line)
     return match.group(1) if match else None
+
+
+# --- the device: what it actually ran on --------------------------------------
+
+# Both policy servers print exactly one of these, right after picking a device
+# and before the weights load:
+#
+#     [policy] device: NVIDIA A100-SXM4-40GB (39.6 GiB)
+#     [policy] device: cpu
+#
+# Anchored on the `[policy] device: ` prefix and taking the REST of the line,
+# for `parse_phase`'s reason: Modal decorates and wraps freely, so a fixed tail
+# pattern would be the fragile half. The name and the VRAM figure are kept
+# together as one display string — they are read together and never separately.
+_DEVICE_RE = re.compile(r"\[policy\] device:\s*(?P<name>\S.*?)\s*$")
+
+
+def parse_device_name(line: str) -> str | None:
+    """The device one log line reports, or None.
+
+    Pure, like `parse_phase` and `parse_app_id`. This is the ONLY evidence in
+    the system about what hardware a run got — `gpu` in the status is what was
+    ASKED for, which is a different fact and was the one being mistaken for
+    this.
+    """
+    match = _DEVICE_RE.search(line.rstrip())
+    return match.group("name") if match else None
 
 
 def _write_app_record(app_id: str, profile: str | None, started_at: float | None) -> None:
@@ -1084,6 +1277,17 @@ _s_min: int | None = None
 # `_profile`'s `or None`.
 _model_dtype: str | None = None
 _gpu: str | None = None
+# Whether the launch actually SENT each of the two per-checkpoint knobs (S3.8f).
+# Plain bools, not tri-states: read them BESIDE the echoed value above, where a
+# value with a False next to it is a knob that was asked for and dropped, and an
+# empty value with a False is a knob nobody chose.
+_model_dtype_applied: bool = False
+_flow_steps: int | None = None
+_flow_steps_applied: bool = False
+# The device the container ITSELF reported, parsed out of its first `[policy]
+# device:` line. Null until that line arrives — and it is the only evidence
+# anywhere about the hardware; `_gpu` above is what was asked for.
+_device_name: str | None = None
 _log_path: str | None = None
 _started_at: float | None = None  # wall clock, for display
 _started_mono: float | None = None  # monotonic, for elapsed + the cold-start bound
@@ -1135,6 +1339,7 @@ def _go_idle_locked() -> None:
     global _started_at, _started_mono, _idle_since, _last_line, _drain_deadline
     global _profile, _environment, _app_id
     global _task, _horizon, _fps, _video_codec, _s_min, _model_dtype, _gpu
+    global _model_dtype_applied, _flow_steps, _flow_steps_applied, _device_name
     _state = STATE_IDLE
     _proc = None
     _phase = None
@@ -1151,6 +1356,10 @@ def _go_idle_locked() -> None:
     _s_min = None
     _model_dtype = None
     _gpu = None
+    _model_dtype_applied = False
+    _flow_steps = None
+    _flow_steps_applied = False
+    _device_name = None
     _started_at = None
     _started_mono = None
     _idle_since = None
@@ -1239,10 +1448,11 @@ def _handle_line(proc: subprocess.Popen, line: str) -> None:
     run's state. `_proc` is cleared the moment a launch stops owning the slot,
     so a stale pump matches nothing.
     """
-    global _phase, _state, _last_line, _idle_since, _app_id
+    global _phase, _state, _last_line, _idle_since, _app_id, _device_name
     text = line.rstrip()
     phase = parse_phase(line)
     app_id = parse_app_id(line)
+    device_name = parse_device_name(line)
     record: tuple[str, str | None, float | None] | None = None
     with _state_lock:
         if _proc is not proc:
@@ -1256,6 +1466,12 @@ def _handle_line(proc: subprocess.Popen, line: str) -> None:
             # The first line of the run that matters after this process dies.
             _app_id = app_id
             record = (app_id, _profile, _started_at)
+        if device_name is not None and device_name != _device_name:
+            # The FIRST answer anyone has ever had to "what did it run on".
+            # Logged at info because the whole point is that it be findable in
+            # the Lab's own log, not only in the container's.
+            _device_name = device_name
+            logger.info("GPU policy server is on %s", device_name)
         if phase is not None:
             _phase = phase
             if phase in _READY_PHASES and _state == STATE_STARTING:
@@ -1542,6 +1758,7 @@ def start(
     environment: str = "",
     model_dtype: str = "",
     gpu: str = "",
+    flow_steps: int | None = None,
 ) -> dict[str, Any]:
     """Launch the GPU policy server. Returns `{started, message, gpu}`.
 
@@ -1561,16 +1778,24 @@ def start(
     millisecond rather than spending ninety seconds finding out.
 
     `model_dtype` / `gpu` say WHAT IT RUNS AS and WHAT IT RUNS ON (S3.8e), and
-    both empty is S3.8's behaviour byte for byte: the checkpoint's saved dtype,
-    and the wrapper's own pinned GPU. They leave here by different doors — the
-    dtype as a flag, the GPU as `DRTC_GPU` in the child env, because the
-    wrapper's `@app.function(gpu=…)` is decided at import — but they are
-    checked together, before anything else touches the disk or the network.
+    `flow_steps` HOW HARD IT WORKS PER CHUNK (S3.8f); all three unset is S3.8's
+    behaviour byte for byte — the checkpoint's saved dtype and step count, and
+    the wrapper's own pinned GPU. They leave here by different doors — the two
+    flags on argv, the GPU as `DRTC_GPU` in the child env, because the wrapper's
+    `@app.function(gpu=…)` is decided at import — but they are range-checked
+    together, before anything else touches the disk or the network.
+
+    The two per-CHECKPOINT ones are then resolved against the target's own
+    config (`resolve_knobs`), which DROPS one the checkpoint has no field for
+    rather than spending a cold start on the container's refusal. That read is
+    the one network call this function makes before the listing, it is a few
+    KB, and it cannot fail the launch.
     """
     global _state, _proc, _phase, _engine, _policy_hub_id, _room
     global _started_at, _started_mono, _log_path, _message, _hint, _last_line, _idle_since
     global _stop_outcome, _code, _drain_deadline, _profile, _environment, _app_id
     global _task, _horizon, _fps, _video_codec, _s_min, _model_dtype, _gpu
+    global _model_dtype_applied, _flow_steps, _flow_steps_applied, _device_name
 
     with _state_lock:
         if _state in (STATE_STARTING, STATE_READY, STATE_STOPPING):
@@ -1594,7 +1819,13 @@ def start(
     # in time (see `check_knobs`).
     want_dtype = model_dtype.strip()
     want_gpu = gpu.strip()
-    check_knobs(want_dtype, want_gpu)
+    want_steps = flow_steps or 0
+    check_knobs(want_dtype, want_gpu, want_steps)
+
+    # And then the one check that needs the CHECKPOINT rather than the request:
+    # a knob the config has no field for is dropped here instead of failing the
+    # container ninety seconds from now (see `resolve_knobs`).
+    plan_knobs = resolve_knobs(hub_id, want_dtype, want_steps)
 
     modal_bin = find_modal()
     if modal_bin is None:
@@ -1646,7 +1877,10 @@ def start(
         s_min=s_min,
         modal_bin=modal_bin,
         environment=want_environment,
-        model_dtype=want_dtype,
+        # What SURVIVED the per-checkpoint drop, not what was asked for. The
+        # status still echoes the ask (see below) — this is the wire.
+        model_dtype=plan_knobs.model_dtype,
+        flow_steps=plan_knobs.flow_steps,
     )
     log_handle, path = _open_log()
     try:
@@ -1687,8 +1921,19 @@ def start(
         _s_min = s_min
         # Raw, not `or None`: "" is a real answer here ("as the checkpoint
         # saved it", "on the wrapper's pin") rather than an absent choice.
+        #
+        # And the ASK, not the resolved value: a panel comparing its form
+        # against this record must still match after a knob was dropped, or
+        # every dropped knob would read as drift and offer a restart that would
+        # drop it again. Whether it went out is `*_applied` beside it.
         _model_dtype = want_dtype
         _gpu = want_gpu
+        _model_dtype_applied = plan_knobs.model_dtype_applied
+        _flow_steps = want_steps or None
+        _flow_steps_applied = plan_knobs.flow_steps_applied
+        # Not known until the container says so, and a previous run's answer
+        # would be a lie about this one.
+        _device_name = None
         _log_path = str(path)
         _started_at = time.time()
         _started_mono = _clock()
@@ -1912,6 +2157,20 @@ def _status_locked() -> dict[str, Any]:
         # rather than folded into null the way an unchosen profile is.
         "model_dtype": _model_dtype,
         "gpu": _gpu,
+        # Whether each per-checkpoint knob actually reached the wire (S3.8f).
+        # False beside a NON-empty value above is the interesting state: the
+        # launch asked, the checkpoint's config has no such field, and it was
+        # dropped rather than spending a cold start on the container's refusal.
+        "model_dtype_applied": _model_dtype_applied,
+        # The ask, on `model_dtype`'s convention — null while idle, and null
+        # also when nothing was asked (an int has no empty string, so the two
+        # cases share one value; `flow_steps_applied` separates them).
+        "flow_steps": _flow_steps,
+        "flow_steps_applied": _flow_steps_applied,
+        # WHAT IT ACTUALLY RAN ON, from the container's own `[policy] device:`
+        # line — evidence, unlike `gpu` above, which is only what was asked
+        # for. Null until that line arrives (and while idle).
+        "device_name": _device_name,
         "log_path": _log_path,
         "started_at": _started_at,
         "elapsed_s": elapsed,

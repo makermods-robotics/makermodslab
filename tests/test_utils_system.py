@@ -221,6 +221,71 @@ def test_molmoact2_rtc_conflict_only_blocks_discrete_checkpoints() -> None:
     assert molmoact2_rtc_conflict({}) is None
 
 
+def test_the_flow_steps_field_is_per_family_and_verified_against_the_pin() -> None:
+    """WHICH field a `--flow-steps` override writes, and the one that traps:
+    MolmoAct2's `num_flow_timesteps` (8) is a TRAINING knob — how many flow
+    timesteps are sampled per example to build the loss — and is never read on
+    an inference path. `predict_action_chunk` reads `num_inference_steps`."""
+    from makermodslab.utils.system import policy_flow_steps_field
+
+    assert policy_flow_steps_field("smolvla") == "num_steps"
+    assert policy_flow_steps_field("pi0") == "num_inference_steps"
+    assert policy_flow_steps_field("pi05") == "num_inference_steps"
+    assert policy_flow_steps_field("molmoact2") == "num_inference_steps"
+    # No denoising loop to shorten: ACT regresses a chunk in one pass, and
+    # pi0_fast decodes action TOKENS autoregressively.
+    assert policy_flow_steps_field("act") is None
+    assert policy_flow_steps_field("pi0_fast") is None
+    # Same `object` tolerance policy_requires_task has: the type is read
+    # straight out of a config.json, where it can be missing or corrupt.
+    assert policy_flow_steps_field(None) is None
+    assert policy_flow_steps_field(7) is None
+
+
+def test_the_flow_steps_default_is_read_off_the_checkpoint_or_is_unknown() -> None:
+    """The checkpoint's own saved value, with ONE documented fallback: a
+    MolmoAct2 that saved `num_inference_steps: null` (which the published one
+    does) runs at 10, because `modeling_molmoact2.py` resolves
+    `steps = int(num_steps or self.config.flow_matching_num_steps)` against the
+    backbone config, whose default is 10. It is NOT 8 — `num_flow_timesteps` is
+    a training knob."""
+    from makermodslab.utils.system import MOLMOACT2_FLOW_STEPS_DEFAULT, policy_flow_steps_default
+
+    assert MOLMOACT2_FLOW_STEPS_DEFAULT == 10
+    assert policy_flow_steps_default({"type": "smolvla", "num_steps": 10}) == 10
+    assert policy_flow_steps_default({"type": "pi05", "num_inference_steps": 4}) == 4
+    assert policy_flow_steps_default({"type": "molmoact2", "num_inference_steps": None}) == 10
+    # Absent reads the same as null — a config that never wrote the key is in
+    # exactly the state the container's `or` fallback answers.
+    assert policy_flow_steps_default({"type": "molmoact2"}) == 10
+    # A saved value still wins over the fallback.
+    assert policy_flow_steps_default({"type": "molmoact2", "num_inference_steps": 4}) == 4
+    # The fallback is MolmoAct2's alone: pi05's `num_inference_steps` has a
+    # class-level default this file cannot see, so null there stays unknown.
+    assert policy_flow_steps_default({"type": "pi05", "num_inference_steps": None}) is None
+    # No such knob at all.
+    assert policy_flow_steps_default({"type": "act", "n_action_steps": 100}) is None
+    # A hand-edited config: "unknown" beats a number somebody sets a latency
+    # budget from. `True` is an `int` subclass and would otherwise read as 1.
+    assert policy_flow_steps_default({"type": "smolvla", "num_steps": 0}) is None
+    assert policy_flow_steps_default({"type": "smolvla", "num_steps": "ten"}) is None
+    assert policy_flow_steps_default({"type": "smolvla", "num_steps": True}) is None
+    # Hand-edited MolmoAct2 too: only null (or absent) takes the fallback.
+    assert policy_flow_steps_default({"type": "molmoact2", "num_inference_steps": "ten"}) is None
+    assert policy_flow_steps_default({}) is None
+
+
+def test_model_dtype_support_is_answered_from_the_saved_config() -> None:
+    """A config.json is a dataclass dump, so key presence IS "the class
+    declares this field" — which stays right through a pin bump that gives
+    another family the knob. In this pin MolmoAct2 is the only one."""
+    from makermodslab.utils.system import policy_supports_model_dtype
+
+    assert policy_supports_model_dtype({"type": "molmoact2", "model_dtype": "float32"}) is True
+    assert policy_supports_model_dtype({"type": "smolvla", "num_steps": 10}) is False
+    assert policy_supports_model_dtype({}) is False
+
+
 def test_molmoact2_device_warning_is_advisory_and_names_the_device() -> None:
     """A WARNING, not a gate: nothing in this pin requires CUDA (the action-flow
     CUDA graph falls back off-CUDA), so this only sets expectations about a ~7B

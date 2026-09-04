@@ -1289,6 +1289,27 @@ class GpuStartBody(BaseModel):
     # DRTC_GPU in the child env.
     model_dtype: modal_launcher.ModelDtypeChoice = ""
     gpu: modal_launcher.GpuChoice = ""
+    # HOW HARD IT WORKS PER CHUNK (S3.8f): the flow-matching / denoising steps
+    # the sampler takes for one action chunk. Null (the default) is the
+    # checkpoint's own count and passes no flag at all — an int has no empty
+    # string, so null is what "" is for the two above.
+    #
+    # A RANGE rather than a Literal, unlike those two, because every integer in
+    # it is meaningful — the sampler simply integrates that many times. The
+    # bounds are the launcher's (`modal_launcher.FLOW_STEPS_MIN/MAX`) and it
+    # checks them again before spawning, because `start()` is a plain function
+    # and a pydantic field cannot guard the callers that skip this model.
+    #
+    # Which config field it writes is per family and is resolved in the
+    # container; if the target checkpoint's config carries no such field at
+    # all, the launcher DROPS the knob before spawning rather than paying for a
+    # cold start that ends in the container's refusal (`flow_steps_applied` in
+    # the GPU status says so).
+    flow_steps: int | None = Field(
+        default=None,
+        ge=modal_launcher.FLOW_STEPS_MIN,
+        le=modal_launcher.FLOW_STEPS_MAX,
+    )
 
 
 @v1_router.get(
@@ -1350,6 +1371,7 @@ def start_remote_inference_gpu(body: GpuStartBody):
         environment=body.environment,
         model_dtype=body.model_dtype,
         gpu=body.gpu,
+        flow_steps=body.flow_steps,
     )
 
 

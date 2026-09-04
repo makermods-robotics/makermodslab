@@ -140,6 +140,29 @@ class CheckpointPolicyConfigResponse(BaseModel):
     image_features: dict[str, CheckpointImageFeature]
     requires_task: bool
     supports_rtc: bool | None
+    # Whether the two GPU-launch knobs apply to THIS checkpoint (S3.8f), so a
+    # launch panel can disable a select with a reason instead of sending a
+    # value that will be dropped.
+    #
+    # supports_model_dtype is "this config carries a `model_dtype` field" —
+    # answered from the saved config rather than a table of policy types,
+    # because a config.json is a dataclass dump and key presence IS the class
+    # having the field. In this pin only MolmoAct2 does.
+    supports_model_dtype: bool
+    # Whether the checkpoint's family samples its actions in steps at all
+    # (smolvla, pi0, pi05, MolmoAct2 do; ACT and pi0_fast do not). A SEPARATE
+    # field from the default below on purpose: null there is both "no such
+    # knob" and "the knob exists and this checkpoint saved nothing this side
+    # can resolve" — a pi05 with a null `num_inference_steps` is the second.
+    supports_flow_steps: bool
+    # The steps-per-chunk the checkpoint would run with, when it can be known.
+    # Null both for a policy with no such knob (ACT, pi0_fast) and for one that
+    # saved no value whose applying default is not readable from here.
+    # MolmoAct2 is NOT the latter: it saves `num_inference_steps: null` and
+    # then runs at 10 — the pin's own backbone default — so it answers 10.
+    # "Unknown" stays the honest answer for the rest, and a client must read
+    # null as "do not print a number", never as "no default".
+    flow_steps_default: int | None
     state_dim: int | None
     action_dim: int | None
     n_action_steps: int | None

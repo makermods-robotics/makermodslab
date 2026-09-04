@@ -50,7 +50,13 @@ from .utils.naming import (
     derive_imported_title,
     imported_name_suffixes,
 )
-from .utils.system import policy_requires_task, torchcodec_loads
+from .utils.system import (
+    policy_flow_steps_default,
+    policy_flow_steps_field,
+    policy_requires_task,
+    policy_supports_model_dtype,
+    torchcodec_loads,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -5293,6 +5299,25 @@ class JobRegistry:
             # guard in rollout.handle_start_inference, which only refuses on a
             # definite False.
             "supports_rtc": (policy_type_supports_rtc(policy_type) if isinstance(policy_type, str) else None),
+            # Whether the two GPU-launch knobs apply to THIS checkpoint
+            # (S3.8f), so the remote panel can disable a select with a reason
+            # rather than send a value the launcher would drop. Both read off
+            # the same `cfg` every other field here comes from; the rules live
+            # in utils.system so the Lab, the route and the container cannot
+            # disagree about what a checkpoint supports.
+            "supports_model_dtype": policy_supports_model_dtype(cfg),
+            # And whether it has a step count to set at all — which
+            # `flow_steps_default` below CANNOT answer, because null there is
+            # both "no such knob" (ACT) and "the knob exists and this
+            # checkpoint saved nothing we can resolve" (a pi05 with a null
+            # `num_inference_steps`).
+            "supports_flow_steps": policy_flow_steps_field(cfg.get("type")) is not None,
+            # Null when there is no number to show — a policy with no such knob,
+            # or one that saved none and whose applying default this side cannot
+            # see. MolmoAct2 is NOT that case: it saves null and runs at 10, the
+            # pin's backbone default, which `policy_flow_steps_default` fills in.
+            # The client must read null as "no number to show", not "no default".
+            "flow_steps_default": policy_flow_steps_default(cfg),
             # Flat proprioceptive state / action widths. For an SO-101 arm this
             # is 6 (one per joint); a bimanual-trained checkpoint carries 12
             # (two arms). The inference modal compares this against the selected

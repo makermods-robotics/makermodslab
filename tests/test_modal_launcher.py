@@ -95,6 +95,12 @@ def _fresh_launcher(tmp_path, monkeypatch):
     there would be interfering with the machine's actual state.
     """
     monkeypatch.setattr(ml, "_APP_RECORD_FILE", tmp_path / "gpu_app.json")
+    # And stubs the per-checkpoint knob drop's config read, for the same class
+    # of reason: it reaches the NETWORK for a hub id, and no test here may.
+    # None is that reader's "not established", which passes the knobs through
+    # unchanged — so every pre-S3.8f assertion still describes what a launch
+    # sends. The tests that exercise the drop inject their own reader.
+    monkeypatch.setattr(ml, "read_pretrained_config", lambda _path: None)
     ml._go_idle_locked()
     ml._tail.clear()
     ml._log_path = None
@@ -384,6 +390,136 @@ def test_an_unchosen_knob_is_echoed_as_launched_not_as_a_non_choice(spawned, fak
     ml.stop()
     ml._handle_exit(spawned["proc"], -2)
     assert ml.status()["gpu"] is None
+
+
+# --- flow steps, the drop, and the device line (S3.8f) ------------------------
+
+
+# What a checkpoint's own saved config.json looks like from `resolve_knobs`'
+# point of view: a policy `type` plus whatever fields that config class
+# declares. A dataclass dump, so a declared field is always a key.
+_MOLMOACT2_CFG = {"type": "molmoact2", "model_dtype": "float32", "num_inference_steps": None}
+_SMOLVLA_CFG = {"type": "smolvla", "num_steps": 10}
+_ACT_CFG = {"type": "act", "n_action_steps": 100}
+
+
+def _reader(cfg):
+    """A `read_pretrained_config` stand-in. Injected everywhere so no test in
+    this module ever reaches the Hub."""
+    return lambda _path: cfg
+
+
+def test_flow_steps_is_a_flag_and_only_when_it_is_set():
+    """0 is not a step count any sampler would take — the pin raises on it — so
+    the flag's ABSENCE is the only way to say "leave the checkpoint's own"."""
+    argv = ml.build_argv(_plan(), **_ARGS, engine="rtc", flow_steps=4)
+    assert argv[argv.index("--flow-steps") + 1] == "4"
+    assert argv.index("--horizon") > argv.index("--flow-steps")
+
+    for unset in (
+        ml.build_argv(_plan(), **_ARGS, engine="sync"),
+        ml.build_argv(_plan(), **_ARGS, engine="rtc", flow_steps=0),
+    ):
+        assert "--flow-steps" not in unset
+
+
+def test_an_off_band_step_count_refuses_before_anything_is_spawned(spawned):
+    """The one knob whose bad value fails NOWHERE: the container takes any
+    positive int, and a chunk that arrives four times too late presents as a
+    session receiving nothing rather than as an error."""
+    for bad in (0 - 1, ml.FLOW_STEPS_MAX + 1):
+        with pytest.raises(ApiError) as excinfo:
+            ml.start(engine="rtc", policy_hub_id="someone/p", flow_steps=bad)
+        assert excinfo.value.code == ErrorCode.GPU_LAUNCH_FAILED
+        assert f"{ml.FLOW_STEPS_MIN}-{ml.FLOW_STEPS_MAX}" in excinfo.value.detail
+    assert spawned["popen"] == []
+
+
+def test_a_knob_the_checkpoint_has_no_field_for_is_dropped_not_sent():
+    """The bench failure this exists for: a precision picked for MolmoAct2 is
+    still selected when the operator switches to SmolVLA, whose config has no
+    `model_dtype` — and the wrapper refused it after a paid cold start."""
+    plan = ml.resolve_knobs("someone/smolvla", "bfloat16", 4, read_config=_reader(_SMOLVLA_CFG))
+    assert plan.model_dtype == "" and plan.model_dtype_applied is False
+    # The other knob is decided independently: smolvla DOES have `num_steps`.
+    assert plan.flow_steps == 4 and plan.flow_steps_applied is True
+
+    # And the reverse pairing, on the checkpoint that has both.
+    both = ml.resolve_knobs("someone/molmo", "bfloat16", 4, read_config=_reader(_MOLMOACT2_CFG))
+    assert both.model_dtype == "bfloat16" and both.model_dtype_applied is True
+    assert both.flow_steps == 4 and both.flow_steps_applied is True
+
+    # ACT has neither: no `model_dtype`, and no denoising loop to shorten.
+    neither = ml.resolve_knobs("someone/act", "bfloat16", 4, read_config=_reader(_ACT_CFG))
+    assert neither.model_dtype == "" and neither.model_dtype_applied is False
+    assert neither.flow_steps == 0 and neither.flow_steps_applied is False
+
+
+def test_an_unreadable_config_passes_the_knobs_through_unchanged():
+    """None from the reader is "not established" — a private repo, no network,
+    a path that isn't there yet — and never "inapplicable". Dropping on it
+    would silently run something other than what was asked the first time the
+    Hub is slow; the container still has its own check."""
+    for reader in (_reader(None), lambda _path: (_ for _ in ()).throw(OSError("no network"))):
+        plan = ml.resolve_knobs("someone/p", "bfloat16", 4, read_config=reader)
+        assert plan.model_dtype == "bfloat16" and plan.model_dtype_applied is True
+        assert plan.flow_steps == 4 and plan.flow_steps_applied is True
+
+
+def test_a_launch_that_asks_for_nothing_never_reads_a_config():
+    """The read is a few KB over the network and every launch would pay for it,
+    so the branch that has nothing to decide does not take it."""
+    reads: list[str] = []
+
+    def _read(path):
+        reads.append(path)
+        return _MOLMOACT2_CFG
+
+    plan = ml.resolve_knobs("someone/p", "", 0, read_config=_read)
+    assert reads == []
+    assert plan == ml.KnobPlan("", False, 0, False)
+
+
+def test_a_dropped_knob_is_echoed_as_asked_beside_an_applied_false(spawned, fake_clock, monkeypatch):
+    """The status echoes the ASK so a panel comparing its form against the
+    record still matches after a drop — a dropped knob that read as drift would
+    offer a restart that dropped it again. `*_applied` is what says it went."""
+    monkeypatch.setattr(ml, "read_pretrained_config", lambda _path: _SMOLVLA_CFG)
+    ml.start(engine="rtc", policy_hub_id="someone/smolvla", model_dtype="bfloat16", flow_steps=4)
+
+    argv, _env = spawned["popen"][0]
+    assert "--model-dtype" not in argv
+    assert argv[argv.index("--flow-steps") + 1] == "4"
+
+    status = ml.status()
+    assert status["model_dtype"] == "bfloat16"
+    assert status["model_dtype_applied"] is False
+    assert status["flow_steps"] == 4
+    assert status["flow_steps_applied"] is True
+
+
+def test_the_device_line_is_parsed_out_of_the_container_stdout(spawned, fake_clock):
+    """The ONLY evidence anywhere about what hardware a run got. `gpu` is what
+    was ASKED for, which is a different fact and was the one being read as
+    this — the panel's "A100" was a hardcoded label."""
+    assert ml.parse_device_name("[policy] device: NVIDIA H100 80GB HBM3 (79.1 GiB)") == (
+        "NVIDIA H100 80GB HBM3 (79.1 GiB)"
+    )
+    assert ml.parse_device_name("[policy] device: cpu") == "cpu"
+    assert ml.parse_device_name("[policy] loading 'someone/p' on cuda ...") is None
+
+    ml.start(engine="sync", policy_hub_id="someone/p", gpu="H100")
+    assert ml.status()["device_name"] is None
+    ml._handle_line(spawned["proc"], "[policy] device: NVIDIA A100-SXM4-40GB (39.6 GiB)\n")
+    status = ml.status()
+    # What it was asked for, and what it answered — two different facts, both
+    # reported, which is the whole point of the line.
+    assert status["gpu"] == "H100"
+    assert status["device_name"] == "NVIDIA A100-SXM4-40GB (39.6 GiB)"
+
+    ml.stop()
+    ml._handle_exit(spawned["proc"], -2)
+    assert ml.status()["device_name"] is None
 
 
 # --- the two listings --------------------------------------------------------
@@ -774,6 +910,10 @@ def test_the_status_dict_always_carries_every_key(spawned, fake_clock):
         "s_min",
         "model_dtype",
         "gpu",
+        "model_dtype_applied",
+        "flow_steps",
+        "flow_steps_applied",
+        "device_name",
         "log_path",
         "started_at",
         "elapsed_s",

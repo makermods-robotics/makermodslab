@@ -4799,6 +4799,41 @@ def test_policy_config_summary_rtc_is_none_when_the_type_is_unreadable(tmp_path,
     assert summary["supports_rtc"] is None
 
 
+def test_policy_config_summary_reports_which_gpu_knobs_apply(tmp_path, tmp_lerobot_home) -> None:
+    """So the remote panel can disable a select with a reason instead of
+    sending a value the launcher would drop — the bench failure this exists
+    for is a precision remembered from a MolmoAct2 run still being selected
+    for a SmolVLA one, which cost a cold start."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+
+    def _summary(cfg: dict) -> dict:
+        model = tmp_path / f"model{len(cfg)}{cfg.get('type')}"
+        model.mkdir()
+        (model / "config.json").write_text(_json.dumps(cfg))
+        return reg.get_policy_config_summary(reg.register_imported(str(model)).id, 0)
+
+    molmo = _summary({"type": "molmoact2", "model_dtype": "float32", "num_inference_steps": None})
+    assert molmo["supports_model_dtype"] is True
+    # The knob applies, and the number the panel shows beside "Checkpoint
+    # default" is 10 even though the config saved null: the container resolves
+    # `num_steps or flow_matching_num_steps` against the backbone config, whose
+    # default is 10. (8 is `num_flow_timesteps`, a TRAINING knob.)
+    assert molmo["supports_flow_steps"] is True
+    assert molmo["flow_steps_default"] == 10
+
+    smol = _summary({"type": "smolvla", "num_steps": 10})
+    assert smol["supports_model_dtype"] is False
+    assert smol["supports_flow_steps"] is True
+    assert smol["flow_steps_default"] == 10
+
+    act = _summary({"type": "act", "n_action_steps": 100})
+    assert act["supports_model_dtype"] is False
+    assert act["supports_flow_steps"] is False
+    assert act["flow_steps_default"] is None
+
+
 def test_policy_config_summary_reports_the_chunk_geometry(tmp_path, tmp_lerobot_home) -> None:
     """n_action_steps is the CEILING on a remote-inference horizon: declare
     more than the policy returns and the two Portal peers disagree about the

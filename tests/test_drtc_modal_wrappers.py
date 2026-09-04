@@ -157,6 +157,20 @@ def test_the_wrappers_forward_model_dtype(wrapper: Path) -> None:
     assert 'argv += ["--model-dtype", model_dtype]' in text, wrapper.name
 
 
+@pytest.mark.parametrize("wrapper", _WRAPPERS, ids=lambda p: p.name)
+def test_the_wrappers_forward_flow_steps(wrapper: Path) -> None:
+    """`--flow-steps` rides the same three links as `--model-dtype`, and a break
+    in any of them is worse here than an ignored flag: `modal_launcher.build_argv`
+    emits `--flow-steps N` unconditionally once the knob is set, so a wrapper
+    whose `local_entrypoint` has no such parameter fails the run on a Click
+    usage error — after the cold start has been paid for."""
+    text = wrapper.read_text(encoding="utf-8")
+    # Twice in the signatures (_serve_impl and main), once in the fn.remote call.
+    assert text.count("flow_steps: int = 0") == 2, wrapper.name
+    assert "flow_steps=flow_steps," in text, wrapper.name
+    assert 'argv += ["--flow-steps", str(flow_steps)]' in text, wrapper.name
+
+
 # --- the tailnet node is ONE node -------------------------------------------
 # Tailscale identifies a node by its node key, which lives in tailscaled's state
 # file; the wrappers keep that file on a dedicated Modal Volume so every launch

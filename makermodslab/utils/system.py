@@ -432,6 +432,123 @@ def policy_requires_task(policy_type: object) -> bool:
     return isinstance(policy_type, str) and policy_type in LANGUAGE_CONDITIONED_POLICY_TYPES
 
 
+# --------------------------------------------------------------------------- #
+# Flow-matching / denoising steps per chunk, by policy family (S3.8f)
+# --------------------------------------------------------------------------- #
+# WHICH config field decides how many integration steps the action sampler takes
+# for ONE chunk. It is the cheapest latency lever a VLA has — the action expert
+# is re-run once per step, so halving the count roughly halves the GPU term of
+# the round trip — and every family spells it differently.
+#
+# Verified against the pinned fork's own source, not from memory:
+#
+#   * smolvla  → ``num_steps`` (configuration_smolvla.py, default 10).
+#   * pi0      → ``num_inference_steps`` (configuration_pi0.py, default 10).
+#   * pi05     → ``num_inference_steps`` (configuration_pi05.py, default 10).
+#   * molmoact2→ ``num_inference_steps`` (configuration_molmoact2.py, default
+#     **None**), and NOT ``num_flow_timesteps``. This one is worth spelling out
+#     because the names invite the opposite guess: `num_flow_timesteps` (8) is a
+#     TRAINING knob — how many flow timesteps are sampled per example to build
+#     the loss (`_prepare_flow_matching_tensors`, and the joint-flow loss) — and
+#     is never read on an inference path. `predict_action_chunk` reads
+#     ``kwargs.get("num_steps", config.num_inference_steps)`` and passes it down
+#     to `generate_actions_from_inputs`, which resolves ``num_steps or
+#     self.config.flow_matching_num_steps`` against the BACKBONE's HF config
+#     (default 10). So a MolmoAct2 checkpoint that saved nothing is really
+#     taking 10 steps, that 10 is not readable from the checkpoint's own
+#     config.json, and setting `num_inference_steps` is the only override that
+#     reaches the sampler. The RTC path resolves it identically.
+#
+# `pi0_fast` is deliberately absent: it decodes action TOKENS autoregressively
+# and has no denoising loop, so there is no field to point at and the knob is
+# correctly reported as inapplicable.
+#
+# Mirrored by hand from the pin, alongside POLICY_EXTRAS and
+# LANGUAGE_CONDITIONED_POLICY_TYPES — update all three on a pin bump.
+POLICY_FLOW_STEPS_FIELDS: dict[str, str] = {
+    "smolvla": "num_steps",
+    "pi0": "num_inference_steps",
+    "pi05": "num_inference_steps",
+    MOLMOACT2: "num_inference_steps",
+}
+
+# What MolmoAct2 actually samples with when its own config says nothing, which
+# is what the PUBLISHED checkpoint says (`num_inference_steps: null`). The
+# number is NOT in the checkpoint: `modeling_molmoact2.py` resolves
+# `steps = int(num_steps or self.config.flow_matching_num_steps)` against the
+# BACKBONE's HF config, whose `flow_matching_num_steps` defaults to 10
+# (`molmoact2_hf_model/configuration_molmoact2.py`), and nothing on the rollout
+# path passes `num_steps`. Stated here rather than left as "unknown" because
+# "unknown" is what made the panel offer 8 — `num_flow_timesteps` (default 8) is
+# a TRAINING knob (how many flow timesteps each example is sampled at to build
+# the loss) and is never read at inference. Re-verify on a lerobot pin bump: it
+# is the pin's default, not ours.
+MOLMOACT2_FLOW_STEPS_DEFAULT = 10
+
+
+def policy_flow_steps_field(policy_type: object) -> str | None:
+    """The config field a flow-steps override has to write for this policy.
+
+    ``object`` rather than ``str`` for the same reason `policy_requires_task`
+    takes one: every caller reads the type straight out of a checkpoint's
+    config.json, where it can be missing or, in a corrupt file, anything at
+    all. None means "this architecture has no such knob" — which is the answer
+    that makes the caller DROP the override rather than send a flag that dies
+    in the container after a paid cold start.
+    """
+    if not isinstance(policy_type, str):
+        return None
+    return POLICY_FLOW_STEPS_FIELDS.get(policy_type)
+
+
+def policy_supports_model_dtype(policy_config: Mapping[str, Any]) -> bool:
+    """Whether ``--model-dtype`` has anything to write on this checkpoint.
+
+    Answered from the SAVED config rather than from a table of policy types,
+    because a saved config.json is a dataclass dump: every field the config
+    class declares is a key in it, so key presence IS "the class has this
+    field" — and it stays right through a pin bump that gives another family
+    the knob. In this pin MolmoAct2 is the only one (`model_dtype: "bfloat16"`).
+
+    One function so the two places that ask cannot drift: the policy-config
+    route (which disables the panel's select) and `modal_launcher` (which drops
+    the flag before spending a cold start on a `SystemExit`).
+    """
+    return "model_dtype" in policy_config
+
+
+def policy_flow_steps_default(policy_config: Mapping[str, Any]) -> int | None:
+    """The step count this checkpoint would run with, or None when unknown.
+
+    Read off the checkpoint's own saved config, so it is what the panel shows
+    beside "Checkpoint default".
+
+    ONE exception, and it is the family the knob is for: a MolmoAct2 whose
+    ``num_inference_steps`` is absent or null answers
+    ``MOLMOACT2_FLOW_STEPS_DEFAULT`` (10) rather than None, because the number
+    that applies is a documented constant in the pin's own backbone config, not
+    an unknown — see that constant for the citation. A saved value still wins;
+    this is the fallback the container itself takes.
+
+    Non-positive and non-integral values answer None (`bool` explicitly, since
+    it is an `int` subclass): every policy config validates this itself at
+    construction, so anything else means a hand-edited config, and the honest
+    answer downstream is "unknown" rather than a number somebody sets a latency
+    budget from. That includes a hand-edited MolmoAct2 — only null (or absent)
+    takes the documented fallback.
+    """
+    policy_type = policy_config.get("type")
+    field = policy_flow_steps_field(policy_type)
+    if field is None:
+        return None
+    value = policy_config.get(field)
+    if value is None and policy_type == MOLMOACT2:
+        return MOLMOACT2_FLOW_STEPS_DEFAULT
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
+
+
 # One install manager per install target (lerobot[smolvla] / lerobot[pi] / …),
 # created lazily so pi0 and pi0_fast share the lerobot[pi] install.
 _policy_install_managers: dict[str, InstallManager] = {}

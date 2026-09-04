@@ -616,6 +616,7 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
     policy_path: str,
     task: str = "",
     model_dtype: str = "",
+    flow_steps: int = 0,
     horizon: int = 16,
     fps: int = 30,
     duration: float = 0.0,
@@ -685,6 +686,7 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
         "policy_path": policy_path,
         "task": task,
         "model_dtype": model_dtype,
+        "flow_steps": flow_steps,
         "horizon": horizon,
         "fps": fps,
         "duration": duration,
@@ -729,6 +731,15 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
         # autocast, so `--model-dtype bfloat16` is the escape hatch. Measure
         # first, then decide.
         argv += ["--model-dtype", model_dtype]
+    if flow_steps:
+        # Same shape and the same rule as --model-dtype: an OPERATOR OPT-IN the
+        # server applies before weights load, never a default this side picks.
+        # Unset is 0 — no sampler takes zero steps, so the absence of the flag
+        # is the only way to say "leave the checkpoint's own count alone" — and
+        # WHICH config field it writes is per policy family (see
+        # utils.system.POLICY_FLOW_STEPS_FIELDS). Fewer steps is less GPU work
+        # per chunk and a coarser action trajectory; measure before trusting it.
+        argv += ["--flow-steps", str(flow_steps)]
     if task:
         argv += ["--task", task]
     sys.argv = argv
@@ -813,6 +824,7 @@ def main(  # nosec B107 — the empty `*_secret` defaults are "flag not passed",
     policy_path: str,
     task: str = "",
     model_dtype: str = "",
+    flow_steps: int = 0,
     horizon: int = 16,
     fps: int = 30,
     duration: float = 0.0,
@@ -857,6 +869,7 @@ def main(  # nosec B107 — the empty `*_secret` defaults are "flag not passed",
         policy_path=policy_path,
         task=task,
         model_dtype=model_dtype,
+        flow_steps=flow_steps,
         horizon=horizon,
         fps=fps,
         duration=duration,
