@@ -23,8 +23,12 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
+from importlib.metadata import requires
+from pathlib import Path
 from typing import Any
 
+from packaging.requirements import Requirement
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -261,6 +265,69 @@ def handle_install_wandb_extra_status() -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# The lerobot pin
+# --------------------------------------------------------------------------- #
+# lerobot is pinned by SHA to the makermods fork, with the extras that carry
+# every arm stack this app drives. Any install that names a bare ``lerobot``
+# resolves against PyPI and would REPLACE that fork — silently breaking the
+# CAN/Feetech buses and the pin. So anything installing lerobot into this
+# environment (or a cloud container) composes its spec from the pin below.
+# Lives here rather than in runners/hf_cloud.py because utils.system is a leaf
+# module: makermodslab.jobs already imports it, and jobs is on hf_cloud's
+# import path, so the dependency can only run in this direction.
+
+
+def _pinned_lerobot_requirement() -> Requirement:
+    """The exact lerobot requirement MakerMods Lab was installed with (the pyproject pin).
+
+    Primary source is the installed distribution's metadata — generated from
+    pyproject.toml at install time, so there is no second hardcoded copy of the
+    sha and, crucially, it matches the lerobot actually importable on this host.
+    Falls back to parsing pyproject.toml directly when running from a source
+    tree without installed metadata.
+    """
+    candidates: list[str] = []
+    with contextlib.suppress(Exception):
+        candidates = requires("makermodslab") or []
+    if not any("lerobot" in c for c in candidates):
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        candidates = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
+    for line in candidates:
+        with contextlib.suppress(Exception):
+            parsed = Requirement(line)
+            if parsed.name.lower() == "lerobot":
+                return parsed
+    raise RuntimeError("Could not resolve the lerobot pin from MakerMods Lab metadata or pyproject.toml")
+
+
+def _compose_lerobot_spec(pin: Requirement, install_target: str) -> str:
+    """Pip requirement that adds ``install_target``'s extra to the pinned lerobot.
+
+    Pure: takes the pin, returns the spec. `install_target` is a
+    ``lerobot[extra]`` string from POLICY_EXTRAS; its extras are UNIONED with
+    the pin's own so the arm stacks (feetech/maker/damiao/rebot) survive the
+    reinstall instead of being dropped from the resolved distribution.
+
+    The pin's URL is carried through verbatim — unlike
+    ``hf_cloud.cloud_lerobot_spec``, which rewrites ``git+…@ref`` to a source
+    archive because the training image has no git binary. This install runs on
+    the host, where git is a given and the git+ form is exactly what pyproject
+    already asked for.
+    """
+    extras = set(pin.extras) | set(Requirement(install_target).extras)
+    name = f"lerobot[{','.join(sorted(extras))}]" if extras else "lerobot"
+    if pin.url:
+        return f"{name} @ {pin.url}"
+    # Future-proofing: a PyPI-version pin flows through as a plain specifier.
+    return f"{name}{pin.specifier}"
+
+
+def pinned_lerobot_install_spec(install_target: str) -> str:
+    """``install_target`` re-expressed against the pinned fork, for local install."""
+    return _compose_lerobot_spec(_pinned_lerobot_requirement(), install_target)
+
+
+# --------------------------------------------------------------------------- #
 # Policy extras
 # --------------------------------------------------------------------------- #
 # Some LeRobot policies import an optional extra at construction time; training
@@ -289,7 +356,12 @@ def _policy_install_manager(policy_type: str) -> InstallManager | None:
     target = spec[1]
     mgr = _policy_install_managers.get(target)
     if mgr is None:
-        mgr = InstallManager(target)
+        # NOT the bare `target`: `uv pip install lerobot[smolvla]` resolves
+        # against PyPI and would swap the SHA-pinned fork out from under the
+        # running app. Install the same extra AT the pin instead. Raises rather
+        # than falling back to the bare name — a loud failure beats silently
+        # clobbering the fork (same posture as hf_cloud.cloud_lerobot_spec).
+        mgr = InstallManager(pinned_lerobot_install_spec(target))
         _policy_install_managers[target] = mgr
     return mgr
 
@@ -300,6 +372,15 @@ def handle_get_policy_extra(policy_type: str) -> dict[str, Any]:
     Probed live (not cached at import) so a restart after installing is picked
     up. Policies that need nothing report ``available`` so the UI never blocks
     them.
+
+    ``install_hint`` deliberately carries NO runnable command. The obvious one
+    (``pip install 'lerobot[smolvla]'``) resolves against PyPI and would replace
+    the SHA-pinned fork the arm stacks run on — the same foot-gun
+    _policy_install_manager fixes for the in-app button. A hint the user can
+    copy into a shell has to be the pinned spec or nothing, and the pinned spec
+    is a 140-character URL nobody should be retyping; so the hint points at the
+    button that composes it correctly instead. ``install_target`` stays the bare
+    extra id — it is the UI's handle, not a command.
     """
     spec = POLICY_EXTRAS.get(policy_type)
     if spec is None:
@@ -322,7 +403,10 @@ def handle_get_policy_extra(policy_type: str) -> dict[str, Any]:
         "available": available,
         "package": probe,
         "install_target": target,
-        "install_hint": f"pip install '{target}'",
+        "install_hint": (
+            f"Use the in-app Install button — {target} must be installed at "
+            "MakerMods Lab's pinned lerobot fork, not from PyPI."
+        ),
     }
 
 
