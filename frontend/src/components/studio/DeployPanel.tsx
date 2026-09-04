@@ -1095,8 +1095,17 @@ const DeployPanel: React.FC = () => {
   // Prefill the task from the dataset the selected checkpoint was trained on.
   // Typing it by hand means retyping a sentence that already exists, and a
   // typo'd task is invisible until the policy underperforms.
+  //
+  // Sourced from the CHECKPOINT (policyConfig, addressed by owner + step), with
+  // the job record only as a fallback for a backend too old to send the field.
+  // The record is the wrong source twice over: an import's carries the
+  // "(imported)" placeholder rather than a repo id, and on a resume chain the
+  // tip's record does not describe a checkpoint owned by an ancestor. Keying on
+  // policyConfig also means the lookup re-runs when the STEP changes, which
+  // keying on selectedJob never did.
   useEffect(() => {
-    const repoId = selectedJob?.config?.dataset_repo_id;
+    const repoId =
+      policyConfig?.dataset_repo_id ?? selectedJob?.config?.dataset_repo_id;
     if (!repoId || repoId === "(imported)") {
       setDatasetTasks([]);
       return;
@@ -1126,7 +1135,7 @@ const DeployPanel: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [selectedJob, baseUrl, fetchWithHeaders]);
+  }, [policyConfig, selectedJob, baseUrl, fetchWithHeaders]);
 
   // Drop the operator's typed overrides when the POLICY changes.
   //

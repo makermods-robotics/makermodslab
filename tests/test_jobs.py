@@ -4791,6 +4791,41 @@ def test_policy_config_summary_arm_is_none_when_unrecoverable(
     assert reg.get_policy_config_summary(rec.id, 0)["trained_on_robot_type"] is None
 
 
+def test_policy_config_summary_reports_the_training_dataset(tmp_path, tmp_lerobot_home) -> None:
+    """The Deploy panel prefills the task description from this, and an IMPORT
+    is exactly the case the job record can't answer: its config carries the
+    "(imported)" placeholder, while the checkpoint's own train_config.json
+    names the real repo."""
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    _make_pretrained(model)
+    (model / "train_config.json").write_text(_json.dumps({"dataset": {"repo_id": "user/corrections"}}))
+
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    # The record really does hold the placeholder — the checkpoint is what
+    # rescues the answer, which is the whole point of reading train_config.
+    assert rec.config.dataset_repo_id == "(imported)"
+    assert reg.get_policy_config_summary(rec.id, 0)["dataset_repo_id"] == "user/corrections"
+
+
+def test_policy_config_summary_dataset_is_none_for_the_imported_placeholder(
+    tmp_path, tmp_lerobot_home
+) -> None:
+    """ "(imported)" is a sentinel, not a repo id. With no train_config.json to
+    override it the field must be null — reporting the placeholder would send
+    the client off to fetch a dataset that cannot exist."""
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    _make_pretrained(model)  # config.json only, no train_config.json
+
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    assert reg.get_policy_config_summary(rec.id, 0)["dataset_repo_id"] is None
+
+
 @pytest.mark.parametrize(
     ("policy_type", "expected"),
     [("act", False), ("smolvla", True), ("some_future_policy", None)],

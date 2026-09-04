@@ -5249,10 +5249,13 @@ class JobRegistry:
         height/width, whether the policy needs a --task string, the flat
         state/action widths, and the arm the checkpoint was trained on.
 
-        The arm isn't in config.json — it's recovered via train_config.json's
-        dataset repo id → that dataset's meta/info.json robot_type. None
-        whenever any hop can't be made (an imported flat model, a deleted
-        training dataset, an untagged one); the fine-tune panel treats None as
+        Neither the training dataset nor the arm is in config.json. Both come
+        from train_config.json: it names the dataset repo id (returned as
+        `dataset_repo_id`, and what the Deploy panel prefills the task
+        description from), and that dataset's meta/info.json names the robot
+        (`trained_on_robot_type`). Either is None whenever a hop can't be made
+        (an imported flat model with no train_config, a deleted training
+        dataset, an untagged one); the fine-tune panel treats a None arm as
         "can't tell", not "matches"."""
         with self._lock:
             record = self._records.get(job_id)
@@ -5275,27 +5278,40 @@ class JobRegistry:
             )
         cfg = _read_checkpoint_config(match)
         policy_type = cfg.get("type")
-        # The arm the checkpoint was trained on, for the fine-tune panel's
-        # cross-arm warning: train_config.json names the training dataset, and
-        # that dataset's meta/info.json names the robot. LOCAL checkpoints only
-        # — for a hub checkpoint read_checkpoint_train_config is itself a Hub
-        # download, and read_dataset_robot_type (local-only) would almost
-        # always return None for its training dataset anyway. Not worth a
-        # network round-trip on this synchronous GET.
-        train_cfg = read_checkpoint_train_config(match) if match.source == "local" else {}
+        # The dataset this checkpoint was trained on, read from its OWN
+        # train_config.json and only then falling back to the registry record.
+        # That order matters: an import's record carries the "(imported)"
+        # placeholder rather than a repo id (see register_imported), so the
+        # record is exactly the wrong source for the one case that most needs an
+        # answer. The checkpoint knows; the record does not.
+        #
+        # Read for hub checkpoints too. The previous local-only gate was
+        # justified as "not worth a network round-trip on this synchronous GET",
+        # but _read_checkpoint_config above ALREADY downloads config.json from
+        # the same repo on this same request — train_config.json is a second
+        # small file alongside it, not a new class of cost. It also degrades to
+        # {} on any failure, so a miss costs a log line, not the response.
+        train_cfg = read_checkpoint_train_config(match)
         train_dataset = train_cfg.get("dataset")
         base_dataset_repo_id = (
             train_dataset.get("repo_id") if isinstance(train_dataset, dict) else None
         ) or record.config.dataset_repo_id
-        trained_on_robot_type = (
-            read_dataset_robot_type(base_dataset_repo_id)
-            # "(imported)" is the placeholder an import's config carries — not a
-            # real repo id, so don't even try to resolve it.
+        # "(imported)" is the placeholder an import's config carries — not a real
+        # repo id, so it must never be resolved OR reported as one.
+        dataset_repo_id = (
+            base_dataset_repo_id
             if isinstance(base_dataset_repo_id, str)
             and base_dataset_repo_id
             and base_dataset_repo_id != "(imported)"
             else None
         )
+        # The arm the checkpoint was trained on, for the fine-tune panel's
+        # cross-arm warning: the dataset above, then that dataset's
+        # meta/info.json robot_type. read_dataset_robot_type is local-only, so a
+        # dataset that lives only on the Hub still answers None here — lifting
+        # the gate above widened which checkpoints can be ASKED, not where the
+        # answer comes from.
+        trained_on_robot_type = read_dataset_robot_type(dataset_repo_id) if dataset_repo_id else None
         input_features = cfg.get("input_features") or {}
         image_features: dict[str, dict[str, int]] = {}
         for full_name, feat in input_features.items():
@@ -5331,6 +5347,18 @@ class JobRegistry:
             # Raw lerobot robot_type string (e.g. "maker_follower"); the client
             # normalises it. None when it can't be established.
             "trained_on_robot_type": trained_on_robot_type,
+            # The dataset this checkpoint was trained on, from its own
+            # train_config.json (see above). None when the lineage offers no real
+            # id — an imported flat model repo with no train_config, or a record
+            # still carrying the "(imported)" placeholder.
+            #
+            # The Deploy panel prefills the task description from this rather
+            # than from the selected JOB's config: a job record is the wrong
+            # source twice over — an import's is a placeholder, and on a resume
+            # chain the tip's record does not describe a checkpoint owned by an
+            # ancestor. Addressed by (owner, step), this is the checkpoint's own
+            # provenance.
+            "dataset_repo_id": dataset_repo_id,
         }
 
     def _queued_dependents_of(self, record: JobRecord) -> builtins.list[str]:

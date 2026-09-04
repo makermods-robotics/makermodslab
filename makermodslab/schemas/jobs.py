@@ -129,7 +129,15 @@ class CheckpointPolicyConfigResponse(BaseModel):
     inference engine; null means the policy type isn't one the server knows
     (a fork newer than jobs.policy_type_supports_rtc's table), which the client
     must read as "offer it and let the server decide", not as "no". The route
-    declares no exclude_none/exclude_unset, so the key is always present."""
+    declares no exclude_none/exclude_unset, so the key is always present.
+
+    dataset_repo_id is the dataset the checkpoint was trained on, read from its
+    own train_config.json — null when the lineage offers no real id (an
+    imported flat model repo, or a record still carrying the "(imported)"
+    placeholder, which is never reported as a repo id). Clients should prefer
+    it over the owning job record's config.dataset_repo_id: the record is a
+    placeholder for imports, and on a resume chain the tip's record does not
+    describe a checkpoint owned by an ancestor."""
 
     policy_type: str | None
     image_features: dict[str, CheckpointImageFeature]
@@ -138,6 +146,7 @@ class CheckpointPolicyConfigResponse(BaseModel):
     state_dim: int | None
     action_dim: int | None
     trained_on_robot_type: str | None
+    dataset_repo_id: str | None
 
 
 class HubJobStatus(BaseModel):
