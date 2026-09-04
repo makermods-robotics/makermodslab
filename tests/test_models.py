@@ -1208,6 +1208,48 @@ def test_published_repo_state_is_cached_for_the_picker(registry) -> None:
         assert fake_api.list_repo_files.call_count == 2
 
 
+def test_invalidate_model_hub_info_evicts_the_published_state_cache(registry) -> None:
+    """A repo deleted on the Hub (forget_hub_repo -> invalidate_model_hub_info)
+    must not keep answering the publish picker with its pre-delete checkpoints
+    for the 30s TTL. The probe cache is keyed the same way /models/info's is,
+    and the same mutations invalidate both."""
+    from makermodslab.models import _published_repo_state, invalidate_model_hub_info
+
+    fake_api = MagicMock()
+    fake_api.list_repo_files.return_value = ["checkpoints/000300/pretrained_model/config.json"]
+    with patch("makermodslab.models.shared_hf_api", return_value=fake_api):
+        assert _published_repo_state("user/gone").steps == {300: "000300"}
+
+        invalidate_model_hub_info("user/gone")
+
+        fake_api.list_repo_files.return_value = []
+        assert _published_repo_state("user/gone").steps == {}
+        assert fake_api.list_repo_files.call_count == 2
+
+
+def test_forget_hub_repo_evicts_the_published_state_cache(registry) -> None:
+    """The user-facing path: deleting the repo on the Hub. forget_hub_repo runs
+    the full invalidation, so the picker re-probes instead of badging vanished
+    checkpoints as published."""
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    from makermodslab.models import _published_repo_state, forget_hub_repo
+
+    fake_api = MagicMock()
+    fake_api.list_repo_files.return_value = ["checkpoints/000300/pretrained_model/config.json"]
+    with patch("makermodslab.models.shared_hf_api", return_value=fake_api):
+        assert _published_repo_state("user/deleted").steps == {300: "000300"}
+
+        forget_hub_repo("user/deleted")
+
+        fake_api.list_repo_files.side_effect = RepositoryNotFoundError(
+            "gone", response=MagicMock(status_code=404, headers={})
+        )
+        after = _published_repo_state("user/deleted")
+        assert after.steps == {}
+        assert after.readable is True
+
+
 def test_published_repo_state_does_not_cache_failures(registry) -> None:
     """An unreadable probe ("couldn't check") must retry on the next read
     rather than pinning the warning for the whole TTL."""

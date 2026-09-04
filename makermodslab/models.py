@@ -2043,10 +2043,18 @@ _MODEL_HUB_INFO_LOCK = threading.Lock()
 
 
 def invalidate_model_hub_info(repo_id: str) -> None:
-    """Drop the cached Hub metadata for `repo_id`, so the next /models/info
-    re-reads it (e.g. after an upload changed the repo's tags/size)."""
+    """Drop everything cached about `repo_id`'s state on the Hub, so the next
+    read re-fetches it: the /models/info metadata (tags/size) and the
+    published-checkpoints probe the publish dialog's checkpoint picker runs
+    (_published_repo_state). Both answer "what does the Hub hold for this repo",
+    and every caller here has just changed exactly that — an upload, a local
+    delete, a hide, or forget_hub_repo after the repo was deleted on the Hub.
+    Leaving the probe's 30s cache warm let the picker keep badging checkpoints
+    as already-published for up to 30s after they were gone."""
     with _MODEL_HUB_INFO_LOCK:
         _MODEL_HUB_INFO_CACHE.pop(repo_id, None)
+    with _published_state_lock:
+        _published_state_cache.pop(repo_id, None)
 
 
 def _hub_model_probe(repo_id: str) -> dict[str, Any] | None:
