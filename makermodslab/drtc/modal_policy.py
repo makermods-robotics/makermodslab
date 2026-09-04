@@ -341,22 +341,49 @@ image = (
         "git", "ffmpeg", "libgl1", "libglib2.0-0", "build-essential", "cmake", "curl", "ca-certificates"
     )
     .pip_install("uv")
+    # lerobot is pinned to the SAME SHA as pyproject.toml — the Lab's fork,
+    # `makermods-robotics/lerobot`. THE TWO PINS MOVE TOGETHER OR NOT AT ALL;
+    # `tests/test_drtc_modal_wrappers.py` reads both files and asserts it, so
+    # they cannot drift apart again the way they had by S3.7.
+    #
+    # Until 2026-09-03 this said upstream `huggingface/lerobot@8414188d` and
+    # argued for it. Two things make the fork the right pin now:
+    #   * upstream 8414188d is lerobot **0.5.2**, which has no `supports_rtc`
+    #     anywhere in the tree — the RTC server cannot ask a policy whether
+    #     in-painting is even possible, and MolmoAct2 cannot be served at all.
+    #     The fork is 0.6.2 and declares it on seven policies.
+    #   * the fork is what the LAB itself runs, and config compatibility follows
+    #     the lerobot that WROTE the checkpoint, not the highest version number.
+    #     Training on the fork and serving on upstream is the same class of
+    #     mismatch the old comment warned about for PI05Config, just pointed the
+    #     other way.
+    # Do NOT use bare `lerobot` (PyPI) for either reason. Building from git needs
+    # the `git` apt package (installed above). A bump here is a real lerobot bump
+    # per CLAUDE.md: re-run a known-good SmolVLA RTC session on the new image
+    # before declaring it good.
+    #
+    # `pydantic` is explicit rather than transitive: the servers import
+    # `makermodslab.utils.system` (the policy-requirement helpers), which imports
+    # it, and nothing else in this image pulls it in.
+    #
     # livekit-portal comes from PyPI, pinned to the same version as
-    # pyproject.toml so robot and GPU sides speak the identical wire code.
+    # pyproject.toml's `[drtc]` extra so robot and GPU sides speak the identical
+    # wire code (Portal fingerprints the schema and drops mismatched packets
+    # SILENTLY — a healthy-looking session with zero chunks).
     .run_commands(
         "uv pip install --system --compile-bytecode "
+        # fastapi is this wrapper's alone: it serves the /reset endpoint.
         '"fastapi[standard]" '
-        '"livekit-api>=0.7" "python-dotenv>=1" "numpy>=1.24" '
+        '"livekit-api>=0.7" "python-dotenv>=1" "numpy>=1.24" "pydantic>=2" '
         '"livekit-portal==0.2.4" '
-        # Pinned to the SAME upstream lerobot commit as pyproject.toml, not bare
-        # `lerobot` (PyPI 0.6.0), so Modal loads models whose config.json was
-        # saved on main — see modal_policy_rtc.py for the full rationale. Bump on
-        # retrain. Needs the `git` apt package (installed above).
-        # [smolvla] pulls the flow-policy runtime deps (transformers, accelerate,
-        # num2words). SmolVLA/pi0/pi05 all import transformers; without the extra
-        # from_pretrained fails with "transformers is required".
-        '"lerobot[smolvla] @ git+https://github.com/huggingface/lerobot.git'
-        '@8414188db0b178b947985a7a9a91314708837315"'
+        # [pi,smolvla,molmoact2] pulls the flow-policy runtime deps
+        # (transformers, scipy, accelerate, num2words, peft). pi0/pi05/smolvla/
+        # molmoact2 all import transformers; without the extras, from_pretrained
+        # fails with "transformers is required". molmoact2 adds only peft (~1 MB)
+        # and scipy (~35 MB) on top of what [pi,smolvla] already pulls, and all
+        # three extras resolve the same transformers range — no conflict.
+        '"lerobot[pi,smolvla,molmoact2] @ git+https://github.com/makermods-robotics/lerobot.git'
+        '@eaab69339120787948776e4354dcee09f501fd16"'
     )
     # Tailscale, for the `--tailscale` hybrid transport (signaling over the
     # tailnet; media still direct UDP). Installed from Tailscale's own apt repo,
@@ -455,6 +482,7 @@ _BASE_SECRETS = [
 def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not passed", not credentials
     policy_path: str,
     task: str = "",
+    model_dtype: str = "",
     horizon: int = 16,
     fps: int = 30,
     duration: float = 0.0,
@@ -514,6 +542,7 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
     run_config["last"] = {
         "policy_path": policy_path,
         "task": task,
+        "model_dtype": model_dtype,
         "horizon": horizon,
         "fps": fps,
         "duration": duration,
@@ -545,6 +574,15 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
         "--duration",
         str(duration),
     ]
+    if model_dtype:
+        # OPERATOR OPT-IN, never a default: the server overrides the config's
+        # saved `model_dtype` before weights load. The checkpoint's own value is
+        # a deliberate choice by whoever trained it (the published MolmoAct2
+        # saves float32), so the Lab does not second-guess it silently — but a
+        # ~7B model in fp32 does not fit comfortably on a 40 GB A100 and gets no
+        # autocast, so `--model-dtype bfloat16` is the escape hatch. Measure
+        # first, then decide.
+        argv += ["--model-dtype", model_dtype]
     if task:
         argv += ["--task", task]
     sys.argv = argv
@@ -621,6 +659,7 @@ def reset() -> dict:
 def main(  # nosec B107 — the empty `*_secret` defaults are "flag not passed", not credentials
     policy_path: str,
     task: str = "",
+    model_dtype: str = "",
     horizon: int = 16,
     fps: int = 30,
     duration: float = 0.0,
@@ -658,6 +697,7 @@ def main(  # nosec B107 — the empty `*_secret` defaults are "flag not passed",
     fn.remote(
         policy_path=policy_path,
         task=task,
+        model_dtype=model_dtype,
         horizon=horizon,
         fps=fps,
         duration=duration,

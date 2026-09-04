@@ -238,10 +238,94 @@ The Modal app names (`lerobot-drtc-policy`, `lerobot-drtc-full-policy`) are
 unchanged from the source repo so a deployed `/reset` URL stays valid — do not
 rename them.
 
-Note: the GPU image pins **upstream** `huggingface/lerobot@8414188`, not the
-Lab's `makermods-robotics/lerobot` fork pin from `pyproject.toml`. That is
-deliberate for now — the DRTC policy servers only need upstream policy code, and
-switching the image to the fork pin is a separate, tested step.
+The GPU image pins **the same lerobot SHA as `pyproject.toml`** — the Lab's
+`makermods-robotics/lerobot` fork, with the extras `[pi,smolvla,molmoact2]`. It
+used to pin upstream `huggingface/lerobot@8414188`; that changed in S3.7a for
+two reasons. Upstream `8414188` is lerobot 0.5.2 and has no `supports_rtc`
+anywhere in the tree, so the RTC server cannot ask a policy whether in-painting
+is possible and MolmoAct2 cannot be served at all. And the fork is what the Lab
+itself trains on — config compatibility follows the lerobot that WROTE a
+checkpoint, so a GPU on a different lerobot is the very hazard the old pin
+comment warned about, pointed the other way.
+
+**The two pins move together or not at all.**
+`tests/test_drtc_modal_wrappers.py` reads `pyproject.toml` and both wrappers as
+text and asserts one URL, one SHA, one extras list and one `livekit-portal`
+version across all three. Bumping the Lab's lerobot means editing three files,
+and per CLAUDE.md it is a real bump: re-run a known-good SmolVLA RTC session on
+the new image before declaring it good.
+
+### MolmoAct2
+
+Supported since S3.7a, on both servers. It is a ~7B vision-language policy, and
+almost everything specific to it is about size and about the task string.
+
+The public checkpoint is **`lerobot/MolmoAct2-SO100_101-LeRobot`** (ungated):
+
+| What                    | Value                                          |
+| ----------------------- | ---------------------------------------------- |
+| cameras                 | `cam0`, `cam1`, both 3×224×224                 |
+| state / action          | 6 / 6 (single SO-101 arm)                      |
+| `n_action_steps`        | **30** — so `--horizon 30`, not the default 50 |
+| `chunk_size`            | 30                                             |
+| `inference_action_mode` | `continuous` → `supports_rtc()` is True        |
+| `model_dtype`           | `float32`                                      |
+
+**`--task` is REQUIRED, and the server refuses without it.** Not a style
+preference: with no task MolmoAct2 does not fail, it renders the missing string
+into a fixed template and prompts its VLM with the literal `"The task is to ."`,
+then returns confidently wrong actions with nothing in any log to explain it.
+Phrase the task as an infinitive completion — `--task "pick up the block and put
+it in the box"`. The same rule now covers smolvla / pi0 / pi0_fast / pi05, from
+one vocabulary (`makermodslab.utils.system.policy_requires_task`) that the Lab's
+`requires_task` reads too.
+
+**`--horizon` must be 30.** `predict_action_chunk` returns `n_action_steps`
+steps; declaring 50 makes the two Portal peers disagree about the action-chunk
+shape, the fingerprint stops matching, and every packet is dropped **in
+silence** — a connected session that transfers nothing. `GET
+…/policy-config` now reports `n_action_steps` so a launcher can stop guessing.
+
+**Cold start downloads 21.8 GB.** The config's `checkpoint_path` is
+`allenai/MolmoAct2-SO100_101` (5 safetensors shards), pulled into the `hf-cache`
+Volume at `/cache/huggingface` — once, then every later run reads the Volume.
+Budget several minutes before the first log line past model load, and note the
+download starts EARLY: `_apply_norm_tag_metadata` snapshot-downloads the repo
+before `_load_hf_model` does, just to read a 4.8 KB `norm_stats.json`. The image
+itself grows only ~40 MB (peft + scipy).
+
+**`model_dtype` is `float32` on a 40 GB `A100` — measure before changing it.**
+~7B in fp32 is ~28 GB of weights before activations, and `predict_action_chunk`
+only applies `autocast` for bf16/fp16, so fp32 runs full fp32 compute. If it
+OOMs or cannot keep up, the operator's opt-in is:
+
+```bash
+modal run makermodslab/drtc/modal_policy_rtc.py \
+    --policy-path lerobot/MolmoAct2-SO100_101-LeRobot \
+    --task "pick up the block and put it in the box" \
+    --horizon 30 --fps 30 --s-min 4 --video-codec H264 \
+    --model-dtype bfloat16 \
+    --livekit-room <the room the panel shows>
+```
+
+`--model-dtype` (float32 | bfloat16 | float16) is on BOTH wrappers and both
+servers, defaults to unset, and when unset the checkpoint's saved value is used
+exactly as saved. When set it replaces that value **before weights load** and
+logs the override; the Lab never changes it silently. `gpu="A100-80GB"` is the
+other lever — it respects the checkpoint but bills more on every run, including
+the ones that did not need it.
+
+**A discrete-mode checkpoint degrades instead of raising.** `enable_rtc()` now
+consults `supports_rtc()` (MolmoAct2's is literally `inference_action_mode ==
+"continuous"`), so a discrete checkpoint serves plain chunks with a logged
+reason rather than reporting `RTC ENABLED` and then raising on every inference.
+
+**Not yet: starting one from the UI.** The checkpoint's cameras are `cam0` /
+`cam1`, no robot record has cameras by those names, and the Deploy panel binds
+checkpoint cameras to robot cameras purely by name match with no manual picker —
+so every binding lands in `unmatchedCameras` and Start stays disabled. Launch it
+by hand (or from the panel's generated command line) until S3.7b lands the
+per-role picker.
 
 ## Robot side
 
@@ -413,7 +497,8 @@ needs only that one file plus
 ```bash
 pytest tests/test_drtc_schedule.py tests/test_drtc_env.py \
        tests/test_drtc_protocol.py tests/test_drtc_pose.py \
-       tests/test_drtc_robot_sync.py tests/test_drtc_robot_rtc.py
+       tests/test_drtc_robot_sync.py tests/test_drtc_robot_rtc.py \
+       tests/test_drtc_modal_wrappers.py
 ```
 
 - `tests/test_drtc_schedule.py` — the offline core: absolute-step alignment,
@@ -436,8 +521,14 @@ pytest tests/test_drtc_schedule.py tests/test_drtc_env.py \
   redefines a piece of `_session_glue` locally. The shield's own unit tests
   `importorskip` the extra; everything read off the source runs everywhere,
   which matters because those are the halves a refactor drops.
+- `tests/test_drtc_modal_wrappers.py` — the GPU image's pins equal the Lab's
+  own: one lerobot fork URL + SHA, one extras list including `molmoact2`, and
+  one `livekit-portal` version across `pyproject.toml` and BOTH wrappers, plus
+  that `--model-dtype` is forwarded end to end. Reads the files as TEXT, because
+  the wrappers import `modal` at their top level and are not importable in CI —
+  and because the pins are string literals, which is what a hand-edit breaks.
 
-None needs LiveKit, hardware or a GPU, so all six run in ordinary CI without
+None needs LiveKit, hardware or a GPU, so all seven run in ordinary CI without
 the extra installed. The `return_to_rest_pose` poll loop itself is deliberately
 NOT re-tested here — it settles for `RETURN_SETTLE_S` and is already covered by
 the replay tests; driving it would mean sleeping.
@@ -452,6 +543,22 @@ python -m makermodslab.drtc._sync_player
 ## Done since the port
 
 The design record is [`SLICE3.md`](SLICE3.md).
+
+### S3.7a (2026-09-03) — MolmoAct2, and the GPU image joins the Lab's pin
+
+The backend half. Both wrapper images moved from upstream `lerobot@8414188`
+(0.5.2, no `supports_rtc`) to the SAME fork SHA `pyproject.toml` pins, with
+`[pi,smolvla,molmoact2]`; `tests/test_drtc_modal_wrappers.py` now asserts the
+two pins are equal so they cannot drift again. Both servers gained an opt-in
+`--model-dtype` applied BEFORE weights load, refuse to start when a
+language-conditioned policy has no `--task` (one vocabulary shared with the
+Lab's `requires_task`, which gained `molmoact2`), and fill a MolmoAct2
+`inference_action_mode` only when the checkpoint saved none.
+`policy_rtc.enable_rtc()` now consults the policy's own `supports_rtc()`, so a
+discrete checkpoint degrades to plain chunks instead of raising once per
+inference. `…/policy-config` reports `n_action_steps` and `chunk_size`. See the
+MolmoAct2 section above for what an actual run needs; the UI half (camera role
+binding) is S3.7b.
 
 ### S3.8 (2026-09-03) — the Lab launches the GPU
 
@@ -577,6 +684,14 @@ What that slice landed, `robot_sync` only (all of it is now shared):
   is in the room before it energizes anything, refusing with a coded
   `transport.*` otherwise. Running `modal run makermodslab/drtc/modal_policy.py`
   by hand in another terminal remains fully supported.
+- **MolmoAct2 cannot be STARTED from the UI yet.** The backend is in (S3.7a,
+  above), but the published checkpoint's cameras are `cam0` / `cam1` and the
+  Deploy panel binds checkpoint cameras to robot cameras by NAME MATCH with no
+  manual picker — every binding lands in `unmatchedCameras` and Start stays
+  disabled. Launch it by hand, or from the panel's generated command line, until
+  S3.7b adds the per-role picker. The panel also still defaults the RTC horizon
+  to 50, where this checkpoint needs 30; `…/policy-config` now carries
+  `n_action_steps` so S3.7b can read it instead of the operator typing it.
 - **No CAN-arm support here, and none planned in this slice.** `maker_follower`
   / `metal_follower` are not registered with draccus in either entrypoint, so
   `--robot.type=maker_follower` fails at CLI-parse time inside the child —

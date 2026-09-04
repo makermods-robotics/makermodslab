@@ -82,6 +82,20 @@ CLI knobs:
   --max-guidance-weight       RTCConfig.max_guidance_weight (default 10.0)
   --rtc-schedule              linear | exp | ones | zeros (prefix_attention_schedule)
   --raw-cache-size            LRU size for the raw-chunk cache (default 32)
+  --task                      REQUIRED for a language-conditioned policy
+  --model-dtype               override the checkpoint's saved precision (opt-in)
+
+Why the interesting decisions are not made in this file
+-------------------------------------------------------
+This module imports `livekit.portal` and `torch`, so CI cannot import it and
+nothing here can carry a unit test. Every judgement that has a right and a wrong
+answer is therefore delegated to a PURE helper in
+``makermodslab.utils.system`` — which types need a task
+(``policy_requires_task``) and what to do about a missing MolmoAct2 action mode
+(``molmoact2_inference_action_mode``) — where `tests/test_utils_system.py`
+covers it. What is left here is wiring: read a flag, call the helper, print, and
+either refuse or proceed. Keep it that way; a decision that grows a branch
+belongs in the helper, not below.
 """
 
 from __future__ import annotations
@@ -99,6 +113,7 @@ from livekit.portal import Observation, Operator, OperatorConfig, VideoCodec, fr
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 
+from ..utils.system import molmoact2_inference_action_mode, policy_requires_task
 from ._common import load_env, mint_token, required_env
 from ._schema_rtc import (
     CHUNK_NAME,
@@ -149,6 +164,36 @@ def enable_rtc(
         )
         return False
 
+    # The hooks above are a CLASS-level signal; ``supports_rtc()`` is the
+    # policy's own answer, and for one policy it is per-CHECKPOINT rather than
+    # per-architecture: MolmoAct2's is literally
+    # ``inference_action_mode == "continuous"``. Without this consult a discrete
+    # checkpoint reports "RTC ENABLED" and then raises on EVERY inference
+    # ("RTC is only supported for continuous MolmoAct2 inference") instead of
+    # degrading the way ACT does. Deliberately asked of every policy, not just
+    # MolmoAct2 — but it changes nothing for the ones already served here:
+    # pi0/pi05/smolvla all `return True` unconditionally on this pin, and the
+    # policies that return the base class's False never reach this line (they
+    # have no ``init_rtc_processor``). A raising or missing ``supports_rtc`` is
+    # read as "can't tell, proceed": this is a refinement of the hook check, not
+    # a second gate that can newly refuse a policy the servers used to run.
+    declares = getattr(policy, "supports_rtc", None)
+    if callable(declares):
+        try:
+            declared = bool(declares())
+        except Exception as exc:  # noqa: BLE001 — an unanswerable question is not a refusal
+            print(f"[policy] {type(policy).__name__}.supports_rtc() raised ({exc!r}); assuming yes")
+            declared = True
+        if not declared:
+            print(
+                f"[policy] WARNING: {type(policy).__name__}.supports_rtc() is False for THIS "
+                "checkpoint; serving PLAIN chunks. For MolmoAct2 that means the checkpoint "
+                "runs discrete actions (inference_action_mode != 'continuous') — RTC "
+                "in-painting needs continuous ones. The robot may still send the RTC state "
+                "fields; they are ignored."
+            )
+            return False
+
     from lerobot.configs import RTCAttentionSchedule
     from lerobot.policies.rtc.configuration_rtc import RTCConfig
 
@@ -176,11 +221,86 @@ def enable_rtc(
     return ok
 
 
-def load_policy(policy_path: str, device: torch.device):
-    """Load any lerobot policy + its pre/post processors from a checkpoint."""
+def load_policy(policy_path: str, device: torch.device, task: str = "", model_dtype: str = ""):
+    """Load any lerobot policy + its pre/post processors from a checkpoint.
+
+    Three things happen BEFORE the weights load, and the ordering is the point —
+    the first checkpoint this matters for pulls a 21.8 GB base VLM, so a
+    refusal or an override that lands after the download is worth nothing.
+
+    * **A language-conditioned policy with no ``--task`` is refused outright.**
+      MolmoAct2 is why: with an empty task it does not fail, it DEGRADES
+      SILENTLY — its processor renders the missing string into a fixed template
+      and prompts the VLM with the literal "The task is to .". Which types
+      those are is ``utils.system.policy_requires_task``, the SAME vocabulary
+      the Lab's ``requires_task`` reads, so the launch panel and the GPU can
+      never disagree about whether a run needs a task.
+    * **``--model-dtype``, when passed, replaces the config's saved dtype.** It
+      has to happen here: the dtype is read while the base model is being
+      constructed, so assigning it afterwards would change nothing. Never a
+      default and never silent (see the flag's help).
+    * **A missing ``inference_action_mode`` is filled in, and only a missing
+      one.** ``utils.system.molmoact2_inference_action_mode`` decides, again so
+      the Lab and the GPU answer identically.
+
+    ``config=`` is handed to ``from_pretrained`` only when something actually
+    changed, so a run that passes neither flag loads exactly as it did before.
+    """
     policy_cfg = PreTrainedConfig.from_pretrained(policy_path)
+    policy_type = getattr(policy_cfg, "type", "")
+
+    if policy_requires_task(policy_type) and not task:
+        raise SystemExit(
+            f"--task is required for a '{policy_type}' policy. It is language-conditioned, "
+            "and an empty task does not fail — it degrades silently (MolmoAct2 prompts its "
+            'VLM with the literal "The task is to ."). Pass --task "<what the robot should '
+            'do>", phrased as an infinitive completion.'
+        )
+
+    overridden = False
+
+    if model_dtype:
+        if not hasattr(policy_cfg, "model_dtype"):
+            raise SystemExit(
+                f"--model-dtype={model_dtype!r} was passed, but {type(policy_cfg).__name__} "
+                f"('{policy_type}') has no model_dtype field — this policy's precision is not "
+                "configurable that way. Drop the flag rather than have it be silently ignored."
+            )
+        if not isinstance(getattr(torch, model_dtype, None), torch.dtype):
+            raise SystemExit(
+                f"--model-dtype={model_dtype!r} does not name a torch dtype. "
+                "Use float32, bfloat16 or float16."
+            )
+        print(
+            f"[policy] --model-dtype: OVERRIDING the checkpoint's saved "
+            f"model_dtype={policy_cfg.model_dtype!r} with {model_dtype!r} before weights load "
+            "(operator opt-in; without the flag the checkpoint's own value is used as saved)"
+        )
+        policy_cfg.model_dtype = model_dtype
+        overridden = True
+
+    # A GAP FILL, never an override. `MolmoAct2Config.inference_action_mode`
+    # defaults to None and the policy raises on None, so a checkpoint that saved
+    # no mode cannot be served at all; the published one saves "continuous" and
+    # a discrete one saves "discrete", and forcing either would break the other.
+    # No other config in the pin has this field, so the guard is self-scoping.
+    if getattr(policy_cfg, "inference_action_mode", "unset") is None:
+        mode = molmoact2_inference_action_mode(
+            {"type": policy_type, "action_mode": getattr(policy_cfg, "action_mode", None)}
+        )
+        print(
+            f"[policy] checkpoint saved no inference_action_mode; using {mode!r}, derived "
+            "from its action_mode (lerobot raises on None, so there is no do-nothing option)"
+        )
+        policy_cfg.inference_action_mode = mode
+        overridden = True
+
     policy_cls = get_policy_class(policy_cfg.type)
-    policy = policy_cls.from_pretrained(policy_path)
+    policy = (
+        policy_cls.from_pretrained(policy_path, config=policy_cfg)
+        if overridden
+        else policy_cls.from_pretrained(policy_path)
+    )
     policy.to(device)
     policy.eval()
 
@@ -362,6 +482,16 @@ async def main() -> None:
     parser.add_argument("--device", default="auto", help="cuda | mps | cpu | auto")
     parser.add_argument("--task", default="", help="Language instruction for VLA policies")
     parser.add_argument(
+        "--model-dtype",
+        default="",
+        help="Override the checkpoint's saved model_dtype before weights load "
+        "(float32 | bfloat16 | float16). OPT-IN: unset means the checkpoint's "
+        "own value is used as saved. MolmoAct2's published checkpoint saves "
+        "float32, which on a 40 GB A100 is ~28 GB of weights AND gets no "
+        "autocast — measure first, then reach for bfloat16 if it OOMs or "
+        "cannot keep up.",
+    )
+    parser.add_argument(
         "--fps", type=int, default=30, help="Control/stream frequency. MUST match robot --fps."
     )
     parser.add_argument(
@@ -427,7 +557,7 @@ async def main() -> None:
 
     device = pick_device(args.device)
     print(f"[policy] loading '{args.policy_path}' on {device} ...")
-    policy, pre, post = load_policy(args.policy_path, device)
+    policy, pre, post = load_policy(args.policy_path, device, task=args.task, model_dtype=args.model_dtype)
 
     # Enable RTC in-painting. execution_horizon default = H - s_min (the RTC
     # constraint region); per-request overlap_end from the robot overrides it.

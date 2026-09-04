@@ -4799,6 +4799,54 @@ def test_policy_config_summary_rtc_is_none_when_the_type_is_unreadable(tmp_path,
     assert summary["supports_rtc"] is None
 
 
+def test_policy_config_summary_reports_the_chunk_geometry(tmp_path, tmp_lerobot_home) -> None:
+    """n_action_steps is the CEILING on a remote-inference horizon: declare
+    more than the policy returns and the two Portal peers disagree about the
+    action-chunk shape, so every packet is dropped in silence. MolmoAct2's
+    published checkpoint is 30 where the panel's default is 50, which is the
+    case this field exists to stop the operator walking into."""
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(
+        _json.dumps({"type": "molmoact2", "chunk_size": 30, "n_action_steps": 30})
+    )
+
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    summary = reg.get_policy_config_summary(rec.id, 0)
+    assert summary["n_action_steps"] == 30
+    assert summary["chunk_size"] == 30
+    # MolmoAct2 joined the language-conditioned set: it renders a missing task
+    # as the literal prompt "The task is to ." and degrades silently.
+    assert summary["requires_task"] is True
+
+
+def test_policy_config_summary_chunk_geometry_is_none_when_unusable(tmp_path, tmp_lerobot_home) -> None:
+    """Absent, non-integral or non-positive all answer null. Every policy config
+    validates these itself at construction, so a bad value here means a corrupt
+    or hand-edited config.json — "unknown" is the honest answer, not a number
+    somebody derives a horizon from."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+
+    absent = tmp_path / "absent"
+    absent.mkdir()
+    (absent / "config.json").write_text(_json.dumps({"type": "act"}))
+    summary = reg.get_policy_config_summary(reg.register_imported(str(absent)).id, 0)
+    assert summary["n_action_steps"] is None
+    assert summary["chunk_size"] is None
+
+    junk = tmp_path / "junk"
+    junk.mkdir()
+    (junk / "config.json").write_text(_json.dumps({"type": "act", "n_action_steps": "50", "chunk_size": 0}))
+    summary = reg.get_policy_config_summary(reg.register_imported(str(junk)).id, 0)
+    assert summary["n_action_steps"] is None
+    assert summary["chunk_size"] is None
+
+
 # --- Deliberate stop vs genuine failure -------------------------------------
 #
 # Regression cover for the defect where every press of Stop landed in run

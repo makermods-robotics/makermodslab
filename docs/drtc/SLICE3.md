@@ -354,13 +354,24 @@ Note the pleasant consequence of the sessions-first design: **start and stop nee
 The plan below was written before S3.5 was repurposed, so the numbers past S3.4
 no longer mean what the entries say. What actually happened, and what is left:
 
-| Slice    | What it is                                                    | State                                                            |
-| -------- | ------------------------------------------------------------- | ---------------------------------------------------------------- |
-| **S3.5** | The RTC in-painting regime becomes a session ENGINE           | **done** — repurposed from the design's "the Lab launches Modal" |
-| **S3.6** | Adopt the Lab-owned SFU (`makermodslab --sfu`) and its signer | **done** — this slice; the design's option C, earned             |
-| **S3.7** | MolmoAct2 over DRTC                                           | next                                                             |
-| **S3.8** | The Lab launches Modal (the design's old S3.5, lifecycle B)   | later                                                            |
-| **S3.9** | CAN arms                                                      | later                                                            |
+| Slice     | What it is                                                            | State                                                            |
+| --------- | --------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| **S3.5**  | The RTC in-painting regime becomes a session ENGINE                   | **done** — repurposed from the design's "the Lab launches Modal" |
+| **S3.6**  | Adopt the Lab-owned SFU (`makermodslab --sfu`) and its signer         | **done** — the design's option C, earned                         |
+| **S3.7a** | MolmoAct2 over DRTC — backend (GPU image, servers, policy metadata)   | **done** — this slice                                            |
+| **S3.7b** | MolmoAct2 over DRTC — frontend (camera role binding, horizon default) | next                                                             |
+| **S3.8**  | The Lab launches Modal (the design's old S3.5, lifecycle B)           | **done** — landed ahead of S3.7                                  |
+| **S3.9**  | UI smoothing                                                          | later                                                            |
+| **S3.10** | CAN arms                                                              | later                                                            |
+
+S3.7 split in two because its halves have nothing to do with each other: the
+backend is a lerobot pin bump plus per-checkpoint metadata, and the frontend is
+a camera-binding UI. The published MolmoAct2 checkpoint's cameras are `cam0` /
+`cam1`, no robot record has cameras by those names, and `DeployPanel` binds
+purely by name match with no manual picker — so **S3.7b is what makes a
+MolmoAct2 run startable from the UI at all**. S3.7a is startable by hand today
+(`modal run …` + the generated command line), which is what its acceptance
+recipe uses.
 
 The two entries at the bottom of this section still carry their original
 wording; read them through the table.
@@ -1204,3 +1215,163 @@ changes, and **the Lab never reads `~/.modal.toml`**: it inherits the
 environment and lets the CLI do its own thing, so a missing token surfaces as a
 fast nonzero exit that `classify_failure` turns into `gpu.unauthenticated`
 naming `modal token new`.
+
+---
+
+## S3.7a as built (2026-09-03)
+
+The backend half of MolmoAct2 over DRTC. Nothing in `frontend/`,
+`remote_inference.py`, `modal_launcher.py`, `rollout.py` or `sessions.py` was
+touched — a MolmoAct2 run is startable by hand (`modal run …`, or the panel's
+generated command line) but not yet from the UI's Start button, because the
+checkpoint's camera roles have no picker. That is S3.7b.
+
+### The GPU image moves to the fork pin, and a test holds it there
+
+Both wrappers now install
+`lerobot[pi,smolvla,molmoact2] @ git+…/makermods-robotics/lerobot.git@eaab69339`
+— the exact SHA `pyproject.toml` pins. The comment block above it used to argue
+FOR upstream; the argument it made (PyPI 0.6.0's `PI05Config` lacks fields a
+checkpoint saved on main carries) was true and is now made better by the fork:
+
+- upstream `8414188d` is lerobot **0.5.2**, which has no `supports_rtc` anywhere
+  in the tree. The RTC server cannot ask a policy whether in-painting is
+  possible, and MolmoAct2 cannot be served at all;
+- the fork is what the **Lab itself runs**, and config compatibility follows the
+  lerobot that WROTE a checkpoint. Training on the fork and serving on upstream
+  is the same mismatch the old comment warned about, pointed the other way.
+
+The drift this closes was real and silent: `pyproject.toml` moved to the fork
+twice while both wrappers stayed on an upstream SHA, and the two wrappers had
+even drifted from each OTHER (`modal_policy.py` installed `[smolvla]`,
+`modal_policy_rtc.py` `[pi,smolvla]`). So the fix is not just the edit but
+`tests/test_drtc_modal_wrappers.py`, which reads all three files as **text** —
+the wrappers import `modal` at their top level and are not importable in CI —
+and asserts one fork URL, one SHA, one extras list and one `livekit-portal`
+version across `pyproject.toml` and both wrappers. A bump now edits three files
+or fails.
+
+`pydantic>=2` joins the install string, made explicit rather than transitive:
+the servers import `makermodslab.utils.system` for the pure helpers below, that
+module imports pydantic, and nothing else in the RTC image pulled it in
+(`modal_policy.py` had it only via `fastapi[standard]`, which is its own
+`/reset` dependency and not something to rely on).
+
+Cost of the extras: `molmoact2` is `transformers + peft + scipy`, of which only
+peft (~1 MB) and scipy (~35 MB) are new over `[pi,smolvla]`, and all three
+extras resolve the same `transformers>=5.4,<5.6` range. **The 21.8 GB is
+runtime, not image** — see the README.
+
+### `--model-dtype`, and why it is opt-in
+
+New flag on both wrappers and both servers. When set it replaces the config's
+saved `model_dtype` **before weights load** (the dtype is read while the base
+model is being constructed, so a later assignment changes nothing), and it says
+so on stdout. Unset, the checkpoint's own value is used exactly as saved.
+
+That asymmetry is the point. The published MolmoAct2 checkpoint saves
+`float32`, which on a 40 GB A100 is ~28 GB of weights before activations AND
+gets no autocast (`predict_action_chunk` only wraps bf16/fp16 in `autocast`).
+Overriding it server-side would be the Lab second-guessing a value someone
+deliberately saved; upsizing the GPU costs money on every run including the ones
+that did not need it. So: **measure first, then let the operator decide**, which
+is what a flag is for. The GPU stays `A100`.
+
+Two refusals guard it, both before the download: a config class with no
+`model_dtype` field is a clear error rather than a silently ignored flag, and a
+value that does not name a `torch.dtype` is rejected up front instead of dying
+inside `_torch_dtype` after 21.8 GB has moved.
+
+### `enable_rtc()` now consults `supports_rtc()`
+
+`policy_rtc.enable_rtc` decided RTC support from two CLASS-level signals
+(`init_rtc_processor` exists, `config.rtc_config` exists). MolmoAct2 passes both
+unconditionally, but its `supports_rtc()` is per-CHECKPOINT —
+`inference_action_mode == "continuous"`. A discrete checkpoint therefore logged
+`RTC ENABLED` and then raised on **every** inference instead of degrading the
+way ACT does.
+
+The consult is deliberately asked of every policy, not just MolmoAct2, and it is
+a refinement of the existing hook check rather than a second gate:
+`pi0`/`pi05`/`smolvla` all `return True` unconditionally on this pin, and the
+policies inheriting the base class's `False` never reach the line (they have no
+`init_rtc_processor`). A `supports_rtc` that raises or is missing reads as
+"can't tell, proceed" — so no policy the servers used to run can be newly
+refused by this.
+
+### A task is now required, from one vocabulary
+
+`_LANGUAGE_CONDITIONED_POLICY_TYPES` left `jobs.py` and became
+`utils.system.LANGUAGE_CONDITIONED_POLICY_TYPES` + `policy_requires_task()`,
+read by BOTH `jobs.get_policy_config_summary`'s `requires_task` and the two
+policy servers' startup refusal. One vocabulary, because a type in one and not
+the other is a run the panel lets through and the GPU then rejects — or worse,
+accepts and degrades.
+
+It gained `molmoact2`, which is a correctness fix independent of the move:
+MolmoAct2's processor renders a missing task as the empty string into a fixed
+template, so the VLM is prompted with the literal `"The task is to ."` and
+returns confidently wrong actions with **nothing in any log** to say why. That
+is why the servers refuse rather than warn.
+
+### #112's helpers, cherry-picked verbatim
+
+PR #112 (`feat/molmoact2-rollout`, the LOCAL rollout path) stays unmerged. Its
+`utils/system.py` helpers — `MOLMOACT2`, `molmoact2_inference_action_mode`,
+`policy_inference_args`, `molmoact2_rtc_conflict`, `molmoact2_device_warning`,
+the `POLICY_EXTRAS["molmoact2"]` entry — and their six tests were copied here
+**byte-identical**, so a later #112 rebase is a no-op on those hunks rather than
+a merge. All three of #112's stated assumptions re-verified against the
+installed `eaab69339`.
+
+Server-side only ONE of them is used, and only as a gap fill:
+`molmoact2_inference_action_mode` populates `cfg.inference_action_mode` when the
+checkpoint saved none. `MolmoAct2Config` defaults it to `None` and the policy
+raises on `None`, so a checkpoint without one cannot be served at all — but the
+published checkpoint saves `continuous` and a discrete one saves `discrete`, and
+forcing either would break the other. No other config in the pin has the field,
+so the guard is self-scoping. `molmoact2_rtc_conflict` and
+`molmoact2_device_warning` are carried but unused here: the first is a launch
+panel's job (S3.7b), and the second is written for a local rollout — the DRTC
+GPU is always CUDA.
+
+`config=` is passed to `from_pretrained` only when one of the two overrides
+actually fired, so a run with neither flag loads exactly as it did before.
+
+### `KNOWN_POLICY_TYPES` and the two new summary fields
+
+`utils/naming.py` gained #112's eight missing types (`eo1`, `evo1`, `fastwam`,
+`groot`, `lingbot_va`, `molmoact2`, `vla_jepa`, `xvla`) and its mirror test,
+which passes unchanged against the installed `eaab69339` registry — 19 types,
+exactly #112's set. Purely a recognition vocabulary: a missing type only made a
+model list with `policy_type: null`.
+
+`CheckpointPolicyConfigResponse` gained `n_action_steps` and `chunk_size`, read
+straight off the checkpoint config (null when absent or unusable).
+`n_action_steps` is the CEILING on a remote-inference horizon: declare more than
+the policy returns and the two Portal peers disagree about the action-chunk
+shape, the fingerprint stops matching, and every packet is dropped in silence —
+a healthy-looking session with zero chunks. The panel's default is 50;
+MolmoAct2's published checkpoint is 30. **S3.7b is what makes the panel read
+this**; S3.7a only makes the number available.
+
+### Where the tests live, and why
+
+`policy.py` / `policy_rtc.py` import `livekit.portal` and `torch`, so CI cannot
+import them and nothing in them can carry a unit test. Every judgement with a
+right and a wrong answer therefore lives in a pure helper in `utils/system.py`,
+where `tests/test_utils_system.py` covers it; what is left in the servers is
+wiring — read a flag, call the helper, print, refuse or proceed. Both module
+docstrings now say so, because the temptation to grow a branch there is
+constant.
+
+### Ratchets and what was not touched
+
+No ratchet moved. `LEGACY_ROUTES`, `UNTYPED_V1_ROUTES`, `V1_ONLY_ROUTES` and
+`RESPONSE_MODEL_EXEMPT` are all unchanged: no route was added, and the two new
+fields land on an ALREADY-typed route. `docs/api/openapi.json` regenerated; its
+whole diff is those two fields plus two docstrings.
+
+No new dependency in `pyproject.toml` (the image's `pydantic` is the GPU
+container's, not the Lab's), no `modal` import anywhere, no change to
+`remote_inference.py`'s preflight ladder, and no `frontend/` change of any kind.

@@ -50,7 +50,7 @@ from .utils.naming import (
     derive_imported_title,
     imported_name_suffixes,
 )
-from .utils.system import torchcodec_loads
+from .utils.system import policy_requires_task, torchcodec_loads
 
 logger = logging.getLogger(__name__)
 
@@ -1662,7 +1662,13 @@ def _list_hub_checkpoints(api, repo_id: str) -> list[JobCheckpoint]:
     return []
 
 
-_LANGUAGE_CONDITIONED_POLICY_TYPES = {"smolvla", "pi0", "pi0_fast", "pi05"}
+# Which policy types need a task string is `utils.system`'s
+# LANGUAGE_CONDITIONED_POLICY_TYPES / policy_requires_task — ONE vocabulary,
+# because the two DRTC policy servers refuse to start without a task for exactly
+# these types and a second copy here would let the Lab and the GPU disagree.
+# The set gained `molmoact2` with that move (S3.7a): MolmoAct2 renders a missing
+# task as the literal prompt "The task is to ." and degrades silently, so
+# `requires_task` was already wrong for it before this became shared.
 
 # Policy types whose class declares Real-Time Chunking support in the pinned
 # lerobot fork. See policy_type_supports_rtc for how this list was derived and
@@ -1748,7 +1754,7 @@ def policy_type_supports_rtc(policy_type: str) -> bool | None:
     return None
 
 
-# None of _LANGUAGE_CONDITIONED_POLICY_TYPES has a legitimate from-scratch
+# None of the four types below has a legitimate from-scratch
 # mode: each builds a pretrained backbone (a vision-language model for
 # smolvla, a PaliGemma+expert stack for pi0/pi05/pi0_fast) from a bare config
 # object with no unconditional download anywhere in modeling_<policy>.py —
@@ -2240,6 +2246,21 @@ def _flat_feature_dim(feat: object) -> int | None:
         return int(shape[0])
     except (TypeError, ValueError):
         return None
+
+
+def _positive_int_or_none(value: object) -> int | None:
+    """A checkpoint config's integer knob, or None when it can't be trusted.
+
+    Sibling of `_flat_feature_dim` for the scalar fields (`n_action_steps`,
+    `chunk_size`). Absent, non-integral or non-positive all answer None: every
+    policy config validates these itself at construction, so a bad value here
+    means a hand-edited or corrupt config.json, and the honest answer
+    downstream is "unknown" rather than a number someone derives a horizon
+    from. `bool` is rejected explicitly because it is an `int` subclass and
+    `True` would otherwise read as a horizon of 1."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
 
 
 def read_pretrained_config(pretrained_path: str) -> dict[str, Any] | None:
@@ -5263,7 +5284,7 @@ class JobRegistry:
         return {
             "policy_type": policy_type,
             "image_features": image_features,
-            "requires_task": policy_type in _LANGUAGE_CONDITIONED_POLICY_TYPES,
+            "requires_task": policy_requires_task(policy_type),
             # Whether this architecture can run the Real-Time Chunking engine,
             # so the launch UI can offer the engine choice only where it works
             # instead of letting the run die inside the subprocess with the arm
@@ -5279,6 +5300,20 @@ class JobRegistry:
             # the user hits Start. None when the checkpoint omits the feature.
             "state_dim": _flat_feature_dim(input_features.get("observation.state")),
             "action_dim": _flat_feature_dim((cfg.get("output_features") or {}).get("action")),
+            # The checkpoint's own chunk geometry, straight off config.json.
+            # `n_action_steps` is how many steps of a predicted chunk the policy
+            # actually returns, so it is the CEILING on a remote-inference
+            # horizon: declare more and the two Portal peers disagree about the
+            # action-chunk shape, the fingerprint stops matching, and every
+            # packet is dropped in silence — a healthy-looking session with zero
+            # chunks. The default the panel prints (50) is a smolvla/pi0 number;
+            # MolmoAct2's published checkpoint is 30, which is exactly the case
+            # this field exists to stop the operator walking into. `chunk_size`
+            # is the width the policy predicts internally (>= n_action_steps),
+            # carried alongside so the two are readable together. Both null when
+            # the checkpoint omits them or saves a non-integer.
+            "n_action_steps": _positive_int_or_none(cfg.get("n_action_steps")),
+            "chunk_size": _positive_int_or_none(cfg.get("chunk_size")),
             # Raw lerobot robot_type string (e.g. "maker_follower"); the client
             # normalises it. None when it can't be established.
             "trained_on_robot_type": trained_on_robot_type,

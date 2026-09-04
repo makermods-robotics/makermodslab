@@ -129,7 +129,12 @@ class CheckpointPolicyConfigResponse(BaseModel):
     inference engine; null means the policy type isn't one the server knows
     (a fork newer than jobs.policy_type_supports_rtc's table), which the client
     must read as "offer it and let the server decide", not as "no". The route
-    declares no exclude_none/exclude_unset, so the key is always present."""
+    declares no exclude_none/exclude_unset, so the key is always present.
+
+    n_action_steps / chunk_size are the checkpoint's chunk geometry, null when
+    the config omits them. n_action_steps is the CEILING on a remote-inference
+    horizon — a declared horizon above it makes the two Portal peers disagree
+    about the action-chunk shape, and every packet is then dropped in silence."""
 
     policy_type: str | None
     image_features: dict[str, CheckpointImageFeature]
@@ -137,6 +142,8 @@ class CheckpointPolicyConfigResponse(BaseModel):
     supports_rtc: bool | None
     state_dim: int | None
     action_dim: int | None
+    n_action_steps: int | None
+    chunk_size: int | None
     trained_on_robot_type: str | None
 
 

@@ -327,7 +327,7 @@
         "type": "object"
       },
       "CheckpointPolicyConfigResponse": {
-        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature. trained_on_robot_type is the\nraw lerobot robot_type of the checkpoint's training dataset (recovered via\ntrain_config.json), null when it can't be established — the fine-tune\npanel compares it against the selected dataset's arm.\n\nsupports_rtc says whether this architecture can run the Real-Time Chunking\ninference engine; null means the policy type isn't one the server knows\n(a fork newer than jobs.policy_type_supports_rtc's table), which the client\nmust read as \"offer it and let the server decide\", not as \"no\". The route\ndeclares no exclude_none/exclude_unset, so the key is always present.",
+        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature. trained_on_robot_type is the\nraw lerobot robot_type of the checkpoint's training dataset (recovered via\ntrain_config.json), null when it can't be established — the fine-tune\npanel compares it against the selected dataset's arm.\n\nsupports_rtc says whether this architecture can run the Real-Time Chunking\ninference engine; null means the policy type isn't one the server knows\n(a fork newer than jobs.policy_type_supports_rtc's table), which the client\nmust read as \"offer it and let the server decide\", not as \"no\". The route\ndeclares no exclude_none/exclude_unset, so the key is always present.\n\nn_action_steps / chunk_size are the checkpoint's chunk geometry, null when\nthe config omits them. n_action_steps is the CEILING on a remote-inference\nhorizon — a declared horizon above it makes the two Portal peers disagree\nabout the action-chunk shape, and every packet is then dropped in silence.",
         "properties": {
           "action_dim": {
             "anyOf": [
@@ -340,12 +340,34 @@
             ],
             "title": "Action Dim"
           },
+          "chunk_size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunk Size"
+          },
           "image_features": {
             "additionalProperties": {
               "$ref": "#/components/schemas/CheckpointImageFeature"
             },
             "title": "Image Features",
             "type": "object"
+          },
+          "n_action_steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N Action Steps"
           },
           "policy_type": {
             "anyOf": [
@@ -403,6 +425,8 @@
           "supports_rtc",
           "state_dim",
           "action_dim",
+          "n_action_steps",
+          "chunk_size",
           "trained_on_robot_type"
         ],
         "title": "CheckpointPolicyConfigResponse",
@@ -8481,7 +8505,7 @@
     },
     "/api/v1/jobs/{job_id}/checkpoints/{step}/policy-config": {
       "get": {
-        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, the\nflat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch, and trained_on_robot_type\n(the arm the checkpoint was trained on, for the fine-tune panel's cross-arm\nwarning; null when it can't be established).",
+        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, the\nflat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch, the n_action_steps /\nchunk_size geometry (n_action_steps is the ceiling on a remote-inference\nhorizon), and trained_on_robot_type (the arm the checkpoint was trained on,\nfor the fine-tune panel's cross-arm warning; null when it can't be\nestablished).",
         "operationId": "get_checkpoint_policy_config",
         "parameters": [
           {
@@ -13507,7 +13531,7 @@
     },
     "/jobs/{job_id}/checkpoints/{step}/policy-config": {
       "get": {
-        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, the\nflat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch, and trained_on_robot_type\n(the arm the checkpoint was trained on, for the fine-tune panel's cross-arm\nwarning; null when it can't be established).",
+        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, the\nflat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch, the n_action_steps /\nchunk_size geometry (n_action_steps is the ceiling on a remote-inference\nhorizon), and trained_on_robot_type (the arm the checkpoint was trained on,\nfor the fine-tune panel's cross-arm warning; null when it can't be\nestablished).",
         "operationId": "get_checkpoint_policy_config_jobs__job_id__checkpoints__step__policy_config_get",
         "parameters": [
           {
