@@ -58,6 +58,17 @@ export default {
       },
       engagedBy: "Engaged by {{operator}}",
     },
+    // The station-mode chips shown while NOTHING is hosted: no robot chosen
+    // yet (opens the hosted-robot picker), or a chosen robot whose hosting is
+    // down right now (opens the status view). {{robot}} is data.
+    station: {
+      chooseChip: "Station · choose a robot to host",
+      chooseTooltip:
+        "This station has no robot to host yet. Pick a saved robot whose follower arm is set up.",
+      idleChip: "Station · {{robot}}",
+      idleTooltip:
+        "This station hosts {{robot}} whenever nothing local holds the arm — open the status view.",
+    },
   },
   rename: {
     title: "Rename robot",
@@ -109,6 +120,16 @@ export default {
       // 409 sfu.seat_taken: the station's single operator seat is held.
       seatTaken:
         "Someone else is driving this robot. Wait for them to stop, then try again.",
+    },
+  },
+  // Station side: changing the hosted robot (PUT /api/v1/station/robot).
+  // 409 session.held here means an operator is driving the hosted robot;
+  // robot.not_ready / robot.not_found show the server's prose.
+  station: {
+    failedTitle: "Couldn't change the hosted robot",
+    failedFallback: "The station didn't accept the change.",
+    refusal: {
+      held: "An operator is driving right now — change the hosted robot once they leave.",
     },
   },
   // Layout chips beside a record's name wherever it is listed. The VALUES

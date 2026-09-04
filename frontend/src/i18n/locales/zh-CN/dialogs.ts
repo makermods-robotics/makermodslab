@@ -139,12 +139,33 @@ export default {
     rightArm: "右臂",
     endedWithWarning: "托管已结束，但清理时有警告",
     failed: "托管失败",
+    changeRobot: "更改托管的机器人…",
     toast: {
       stoppedCheckArm: "托管已停止 — 请检查机械臂",
       stopped: "托管已停止",
       releasing: "机械臂会先回到起始位置，然后松开力矩。",
       checkArm: "请检查机械臂",
       disconnected: "机械臂已正常断开连接。",
+    },
+  },
+  stationRobot: {
+    title: "托管的机器人",
+    description:
+      "此工作站用于远程遥操作所托管的机器人。选择后几秒内托管会自动重新启动；上一个机器人已停放且无人驱动的会话会自行让出。",
+    listLabel: "此工作站可托管的机器人",
+    hostedNow: "正在托管",
+    chosen: "已选择",
+    empty: "此工作站上还没有可托管的机器人。请先设置好某个机器人的从臂和摄像头 — 托管支持 SO-101。",
+    openSettings: "打开机器人设置",
+    createRobot: "创建机器人",
+    host: "托管此机器人",
+    applying: "正在应用…",
+    stopHosting: "停止托管",
+    toast: {
+      changedTitle: "已更改托管的机器人",
+      changedDescription: "此工作站现在托管 {{robot}}。",
+      stoppedTitle: "托管已停止",
+      stoppedDescription: "此工作站不再托管任何机器人。",
     },
   },
   remoteTeleop: {

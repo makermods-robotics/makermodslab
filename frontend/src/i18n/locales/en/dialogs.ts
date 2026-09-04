@@ -203,12 +203,42 @@ export default {
     rightArm: "Right arm",
     endedWithWarning: "Hosting ended with a cleanup warning",
     failed: "Hosting failed",
+    // Station mode only: opens the hosted-robot picker (StationRobotDialog).
+    changeRobot: "Change hosted robot…",
     toast: {
       stoppedCheckArm: "Hosting stopped — check the arm",
       stopped: "Hosting stopped",
       releasing: "The arm returns to its starting position, then goes limp.",
       checkArm: "Check the arm",
       disconnected: "The arm was disconnected cleanly.",
+    },
+  },
+  // Station side — which saved robot this station hosts (PUT
+  // /api/v1/station/robot). Robot names are data; the list is the backend's
+  // `hostable` (saved robots whose follower side is set up).
+  stationRobot: {
+    title: "Hosted robot",
+    description:
+      "The robot this station hosts for remote teleoperation. Hosting re-arms on your choice within a few seconds; a parked, unseated session of the previous robot yields on its own.",
+    listLabel: "Robots this station can host",
+    // The row of the robot hosted right now.
+    hostedNow: "Hosted now",
+    // The row of the chosen robot while its hosting is down (a local session
+    // has the arm, or it is still re-arming).
+    chosen: "Chosen",
+    // No saved robot has its follower side set up.
+    empty:
+      "No robot on this station can be hosted yet. Set up a robot's follower arm and cameras first — hosting supports the SO-101.",
+    openSettings: "Open Robot settings",
+    createRobot: "Create robot",
+    host: "Host this robot",
+    applying: "Applying…",
+    stopHosting: "Stop hosting",
+    toast: {
+      changedTitle: "Hosted robot changed",
+      changedDescription: "This station now hosts {{robot}}.",
+      stoppedTitle: "Hosting stopped",
+      stoppedDescription: "This station no longer hosts a robot.",
     },
   },
   // Operator side — the station picker, then the live viewer. Station names,

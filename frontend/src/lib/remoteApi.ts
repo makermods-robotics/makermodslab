@@ -98,6 +98,46 @@ export interface RemoteTeleoperationStatus {
   message: string;
 }
 
+/** The station's `--host` posture (GET /api/v1/station): `robot` is the
+ * chosen/remembered robot (null = nothing chosen yet — the UI picks),
+ * `hostable` the saved robots whose follower side is set up (SO-101 only),
+ * `phase` the live hosting phase or null while hosting is down. Names and
+ * phase ids are data. */
+export interface StationStatus {
+  station_mode: boolean;
+  robot: string | null;
+  hostable: string[];
+  hosting_active: boolean;
+  phase: HostingPhase | null;
+}
+
+export async function getStationStatus(
+  baseUrl: string,
+  fetcher: Fetcher,
+  signal?: AbortSignal,
+): Promise<StationStatus> {
+  return apiRequest<StationStatus>(baseUrl, fetcher, "/api/v1/station", {
+    signal,
+    action: "Get station status",
+  });
+}
+
+/** Choose (or, with null, clear) the robot this station hosts. The station
+ * remembers it and re-arms hosting on it within seconds. Refusals: 404
+ * robot.not_found, 400 robot.not_ready (follower not set up / not SO-101),
+ * 409 session.held (an operator is driving — change it once they leave). */
+export async function setStationRobot(
+  baseUrl: string,
+  fetcher: Fetcher,
+  robot: string | null,
+): Promise<StationStatus> {
+  return apiRequest<StationStatus>(baseUrl, fetcher, "/api/v1/station/robot", {
+    method: "PUT",
+    body: { robot },
+    action: "Set station robot",
+  });
+}
+
 export async function getHostingStatus(
   baseUrl: string,
   fetcher: Fetcher,
@@ -232,4 +272,22 @@ export function formatRemoteRefusal(
     };
   }
   return { message: e.detail ?? fallback, needsInstall: false };
+}
+
+/**
+ * Localized line for a refusal of PUT /api/v1/station/robot, or null when
+ * `e` is not an ApiError (the caller then renders its connection-error
+ * toast). 409 session.held here means an operator is driving the hosted
+ * robot right now — a station-specific line rather than the generic
+ * "robot is busy" one; robot.not_found / robot.not_ready fall back to the
+ * server's own prose, which names the robot and the gap.
+ */
+export function formatStationRefusal(
+  t: TFunction,
+  e: unknown,
+  fallback: string,
+): string | null {
+  if (!(e instanceof ApiError)) return null;
+  if (e.code === "session.held") return t("robot.station.refusal.held");
+  return e.detail ?? fallback;
 }

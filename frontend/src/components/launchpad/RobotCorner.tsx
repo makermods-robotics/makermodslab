@@ -4,6 +4,7 @@ import {
   Gamepad2,
   Plus,
   Radio,
+  RadioTower,
   Settings,
   ChevronDown,
   Loader2,
@@ -49,11 +50,13 @@ import TeleopDialog from "@/components/dialogs/TeleopDialog";
 import HostingDialog from "@/components/dialogs/HostingDialog";
 import RemoteTeleopDialog from "@/components/dialogs/RemoteTeleopDialog";
 import RemoteExtraInstallDialog from "@/components/dialogs/RemoteExtraInstallDialog";
+import StationRobotDialog from "@/components/dialogs/StationRobotDialog";
 import RobotConfigDialog from "@/components/dialogs/RobotConfigDialog";
 import RobotLayoutChip from "@/components/launchpad/RobotLayoutChip";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useHostingStatus } from "@/hooks/useHostingStatus";
+import { useStationStatus } from "@/hooks/useStationStatus";
 import { useRobots, RobotRecord, RobotMode, ArmType } from "@/hooks/useRobots";
 import { ApiError } from "@/lib/apiClient";
 import { startSession, formatSessionHeld } from "@/lib/sessionApi";
@@ -131,6 +134,12 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
   // owns its own start.
   const [hostOpen, setHostOpen] = useState(false);
   const { status: hostingStatus } = useHostingStatus();
+  // Station mode: which robot this station hosts is a runtime choice
+  // (PUT /api/v1/station/robot) made in StationRobotDialog — a station may
+  // boot with nothing chosen. Separate from the corner's SELECTED robot,
+  // which drives local flows; the two may differ.
+  const [stationOpen, setStationOpen] = useState(false);
+  const { status: stationStatus } = useStationStatus();
   const [remoteOpen, setRemoteOpen] = useState(false);
   const [remoteInstallOpen, setRemoteInstallOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
@@ -291,6 +300,11 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
     hostingStatus?.hosting_active && hostingStatus.hosting
       ? hostingStatus.hosting
       : null;
+  // While nothing is hosted on a station: no robot chosen yet (the chip asks
+  // for one), or a chosen robot whose hosting is down right now (a local
+  // session has the arm, or it is re-arming — the status view says which).
+  const stationIdle =
+    !hosting && stationStatus?.station_mode === true ? stationStatus : null;
   const hostingPhaseLabel = hosting
     ? hosting.phase === "engaged" && hosting.active_operator
       ? t("robot.corner.hosting.engagedBy", {
@@ -482,6 +496,51 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
         </DropdownMenuContent>
       </DropdownMenu>
 
+      {stationIdle && stationIdle.robot === null && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              size="sm"
+              variant="default"
+              onClick={() => setStationOpen(true)}
+              className="h-7 gap-1.5 rounded-full px-2.5"
+            >
+              <RadioTower className="h-3.5 w-3.5" />
+              <span className="max-w-[260px] truncate">
+                {t("robot.corner.station.chooseChip")}
+              </span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">
+            {t("robot.corner.station.chooseTooltip")}
+          </TooltipContent>
+        </Tooltip>
+      )}
+
+      {stationIdle && stationIdle.robot !== null && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => setHostOpen(true)}
+              className="h-7 gap-1.5 rounded-full px-2.5"
+            >
+              <span
+                aria-hidden
+                className="h-2 w-2 shrink-0 rounded-full bg-muted-foreground/60"
+              />
+              <span className="max-w-[220px] truncate">
+                {t("robot.corner.station.idleChip", { robot: stationIdle.robot })}
+              </span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">
+            {t("robot.corner.station.idleTooltip", { robot: stationIdle.robot })}
+          </TooltipContent>
+        </Tooltip>
+      )}
+
       {hosting && (
         <Tooltip>
           <TooltipTrigger asChild>
@@ -589,7 +648,18 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
         sessionId={teleopSessionId}
       />
 
-      <HostingDialog open={hostOpen} onOpenChange={setHostOpen} />
+      <HostingDialog
+        open={hostOpen}
+        onOpenChange={setHostOpen}
+        onChangeRobot={() => setStationOpen(true)}
+      />
+
+      <StationRobotDialog
+        open={stationOpen}
+        onOpenChange={setStationOpen}
+        onOpenSettings={openSettings}
+        onCreateRobot={() => setCreateOpen(true)}
+      />
 
       <RemoteTeleopDialog
         open={remoteOpen}

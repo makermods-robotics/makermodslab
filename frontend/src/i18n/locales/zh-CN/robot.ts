@@ -43,6 +43,12 @@ export default {
       },
       engagedBy: "{{operator}} 正在驱动",
     },
+    station: {
+      chooseChip: "工作站 · 选择要托管的机器人",
+      chooseTooltip: "此工作站尚未选择要托管的机器人。请选择一个已设置好从臂的已保存机器人。",
+      idleChip: "工作站 · {{robot}}",
+      idleTooltip: "本地没有会话占用机械臂时，此工作站会托管 {{robot}} — 打开状态视图。",
+    },
   },
   rename: {
     title: "重命名机器人",
@@ -79,6 +85,13 @@ export default {
       sfuDisabled: "此节点未运行 LiveKit SFU。请用 makermodslab --sfu 重新启动。",
       extraMissing: "此节点未安装远程遥操作扩展。",
       seatTaken: "其他人正在驱动这台机器人。请等他们停止后再试。",
+    },
+  },
+  station: {
+    failedTitle: "无法更改托管的机器人",
+    failedFallback: "工作站未接受此更改。",
+    refusal: {
+      held: "目前有操作者正在驱动 — 请等他们离开后再更改托管的机器人。",
     },
   },
   layout: {

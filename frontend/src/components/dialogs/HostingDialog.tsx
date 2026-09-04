@@ -7,6 +7,7 @@ import RobotLayoutChip from "@/components/launchpad/RobotLayoutChip";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { useHostingStatus } from "@/hooks/useHostingStatus";
+import { useStationStatus } from "@/hooks/useStationStatus";
 import { useRobots } from "@/hooks/useRobots";
 import { isCanArmType, type ArmType } from "@/lib/armTypes";
 import { getHostingStatus, type HostingPhase } from "@/lib/remoteApi";
@@ -16,6 +17,10 @@ import { cn } from "@/lib/utils";
 export interface HostingDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Station mode only: open the hosted-robot picker (StationRobotDialog).
+   * The owner closes this view first — the picker is a separate dialog, not
+   * nested under this one's ESC handler. */
+  onChangeRobot?: () => void;
 }
 
 // Static catalog keys per phase (never a runtime-built template) so
@@ -50,12 +55,19 @@ const PHASE_STYLES: Record<HostingPhase, string> = {
  * immediate. Closing the dialog (ESC, the Close button, unmount) never stops
  * anything: the station keeps hosting whether or not anyone is watching.
  */
-const HostingDialog: React.FC<HostingDialogProps> = ({ open, onOpenChange }) => {
+const HostingDialog: React.FC<HostingDialogProps> = ({
+  open,
+  onOpenChange,
+  onChangeRobot,
+}) => {
   const { t } = useTranslation();
   const { toast } = useToast();
   const { baseUrl, fetchWithHeaders } = useApi();
-  const { selectedRecord } = useRobots();
+  const { records } = useRobots();
   const { status } = useHostingStatus({ enabled: open, intervalMs: 2000 });
+  // The station's remembered choice — names the robot while hosting is down
+  // (the descriptor only rides on a live session) and gates the picker.
+  const { status: station } = useStationStatus({ enabled: open, intervalMs: 3000 });
 
   // How many release presses have been sent (0, 1, 2). Two is terminal.
   const pressesRef = useRef(0);
@@ -197,18 +209,18 @@ const HostingDialog: React.FC<HostingDialogProps> = ({ open, onOpenChange }) => 
   const descriptor = status?.hosting ?? null;
   const active = status?.hosting_active === true;
   const phase = descriptor?.phase ?? null;
-  const robotName = descriptor?.robot ?? selectedRecord?.name ?? null;
-  const armType = (descriptor?.arm_type ?? selectedRecord?.arm_type) as
+  // The hosted robot is the descriptor's while a session is live, else the
+  // station's remembered choice — never the corner's selected robot, which
+  // drives LOCAL flows and may legitimately differ.
+  const robotName = descriptor?.robot ?? station?.robot ?? null;
+  const hostedRecord = robotName !== null ? records[robotName] : undefined;
+  const armType = (descriptor?.arm_type ?? hostedRecord?.arm_type) as
     | ArmType
     | undefined;
   const readoutOnly = isCanArmType(armType);
-  const bimanual = (descriptor?.mode ?? selectedRecord?.mode) === "bimanual";
-  // The layout chip beside the name — from the local record, which is only
-  // the hosted robot while the descriptor names the same record.
-  const layoutArms =
-    selectedRecord && (!descriptor || descriptor.robot === selectedRecord.name)
-      ? selectedRecord.arms
-      : undefined;
+  const bimanual = (descriptor?.mode ?? hostedRecord?.mode) === "bimanual";
+  // The layout chip beside the name — from the hosted robot's local record.
+  const layoutArms = hostedRecord?.arms;
   const title = robotName
     ? t("dialogs.hosting.titleWithRobot", { robot: robotName })
     : t("dialogs.hosting.title");
@@ -259,6 +271,19 @@ const HostingDialog: React.FC<HostingDialogProps> = ({ open, onOpenChange }) => 
           </span>
         )}
         <div className="ml-auto flex items-center gap-1.5">
+          {station?.station_mode && onChangeRobot && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={stopping || releasing}
+              onClick={() => {
+                onOpenChange(false);
+                onChangeRobot();
+              }}
+            >
+              {t("dialogs.hosting.changeRobot")}
+            </Button>
+          )}
           <Button
             size="sm"
             variant="ghost"
