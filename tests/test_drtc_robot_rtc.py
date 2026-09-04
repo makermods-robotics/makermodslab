@@ -96,6 +96,23 @@ def test_every_teardown_step_goes_through_the_shield() -> None:
         )
 
 
+def test_the_teardown_never_writes_to_stdout_unprotected() -> None:
+    """The dead-stdout twin of the assertion above, on this entrypoint.
+
+    Pinned on BOTH children for the same reason the shield itself is: the
+    parent's death breaks this pipe, and a bare `print`/`emit` in the `finally:`
+    would unwind the teardown and skip the torque release. See
+    `tests/test_drtc_robot_sync.py` for the full rationale."""
+    names = [_callee(node) for node in _direct_calls(_finally_body(ROBOT_RTC).finalbody)]
+    assert "say" in names
+    for direct in ("print", "emit"):
+        assert direct not in names, (
+            f"{direct}() is called directly in run()'s finally — a dead stdout (the parent "
+            "died) would unwind the teardown and skip the torque release. Use `say`, or "
+            "route it through `shielded`."
+        )
+
+
 def test_both_engines_tear_down_the_same_way() -> None:
     """The two entrypoints are one session's two children; a teardown that
     diverged would mean an arm that is safe on one engine and not the other.
@@ -115,6 +132,7 @@ def test_both_engines_tear_down_the_same_way() -> None:
 
     assert labels(ROBOT_RTC) == labels(ROBOT_SYNC)
     assert labels(ROBOT_RTC) == [
+        "the RETURNING event",
         "the return to the start pose",
         "closing the transport",
         "the torque release (robot.disconnect)",

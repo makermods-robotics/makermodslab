@@ -53,6 +53,7 @@ What deliberately did NOT move here
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import threading
 import time
@@ -77,8 +78,36 @@ def emit(event: str, payload: str = "") -> None:
     stdout is a pipe under a supervising parent, so it is block-buffered by
     default — without the flush the parent would not see CONNECTED (or a
     per-second STATS) until 4-8 KB of unrelated lerobot log had accumulated
-    behind it, which is most of a short run."""
+    behind it, which is most of a short run.
+
+    Deliberately RAISES on a dead pipe, and that is load-bearing: a parent that
+    died without saying STOP (SIGKILL, an OOM, a crash) leaves this child
+    holding an energized arm with no other signal — stdin EOF is ignored by
+    design (see `drtc_protocol.pump_commands`). The read end closing makes the
+    next write raise BrokenPipeError, which unwinds the control loop into the
+    teardown within the second it takes the next STATS to be emitted, and the
+    teardown returns the arm and releases torque. Swallowing it here would
+    retire the only detector the child has. The teardown's OWN narration goes
+    through :func:`say` instead, so the same broken pipe cannot then unwind the
+    teardown itself."""
     print(format_event(event, payload), flush=True)
+
+
+def say(message: str) -> None:
+    """`print` for the TEARDOWN, where a dead stdout must not cost the release.
+
+    Same broken pipe as above, one block later: a bare `print` in the `finally:`
+    raises BrokenPipeError, propagates out of the block, and skips
+    `robot.disconnect()` — the call that RELEASES TORQUE. The arm is then left
+    energized holding the policy's last command, on the one path whose entire
+    job is to make it safe, and precisely in the case (the parent is gone) where
+    nobody is left to notice. So the teardown narrates through here, and
+    :func:`shielded`'s own diagnostics with it.
+
+    `ValueError` as well as `OSError`: a closed (rather than broken) stream
+    raises "I/O operation on closed file"."""
+    with contextlib.suppress(OSError, ValueError):
+        print(message, flush=True)
 
 
 def emit_stats(values: dict[str, object]) -> None:
@@ -254,9 +283,9 @@ def shielded(what: str, fn, *args, attempts: int = 2, reraise: bool = False, **k
             return fn(*args, **kwargs)
         except KeyboardInterrupt:
             remaining = attempts - attempt
-            print(f"[robot] Ctrl-C during {what}; {'retrying' if remaining else 'giving up on it'}")
+            say(f"[robot] Ctrl-C during {what}; {'retrying' if remaining else 'giving up on it'}")
         except Exception as exc:
-            print(f"[robot] {what} failed: {exc}")
+            say(f"[robot] {what} failed: {exc}")
             if reraise:
                 raise
             return None
@@ -272,9 +301,9 @@ async def _shielded_disconnect(portal) -> None:
     try:
         await portal.disconnect()
     except KeyboardInterrupt:
-        print("[robot] Ctrl-C during the transport disconnect; continuing to the torque release")
+        say("[robot] Ctrl-C during the transport disconnect; continuing to the torque release")
     except Exception as exc:
-        print(f"[robot] transport disconnect failed: {exc}")
+        say(f"[robot] transport disconnect failed: {exc}")
 
 
 # --- the shared draccus flags -------------------------------------------------

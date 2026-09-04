@@ -1721,29 +1721,112 @@ def handle_stop_remote_inference() -> dict[str, Any]:
         _send_command(proc, CMD_STOP)
         return {"success": True, "message": "Cutting the return to rest short"}
 
+    _stop_child_and_wait(proc)
+    return {"success": True, "message": "Remote inference stopped"}
+
+
+def _stop_child_and_wait(proc: subprocess.Popen) -> None:
+    """STOP the child, wait out its return-to-rest, escalate, then finalise.
+
+    Factored out of :func:`handle_stop_remote_inference` so
+    :func:`stop_for_shutdown` drives the SAME sequence rather than a parallel
+    one — a second implementation of "make the arm safe" is exactly the kind of
+    duplication that ends with one of the two paths quietly missing the
+    escalation."""
     if not _send_command(proc, CMD_STOP):
         # A child that cannot be talked to cannot return the arm either;
         # terminate the tree rather than wait out the ceiling for nothing.
         logger.warning("robot_sync did not accept STOP; terminating the process group")
         _terminate_tree(proc)
     else:
-        try:
-            proc.wait(timeout=_STOP_WAIT_S)
-        except subprocess.TimeoutExpired:
-            logger.warning(
-                "robot_sync did not exit %.0fs after STOP; terminating the process group",
-                _STOP_WAIT_S,
-            )
-            _terminate_tree(proc)
-        except Exception as exc:
-            logger.exception("Waiting for robot_sync to stop failed: %s", exc)
+        _await_child_exit(proc)
+    _finalise_if_ours(proc)
 
+
+def _await_child_exit(proc: subprocess.Popen) -> None:
+    """Block until the child is gone, bounded by `_STOP_WAIT_S`, then escalate.
+
+    The bound is the return's own ceiling plus teardown; past it the whole
+    process group is terminated, which is the escalation the second STOP press
+    would otherwise have to be."""
+    try:
+        proc.wait(timeout=_STOP_WAIT_S)
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "robot_sync did not exit %.0fs after STOP; terminating the process group",
+            _STOP_WAIT_S,
+        )
+        _terminate_tree(proc)
+    except Exception as exc:
+        logger.exception("Waiting for robot_sync to stop failed: %s", exc)
+
+
+def _finalise_if_ours(proc: subprocess.Popen) -> None:
+    """Record the terminal payload and emit the release — unless someone did.
+
+    Re-reads under the lock: the pump's EOF path may have finalised this exit
+    while the caller was waiting outside it, and whichever path arrives second
+    must leave the recorded verdict alone."""
     with _state_lock:
-        # Re-read: the pump's EOF path may have finalised the exit while we
-        # were outside the lock.
         if remote_inference_active and _remote_proc is proc:
             _finalise_exit_locked(proc.poll())
-    return {"success": True, "message": "Remote inference stopped"}
+
+
+def stop_for_shutdown() -> bool:
+    """Stop a live session on the way out — synchronously, bounded.
+
+    The shutdown twin of :func:`handle_stop_remote_inference`, and the reason it
+    exists is that this is the ONE robot-driving flow whose arm is held by a
+    child process that outlives us: `_spawn` gives it `start_new_session=True`,
+    so a SIGTERM/SIGINT aimed at this worker never reaches it, and stdin EOF is
+    ignored by design (`drtc_protocol.pump_commands`). Without this, a uvicorn
+    `--reload` save, a Ctrl-C or a `makermodslab --stop` during a remote run
+    left the child driving an energized arm with nobody able to reach it from
+    the API — against this repo's contract that stopped means de-energized and
+    that every flow returns the arm before releasing torque.
+
+    Returns whether there was anything to stop. Never raises (it is called from
+    a shutdown handler), and it emits the session_events release the normal
+    stop does, because it IS the normal stop: the STOP goes on the child's
+    stdin, the child returns the arm to its captured start pose, and only then
+    is torque released and BYE written.
+
+    Bounded by `_STOP_WAIT_S` for the return, plus at most
+    `_STARTUP_STOP_JOIN_TIMEOUT_S` for a startup worker still inside
+    `_prepare_robot` (it holds the serial bus, and it cannot be interrupted
+    mid-call — the same bounded-wait-and-report the "press Stop again" gesture
+    makes). Typical cost is the two or three seconds a real return-to-rest
+    takes; zero when nothing is running.
+    """
+    with _state_lock:
+        active = remote_inference_active
+        proc = _remote_proc
+        # A stop is already in flight on another thread (a Stop press, or a
+        # watchdog). Pressing Stop again is the ABORT gesture — it would cut
+        # that return short, which is the opposite of what a shutdown wants
+        # while it can still afford to wait. So we wait it out instead.
+        in_flight = _remote_meta.get("phase") == PHASE_STOPPING
+        worker = _startup_thread
+
+    if not active and (worker is None or not worker.is_alive()):
+        return False
+
+    logger.info("Stopping the remote-inference session before shutdown")
+    try:
+        if active and proc is not None and in_flight:
+            _await_child_exit(proc)
+            _finalise_if_ours(proc)
+        elif active:
+            handle_stop_remote_inference()
+    except Exception:
+        logger.exception("Failed to stop remote inference during shutdown")
+
+    if worker is not None and worker.is_alive():
+        # Not the child: the pre-spawn preflight, which has the follower's
+        # serial port open. Leaving while it does is how the NEXT boot finds
+        # the bus busy.
+        worker.join(timeout=_STARTUP_STOP_JOIN_TIMEOUT_S)
+    return True
 
 
 def handle_remote_inference_status() -> dict[str, Any]:

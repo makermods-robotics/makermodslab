@@ -157,6 +157,7 @@ from ._session_glue import (
     or_none,
     return_step,
     return_to_rest_field,
+    say,
     shielded,
 )
 
@@ -739,13 +740,19 @@ async def run(cfg: RobotSideRTCConfig) -> None:
         # short and release where the arm is, nearer rest than it started —
         # which is what setting `abort_event` before the retry does.
         if start_poses and not control.quit_event.is_set():
-            emit(EVENT_RETURNING)
-            print("[robot] returning to the start pose ...")
+            # Shielded like every other step, and for one more reason than the
+            # interrupt: when the parent is what died, THIS pipe is broken, and
+            # a bare `emit` here raised BrokenPipeError straight out of the
+            # `finally:` — skipping the return AND the torque release, on the
+            # one path that exists to make the arm safe. Narration goes through
+            # `say` for the same reason.
+            shielded("the RETURNING event", emit, EVENT_RETURNING, attempts=1)
+            say("[robot] returning to the start pose ...")
             shielded(
                 "the return to the start pose",
                 return_step(start_poses, control.abort_event),
             )
-        print("[robot] disconnecting...")
+        say("[robot] disconnecting...")
         # `portal` is None when the failure landed before it was built (a bad
         # codec name, a camera that would not open) — the arm is connected and
         # energized by then, so the return above and this release still have to

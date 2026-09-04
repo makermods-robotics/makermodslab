@@ -26,6 +26,8 @@ arm), and it is the half a refactor is most likely to drop.
 from __future__ import annotations
 
 import ast
+import contextlib
+import io
 from pathlib import Path
 
 import pytest
@@ -111,6 +113,61 @@ def test_reraise_still_shields_an_interrupt(shielded) -> None:
 
 
 # ---------------------------------------------------------------------------
+# A dead stdout (the parent died)
+# ---------------------------------------------------------------------------
+#
+# `_session_glue` is importable WITHOUT the `[drtc]` extra (see its module
+# docstring), so these run everywhere rather than importorskip-ing.
+
+
+class _DeadStdout:
+    """stdout after the supervising parent's death closed the read end."""
+
+    def write(self, data: str) -> int:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def flush(self) -> None:
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def test_emit_still_raises_on_a_dead_pipe() -> None:
+    """The child's ONLY parent-death detector, and therefore not swallowed.
+
+    stdin EOF is ignored by design (`drtc_protocol.pump_commands`), and the
+    child is spawned into its own session so no signal reaches it either. The
+    once-a-second STATS write raising is what unwinds the control loop into the
+    teardown — where the arm is returned and torque released."""
+    from makermodslab.drtc._session_glue import emit
+
+    with contextlib.redirect_stdout(_DeadStdout()), pytest.raises(BrokenPipeError):
+        emit("STATS", "{}")
+
+
+def test_say_survives_a_dead_pipe_and_a_closed_stream() -> None:
+    """The teardown's narration must never be what skips the torque release."""
+    from makermodslab.drtc._session_glue import say
+
+    with contextlib.redirect_stdout(_DeadStdout()):
+        say("[robot] returning to the start pose ...")  # must not raise
+
+    closed = io.StringIO()
+    closed.close()
+    with contextlib.redirect_stdout(closed):
+        say("[robot] disconnecting...")  # must not raise
+
+
+def test_the_shield_itself_survives_a_dead_pipe() -> None:
+    """`shielded` reports a failed step by printing — on a dead pipe that print
+    would raise INSIDE the handler and unwind the teardown anyway, which is why
+    its diagnostics go through `say` too. The shielded RETURNING event is the
+    step this actually protects."""
+    from makermodslab.drtc._session_glue import emit, shielded
+
+    with contextlib.redirect_stdout(_DeadStdout()):
+        assert shielded("the RETURNING event", emit, "RETURNING", attempts=1) is None
+
+
+# ---------------------------------------------------------------------------
 # The teardown's shape, read off the source
 # ---------------------------------------------------------------------------
 
@@ -162,6 +219,26 @@ def test_every_teardown_step_goes_through_the_shield() -> None:
         assert direct not in names, (
             f"{direct}() is called directly in run()'s finally — an interrupt there would "
             "unwind the teardown and skip the torque release. Route it through `shielded`."
+        )
+
+
+def test_the_teardown_never_writes_to_stdout_unprotected() -> None:
+    """S3.8d: the teardown's own NARRATION can unwind it too.
+
+    When the parent is what died, this stdout pipe's read end is closed, so a
+    bare `print` (or a bare `emit`) in that `finally:` raises BrokenPipeError,
+    propagates out of the block, and skips `robot.disconnect()` — the torque
+    release — leaving the arm energized with nobody left to reach it. `say`
+    swallows a dead stream; `emit` deliberately does not (it is how the child
+    NOTICES the parent is gone), so in the teardown it goes through `shielded`
+    like every other step."""
+    names = [_callee(node) for node in _direct_calls(_finally_body().finalbody)]
+    assert "say" in names
+    for direct in ("print", "emit"):
+        assert direct not in names, (
+            f"{direct}() is called directly in run()'s finally — a dead stdout (the parent "
+            "died) would unwind the teardown and skip the torque release. Use `say`, or "
+            "route it through `shielded`."
         )
 
 

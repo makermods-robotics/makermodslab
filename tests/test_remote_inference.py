@@ -28,6 +28,7 @@ is warranted for a function this thin.
 
 from __future__ import annotations
 
+import subprocess
 import time
 from pathlib import Path
 
@@ -888,6 +889,128 @@ def test_stop_pressed_again_while_a_worker_is_still_shutting_down(monkeypatch) -
     result = ri.handle_stop_remote_inference()
     assert result["success"] is True
     assert result["shutting_down"] is True
+
+
+# ---------------------------------------------------------------------------
+# The shutdown stop (S3.8d)
+# ---------------------------------------------------------------------------
+#
+# This is the one robot-driving flow whose arm is held by a child process that
+# OUTLIVES the worker: `_spawn` gives it `start_new_session=True`, so the
+# SIGTERM/SIGINT that ends a `--reload` save, a Ctrl-C or a `makermodslab
+# --stop` never reaches it, and stdin EOF is ignored by design. `STOP` on that
+# stdin is the only thing that returns the arm before torque is released.
+
+
+@pytest.fixture
+def released(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
+    """Every `session_changed` emission this module makes, in order."""
+    events: list[tuple] = []
+
+    def _record(kind, active, **kwargs):
+        events.append((kind, active, kwargs.get("phase")))
+
+    monkeypatch.setattr(ri, "notify_session_changed", _record)
+    return events
+
+
+def test_shutdown_stop_is_a_no_op_when_nothing_is_running(released) -> None:
+    """Idle is the normal case on the way out, not an exceptional one — and it
+    must cost nothing and say so, exactly like `modal_launcher`'s twin."""
+    assert ri.stop_for_shutdown() is False
+    assert released == []
+
+
+def test_shutdown_stop_drives_the_same_stop_the_stop_control_does(released) -> None:
+    """STOP on stdin, then BLOCK until the child has actually returned the arm
+    and exited — a stop that outlives the process it runs in is not a stop."""
+    _live_session(phase=ri.PHASE_RUNNING)
+    proc = FakeProc()
+    ri._remote_proc = proc
+
+    assert ri.stop_for_shutdown() is True
+    assert proc.stdin.written == [b"STOP\n"]
+    # Bounded by the return's own ceiling plus teardown, never unbounded.
+    assert proc.waits == [ri._STOP_WAIT_S]
+    assert ri.remote_inference_active is False
+    assert ri._last_result["exited"] is True
+    assert ri._last_result["phase"] == ri.PHASE_STOPPED
+    # The SessionTracker and the lease must see a clean end, exactly as they do
+    # for a Stop press: the stopping hint, then the release.
+    assert released[0] == (ri.KIND, True, ri.PHASE_STOPPING)
+    assert released[-1] == (ri.KIND, False, ri.PHASE_STOPPED)
+
+
+def test_shutdown_stop_escalates_when_the_child_ignores_stop(monkeypatch, released) -> None:
+    """Bounded, and the bound has teeth: past the ceiling the whole process
+    group goes, because a child that will not answer is a child that is still
+    holding the arm."""
+    terminated: list = []
+    monkeypatch.setattr(ri, "_terminate_tree", lambda p, **kw: terminated.append(p))
+
+    class _Wedged(FakeProc):
+        def wait(self, timeout=None):
+            self.waits.append(timeout)
+            raise subprocess.TimeoutExpired(cmd="robot_sync", timeout=timeout)
+
+    _live_session(phase=ri.PHASE_RUNNING)
+    proc = _Wedged()
+    ri._remote_proc = proc
+
+    assert ri.stop_for_shutdown() is True
+    assert proc.waits == [ri._STOP_WAIT_S]
+    assert terminated == [proc]
+    ri._go_idle_locked()
+
+
+def test_shutdown_stop_waits_out_a_stop_already_in_flight_rather_than_aborting_it(
+    released,
+) -> None:
+    """A second STOP is the ABORT gesture — it cuts the return short. On the way
+    out we can still afford to wait, so a stop already in flight (a Stop press,
+    or a watchdog) is waited out instead of pressed again."""
+    _live_session(phase=ri.PHASE_STOPPING)
+    proc = FakeProc()
+    ri._remote_proc = proc
+    ri._returning_to_rest = True
+
+    assert ri.stop_for_shutdown() is True
+    assert proc.stdin.written == [], "a second STOP would have cut the return to rest short"
+    assert proc.waits == [ri._STOP_WAIT_S]
+    assert ri.remote_inference_active is False
+
+
+def test_shutdown_stop_joins_a_startup_worker_still_holding_the_bus(monkeypatch, released) -> None:
+    """The pre-spawn preflight has the follower's serial port open and cannot be
+    interrupted mid-call. Leaving while it does is how the NEXT boot finds the
+    bus busy — so it is joined, bounded, like the "press Stop again" gesture."""
+    joins: list[float | None] = []
+
+    class _Worker:
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout=None) -> None:
+            joins.append(timeout)
+
+    monkeypatch.setattr(ri, "_startup_thread", _Worker())
+    assert ri.stop_for_shutdown() is True
+    assert joins == [ri._STARTUP_STOP_JOIN_TIMEOUT_S]
+
+
+def test_shutdown_stop_never_raises_into_the_shutdown_handler(monkeypatch, released) -> None:
+    """It is called from `shutdown_event`, where an exception would skip every
+    cleanup queued behind it."""
+
+    def _boom() -> dict:
+        raise RuntimeError("the stop machine fell over")
+
+    monkeypatch.setattr(ri, "handle_stop_remote_inference", _boom)
+    _live_session(phase=ri.PHASE_RUNNING)
+    ri._remote_proc = FakeProc()
+
+    assert ri.stop_for_shutdown() is True
+    ri._go_idle_locked()
 
 
 # ---------------------------------------------------------------------------

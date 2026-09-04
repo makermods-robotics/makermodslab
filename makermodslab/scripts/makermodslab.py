@@ -297,7 +297,15 @@ def _find_makermodslab_pids() -> tuple[dict[int, str], dict[int, tuple[int, str]
 # is ~2s, bounded at 5s, plus uvicorn's own bounded graceful shutdown) with
 # margin, and costs NOTHING in the common case: the wait returns as soon as the
 # tree is gone, which for a Lab with no GPU running is immediate.
-_LEADER_GRACE_S = 10.0
+# 22 s, not 10: the worker's own shutdown can legitimately take that long
+# — the GPU stop is bounded at 5 s, a remote-inference return-to-rest at
+# 15 s, uvicorn's own drain ~1-2 s — and a grace shorter than the sum
+# SIGTERMs the tree (the DRTC child included: it escapes the process
+# GROUP, not the psutil parent walk) mid-return, which is exactly the
+# torque-on cut-off the ordered shutdown exists to prevent. `wait_procs`
+# returns the moment the tree is gone, so a healthy shutdown never pays
+# this; only a wedged backend takes 22 s instead of 10 s to be force-killed.
+_LEADER_GRACE_S = 22.0
 
 
 def _terminate_tree(pid: int, timeout: int = 5, grace: float = _LEADER_GRACE_S) -> None:

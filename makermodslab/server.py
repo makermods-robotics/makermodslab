@@ -57,6 +57,11 @@ from . import (
     modal_launcher,
     models as model_browser,
     record as record_state,
+    # The ROBOT half of the same run. Imported as a module (beside the two
+    # handlers pulled in below) because `shutdown_event` calls
+    # `stop_for_shutdown` on it — the child holds an energized arm and does not
+    # die with this process.
+    remote_inference,
     rollout as rollout_state,
     session_events,
     sfu,
@@ -4834,6 +4839,18 @@ async def shutdown_event():
     # ever has real work — gathered concurrently anyway, both because it's
     # cheap and as a defensive measure if that invariant is ever violated,
     # rather than paying each stop's worst case one after another.
+    #
+    # REMOTE INFERENCE belongs here rather than beside the GPU stop above, and
+    # it is the sharpest case on the list: its child is spawned with
+    # `start_new_session=True`, so the SIGTERM/SIGINT that ends this worker
+    # never reaches it, and it ignores stdin EOF by design — `STOP` on that
+    # stdin is the ONLY thing that makes it return the arm before releasing
+    # torque. It is deliberately AFTER the GPU stop (which has already
+    # completed above, awaited, so the two never overlap): the child losing its
+    # policy for a second is a robot side that stops receiving actions and
+    # holds, which is exactly the state a return-to-rest wants to start from,
+    # whereas stopping the arm first would leave a GPU billing while we waited
+    # out its return.
     results = await asyncio.gather(
         asyncio.to_thread(stop_teleoperation_and_wait),
         asyncio.to_thread(stop_recording_and_wait),
@@ -4841,6 +4858,7 @@ async def shutdown_event():
         asyncio.to_thread(auto_calibration_batch_manager.stop_and_wait),
         asyncio.to_thread(handle_stop_inference),
         asyncio.to_thread(stop_replay_and_wait),
+        asyncio.to_thread(remote_inference.stop_for_shutdown),
         return_exceptions=True,
     )
     labels = (
@@ -4850,6 +4868,7 @@ async def shutdown_event():
         "auto-calibration batch",
         "inference",
         "replay",
+        "remote inference",
     )
     for label, result in zip(labels, results, strict=True):
         if isinstance(result, Exception):
