@@ -134,7 +134,15 @@ class CheckpointPolicyConfigResponse(BaseModel):
     n_action_steps / chunk_size are the checkpoint's chunk geometry, null when
     the config omits them. n_action_steps is the CEILING on a remote-inference
     horizon — a declared horizon above it makes the two Portal peers disagree
-    about the action-chunk shape, and every packet is then dropped in silence."""
+    about the action-chunk shape, and every packet is then dropped in silence.
+
+    dataset_repo_id is the dataset the checkpoint was trained on, read from its
+    own train_config.json — null when the lineage offers no real id (an
+    imported flat model repo, or a record still carrying the "(imported)"
+    placeholder, which is never reported as a repo id). Clients should prefer
+    it over the owning job record's config.dataset_repo_id: the record is a
+    placeholder for imports, and on a resume chain the tip's record does not
+    describe a checkpoint owned by an ancestor."""
 
     policy_type: str | None
     image_features: dict[str, CheckpointImageFeature]
@@ -180,6 +188,7 @@ class CheckpointPolicyConfigResponse(BaseModel):
     n_action_steps: int | None
     chunk_size: int | None
     trained_on_robot_type: str | None
+    dataset_repo_id: str | None
 
 
 class HubJobStatus(BaseModel):
