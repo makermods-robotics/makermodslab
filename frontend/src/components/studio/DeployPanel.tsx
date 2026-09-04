@@ -96,6 +96,7 @@ import {
   defaultTaskFrom,
   effectiveTaskFor,
   loadingDots,
+  loadingWordKey,
   TASK_LOADING_DOT_MS,
   TASK_LOADING_MAX_MS,
   taskIsAmbiguous,
@@ -1920,9 +1921,10 @@ const DeployPanel: React.FC = () => {
                 placeholder={
                   defaultTask ||
                   (taskPrefill.kind === "loading" && !taskLoadingExpired
-                    ? // The word is translated; the dots are punctuation
-                      // driven by the tick, so they stay out of the catalog.
-                      `${t("studio.deploy.task.placeholderLoading")}${loadingDots(taskLoadingTick)}`
+                    ? // The word is translated and cycles once per dot
+                      // cycle; the dots are punctuation driven by the tick,
+                      // so they stay out of the catalog.
+                      `${t(loadingWordKey(taskLoadingTick) as never)}${loadingDots(taskLoadingTick)}`
                     : taskPrefill.kind === "loading"
                       ? // Still running, but past the point where watching
                         // dots beats typing. Does NOT claim the dataset has
