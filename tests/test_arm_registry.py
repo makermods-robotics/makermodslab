@@ -373,16 +373,18 @@ def test_non_families_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
 # the NEXT family forgets to extend — cannot be reached by a behaviour test.
 # Pure AST over the files on disk.
 #
-# Scoped to the modules step 4a moved (docs/extensions/plan.md); 4b widens
-# this list to the calibration, port-detection, stop-path and loop modules.
+# Every module outside the families themselves (and the vendored autocal,
+# which is upstream's to re-shape). Computed rather than listed, so a new
+# module is swept the day it lands.
 # ---------------------------------------------------------------------------
 
 _PACKAGE = Path(__file__).resolve().parents[1] / "makermodslab"
-_SWEPT_FILES = (
-    "arm_capabilities.py",
-    "rollout.py",
-    "utils/config.py",
-    "utils/robot_factory.py",
+_SWEPT_FILES = tuple(
+    sorted(
+        str(p.relative_to(_PACKAGE))
+        for p in _PACKAGE.rglob("*.py")
+        if "vendor" not in p.parts and p.relative_to(_PACKAGE).parts[0] != "arms"
+    )
 )
 
 
@@ -412,6 +414,23 @@ def test_the_sweep_reads_the_files_it_claims_to() -> None:
     every assertion below by matching nothing."""
     for name in _SWEPT_FILES:
         assert (_PACKAGE / name).is_file(), name
+    assert len(_SWEPT_FILES) >= 30
+    # The seams the refactor moved must be in the sweep, or it protects nothing.
+    for name in (
+        "arm_capabilities.py",
+        "can_recovery.py",
+        "maker_ports.py",
+        "record.py",
+        "replay.py",
+        "rollout.py",
+        "server.py",
+        "teleoperate.py",
+        "zero_calibrate.py",
+        "utils/config.py",
+        "utils/robot_factory.py",
+    ):
+        assert name in _SWEPT_FILES, name
+    assert not any(name.startswith("arms/") for name in _SWEPT_FILES)
 
 
 @pytest.mark.parametrize("name", _SWEPT_FILES)
