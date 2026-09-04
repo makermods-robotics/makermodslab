@@ -72,6 +72,20 @@ class SO101Family(ArmFamily):
 
         return SO101LeaderConfig(port=port, id=config_id)
 
+    def verify_identity(self, pairs: Any, *, skip: bool = False, config_names: Any = None) -> list[str]:
+        from .. import arm_identity
+
+        return arm_identity.verify_devices(pairs, skip=skip, config_names=config_names)
+
+    def prepare_follower_registers(self, robot: Any, label: str | None = None) -> list[str]:
+        # Both are Feetech RAM registers on the FOLLOWER (see motor_power.py
+        # for why the leader must never get the speed-cap clear).
+        from ..motor_power import FOLLOWER, clear_goal_velocity, reset_torque_limit
+
+        warnings = reset_torque_limit(robot, FOLLOWER, label)
+        warnings += clear_goal_velocity(robot, FOLLOWER, label)
+        return warnings
+
     async def identify_by_motion(self, device_type: str, ports: list[str] | None = None) -> dict:
         # Both halves speak Feetech serial on motor id 1, so the side asked
         # about changes nothing — identify.py watches the same register either way.

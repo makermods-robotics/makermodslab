@@ -103,7 +103,11 @@ def test_the_sweep_finds_the_call_sites_at_all() -> None:
     assertion below it — a green tripwire that protects nothing is worse than no
     tripwire, because it is believed."""
     sites = _call_sites()
-    assert len(sites) >= 10, f"expected the known motor-register call sites, found {len(sites)}"
+    # The arm family's prepare_follower_registers (makermodslab/arms/so101.py)
+    # is now the one in-process call site for the teleop / record / replay
+    # connect preflight; replay's _ensure_uncapped and rollout's port-based
+    # preflights are the rest.
+    assert len(sites) >= 7, f"expected the known motor-register call sites, found {len(sites)}"
     assert {name for _, _, name, _ in sites} == set(_GUARDED)
 
 

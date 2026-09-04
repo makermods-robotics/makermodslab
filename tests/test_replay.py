@@ -555,8 +555,11 @@ def _connect_stubs(monkeypatch):
     monkeypatch.setattr(
         "makermodslab.replay.setup_follower_calibration_file", lambda cfg, arm_type="so101": "fid"
     )
-    monkeypatch.setattr("makermodslab.replay.verify_devices", lambda *a, **k: [])
-    monkeypatch.setattr("makermodslab.replay.reset_torque_limit", lambda *a, **k: [])
+    # The connect preflight runs through the arm family, which calls these
+    # modules; replay's own _ensure_uncapped still calls clear_goal_velocity.
+    monkeypatch.setattr("makermodslab.arm_identity.verify_devices", lambda *a, **k: [])
+    monkeypatch.setattr("makermodslab.motor_power.reset_torque_limit", lambda *a, **k: [])
+    monkeypatch.setattr("makermodslab.motor_power.clear_goal_velocity", lambda *a, **k: [])
     monkeypatch.setattr("makermodslab.replay.clear_goal_velocity", lambda *a, **k: [])
     monkeypatch.setattr("makermodslab.replay.time.sleep", lambda s: None)
 

@@ -31,14 +31,12 @@ from lerobot.utils.errors import DeviceNotConnectedError
 
 from .api_errors import ErrorCode
 from .arm_capabilities import uses_feetech_bus
-from .arm_identity import verify_devices
 from .arms import registry as arm_registry
 from .maker_rest_pose import (
     capture_maker_pose,
     maker_follower_arms,
     return_maker_arms_to_rest,
 )
-from .motor_power import FOLLOWER, clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
 from .session_events import notify_session_changed
 from .torque import de_energize_can_device, release_maker_torque
@@ -764,6 +762,7 @@ def _connect_bimanual(request: TeleoperateRequest):
     error if any library file is missing (before connect() drops into
     interactive recalibration, which would hang this thread).
     """
+    family = arm_registry.get(request_arm_type(request))
     robot_config, teleop_config = build_bimanual_configs(request)
 
     robot = BiSOFollower(robot_config)
@@ -790,7 +789,7 @@ def _connect_bimanual(request: TeleoperateRequest):
         # ids are BiSO staging aliases, so pass the real library stems (in
         # arm-iteration order: left follower, right follower, left leader, right
         # leader) for the identity comparison.
-        identity_warnings = verify_devices(
+        identity_warnings = family.verify_identity(
             ((robot, "follower"), (teleop_device, "leader")),
             skip=request.skip_identity_check,
             config_names=[
@@ -809,15 +808,11 @@ def _connect_bimanual(request: TeleoperateRequest):
             arm.bus.write_calibration(arm.calibration)
         robot.configure()
         teleop_device.configure()
-        # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) —
-        # followers only, never the human-held leader. Clears any torque cap a
-        # previous auto-calibration left in RAM; a failed write degrades to
-        # the previous limit and is surfaced as a warning.
-        identity_warnings += reset_torque_limit(robot, FOLLOWER, "follower arms")
-        # Clear any leftover Goal_Velocity speed cap a previous arm-driving
-        # feature stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400);
-        # followers only, never the human-held leader. See makermodslab/motor_power.py.
-        identity_warnings += clear_goal_velocity(robot, FOLLOWER, "follower arms")
+        # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) and a
+        # cleared Goal_Velocity speed cap — followers only, never the
+        # human-held leader; a failed write degrades to the previous value and
+        # is surfaced as a warning. See makermodslab/motor_power.py.
+        identity_warnings += family.prepare_follower_registers(robot, "follower arms")
         logger.info("Successfully connected to both bimanual arms")
         return robot, teleop_device, identity_warnings
     except Exception as e:
@@ -1020,7 +1015,8 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             f"Starting teleoperation with leader port: {request.leader_port}, follower port: {request.follower_port}"
         )
 
-        if not uses_feetech_bus(request.arm_type):
+        family = arm_registry.get(request_arm_type(request))
+        if not family.uses_feetech_bus:
             robot, teleop_device, identity_warnings = _connect_can(request)
         elif request.mode == "bimanual":
             robot, teleop_device, identity_warnings = _connect_bimanual(request)
@@ -1061,7 +1057,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             # Must run BEFORE write_calibration below stamps the (possibly wrong)
             # file into the servos' EEPROM. Raises on mismatch; the except path
             # below disconnects both devices and surfaces the message.
-            identity_warnings = verify_devices(
+            identity_warnings = family.verify_identity(
                 ((robot, "follower"), (teleop_device, "leader")), skip=request.skip_identity_check
             )
 
@@ -1076,16 +1072,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             logger.info("Configuring motors...")
             robot.configure()
             teleop_device.configure()
-            # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) —
-            # follower only, never the human-held leader. Clears any torque
-            # cap a previous auto-calibration left in RAM; a failed write
-            # degrades to the previous limit and is surfaced as a warning.
-            identity_warnings += reset_torque_limit(robot, FOLLOWER)
-            # Clear any leftover Goal_Velocity speed cap a previous arm-driving
-            # feature stamped in RAM (auto-cal fold/unfold=1000, rest-pose
-            # return=400); follower only, never the human-held leader. See
-            # makermodslab/motor_power.py.
-            identity_warnings += clear_goal_velocity(robot, FOLLOWER)
+            # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) and
+            # a cleared Goal_Velocity speed cap — follower only, never the
+            # human-held leader; a failed write degrades to the previous value
+            # and is surfaced as a warning. See makermodslab/motor_power.py.
+            identity_warnings += family.prepare_follower_registers(robot)
             logger.info("Successfully connected to both devices")
 
         current_robot = robot

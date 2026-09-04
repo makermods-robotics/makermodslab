@@ -40,10 +40,10 @@ from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .api_errors import ErrorCode
 from .arm_capabilities import ARM_TYPE_LABEL, arm_type_from_robot_type, uses_feetech_bus
-from .arm_identity import verify_devices
+from .arms import registry as arm_registry
 from .datasets import get_episode_action_series, read_dataset_robot_type
 from .maker_rest_pose import capture_maker_pose, return_maker_to_pose
-from .motor_power import FOLLOWER, clear_goal_velocity, reset_torque_limit
+from .motor_power import FOLLOWER, clear_goal_velocity
 from .rest_pose import (
     RETURN_CEILING_S,
     _clamp_to_representable_range,
@@ -372,7 +372,6 @@ def _connect_can_follower(request: ReplayRequest):
     """
     from lerobot.robots import make_robot_from_config
 
-    from .arms import registry as arm_registry
     from .torque import de_energize_can_device
 
     arm_family = arm_registry.get(normalize_arm_type(request.arm_type))
@@ -401,7 +400,8 @@ def _connect_follower(request: ReplayRequest):
     configure → reset_torque_limit → clear_goal_velocity), follower-only.
     Raises on a connection or hard identity-mismatch failure; the caller
     (handle_start_replay) is responsible for cleanup on that path."""
-    if not uses_feetech_bus(request.arm_type):
+    family = arm_registry.get(normalize_arm_type(request.arm_type))
+    if not family.uses_feetech_bus:
         return _connect_can_follower(request)
 
     follower_id = setup_follower_calibration_file(request.follower_config, request.arm_type)
@@ -414,7 +414,7 @@ def _connect_follower(request: ReplayRequest):
             "Make sure it's plugged in and powered on, then try again."
         ) from e
 
-    identity_warnings = verify_devices(((robot, "follower"),), skip=request.skip_identity_check)
+    identity_warnings = family.verify_identity(((robot, "follower"),), skip=request.skip_identity_check)
 
     # A dropped serial packet during configure() ("Failed to write 'Lock' ...
     # no status packet") turned roughly one start in twenty into a hard 500,
@@ -437,8 +437,7 @@ def _connect_follower(request: ReplayRequest):
             )
             time.sleep(_CONNECT_RETRY_DELAY_S)
 
-    identity_warnings += reset_torque_limit(robot, FOLLOWER)
-    identity_warnings += clear_goal_velocity(robot, FOLLOWER)
+    identity_warnings += family.prepare_follower_registers(robot)
     return robot, identity_warnings
 
 

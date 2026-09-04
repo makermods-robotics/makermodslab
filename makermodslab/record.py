@@ -31,8 +31,8 @@ from lerobot.datasets import LeRobotDataset
 from lerobot.scripts.lerobot_record import RecordConfig
 
 from .api_errors import ErrorCode
-from .arm_capabilities import arm_type_of_robot_config, uses_feetech_bus
-from .arm_identity import ArmIdentityError, verify_devices
+from .arm_identity import ArmIdentityError
+from .arms import registry as arm_registry
 from .bus_retry import BUS_SYNC_READ_RETRIES as _BUS_SYNC_READ_RETRIES  # noqa: F401
 from .camera_preview import camera_preview_manager
 from .datasets import (
@@ -46,7 +46,6 @@ from .maker_rest_pose import (
     maker_follower_arms,
     return_maker_arms_to_rest,
 )
-from .motor_power import FOLLOWER, clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose
 from .session_events import notify_session_changed
 from .teleoperate import (
@@ -1693,10 +1692,11 @@ def record_with_web_events(
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
 
-    # Read the arm type back off the assembled config rather than taking it as
+    # Read the family back off the assembled config rather than taking it as
     # a parameter, so it can never disagree with the devices actually built.
     # Everything below that touches a Feetech register by name is gated on it.
-    feetech = uses_feetech_bus(arm_type_of_robot_config(cfg.robot))
+    family = arm_registry.family_for_robot_config_type(getattr(cfg.robot, "type", None))
+    feetech = family.uses_feetech_bus
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
@@ -1873,13 +1873,13 @@ def record_with_web_events(
     # mismatch, release the arms (torque was never enabled) and let the worker's
     # error path surface the message via the recording status.
     try:
-        identity_warnings = verify_devices(
+        # A CAN family answers with nothing to compare — its zero lives inside
+        # the motors and its calibration writes homing_offset=0 for every
+        # joint — so the guard is a no-op there rather than left to fail open
+        # per arm.
+        identity_warnings = family.verify_identity(
             ((robot, "follower"), (teleop, "leader")),
-            # A Maker arm has no EEPROM fingerprint to compare — its zero lives
-            # inside the RobStride motors and its calibration writes
-            # homing_offset=0 for every joint — so the guard is skipped whole
-            # rather than left to fail open per arm.
-            skip=skip_identity_check or not feetech,
+            skip=skip_identity_check,
             config_names=identity_config_names,
         )
     except ArmIdentityError:
@@ -1929,16 +1929,11 @@ def record_with_web_events(
         # the servos, not in a file the bus reloads.
         logger.info("CAN arm: calibration registered by connect(); skipping the explicit write")
 
-    # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) — the
-    # follower only, never the human-held leader. Clears any torque cap a
-    # previous auto-calibration left in RAM; a failed write degrades to the
-    # previous limit (logged inside) and must not abort the session.
-    if feetech:
-        reset_torque_limit(robot, FOLLOWER)
-        # Clear any leftover Goal_Velocity speed cap a previous arm-driving feature
-        # stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400); the
-        # follower only, never the human-held leader. See makermodslab/motor_power.py.
-        clear_goal_velocity(robot, FOLLOWER)
+    # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) and a
+    # cleared Goal_Velocity speed cap — the follower only, never the human-held
+    # leader; a failed write degrades to the previous value (logged inside)
+    # and must not abort the session. A no-op on a CAN family.
+    family.prepare_follower_registers(robot)
 
     # Capture the follower's rest pose now — after connect/configure/identity
     # guard, before the recording loop moves anything — so a normal stop can

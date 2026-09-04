@@ -163,6 +163,34 @@ def test_only_the_damiao_follower_refuses_the_motion_gesture() -> None:
     assert [f.follower_probe_protocol for f in registry.families()] == [None, "robstride", "damiao"]
 
 
+@pytest.mark.parametrize("family", registry.families(), ids=lambda f: f.id)
+def test_preflight_is_feetech_register_work_and_nothing_elsewhere(
+    family: ArmFamily, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from makermodslab import arm_identity, motor_power
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        arm_identity,
+        "verify_devices",
+        lambda pairs, skip=False, config_names=None: calls.append(("v", skip)) or ["w"],
+    )
+    monkeypatch.setattr(
+        motor_power, "reset_torque_limit", lambda d, side, label=None: calls.append(("r", side)) or []
+    )
+    monkeypatch.setattr(
+        motor_power, "clear_goal_velocity", lambda d, side, label=None: calls.append(("c", side)) or []
+    )
+
+    identity = family.verify_identity((("dev", "follower"),), skip=True)
+    registers = family.prepare_follower_registers("dev", "follower arms")
+    if family.uses_feetech_bus:
+        assert identity == ["w"] and registers == []
+        assert calls == [("v", True), ("r", "follower"), ("c", "follower")]
+    else:
+        assert identity == [] and registers == [] and calls == []
+
+
 def test_library_dirs_are_resolved_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None:
     """The test fixtures redirect calibration libraries by monkeypatching the
     config constants; a family that captured the path at import would silently

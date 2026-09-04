@@ -183,9 +183,10 @@ def test_start_teleoperation_force_disables_torque_and_warns_when_setup_fails_af
         "makermodslab.utils.robot_factory.setup_calibration_files",
         lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
-    monkeypatch.setattr(teleop, "verify_devices", lambda *a, **k: [])
-    monkeypatch.setattr(teleop, "reset_torque_limit", lambda *a, **k: [])
-    monkeypatch.setattr(teleop, "clear_goal_velocity", lambda *a, **k: [])
+    # The preflight runs through the arm family, which calls these modules.
+    monkeypatch.setattr("makermodslab.arm_identity.verify_devices", lambda *a, **k: [])
+    monkeypatch.setattr("makermodslab.motor_power.reset_torque_limit", lambda *a, **k: [])
+    monkeypatch.setattr("makermodslab.motor_power.clear_goal_velocity", lambda *a, **k: [])
 
     class _FollowerBus:
         def __init__(self) -> None:
@@ -281,9 +282,10 @@ def test_start_teleoperation_bimanual_force_disables_torque_and_warns_when_leade
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(teleop, "build_bimanual_configs", lambda request: ("robot_cfg", "teleop_cfg"))
-    monkeypatch.setattr(teleop, "verify_devices", lambda *a, **k: [])
-    monkeypatch.setattr(teleop, "reset_torque_limit", lambda *a, **k: [])
-    monkeypatch.setattr(teleop, "clear_goal_velocity", lambda *a, **k: [])
+    # The preflight runs through the arm family, which calls these modules.
+    monkeypatch.setattr("makermodslab.arm_identity.verify_devices", lambda *a, **k: [])
+    monkeypatch.setattr("makermodslab.motor_power.reset_torque_limit", lambda *a, **k: [])
+    monkeypatch.setattr("makermodslab.motor_power.clear_goal_velocity", lambda *a, **k: [])
 
     class _SubBus:
         def __init__(self, port: str, motors: dict, fail_disable: bool = False) -> None:

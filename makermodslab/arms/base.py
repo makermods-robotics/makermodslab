@@ -62,11 +62,18 @@ What the contract covers TODAY (refactor step "4a" of docs/extensions/plan.md):
   tells one arm from its twin), with the two facts the CAN probes branch on:
   follower_probe_protocol and motion_identify_energizes_follower.
 
-What step "4b" still adds (deliberately NOT declared yet): the pre-torque
-preflight (identity fingerprint, motor-power cap), the stop-path pair
-return_to_rest / release_torque, and the telemetry kind the loops broadcast
-(URDF joints vs degrees by motor name). Until then those flows keep their
-own per-family modules.
+* preflight — verify_identity (the read-only EEPROM fingerprint that
+  catches a swapped or mis-assigned arm BEFORE a calibration is written into
+  it) and prepare_follower_registers (re-seed the session torque limit and
+  clear a leftover speed cap). Both are Feetech register work; the CAN
+  families answer with nothing to do, because a RobStride/Damiao motor
+  keeps its zero internally and takes its drive effort from the MIT gains
+  connect() writes.
+
+What step "4b" still adds (deliberately NOT declared yet): the stop-path
+pair return_to_rest / release_torque, and the telemetry kind the loops
+broadcast (URDF joints vs degrees by motor name). Until then those flows
+keep their own per-family modules.
 """
 
 from __future__ import annotations
@@ -248,6 +255,30 @@ class ArmFamily(ABC):
         ``device_type`` is "robot" (the follower) or "teleop" (the leader);
         a family whose two halves share one bus driver may ignore it.
         """
+
+    # --- preflight, before any torque --------------------------------------------
+
+    def verify_identity(self, pairs: Any, *, skip: bool = False, config_names: Any = None) -> list[str]:
+        """Check each connected (device, side) pair against its assigned calibration.
+
+        Runs after the buses connect and strictly before anything writes a
+        calibration or enables torque; raises on a hard mismatch, returns
+        warn-but-allow messages otherwise. The default is "nothing to
+        compare": only a family whose servos hold a fingerprint in EEPROM
+        (the SO-101) can answer, and it overrides this.
+        """
+        return []
+
+    def prepare_follower_registers(self, robot: Any, label: str | None = None) -> list[str]:
+        """Put a connected FOLLOWER's drive registers into session state.
+
+        Re-seed the RAM torque limit from EEPROM (clearing any cap a previous
+        auto-calibration left) and clear a leftover Goal_Velocity speed cap.
+        Followers only, never the human-held leader. Returns warnings; a
+        failed write degrades rather than aborts. The default is a no-op: a
+        CAN follower's drive effort is its MIT gains, set at connect().
+        """
+        return []
 
     # --- device construction -------------------------------------------------
 
