@@ -341,10 +341,26 @@ export default {
       // Only `placeholderNone` may claim the dataset lists no task; a lookup
       // that failed is not evidence of that.
       placeholderNone: "No task found on the training dataset — type one",
-      // While the lookup is in flight. The animated dots are appended by the
-      // caller — they are punctuation, not prose, and must not be translated
-      // into a catalog string that a plural or a full stop could disturb.
-      placeholderLoading: "Loading the training dataset",
+      // While the lookup is in flight. One of these is on screen at a time,
+      // cycling about once a second, with animated dots appended by the caller
+      // — the dots are punctuation, not prose, so they are not catalog strings.
+      //
+      // "loading" is first and deliberately plain: the field says what it is
+      // doing before it starts having fun. The rest are rummaging-for-something
+      // verbs, which is the actual job — going through a dataset's metadata
+      // looking for the sentence it was recorded under. Translate them for
+      // flavour rather than literally; what matters is that each reads as
+      // "still searching", not as an error.
+      loading: {
+        loading: "Loading",
+        rummaging: "Rummaging",
+        digging: "Digging",
+        foraging: "Foraging",
+        excavating: "Excavating",
+        spelunking: "Spelunking",
+        ferreting: "Ferreting",
+        scrounging: "Scrounging",
+      },
       // The lookup is STILL running after the animation gives up. Deliberately
       // does not say the dataset has no task: it has not answered either way,
       // and if it lands later its answer replaces this.

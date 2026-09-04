@@ -48,6 +48,40 @@ export function loadingDots(tick: number): string {
   return ".".repeat((tick % 3) + 1);
 }
 
+/** The words the placeholder cycles through while it waits.
+ *
+ * "Loading" comes first and is on screen for the whole first dot cycle, so the
+ * field states what it is doing before it starts having fun. The rest are all
+ * rummaging-for-something verbs, which is literally the job: going through a
+ * dataset's metadata looking for the sentence it was recorded under.
+ *
+ * Spelled as FULL literal key paths rather than assembled from a suffix,
+ * deliberately: i18n/keyUsage.test.ts scans the source for key-shaped literals
+ * and asserts each resolves in every language, so writing them out means a
+ * missing translation is a test failure instead of a raw key path rendered at
+ * an operator. */
+export const TASK_LOADING_WORD_KEYS = [
+  "studio.deploy.task.loading.loading",
+  "studio.deploy.task.loading.rummaging",
+  "studio.deploy.task.loading.digging",
+  "studio.deploy.task.loading.foraging",
+  "studio.deploy.task.loading.excavating",
+  "studio.deploy.task.loading.spelunking",
+  "studio.deploy.task.loading.ferreting",
+  "studio.deploy.task.loading.scrounging",
+] as const;
+
+/** Which word is on screen at `tick`.
+ *
+ * One word per full dot cycle (three ticks), so the dots animate visibly
+ * underneath a word that changes about once a second — fast enough to read as
+ * alive, slow enough to actually read. Wraps, so a wait longer than the list
+ * loops rather than running out. */
+export function loadingWordKey(tick: number): (typeof TASK_LOADING_WORD_KEYS)[number] {
+  const index = Math.floor(tick / 3) % TASK_LOADING_WORD_KEYS.length;
+  return TASK_LOADING_WORD_KEYS[index];
+}
+
 /** Order tasks most-represented first, but ONLY when every count is known.
  *
  * `num_episodes` is null for "unknown" (unreadable episode metadata, or a Hub

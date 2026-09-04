@@ -6,7 +6,9 @@ import {
   defaultTaskFrom,
   effectiveTaskFor,
   loadingDots,
+  loadingWordKey,
   rankDatasetTasks,
+  TASK_LOADING_WORD_KEYS,
   TASK_LOADING_DOT_MS,
   TASK_LOADING_MAX_MS,
   taskFieldVisible,
@@ -200,6 +202,37 @@ describe("a lookup in flight contributes nothing", () => {
   it("still sends what the operator typed", () => {
     expect(effectiveTaskFor("mine", { kind: "loading" }, true, "single")).toBe(
       "mine",
+    );
+  });
+});
+
+describe("loadingWordKey", () => {
+  it("holds each word for one full dot cycle", () => {
+    // Three ticks per word: the dots must visibly animate underneath a word
+    // that stays put long enough to actually be read.
+    expect([0, 1, 2].map(loadingWordKey)).toEqual([
+      TASK_LOADING_WORD_KEYS[0],
+      TASK_LOADING_WORD_KEYS[0],
+      TASK_LOADING_WORD_KEYS[0],
+    ]);
+    expect(loadingWordKey(3)).toBe(TASK_LOADING_WORD_KEYS[1]);
+    expect(loadingWordKey(6)).toBe(TASK_LOADING_WORD_KEYS[2]);
+  });
+
+  it("starts on the plain one, so the field says what it is doing first", () => {
+    expect(loadingWordKey(0)).toBe("studio.deploy.task.loading.loading");
+  });
+
+  it("wraps rather than running out on a long wait", () => {
+    const cycle = TASK_LOADING_WORD_KEYS.length * 3;
+    expect(loadingWordKey(cycle)).toBe(TASK_LOADING_WORD_KEYS[0]);
+    expect(loadingWordKey(cycle + 3)).toBe(TASK_LOADING_WORD_KEYS[1]);
+    expect(loadingWordKey(99999)).toBeDefined();
+  });
+
+  it("has no duplicate keys", () => {
+    expect(new Set(TASK_LOADING_WORD_KEYS).size).toBe(
+      TASK_LOADING_WORD_KEYS.length,
     );
   });
 });
