@@ -67,7 +67,7 @@ function App() {
                           {/* /inference is no longer a route — it's the
                               InferenceSessionDialog window, hosted by
                               InferenceSessionProvider and opened by the launch
-                              flows (Deploy panel + InferenceModal). */}
+                              flow (the studio's Deploy panel). */}
                           {/* Robot settings is no longer a route — it's the
                               RobotConfigDialog window, opened from the robot
                               corner (Launchpad + studio headers). */}

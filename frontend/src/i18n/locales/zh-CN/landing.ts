@@ -315,63 +315,6 @@ export default {
       startFailedTitle: "无法开始下载",
     },
   },
-  inference: {
-    title: "配置推理",
-    description:
-      "选择一个检查点并确认硬件。所选策略将在设定的时长内自主驱动从臂。",
-    robotSection: "机器人配置",
-    noRobot: "请先在主页选择并配置一台机器人。",
-    followerNotReady:
-      "<0>{{name}}</0>{{gap}}。请先打开机器人设置再运行推理。（推理只使用从臂 —— 无需配置主臂。）",
-    runningOn: "运行于 <0>{{name}}</0>",
-    runningOnBimanual: "运行于 <0>{{name}}</0>（双臂 —— 两个从臂）",
-    checkpointSection: "检查点",
-    noCheckpoints: "该任务暂时还没有可用的检查点。",
-    mismatchBimanual:
-      "该检查点是在<0>双臂机器人</0>上训练的（状态维度 {{dim}}，{{arms}} 条机械臂），而 <1>{{name}}</1> 是单臂机器人。请改选单臂检查点，或在主页选择一台双臂机器人。",
-    mismatchSingle:
-      "该检查点是在<0>单臂机器人</0>上训练的（状态维度 {{dim}}），而 <1>{{name}}</1> 是双臂机器人。请改选双臂检查点，或在主页选择一台单臂机器人。",
-    paramsSection: "运行参数",
-    taskLabel: "任务描述",
-    taskPlaceholder: "例如：拿起红色积木",
-    languageConditioned: "该策略是语言条件式的（{{policyType}}）。",
-    durationLabel: "最长时长（秒）",
-    engineLabel: "推理引擎",
-    engineSync: "Sync（默认）",
-    engineRtc: "RTC —— 实验性，控制更平滑",
-    engineRtcHint:
-      "Real-Time Chunking 让推理与运动重叠，消除动作块之间的停顿。它同时改变了动作的生成方式 —— 在采信结果前请与 Sync 对比。",
-    engineSyncHint: "每个控制步进行一次策略前向计算。机械臂在动作块之间会短暂停顿。",
-    // 当所选检查点的架构无法运行 RTC（服务端会拒绝）时显示在选择器下方，
-    // 同时该选项也会被禁用。
-    engineRtcUnavailable: "该检查点的策略不支持 Real-Time Chunking。",
-    camerasSection: "摄像头",
-    policyConfigLoading: "正在读取策略配置…",
-    policyConfigError: "无法加载策略配置：{{message}}",
-    noCameras: "该策略不使用摄像头。",
-    bindHint:
-      "为策略训练时使用的每个名称绑定这台机器人的一个摄像头。使用哪个摄像头以及如何打开它取自机器人配置（在机器人设置中修改）；采集分辨率则取自检查点。",
-    capturesAt: "以 {{width}}×{{height}} 采集 —— 与策略的分辨率一致",
-    robotCameraResolution: "（{{name}} 在机器人设置中被设为 {{width}}×{{height}}）",
-    disconnected: "已断开 —— 请在开始前重新连接",
-    selectCamera: "选择摄像头",
-    noRobotCameras: "这台机器人没有摄像头 —— 请在机器人设置中添加",
-    thumbnailReleased: "已释放",
-    thumbnailNoPreview: "无预览",
-    advancedSummary: "ACT 的时序集成",
-    actionSelection: "动作选择",
-    temporalEnsemble: "时序集成",
-    temporalEnsembleHint:
-      "对策略在每一步预测出的重叠动作块取平均，而不是开环执行单个动作块 —— 运动更平滑，但策略要在每个控制步都运行，因此更慢。",
-    coeffLabel: "集成系数",
-    coeffPlaceholder: "{{coeff}}（ACT 论文默认值）",
-    coeffInvalid: "请输入大于 0 的数字。",
-    coeffHint:
-      "权重为 exp(-coeff × age)：值越大越偏向最新的预测，值越小则平均得越均匀。ACT 论文使用 {{coeff}}。",
-    start: "开始推理",
-    starting: "正在启动…",
-    startFailedTitle: "无法开始推理",
-  },
   hubUpload: {
     failed: "上传失败。",
     couldNotStart: "无法开始上传。",
