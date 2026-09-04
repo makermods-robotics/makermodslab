@@ -221,6 +221,26 @@ def test_no_new_routes_outside_api_v1():
 # checks every entry actually exists so retired surface can't linger.
 V1_ONLY_ROUTES: frozenset[str] = frozenset(
     [
+        # Multi-checkpoint publish: the training view's picker + background queue.
+        # Legacy POST /models/upload stays the single-checkpoint synchronous push.
+        "GET /api/v1/models/checkpoints",
+        "GET /api/v1/models/publish-status",
+        "POST /api/v1/models/publish",
+        # Coaching (DAgger) controls. Born versioned: the flat mount was frozen
+        # before coaching landed, so every coaching verb exists only under
+        # /api/v1.
+        "POST /api/v1/coaching-takeover",
+        "POST /api/v1/coaching-handback",
+        "POST /api/v1/coaching-cancel",
+        "POST /api/v1/coaching-hold",
+        "POST /api/v1/coaching-resume",
+        "POST /api/v1/coaching-reset",
+        "POST /api/v1/coaching-recovered",
+        "POST /api/v1/coaching-drop-last",
+        # The session-scoped coaching verb — what the browser actually uses.
+        # Born versioned like the flat ones, and restored after a restack
+        # dropped it along with its handler and its frontend caller.
+        "POST /api/v1/sessions/{session_id}/coaching",
         # Node registry (multi-node): static/manual peer source.
         "GET /api/v1/nodes/{instance_id}/jobs/queue",
         "DELETE /api/v1/nodes/{instance_id}",
@@ -260,6 +280,8 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # the whole-list reorder that goes with it.
         "GET /api/v1/jobs/queue",
         "POST /api/v1/jobs/queue/reorder",
+        # Skills: the deployable projection of the /models build (PR #94).
+        "GET /api/v1/skills",
         # Sessions: identity + server-side robot resolution (sessions.py).
         "GET /api/v1/sessions/current",
         "POST /api/v1/sessions",

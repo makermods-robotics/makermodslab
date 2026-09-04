@@ -14,6 +14,14 @@ import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 import HfAuthBanner from "@/components/landing/HfAuthBanner";
 import LocalDatasetCloudNotice from "@/components/training/config/LocalDatasetCloudNotice";
 import LocalCheckpointCloudNotice from "@/components/training/config/LocalCheckpointCloudNotice";
+import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
+import {
+  JobCheckpoint,
+  getCheckpointPolicyConfig,
+  listJobCheckpoints,
+} from "@/lib/checkpointsApi";
+import { ARM_TYPE_LABEL, armTypeFromRobotType } from "@/lib/armTypes";
+import { Label } from "@/components/ui/label";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -37,10 +45,25 @@ import {
   listNodes,
   nodeDisplayName,
 } from "@/lib/nodesApi";
-import { getDatasetInfo } from "@/lib/replayApi";
+import { DatasetInfo, getDatasetInfo } from "@/lib/replayApi";
 
 // Passed by the "Continue" button on a completed local job, or the "Resume"
 // button on a cloud run that ended before its step target.
+// Policies whose lerobot preset returns NO LR scheduler — a constant learning
+// rate, so changing the step total cannot produce a schedule seam and the
+// warning below would be a plain falsehood. Taken from
+// `get_scheduler_preset() -> None` across the pinned fork lerobot's
+// `policies/*/configuration_*.py` (act, tdmpc, fastwam, gaussian_actor as of
+// the makermods-robotics/lerobot 0.6.2 pin). If lerobot adds another such
+// policy this list goes stale in the safe-ish direction: a warning that does
+// not apply.
+const POLICIES_WITHOUT_LR_SCHEDULE = new Set([
+  "act",
+  "tdmpc",
+  "fastwam",
+  "gaussian_actor",
+]);
+
 export type ResumeSeed = {
   // The run being CONTINUED — the lineage edge. Always the leaf the user
   // clicked, never the checkpoint's owner, so chains stay linear (see
@@ -128,6 +151,13 @@ interface TrainingConfiguratorProps {
   resumeSeed?: ResumeSeed | null;
   /** A "Fine-tune" seed — fresh run initialized from a source checkpoint. */
   finetuneSeed?: FinetuneSeed | null;
+  /** Report a fine-tune base checkpoint choice UP to the owner of
+   * `finetuneSeed`. The chosen step must live in the seed, not in this
+   * component's state: this form is remounted on a number of parent changes
+   * (and by Fast Refresh in dev), and local state would silently revert the
+   * pick to the source's latest checkpoint — training from weights the user
+   * did not choose, with nothing on screen saying so. */
+  onFinetuneCheckpointChange?: (ckpt: JobCheckpoint) => void;
   /** Fired with the new job id right before navigating to its monitor (e.g. so
    * the studio overlay can close). Navigation to /training/:jobId still runs. */
   onStarted?: (jobId: string) => void;
@@ -226,6 +256,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   episodeIndices: controlledEpisodeIndices,
   resumeSeed = null,
   finetuneSeed = null,
+  onFinetuneCheckpointChange,
   onStarted,
   actionsContainer,
 }) => {
@@ -322,8 +353,21 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       policy_type: policyType,
       dataset_repo_id: controlledDatasetRepoId,
       dataset_episodes: controlledEpisodeIndices,
+      // Read the fine-tune step from the SEED, not from the state seeded at
+      // mount. This is what makes the picker authoritative: `trainingConfig`
+      // froze the step this form opened with, so a launch after a pick (or
+      // after any remount) would send the wrong checkpoint.
+      ...(finetuneSeed
+        ? { finetune_from_step: finetuneSeed.step ?? undefined }
+        : {}),
     }),
-    [trainingConfig, policyType, controlledDatasetRepoId, controlledEpisodeIndices],
+    [
+      trainingConfig,
+      policyType,
+      controlledDatasetRepoId,
+      controlledEpisodeIndices,
+      finetuneSeed,
+    ],
   );
 
   const [trainingExtraAvailable, setTrainingExtraAvailable] = useState<
@@ -412,6 +456,88 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       .finally(() => setHardwareLoading(false));
   }, [baseUrl, fetchWithHeaders, auth.status]);
 
+  // ── Fine-tune base checkpoint picker ─────────────────────────────────────
+  // The base's checkpoints, so the user can fine-tune from a step OTHER than
+  // the latest. This lives INSIDE the configurator on purpose: TrainPanel keys
+  // this component on `finetuneSeed.step`, so driving the choice from outside
+  // would remount the form and discard everything already typed into it. Here
+  // the pick is a live edit of `finetune_from_step` instead.
+  const [baseCheckpoints, setBaseCheckpoints] = useState<JobCheckpoint[]>([]);
+  // Held in a ref so the fetch effect can call the newest callback without
+  // listing it as a dependency: both parents pass an inline arrow, so a real
+  // dependency would re-fetch the checkpoint list on every render.
+  const onFinetuneCheckpointChangeRef = useRef(onFinetuneCheckpointChange);
+  useEffect(() => {
+    onFinetuneCheckpointChangeRef.current = onFinetuneCheckpointChange;
+  });
+
+  const finetuneJobId = finetuneSeed?.jobId;
+  const finetuneSeedStep = finetuneSeed?.step;
+  useEffect(() => {
+    if (!finetuneJobId) {
+      setBaseCheckpoints([]);
+      return;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    void (async () => {
+      try {
+        const cks = await listJobCheckpoints(
+          baseUrl,
+          fetchWithHeaders,
+          finetuneJobId,
+          controller.signal,
+        );
+        if (cancelled) return;
+        setBaseCheckpoints(cks);
+        // Honour the step the seed arrived with (a job card's Fine-tune, a
+        // studio prefill); fall back to the latest when that step is gone or
+        // the seed named none. Mirrors resolveFinetune's own rule so the
+        // dropdown never contradicts the banner it sits in.
+        const pinned =
+          finetuneSeedStep != null
+            ? cks.find((c) => c.step === finetuneSeedStep)
+            : undefined;
+        // Normalise UPWARD when the seed names no step, or one this source no
+        // longer has: the parent then holds a real step and the choice survives
+        // a remount. Never overwrite a step that IS present — that would undo
+        // the user's pick every time this effect re-ran.
+        if (pinned === undefined) {
+          const latest = cks.length > 0 ? cks[cks.length - 1] : null;
+          if (latest) onFinetuneCheckpointChangeRef.current?.(latest);
+        }
+      } catch {
+        // Listing failed (offline Hub, deleted run). Leave the picker hidden;
+        // the seed's own step still drives the request and the backend's 400 is
+        // the backstop.
+        if (!cancelled) setBaseCheckpoints([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [finetuneJobId, finetuneSeedStep, baseUrl, fetchWithHeaders]);
+
+  // The step actually being sent — the SEED's, which the parent owns. Derived,
+  // never stored here, so a remount cannot revert it.
+  const effectiveFinetuneStep = finetuneSeed?.step ?? null;
+  const baseCkpt =
+    baseCheckpoints.find((c) => c.step === effectiveFinetuneStep) ?? null;
+  // Where the CHOSEN checkpoint's bytes live — drives the cloud upload consent
+  // notice. Must follow the live pick: switching from a hub step to a local one
+  // changes whether staging is required at all.
+  const effectiveCheckpointSource =
+    baseCkpt?.source ?? finetuneSeed?.checkpointSource;
+  // "makermods/smolvla_3cam_200ep" -> "…smolvla_3cam_200ep". The leading
+  // ellipsis marks that a namespace was dropped; the full id stays available
+  // as the heading's title attribute.
+  const baseDisplayName = (() => {
+    const name = finetuneSeed?.name ?? "";
+    const slash = name.lastIndexOf("/");
+    return slash === -1 ? name : `…${name.slice(slash + 1)}`;
+  })();
+
   const updateConfig = <T extends keyof TrainingConfig>(
     key: T,
     value: TrainingConfig[T],
@@ -435,6 +561,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const { datasets } = useDatasets();
   const datasetRepoId = config.dataset_repo_id.trim();
   const isCloud = config.target.runner === "hf_cloud";
+
   const selectedDatasetItem = datasets.find((d) => d.repo_id === datasetRepoId);
   // Only "local" needs uploading; "both"/"hub" already exist on the Hub, and an
   // unknown item (listing not yet loaded / dataset typed by hand) is left alone
@@ -458,30 +585,84 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const checkpointUploadKind: CheckpointUploadKind =
     resumeSeed != null && resumeSeed.runner !== "hf_cloud" && isCloud
       ? "resume"
-      : finetuneSeed?.checkpointSource === "local" && isCloud
+      : effectiveCheckpointSource === "local" && isCloud
         ? "finetune"
         : null;
   const needsCheckpointUpload = checkpointUploadKind != null;
 
-  // Approximate on-disk size for the notice (cheap detail endpoint; local only).
-  const [datasetSizeBytes, setDatasetSizeBytes] = useState<number | null>(null);
+  // One detail lookup for the selected dataset, feeding both the cloud-upload
+  // size notice and the cross-arm fine-tune warning. Fetched when either
+  // consumer is live (cloud + local dataset needs the size; a fine-tune needs
+  // the arm) so the common non-cloud non-fine-tune case still makes no call.
+  const [datasetInfo, setDatasetInfo] = useState<DatasetInfo | null>(null);
+  const wantDatasetInfo = !!datasetRepoId && (needsUpload || !!finetuneSeed);
   useEffect(() => {
-    if (!needsUpload || !datasetRepoId) {
-      setDatasetSizeBytes(null);
+    if (!wantDatasetInfo || !datasetRepoId) {
+      setDatasetInfo(null);
       return;
     }
+    const controller = new AbortController();
     let cancelled = false;
-    getDatasetInfo(baseUrl, fetchWithHeaders, datasetRepoId)
+    getDatasetInfo(baseUrl, fetchWithHeaders, datasetRepoId, controller.signal)
       .then((info) => {
-        if (!cancelled) setDatasetSizeBytes(info.size_bytes ?? null);
+        if (!cancelled) setDatasetInfo(info);
       })
       .catch(() => {
-        if (!cancelled) setDatasetSizeBytes(null);
+        if (!cancelled) setDatasetInfo(null);
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
-  }, [needsUpload, datasetRepoId, baseUrl, fetchWithHeaders]);
+  }, [wantDatasetInfo, datasetRepoId, baseUrl, fetchWithHeaders]);
+  const datasetSizeBytes = needsUpload ? (datasetInfo?.size_bytes ?? null) : null;
+
+  // Cross-arm fine-tune warning: the base checkpoint was trained on one arm
+  // family and the selected dataset was recorded on another. Advisory only —
+  // the backend's dimension guard already hard-blocks a genuine width mismatch
+  // (SO-101 6 vs a CAN arm's 7); this catches the same-DOF case it can't see
+  // (Maker vs Metal) and shows it before Start. Silent whenever either arm
+  // can't be established, matching the resume LR-seam note's altitude.
+  const [baseTrainedOnRobotType, setBaseTrainedOnRobotType] = useState<
+    string | null
+  >(null);
+  useEffect(() => {
+    if (!finetuneJobId || effectiveFinetuneStep == null) {
+      setBaseTrainedOnRobotType(null);
+      return;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    getCheckpointPolicyConfig(
+      baseUrl,
+      fetchWithHeaders,
+      finetuneJobId,
+      effectiveFinetuneStep,
+      controller.signal,
+    )
+      .then((cfg) => {
+        if (!cancelled) setBaseTrainedOnRobotType(cfg.trained_on_robot_type ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setBaseTrainedOnRobotType(null);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [finetuneJobId, effectiveFinetuneStep, baseUrl, fetchWithHeaders]);
+
+  const crossArmWarning = useMemo(() => {
+    const baseArm = armTypeFromRobotType(baseTrainedOnRobotType);
+    const datasetArm = armTypeFromRobotType(
+      finetuneSeed ? (datasetInfo?.robot_type ?? null) : null,
+    );
+    if (!baseArm || !datasetArm || baseArm === datasetArm) return null;
+    return t("training.configurator.finetune.armMismatch", {
+      base: ARM_TYPE_LABEL[baseArm],
+      dataset: ARM_TYPE_LABEL[datasetArm],
+    });
+  }, [baseTrainedOnRobotType, datasetInfo, finetuneSeed, t]);
 
   const [uploadError, setUploadError] = useState<string | null>(null);
 
@@ -773,6 +954,26 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
               components={[<span key="0" className="font-medium" />]}
             />
           </p>
+          {/* The LR-schedule seam. lerobot's schedulers are LambdaLR objects
+              whose horizon is captured in a closure over `cfg.steps`, and
+              LambdaLR.state_dict() stores `lr_lambdas: [None]` for plain
+              functions — so resuming REBUILDS the schedule from the new total
+              and restores only the step counter, never the horizon. Change the
+              total and the learning rate jumps at the resume point instead of
+              continuing to decay. (Measured on the SmolVLA preset: a parent
+              targeting 1,500 resumed at 5,000 gives a 32x higher LR at the
+              seam.) Keeping the parent's total is continuous, so this warns
+              only when the number actually differs. */}
+          {resumeSeed.sourceSteps > 0 &&
+          config.steps !== resumeSeed.sourceSteps &&
+          !POLICIES_WITHOUT_LR_SCHEDULE.has(resumeSeed.policyType) ? (
+            <p className="mt-2 text-warn">
+              {t("training.configurator.resume.lrSeam", {
+                from: resumeSeed.sourceSteps.toLocaleString(),
+                to: config.steps.toLocaleString(),
+              })}
+            </p>
+          ) : null}
           {isCloud ? (
             <p className="mt-1 text-muted-foreground">
               {/* The timeout is an HF-Jobs duration string — wire format, so
@@ -792,25 +993,80 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       ) : null}
       {finetuneSeed ? (
         <div className="mb-4 rounded-lg border border-border bg-muted/50 p-4 text-sm text-foreground">
-          <div className="font-semibold">
-            {finetuneSeed.step != null
-              ? t("training.configurator.finetune.titleWithStep", {
-                  name: finetuneSeed.name,
-                  step: finetuneSeed.step.toLocaleString(),
-                })
-              : t("training.configurator.finetune.titleLatest", {
-                  name: finetuneSeed.name,
-                })}
+          {/* Namespace dropped and the id truncated from the LEFT: the
+              namespace is the user's own on every row, and the distinguishing
+              part of these names is the tail (…orange_tray vs …orange_box), so
+              right-truncation would make two different bases render
+              identically. Full id on hover via the title attribute.
+
+              The step is deliberately NOT repeated here when the picker below
+              is shown — it was printed twice, once in this heading and again
+              in the control that sets it. With a single checkpoint there is no
+              picker, so the heading keeps naming the step itself. */}
+          <div className="min-w-0">
+            <div className="truncate font-semibold" title={finetuneSeed.name}>
+              {baseCheckpoints.length > 1
+                ? t("training.configurator.finetune.title", {
+                    name: baseDisplayName,
+                  })
+                : effectiveFinetuneStep != null && effectiveFinetuneStep !== 0
+                  ? t("training.configurator.finetune.titleWithStep", {
+                      name: baseDisplayName,
+                      step: effectiveFinetuneStep.toLocaleString(),
+                    })
+                  : t("training.configurator.finetune.titleLatest", {
+                      name: baseDisplayName,
+                    })}
+            </div>
+            {/* The full id, verbatim, on its own line — the house pattern for a
+                long repo id (DatasetLibrary, HubModelCard, ModelCard all pair a
+                shortened heading with the complete address underneath). The
+                heading drops the namespace to stay readable, and this is where
+                that dropped information comes back, so "which org / which of
+                two similarly-named bases" is answerable without hovering.
+                font-mono because it is an address, not prose. */}
+            <div
+              className="truncate font-mono text-[11px] leading-4 text-muted-foreground"
+              title={finetuneSeed.name}
+            >
+              {finetuneSeed.name}
+            </div>
           </div>
-          <p className="mt-1 text-muted-foreground">
+          {/* Step picker. Shown only when there is a real choice: a single
+              checkpoint (every imported model, and any run that saved once)
+              would be a one-option dropdown, and the banner above already
+              names it. Lives here so switching checkpoints is a live edit
+              rather than a remount that would clear the form. */}
+          {baseCheckpoints.length > 1 ? (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {/* Matches the chip it labels: same size (text-xs), same family
+                  (font-mono) and same colour (inherited foreground, not muted),
+                  so the pair reads as one control rather than a caption sitting
+                  next to a widget. */}
+              <Label
+                htmlFor="finetune-base-checkpoint"
+                className="font-mono text-xs text-foreground"
+              >
+                {t("training.configurator.finetune.checkpointLabel")}
+              </Label>
+              <CheckpointDropdown
+                id="finetune-base-checkpoint"
+                checkpoints={baseCheckpoints}
+                selectedRef={baseCkpt?.ref ?? null}
+                onChange={(c) => onFinetuneCheckpointChange?.(c)}
+                disabled={isStarting}
+              />
+            </div>
+          ) : null}
+          <p className="mt-2 text-muted-foreground">
             <Trans
               i18nKey="training.configurator.finetune.body"
-              components={[
-                <span key="0" className="font-medium" />,
-                <span key="1" className="font-medium" />,
-              ]}
+              components={[<span key="0" className="font-medium" />]}
             />
           </p>
+          {crossArmWarning && (
+            <p className="mt-2 text-warn">{crossArmWarning}</p>
+          )}
         </div>
       ) : null}
       <ConfigurationTab
@@ -853,10 +1109,15 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         </div>
       ) : checkpointUploadKind === "finetune" && finetuneSeed ? (
         <div className="mt-6">
+          {/* The LIVE step, not the seed's. This notice names the checkpoint
+              whose weights get staged to the Hub, and the staging follows
+              `finetune_from_step` — which the picker edits. Reading the seed
+              here would name the checkpoint the user arrived with while
+              uploading the one they actually chose. */}
           <LocalCheckpointCloudNotice
             mode="finetune"
             runName={finetuneSeed.name}
-            step={finetuneSeed.step}
+            step={effectiveFinetuneStep}
             offline={offline}
           />
         </div>

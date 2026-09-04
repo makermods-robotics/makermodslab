@@ -25,7 +25,7 @@ const prefersReducedMotion = (): boolean =>
 
 /**
  * Launchpad hero — brand block (MakerMods mark + MakerMods Lab), the cycling
- * "<word> robot skills" slogan (Run → Train → Share, ~1.8s each, ~190ms opacity
+ * "<word> robot policies" slogan (Run → Train → Share, ~1.8s each, ~190ms opacity
  * fade; static when the user prefers reduced motion), and the search box that
  * live-filters the slider below.
  *

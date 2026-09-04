@@ -4,12 +4,29 @@ export interface JobCheckpoint {
   step: number;
   source: "local" | "hub";
   ref: string;
+  /** Which run in a resume chain actually saved this checkpoint. Present only
+   * on a `lineage: true` listing, where a step is no longer unique; a
+   * single-run listing omits it because every row would say the same thing.
+   *
+   * `(owner_job_id, step)` IS unique, so it is the safe way to address one
+   * checkpoint by step — e.g. the policy-config endpoint, which takes a job id
+   * and a step. */
+  owner_job_id?: string;
+  owner_job_number?: number;
+  owner_name?: string;
 }
 
 export interface PolicyConfigSummary {
   policy_type: string | null;
   image_features: Record<string, { height: number; width: number }>;
   requires_task: boolean;
+  /** Whether this checkpoint's ARCHITECTURE can run the Real-Time Chunking
+   * inference engine. `false` means the server refuses `inference_engine:
+   * "rtc"` for it with a 400 before any hardware is claimed, so the dialogs
+   * take the option off the menu. `null` means "not established" — a policy
+   * type newer than the server's table — and must be read as "offer it and let
+   * the server decide", never as "no". */
+  supports_rtc: boolean | null;
   // Flat proprioceptive state / action widths from the checkpoint. For an
   // SO-101 arm this is 6 (one per joint); a bimanual-trained checkpoint carries
   // 12 (two arms). The inference modal compares state_dim against the selected
@@ -17,6 +34,12 @@ export interface PolicyConfigSummary {
   // null when the checkpoint omits the feature.
   state_dim: number | null;
   action_dim: number | null;
+  /** Raw lerobot robot_type of the dataset this checkpoint was trained on
+   * (recovered via its train_config.json). null when it can't be
+   * established — an imported flat model, a deleted training dataset, an
+   * untagged one. The fine-tune panel normalises it with armTypeFromRobotType
+   * and warns when it disagrees with the selected dataset's arm. */
+  trained_on_robot_type?: string | null;
 }
 
 /** Collapse checkpoint entries that point at the same underlying checkpoint.
@@ -46,11 +69,16 @@ export async function listJobCheckpoints(
   fetcher: Fetcher,
   jobId: string,
   signal?: AbortSignal,
+  /** Widen to the whole resume chain — this run plus the runs it resumed.
+   * A chain is ONE model trained across several records, so anything offering
+   * "which checkpoint do you want to run" needs all of them; without this the
+   * tip offers only the steps it personally saved. */
+  lineage = false,
 ): Promise<JobCheckpoint[]> {
   const body = await apiRequest<{ checkpoints: JobCheckpoint[] }>(
     baseUrl,
     fetcher,
-    `/api/v1/jobs/${jobId}/checkpoints`,
+    `/api/v1/jobs/${jobId}/checkpoints${lineage ? "?lineage=true" : ""}`,
     { signal, action: "List checkpoints" },
   );
   return body.checkpoints;

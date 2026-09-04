@@ -40,9 +40,16 @@ class FakeVideoCapture:
         self.backend = backend
         self.opened = True
         self.released = False
+        # (prop, value) pairs in call order — the resolution request must land
+        # before the first read, so tests can assert on ordering too.
+        self.props: list[tuple[int, float]] = []
 
     def isOpened(self) -> bool:  # noqa: N802 — cv2's camelCase API
         return self.opened
+
+    def set(self, prop: int, value: float) -> bool:
+        self.props.append((prop, value))
+        return True
 
     def read(self):
         if not self.opened:
@@ -126,6 +133,25 @@ def test_two_clients_share_one_capture_last_release_frees_it(
     gen_b.close()
     assert fake_captures[0].released
     assert manager._captures == {}
+
+
+def test_preview_requests_thumbnail_resolution_before_first_read(
+    fake_captures: list[FakeVideoCapture],
+) -> None:
+    """The open path must ask for PREVIEW_WIDTH x PREVIEW_HEIGHT before a frame
+    is read: cv2 otherwise keeps the camera's default (1080p on the rig's USB
+    cameras) and its USB bandwidth reservation starves a third camera."""
+    manager = CameraPreviewManager()
+    gen = manager.open_stream(0)
+    next(gen)
+    gen.close()
+
+    cap = fake_captures[0]
+    assert cap.props == [
+        (camera_preview.cv2.CAP_PROP_FRAME_WIDTH, camera_preview.PREVIEW_WIDTH),
+        (camera_preview.cv2.CAP_PROP_FRAME_HEIGHT, camera_preview.PREVIEW_HEIGHT),
+    ]
+    assert (camera_preview.PREVIEW_WIDTH, camera_preview.PREVIEW_HEIGHT) == (640, 480)
 
 
 def test_distinct_indices_get_distinct_captures(fake_captures: list[FakeVideoCapture]) -> None:

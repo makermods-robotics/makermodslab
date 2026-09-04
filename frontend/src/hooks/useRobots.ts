@@ -30,7 +30,7 @@ export interface RobotRecord {
   cameras: CameraConfig[];
   // Auto-calibration drive torque as a percentage of full power (10-100,
   // default 38 = the vendored script's stock 380). Sessions (teleop/record/
-  // skill runs) use stock LeRobot torque and ignore this value.
+  // policy runs) use stock LeRobot torque and ignore this value.
   motor_power: number;
   is_clean: boolean;
   // Follower-side readiness only (ports + calibrations for the follower arm(s)).

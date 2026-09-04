@@ -37,7 +37,7 @@ from .maker_rest_pose import (
     maker_follower_arms,
     return_maker_arms_to_rest,
 )
-from .motor_power import clear_goal_velocity, reset_torque_limit
+from .motor_power import FOLLOWER, clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
 from .session_events import notify_session_changed
 from .torque import de_energize_can_device, release_maker_torque
@@ -812,11 +812,11 @@ def _connect_bimanual(request: TeleoperateRequest):
         # followers only, never the human-held leader. Clears any torque cap a
         # previous auto-calibration left in RAM; a failed write degrades to
         # the previous limit and is surfaced as a warning.
-        identity_warnings += reset_torque_limit(robot, "follower arms")
+        identity_warnings += reset_torque_limit(robot, FOLLOWER, "follower arms")
         # Clear any leftover Goal_Velocity speed cap a previous arm-driving
         # feature stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400);
         # followers only, never the human-held leader. See makermodslab/motor_power.py.
-        identity_warnings += clear_goal_velocity(robot, "follower arms")
+        identity_warnings += clear_goal_velocity(robot, FOLLOWER, "follower arms")
         logger.info("Successfully connected to both bimanual arms")
         return robot, teleop_device, identity_warnings
     except Exception as e:
@@ -1079,12 +1079,12 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             # follower only, never the human-held leader. Clears any torque
             # cap a previous auto-calibration left in RAM; a failed write
             # degrades to the previous limit and is surfaced as a warning.
-            identity_warnings += reset_torque_limit(robot, "follower arm")
+            identity_warnings += reset_torque_limit(robot, FOLLOWER)
             # Clear any leftover Goal_Velocity speed cap a previous arm-driving
             # feature stamped in RAM (auto-cal fold/unfold=1000, rest-pose
             # return=400); follower only, never the human-held leader. See
             # makermodslab/motor_power.py.
-            identity_warnings += clear_goal_velocity(robot, "follower arm")
+            identity_warnings += clear_goal_velocity(robot, FOLLOWER)
             logger.info("Successfully connected to both devices")
 
         current_robot = robot

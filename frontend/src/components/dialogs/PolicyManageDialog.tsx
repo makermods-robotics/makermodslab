@@ -20,34 +20,29 @@ import {
 import { Button } from "@/components/ui/button";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
-import {
-  ModelItem,
-  deleteModel,
-  hideModel,
-  removeCustomModel,
-} from "@/lib/modelsApi";
+import { ModelItem, hideModel, removeCustomModel } from "@/lib/modelsApi";
 import { resolveDeleteAction } from "@/lib/deleteSemantics";
 import ModelInfoCard from "@/components/landing/ModelInfoCard";
 
-export interface SkillManageDialogProps {
+export interface PolicyManageDialogProps {
   model: ModelItem | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Refresh the models listing after upload / download / delete. */
   onChanged: () => void;
-  /** Run this skill on the corner robot (→ Deploy panel, prefilled). */
+  /** Run this policy on the corner robot (→ Deploy panel, prefilled). */
   onRun: (model: ModelItem) => void;
 }
 
 /**
- * Manage one of MY skills — wraps the existing ModelInfoCard (unmodified) in a
+ * Manage one of MY policies — wraps the existing ModelInfoCard (unmodified) in a
  * dialog so the model-library management surface survives the Layout D
  * redesign: Hub upload, checkpoint download, rename-adjacent metadata, and the
  * unified delete pipeline (local delete / local-copy removal / unpin / hide via
  * resolveDeleteAction — the Hub repo itself is never touched). Ported from the
  * old ModelsPanel's confirm pipeline.
  */
-const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
+const PolicyManageDialog: React.FC<PolicyManageDialogProps> = ({
   model,
   open,
   onOpenChange,
@@ -61,10 +56,19 @@ const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
 
   if (!model) return null;
 
+  // Destructive deletes (a local run's files, a "both" row's local copy) are
+  // deliberately no longer offered here — that surface moved out of the
+  // library UI (the backend routes remain for a future management menu). Only
+  // the non-destructive listing management survives: unpinning a pinned custom
+  // hub row and hiding an own-namespace hub row.
+  const modelAction = resolveDeleteAction("model", model).action;
+  const canRemoveFromList = modelAction === "unpin" || modelAction === "hide";
+
   const res = pendingDelete ? resolveDeleteAction("model", pendingDelete) : null;
 
-  // Ported from ModelsPanel.confirmDeleteModel: one confirm path for every
-  // delete entry point; resolveDeleteAction decides the semantics.
+  // Ported from ModelsPanel.confirmDeleteModel, minus the destructive arms:
+  // resolveDeleteAction still decides the semantics, but only rows resolving
+  // to unpin/hide ever reach here (canRemoveFromList gates the button).
   const confirmDelete = async () => {
     const item = pendingDelete;
     if (!item) return;
@@ -75,23 +79,13 @@ const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
         await removeCustomModel(baseUrl, fetchWithHeaders, item.id);
         // The model name is data — it stays the toast's verbatim description.
         toast({
-          title: t("dialogs.skillManage.toast.removedFromList"),
+          title: t("dialogs.policyManage.toast.removedFromList"),
           description: item.name,
         });
       } else if (resolution.action === "hide") {
         await hideModel(baseUrl, fetchWithHeaders, item.hf_repo_id ?? item.id);
         toast({
-          title: t("dialogs.skillManage.toast.removedFromList"),
-          description: item.name,
-        });
-      } else {
-        const r = await deleteModel(baseUrl, fetchWithHeaders, item.id);
-        if (!r.deleted) return;
-        toast({
-          title:
-            resolution.action === "delete-local-copy"
-              ? t("dialogs.skillManage.toast.localCopyRemoved")
-              : t("dialogs.skillManage.toast.modelDeleted"),
+          title: t("dialogs.policyManage.toast.removedFromList"),
           description: item.name,
         });
       }
@@ -99,10 +93,7 @@ const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
       onOpenChange(false);
     } catch (e) {
       toast({
-        title:
-          resolution.action === "delete-local"
-            ? t("dialogs.skillManage.toast.deleteFailed")
-            : t("dialogs.skillManage.toast.removeFailed"),
+        title: t("dialogs.policyManage.toast.removeFailed"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -124,9 +115,9 @@ const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
             // Upload + local-detail affordances are local-only, mirroring the
             // old ModelsPanel gating.
             isLocal={model.source === "local"}
-            // Every listed row has delete semantics (local delete /
-            // local-copy removal / unpin / hide).
-            canDelete
+            // Only list-management rows (unpin / hide) keep the affordance;
+            // destructive deletes are gone from this surface.
+            canDelete={canRemoveFromList}
             onDelete={() => setPendingDelete(model)}
             onUploaded={onChanged}
             onDownloaded={onChanged}
@@ -134,7 +125,7 @@ const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
 
           <Button onClick={() => onRun(model)} className="w-full gap-2">
             <Play className="h-4 w-4" />
-            {t("dialogs.skillManage.runOnRobot")}
+            {t("dialogs.policyManage.runOnRobot")}
           </Button>
         </DialogContent>
       </Dialog>
@@ -170,4 +161,4 @@ const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
   );
 };
 
-export default SkillManageDialog;
+export default PolicyManageDialog;

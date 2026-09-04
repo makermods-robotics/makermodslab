@@ -25,6 +25,7 @@ export default {
     resumeStepError: "总步数必须大于检查点所在的步数（{{step}}）。",
     resume: {
       titleFromStep: "从第 {{step}} 步继续“{{name}}”",
+      lrSeam: "总步数与原运行不同（{{from}} → {{to}}）。LeRobot 会按新的总步数重建学习率调度，因此在恢复点学习率可能回升，而不是接着原来的衰减继续。保持 {{from}} 可获得连续的调度。",
       titleFromLatest: "从最新检查点继续“{{name}}”",
       bodyLocal:
         "设置已按那次运行预填，且仍可编辑。数据集、策略、批大小和优化器都会从检查点本身重建，在这里修改不会影响续训 —— 但<0>步数</0>和检查点保存频率会生效。把步数设为高于续训起点才能继续训练（已预填为 {{steps}}）。",
@@ -35,9 +36,13 @@ export default {
       jobTimeoutDefault: "24h（默认）",
     },
     finetune: {
+      title: "基于“{{name}}”微调",
       titleWithStep: "基于“{{name}}”微调（第 {{step}} 步）",
       titleLatest: "基于“{{name}}”微调（最新检查点）",
-      body: "这会开启一次<0>全新运行</0>（新的优化器，从第 0 步开始），策略权重由该模型初始化。请选择用于训练的<1>数据集</1>，并像平常一样设置训练参数。",
+      checkpointLabel: "检查点",
+      body: "<0>全新训练</0>，从第 0 步开始：优化器全新初始化，策略权重从该检查点载入。",
+      armMismatch:
+        "该检查点是在 {{base}} 机械臂上训练的，而所选数据集是在 {{dataset}} 机械臂上录制的。跨机械臂微调几乎无法迁移，结果可能在两种机器人上都无法运行。",
     },
     tooltip: {
       // 本地槽位被占不再阻止开始——提交会进入队列。
@@ -176,6 +181,10 @@ export default {
 
   essentials: {
     steps: "训练步数",
+    stepsTotal: "总训练步数",
+    stepsTotalHint: "从第 {{from}} 步恢复，将再训练 {{remaining}} 步。",
+    stepsTotalHintLatest: "这是总步数，而非额外增加的步数。",
+    stepsTotalTooLow: "必须大于 {{from}}——该运行已训练到这一步，否则不会训练任何内容。",
     batchSize: "批大小",
     runName: "运行名称",
     resumedFromStep: "从第 {{step}} 步开始",
@@ -336,7 +345,7 @@ export default {
 
   jobDialog: {
     srTitle: "训练任务状态",
-    back: "技能工作室",
+    back: "策略工作室",
     loadFailed: "无法加载任务 {{jobId}}：{{errorText}}",
     loading: "正在加载任务…",
     runnerLocal: "本地",
@@ -357,6 +366,45 @@ export default {
       cancelFailedTitle: "取消失败",
       removedTitle: "任务已移除",
       deleteFailedTitle: "删除失败",
+    },
+  },
+
+  publish: {
+    title: "发布到 Hub",
+    intro:
+      "将此训练的检查点作为公开模型分享到 Hub —— 你选择的每个步数都会进入同一个仓库、同一张模型卡。",
+    hubUnknownShort: "无法检查哪些检查点已发布",
+    publishedOf: "共 {{total}} 个检查点，已发布 {{published}} 个",
+    addCheckpoints: "添加检查点",
+    uploadToHub: "上传到 Hub",
+    addingTo:
+      "将添加到 <0>{{repo}}</0>。一次训练只对应一个仓库，所有检查点都归在同一张模型卡下。",
+    repoNameLabel: "仓库名称（可选）",
+    leaveBlank:
+      "留空则发布为 <0>{{placeholder}}</0>。之后的检查点也会进入这个仓库。",
+    repoInvalid: "仓库名称无效 —— 请使用 name 或 namespace/name 格式。",
+    repoNotWritable: "你的令牌无法写入 {{namespace}}。",
+    checkpointsLabel: "检查点",
+    clearAll: "全部清除",
+    selectAllCount: "全选（{{total}}）",
+    hubUnknownDetail:
+      "无法连接 Hub 检查哪些检查点已发布 —— 下方的标记可能不完整。",
+    publishedBadge: "已发布",
+    multiNote_other:
+      "{{count}} 个检查点将依次上传 —— 每个都是完整的一份策略权重。",
+    overwriteNote: "重新选择已发布的检查点会原地覆盖它。",
+    selectPrompt: "请选择检查点",
+    uploadCount_other: "上传 {{count}} 个检查点",
+    uploadingOf: "正在上传 {{current}}/{{total}}",
+    uploading: "正在上传",
+    publishingAria: "正在发布检查点",
+    legacyRootNote:
+      "此仓库根目录还有一次早期上传留下的检查点。它仍可读取，但工具加载的是上面按步数寻址的副本。",
+    toast: {
+      publishedTitle_other: "已发布 {{count}} 个检查点",
+      publishedBody: "{{repoId}} 已在 Hub 上。<0>查看模型</0>",
+      failedTitle: "发布失败",
+      failedLanded_other: "（已发布 {{count}} 个检查点 —— 只需重试其余部分。）",
     },
   },
 } as const;

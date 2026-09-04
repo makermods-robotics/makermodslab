@@ -41,6 +41,11 @@ export default {
     resume: {
       // {{name}} is the parent run's name — data, rendered verbatim.
       titleFromStep: "Continuing “{{name}}” from step {{step}}",
+      // Shown only when the total differs from the parent run's. lerobot
+      // rebuilds the LR schedule from the new total, so the rate jumps at the
+      // resume point instead of continuing to decay.
+      lrSeam:
+        "Total steps differ from the original run ({{from}} → {{to}}). LeRobot rebuilds the learning-rate schedule from the new total, so the rate can jump back up at the resume point instead of continuing to decay. Keep {{from}} for an unbroken schedule.",
       titleFromLatest: "Continuing “{{name}}” from its latest checkpoint",
       // <0> emphasises the "Steps" control by name. {{steps}} is the
       // pre-formatted prefill. One complete sentence per runner, because the
@@ -55,10 +60,17 @@ export default {
       jobTimeoutDefault: "24h (default)",
     },
     finetune: {
+      // Used when the checkpoint picker is shown: the picker names the step, so
+      // repeating it here printed the same number twice.
+      title: "Fine-tuning from “{{name}}”",
       titleWithStep: "Fine-tuning from “{{name}}” (step {{step}})",
       titleLatest: "Fine-tuning from “{{name}}” (latest checkpoint)",
-      // <0> emphasises "fresh run", <1> the word "dataset".
-      body: "This starts a <0>fresh run</0> (new optimizer, from step 0) with the policy weights initialized from that model. Pick a <1>dataset</1> to train on and set your training parameters as usual.",
+      checkpointLabel: "Checkpoint",
+      // <0> emphasises "Fresh run".
+      body: "<0>Fresh run</0> from step 0 — new optimizer, with the policy weights loaded from this checkpoint.",
+      // {{base}} / {{dataset}} are arm names (SO-101 / Maker / Metal) — data.
+      armMismatch:
+        "This checkpoint was trained on the {{base}} arm, but the selected dataset was recorded on the {{dataset}} arm. Fine-tuning across arms transfers little and the result may not run on either robot.",
     },
     tooltip: {
       // A busy local slot no longer blocks Start — the submission queues.
@@ -221,6 +233,15 @@ export default {
 
   essentials: {
     steps: "Training steps",
+    // Resume only. The field is a TOTAL the run trains up to, not an increment
+    // added to the steps already done — the label and hint both say so, and the
+    // hint does the subtraction so the user never has to.
+    stepsTotal: "Total training steps",
+    stepsTotalHint:
+      "Resuming from step {{from}}, training {{remaining}} more steps.",
+    stepsTotalHintLatest: "Total step count, not additional steps.",
+    stepsTotalTooLow:
+      "Must be above {{from}} — the run has already trained that far, so this would train nothing.",
     batchSize: "Batch size",
     runName: "Run name",
     // Sits beside the Run name label on a continuation. {{step}} is
@@ -422,7 +443,7 @@ export default {
 
   jobDialog: {
     srTitle: "Training job status",
-    back: "Skill studio",
+    back: "Policy studio",
     // {{jobId}} is data; {{errorText}} is the backend's own message, left as it
     // arrived.
     loadFailed: "Couldn't load job {{jobId}}: {{errorText}}",
@@ -446,6 +467,59 @@ export default {
       cancelFailedTitle: "Cancel failed",
       removedTitle: "Job removed",
       deleteFailedTitle: "Delete failed",
+    },
+  },
+
+  publish: {
+    title: "Publish to Hub",
+    intro:
+      "Share this run's checkpoints as a public model on the Hub — every step you pick lands in one repo, under one model card.",
+    // Rendered after the pinned repo link, behind a literal "· " separator.
+    hubUnknownShort: "couldn't check which checkpoints are published",
+    publishedOf: "{{published}} of {{total}} checkpoints published",
+    addCheckpoints: "Add checkpoints",
+    uploadToHub: "Upload to Hub",
+    // {{repo}} is the pinned repo id — data, rendered verbatim inside slot 0.
+    addingTo:
+      "Adding to <0>{{repo}}</0>. A run keeps one repo, so every checkpoint stays under the same model card.",
+    repoNameLabel: "Repo name (optional)",
+    // {{placeholder}} is the default repo id — data, verbatim inside slot 0.
+    leaveBlank:
+      "Leave blank to publish as <0>{{placeholder}}</0>. Later checkpoints go to this same repo.",
+    repoInvalid: "That's not a valid repo name — use name or namespace/name.",
+    // {{namespace}} is the namespace the user typed — data, verbatim.
+    repoNotWritable: "Your token can't write to {{namespace}}.",
+    checkpointsLabel: "Checkpoints",
+    clearAll: "Clear all",
+    // {{total}} is a plain display number, deliberately NOT `count` — no
+    // plural selection wanted here.
+    selectAllCount: "Select all ({{total}})",
+    hubUnknownDetail:
+      "Couldn't reach the Hub to check which checkpoints are already published — the badges below may be incomplete.",
+    publishedBadge: "published",
+    // Shown only for 2+ selections, so no _one form.
+    multiNote_other:
+      "{{count}} checkpoints upload one after another — each is a full copy of the policy weights.",
+    overwriteNote: "Re-selecting a published checkpoint overwrites it in place.",
+    selectPrompt: "Select a checkpoint",
+    uploadCount_one: "Upload {{count}} checkpoint",
+    uploadCount_other: "Upload {{count}} checkpoints",
+    // {{current}} / {{total}} are display numbers (current is 1-based).
+    uploadingOf: "Uploading {{current}} of {{total}}",
+    uploading: "Uploading",
+    publishingAria: "Publishing checkpoints",
+    legacyRootNote:
+      "This repo also holds a checkpoint at its root from an earlier upload. It stays readable, but the step-addressed copies above are what tools load.",
+    toast: {
+      publishedTitle_one: "Published {{count}} checkpoint",
+      publishedTitle_other: "Published {{count}} checkpoints",
+      // {{repoId}} is data; slot 0 is the View-model link.
+      publishedBody: "{{repoId}} is on the Hub. <0>View model</0>",
+      failedTitle: "Publish failed",
+      // Appended (with its own parentheses) after the backend's verbatim
+      // failure message when some checkpoints did land.
+      failedLanded_one: "({{count}} checkpoint already published — retry the rest.)",
+      failedLanded_other: "({{count}} checkpoints already published — retry the rest.)",
     },
   },
 } as const;

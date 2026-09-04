@@ -85,13 +85,13 @@ def test_torque_limit_from_percent_scales_and_clamps() -> None:
 def test_reset_torque_limit_reseeds_ram_from_eeprom_per_motor() -> None:
     """Every motor's RAM Torque_Limit is restored to its own EEPROM
     Max_Torque_Limit — the exact power-on state (stock lerobot torque)."""
-    from makermodslab.motor_power import reset_torque_limit
+    from makermodslab.motor_power import FOLLOWER, reset_torque_limit
 
     bus = _FakeBus(
         ["shoulder_pan", "elbow_flex", "gripper"],
         max_torque={"gripper": 500},  # lerobot's configure() stamps 500 there
     )
-    warnings = reset_torque_limit(_FakeArm(bus))
+    warnings = reset_torque_limit(_FakeArm(bus), FOLLOWER)
 
     assert warnings == []
     # RAM register only — never a write to the EEPROM "Max_Torque_Limit".
@@ -105,10 +105,10 @@ def test_reset_torque_limit_reseeds_ram_from_eeprom_per_motor() -> None:
 def test_reset_torque_limit_failure_warns_but_does_not_abort() -> None:
     """One bad motor must not stop the others, and the failure surfaces as a
     warning message (that motor keeps its previous limit) — never an exception."""
-    from makermodslab.motor_power import reset_torque_limit
+    from makermodslab.motor_power import FOLLOWER, reset_torque_limit
 
     bus = _FakeBus(["shoulder_pan", "elbow_flex", "gripper"], fail=("elbow_flex",))
-    warnings = reset_torque_limit(_FakeArm(bus))
+    warnings = reset_torque_limit(_FakeArm(bus), FOLLOWER)
 
     written = [w[1] for w in bus.writes]
     assert written == ["shoulder_pan", "gripper"]
@@ -119,11 +119,11 @@ def test_reset_torque_limit_failure_warns_but_does_not_abort() -> None:
 
 
 def test_reset_torque_limit_covers_both_bimanual_arms() -> None:
-    from makermodslab.motor_power import reset_torque_limit
+    from makermodslab.motor_power import FOLLOWER, reset_torque_limit
 
     left = _FakeBus(["gripper"], port="/dev/left", max_torque={"gripper": 500})
     right = _FakeBus(["gripper"], port="/dev/right", max_torque={"gripper": 500})
-    warnings = reset_torque_limit(_FakeBimanual(left, right))
+    warnings = reset_torque_limit(_FakeBimanual(left, right), FOLLOWER)
 
     assert warnings == []
     assert left.writes == [("Torque_Limit", "gripper", 500, False, 2)]
@@ -131,9 +131,9 @@ def test_reset_torque_limit_covers_both_bimanual_arms() -> None:
 
 
 def test_reset_torque_limit_handles_none_device() -> None:
-    from makermodslab.motor_power import reset_torque_limit
+    from makermodslab.motor_power import FOLLOWER, reset_torque_limit
 
-    assert reset_torque_limit(None) == []
+    assert reset_torque_limit(None, FOLLOWER) == []
 
 
 # ---------------------------------------------------------------------------
@@ -144,10 +144,10 @@ def test_reset_torque_limit_handles_none_device() -> None:
 
 
 def test_clear_goal_velocity_zeroes_every_follower_motor() -> None:
-    from makermodslab.motor_power import clear_goal_velocity
+    from makermodslab.motor_power import FOLLOWER, clear_goal_velocity
 
     bus = _FakeBus(["shoulder_pan", "elbow_flex", "gripper"])
-    warnings = clear_goal_velocity(_FakeArm(bus))
+    warnings = clear_goal_velocity(_FakeArm(bus), FOLLOWER)
 
     assert warnings == []
     assert len(bus.writes) == 3
@@ -160,11 +160,11 @@ def test_clear_goal_velocity_zeroes_every_follower_motor() -> None:
 
 
 def test_clear_goal_velocity_covers_both_bimanual_arms() -> None:
-    from makermodslab.motor_power import clear_goal_velocity
+    from makermodslab.motor_power import FOLLOWER, clear_goal_velocity
 
     left = _FakeBus(["gripper"], port="/dev/left")
     right = _FakeBus(["gripper"], port="/dev/right")
-    warnings = clear_goal_velocity(_FakeBimanual(left, right))
+    warnings = clear_goal_velocity(_FakeBimanual(left, right), FOLLOWER)
 
     assert warnings == []
     assert left.writes == [("Goal_Velocity", "gripper", 0, False, 2)]
@@ -175,10 +175,10 @@ def test_clear_goal_velocity_failure_warns_but_does_not_abort() -> None:
     """One bad motor must not stop the others, and the failure surfaces as a
     warning message (the motor keeps its leftover cap) — never an exception, so
     the session start still proceeds."""
-    from makermodslab.motor_power import clear_goal_velocity
+    from makermodslab.motor_power import FOLLOWER, clear_goal_velocity
 
     bus = _FakeBus(["shoulder_pan", "elbow_flex", "gripper"], fail=("elbow_flex",))
-    warnings = clear_goal_velocity(_FakeArm(bus))
+    warnings = clear_goal_velocity(_FakeArm(bus), FOLLOWER)
 
     written = [w[1] for w in bus.writes]
     assert written == ["shoulder_pan", "gripper"]  # the good motors were still cleared
@@ -189,9 +189,9 @@ def test_clear_goal_velocity_failure_warns_but_does_not_abort() -> None:
 
 
 def test_clear_goal_velocity_handles_none_device() -> None:
-    from makermodslab.motor_power import clear_goal_velocity
+    from makermodslab.motor_power import FOLLOWER, clear_goal_velocity
 
-    assert clear_goal_velocity(None) == []
+    assert clear_goal_velocity(None, FOLLOWER) == []
 
 
 def test_session_request_models_have_no_motor_power_field() -> None:
@@ -258,3 +258,63 @@ def test_supply_voltage_endpoint_reports_hardware_failure(
     body = response.json()
     assert body["success"] is False
     assert "no device on port" in body["message"]
+
+
+# -- the leader gate -------------------------------------------------------
+#
+# The runtime half of the fix. The static half is
+# tests/test_motor_power_call_sites.py, which checks that call sites STATE a
+# side; this checks what happens when one states "leader".
+
+
+def test_clear_goal_velocity_refuses_a_leader_without_writing() -> None:
+    """The defect this gate exists for: a leader reached a follower-only register.
+
+    The refusal must be total — not a best-effort write that mostly fails — so
+    the bus is asserted untouched, not merely "no exception raised"."""
+    from makermodslab.motor_power import LEADER, clear_goal_velocity
+
+    bus = _FakeBus(["shoulder_pan", "gripper"])
+    warnings = clear_goal_velocity(_FakeArm(bus), LEADER)
+
+    assert len(warnings) == 1
+    assert "follower-only" in warnings[0]
+    assert bus.writes == [], "a refused call must not touch the bus at all"
+
+
+def test_clear_goal_velocity_still_writes_for_a_stated_follower() -> None:
+    """The gate must not be so eager that it breaks the legitimate caller —
+    every session start depends on this write landing."""
+    from makermodslab.motor_power import FOLLOWER, clear_goal_velocity
+
+    bus = _FakeBus(["shoulder_pan"])
+    assert clear_goal_velocity(_FakeArm(bus), FOLLOWER) == []
+    assert [(w[0], w[1], w[2]) for w in bus.writes] == [("Goal_Velocity", "shoulder_pan", 0)]
+
+
+def test_reset_torque_limit_serves_the_leader_because_coaching_drives_it() -> None:
+    """`reset_torque_limit` must NOT inherit the leader refusal.
+
+    Coaching glides the leader to the follower's pose under its own torque, so a
+    leader still capped by an earlier auto-calibration cannot carry its own arm.
+    The two registers are asymmetric; that asymmetry is the whole point of
+    passing `side` rather than banning leaders wholesale."""
+    from makermodslab.motor_power import LEADER, reset_torque_limit
+
+    bus = _FakeBus(["shoulder_pan"], max_torque={"shoulder_pan": 900})
+    assert reset_torque_limit(_FakeArm(bus), LEADER) == []
+    assert [(w[0], w[1], w[2]) for w in bus.writes] == [("Torque_Limit", "shoulder_pan", 900)]
+
+
+def test_an_unknown_side_is_rejected_rather_than_guessed() -> None:
+    """Fail closed. A typo must not fall through to the permissive branch —
+    that is how an optional, prose-defaulted parameter failed the first time."""
+    import pytest
+
+    from makermodslab.motor_power import clear_goal_velocity, reset_torque_limit
+
+    bus = _FakeBus(["shoulder_pan"])
+    for helper in (clear_goal_velocity, reset_torque_limit):
+        with pytest.raises(ValueError, match="side must be one of"):
+            helper(_FakeArm(bus), "follower arm")  # the old prose label
+    assert bus.writes == []

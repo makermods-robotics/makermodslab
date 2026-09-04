@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "MakerModsLab"
 version = "0.1.0"
-description = "LeRobot Lab - A web interface for robotics with lerobot integration"
+description = "A web UI interface for policy development. Maker Arm, Metal Arm and SO-101, single or bimanual"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -136,8 +136,9 @@ files.extend-exclude = [
 # short and justified — a blanket ignore defeats the point of running typos.
 [tool.typos.default]
 extend-ignore-re = [
-    # Hyphenated "mis-" prefix (mis-group, mis-bind) reads as a misspelt "miss".
-    'mis-[a-z]+',
+    # Hyphenated "mis-" prefix (mis-group, mis-bind, "Mis-stamped" at the start
+    # of a sentence) reads as a misspelt "miss".
+    '[Mm]is-[a-z]+',
     # Regex fragment inside a pytest.raises(match=...), not prose.
     '\[Ff\]ine-tun',
     # Short lambda params in a test stub: le = leader, fo = follower.

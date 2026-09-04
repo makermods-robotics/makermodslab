@@ -6,8 +6,11 @@ export interface AvailableCamera {
   name: string;
   deviceId: string;
   available: boolean;
-  /** Stable OS-level device identity (AVFoundation uniqueID on macOS).
-   * Unlike the cv2 index, it survives replugs and identically-named devices. */
+  /** OS-level device identity (AVFoundation uniqueID on macOS; absent
+   * elsewhere). Better than the cv2 index — it does not shift when some other
+   * device comes or goes, and it tells identically-named devices apart — but
+   * it is NOT a serial: it encodes the USB port, so the same camera replugged
+   * elsewhere reports a different one. See CameraConfig.unique_id. */
   uniqueId?: string;
 }
 

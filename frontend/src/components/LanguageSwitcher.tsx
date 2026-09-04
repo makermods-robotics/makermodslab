@@ -18,10 +18,17 @@ import { SUPPORTED_LANGUAGES } from "@/i18n/config";
 import { cn } from "@/lib/utils";
 
 /**
- * App-language picker. Mounted in BOTH the Launchpad header and the studio
- * overlay header — the studio is `fixed inset-0 z-40` and covers the viewport,
- * so a single Launchpad mount would vanish while the studio is open. Same
- * dual-mount pattern as HfAuthChip and RobotCorner.
+ * App-language picker. Mounted ONCE, in the Launchpad footer beside the GitHub
+ * / Documentation / Discord links. It used to sit in the Launchpad header and
+ * again in the studio overlay header (the studio is `fixed inset-0 z-40` and
+ * covers the viewport, so one mount would have vanished behind it); both are
+ * gone. Language is a settle-in-once choice, not something to reach for while
+ * a robot flow is running, and the footer is where the other
+ * once-per-install links already live.
+ *
+ * Icon only. The active language is not printed on the trigger — the menu's
+ * check mark carries it — but the `aria-label` and tooltip stay static English
+ * so someone stranded in a script they cannot read can still find this.
  *
  * Language names are deliberately shown as endonyms ("简体中文", not
  * "Simplified Chinese") — a picker is the one place a language must not be
@@ -29,7 +36,6 @@ import { cn } from "@/lib/utils";
  */
 const LanguageSwitcher: React.FC<{ className?: string }> = ({ className }) => {
   const { language, setLanguage } = useLanguage();
-  const active = SUPPORTED_LANGUAGES.find((l) => l.code === language);
 
   return (
     <DropdownMenu>
@@ -43,10 +49,9 @@ const LanguageSwitcher: React.FC<{ className?: string }> = ({ className }) => {
               // can't read needs this control to still be identifiable, and
               // the icon plus the endonym in the menu carry the meaning.
               aria-label="Language"
-              className={cn("h-8 gap-1.5 rounded-full px-2.5", className)}
+              className={cn("h-8 w-8 rounded-full p-0", className)}
             >
               <Languages className="h-3.5 w-3.5" />
-              <span className="hidden text-xs sm:inline">{active?.label}</span>
             </Button>
           </DropdownMenuTrigger>
         </TooltipTrigger>

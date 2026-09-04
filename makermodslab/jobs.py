@@ -40,7 +40,7 @@ from huggingface_hub import hf_hub_download
 from pydantic import BaseModel
 from tqdm.auto import tqdm as _base_tqdm
 
-from .datasets import CAMERA_FEATURE_PREFIX, read_dataset_features
+from .datasets import CAMERA_FEATURE_PREFIX, read_dataset_features, read_dataset_robot_type
 from .train import TrainingRequest
 from .utils.config import validate_job_name
 from .utils.errors import is_out_of_memory
@@ -219,6 +219,17 @@ class JobCheckpoint(BaseModel):
     step: int
     source: Literal["local", "hub"]
     ref: str
+    # Which run in a resume chain actually saved this checkpoint. Populated only
+    # by `list_chain_checkpoints`, where a list can span several runs and a step
+    # is no longer unique; a single-run listing leaves these None because the
+    # answer would be the same on every row.
+    #
+    # `owner_job_id` is the useful half for callers: `(owner_job_id, step)` IS
+    # unique, so anything that needs to address one checkpoint by step can do so
+    # without handling the opaque `ref`.
+    owner_job_id: str | None = None
+    owner_job_number: int | None = None
+    owner_name: str | None = None
 
 
 class MetricsHistoryPoint(BaseModel):
@@ -294,6 +305,17 @@ UNQUEUEABLE_RUNNER_MESSAGE = "Only local runs wait in the queue, so this one nev
 UNCONFIRMED_OUTCOME_MESSAGE = (
     "MakerMods Lab restarted while this run was training; its outcome could not "
     "be confirmed. Any checkpoints on disk are intact."
+)
+
+# Written to `error_message` when the server itself is going away and takes a
+# local run with it (see JobRegistry.stop_local_for_shutdown). Distinct from
+# STOPPED_BY_REQUEST_MESSAGE because the user did not ask for this one — under
+# `--dev` the trigger is a saved .py file, which is nobody's decision about the
+# training — and distinct from UNCONFIRMED_OUTCOME_MESSAGE because here we DO
+# know how the run ended: we ended it, deliberately, and said so before exiting.
+STOPPED_BY_SERVER_SHUTDOWN_MESSAGE = (
+    "Stopped because MakerMods Lab shut down, not by a training error. "
+    "Resume from the last checkpoint to pick this run back up."
 )
 
 
@@ -646,13 +668,26 @@ class LocalJobRunner:
         self._resume_total = _resume_total_steps(config)
 
         # Build the command via the helper that lives in train.py.
+        from .datasets import dataset_is_weighted
         from .train import build_training_command  # avoid import cycle at module load
 
+        # `weighted` is resolved here, at the last possible moment, from the
+        # dataset itself — never from the request. A dataset carrying
+        # per-episode sampling weights must run through the shim that honours
+        # them; training it on the stock sampler would silently ignore the
+        # weights and look like a clean run (R6). An unweighted dataset takes
+        # the untouched lerobot path (R2).
         # pyav fallback when torchcodec's dylibs don't load here (missing
         # FFmpeg): pyav ships its own bundled FFmpeg, so training works on a
         # bare host instead of dying at the first decoded batch.
         video_backend = None if torchcodec_loads() else "pyav"
-        cmd = build_training_command(config, output_dir, sys.executable, video_backend=video_backend)
+        cmd = build_training_command(
+            config,
+            output_dir,
+            sys.executable,
+            weighted=dataset_is_weighted(config.dataset_repo_id),
+            video_backend=video_backend,
+        )
         logger.info("Starting job %s: %s", job_id, " ".join(cmd))
 
         # Open the persistent log sink (one JSON line per stdout line). Held
@@ -689,13 +724,21 @@ class LocalJobRunner:
             *cmd,
         ]
 
-        # start_new_session=True puts the wrapper (and the trainer it forks)
-        # in their own session/process group. Without it, signals sent to the
-        # uvicorn worker (e.g. when --reload restarts it on a .py file change)
-        # cascade to the child and kill the training. With it, the child
-        # survives reloads; the next worker re-attaches via TailingJobRunner
-        # using job.json's pid — see stop()'s use of killpg for the other side
-        # of this: the tracked pid is the wrapper's, not the trainer's.
+        # start_new_session=True puts the wrapper (and the trainer it forks) in
+        # their own session/process group, so a signal sent to the uvicorn
+        # worker (e.g. --reload restarting it on a .py change) does not cascade
+        # straight to the trainer — the shutdown handler decides what happens to
+        # a local run, not a stray SIGHUP. See stop()'s use of killpg for the
+        # other side of this: the tracked pid is the wrapper's, not the
+        # trainer's.
+        #
+        # This does NOT make a run outlive the process. stdout is a PIPE this
+        # process owns, so once it exits the trainer's next write gets EPIPE and
+        # it dies anyway (that is exactly the silent "exited with code 1" the
+        # shutdown handler now pre-empts by stopping local runs deliberately and
+        # filing them `interrupted`). The exit-status file + TailingJobRunner
+        # still cover the narrower case of a worker reload that this same process
+        # survives.
         self._process = subprocess.Popen(
             wrapped_cmd,
             stdout=subprocess.PIPE,
@@ -1621,6 +1664,90 @@ def _list_hub_checkpoints(api, repo_id: str) -> list[JobCheckpoint]:
 
 _LANGUAGE_CONDITIONED_POLICY_TYPES = {"smolvla", "pi0", "pi0_fast", "pi05"}
 
+# Policy types whose class declares Real-Time Chunking support in the pinned
+# lerobot fork. See policy_type_supports_rtc for how this list was derived and
+# why it is a hand-mirrored table rather than a live import.
+_RTC_CAPABLE_POLICY_TYPES = frozenset({"evo1", "groot", "molmoact2", "pi0", "pi05", "smolvla"})
+
+# Every policy type registered via @PreTrainedConfig.register_subclass in the
+# pinned fork. Membership is what separates "this architecture cannot do RTC"
+# (False) from "we've never heard of it" (None) — a type we don't know about is
+# one the fork gained after this table was written, and guessing False for it
+# would refuse a run the subprocess would have accepted.
+_KNOWN_POLICY_TYPES = frozenset(
+    {
+        "act",
+        "diffusion",
+        "eo1",
+        "evo1",
+        "fastwam",
+        "gaussian_actor",
+        "groot",
+        "lingbot_va",
+        "molmoact2",
+        "multi_task_dit",
+        "pi0",
+        "pi0_fast",
+        "pi05",
+        "smolvla",
+        "tdmpc",
+        "vla_jepa",
+        "vqbet",
+        "wall_x",
+        "xvla",
+    }
+)
+
+
+def policy_type_supports_rtc(policy_type: str) -> bool | None:
+    """Whether a checkpoint of this architecture can run the Real-Time Chunking
+    inference engine (``--inference.type=rtc``).
+
+    True/False for a policy type registered in the pinned lerobot fork; None for
+    anything else, which means "not established", never "no" — callers must not
+    refuse a run on None, they must let the subprocess decide (same
+    silent-when-unreadable discipline as read_pretrained_policy_type).
+
+    **How it decides, and why.** The fork's own authority is
+    ``lerobot.rollout.inference.rtc.supports_rtc_inference(policy)``, which
+    takes an INSTANTIATED policy and asks two things: that ``policy.supports_rtc()``
+    returns True, and that ``predict_action_chunk`` binds ``inference_delay`` and
+    ``prev_chunk_left_over``. Neither can be evaluated here:
+
+    * ``supports_rtc`` is a plain instance method on every policy in the fork
+      (not a classmethod), so there is nothing to call without building the
+      policy — and MolmoAct2's reads ``self.config``.
+    * Reaching the classes at all means importing ``lerobot.policies.factory``,
+      which costs ~2 s and pulls ``transformers`` into the API process on the
+      first RTC launch. Optional-extra policies would also raise ImportError on
+      an install without their extra, turning a capability question into a
+      crash.
+
+    So the table above is a hand-mirrored read of the fork's classes, verified
+    against ``supports_rtc_inference``'s two criteria at class level on the
+    pinned SHA (b968c0c01). Six types declare support — evo1, groot, molmoact2,
+    pi0, pi05, smolvla — and all six accept the RTC call shape; every other
+    registered type inherits ``PreTrainedPolicy.supports_rtc`` (``return False``).
+    Notably **pi0_fast does NOT support RTC** even though its siblings do.
+    Change the fork's pin, re-check this table (test_rollout.py has a drift
+    test that reads the fork's sources without importing them).
+
+    **MolmoAct2 is reported True on purpose, and it is the one approximation
+    here.** Its ``supports_rtc`` is ``self.config.inference_action_mode ==
+    "continuous"`` — a per-CHECKPOINT condition, not a per-architecture one, and
+    the field defaults to None. The class does implement RTC semantics, so this
+    answers the architecture question honestly and leaves the config-level
+    condition to the subprocess, which still raises for a discrete-mode
+    MolmoAct2 checkpoint. Erring the other way would refuse continuous-mode
+    checkpoints that RTC genuinely runs.
+    """
+    if policy_type in _RTC_CAPABLE_POLICY_TYPES:
+        return True
+    if policy_type in _KNOWN_POLICY_TYPES:
+        return False
+    return None
+
+
 # None of _LANGUAGE_CONDITIONED_POLICY_TYPES has a legitimate from-scratch
 # mode: each builds a pretrained backbone (a vision-language model for
 # smolvla, a PaliGemma+expert stack for pi0/pi05/pi0_fast) from a bare config
@@ -1956,6 +2083,13 @@ def upload_local_pretrained(pretrained_dir: Path, repo_id: str, step_dir: str, *
     )
 
 
+#: Suffix distinguishing a checkpoint STAGING repo from a run's output repo.
+#: Read back by the /jobs/hub provenance parser (server.py) to recover the
+#: originating run's job id from a staged base ref, so the two sides of the
+#: convention cannot drift apart.
+CHECKPOINTS_STAGING_SUFFIX = "_checkpoints"
+
+
 def checkpoints_staging_repo_id(username: str, job_id: str) -> str:
     """The Hub repo a LOCAL run's checkpoints are staged in for a cloud resume.
 
@@ -1970,7 +2104,7 @@ def checkpoints_staging_repo_id(username: str, job_id: str) -> str:
         into this one, so parent and child checkpoints stay distinguishable —
         the ambiguity MT12 records for cloud→cloud is not inherited here.
     """
-    return f"{username}/{job_id}_checkpoints"
+    return f"{username}/{job_id}{CHECKPOINTS_STAGING_SUFFIX}"
 
 
 def needs_local_materialization(pretrained_path: str) -> bool:
@@ -2815,6 +2949,22 @@ class JobNotRunningError(Exception):
     """Raised when stop() is called on a non-running job."""
 
 
+class JobPublishInProgressError(Exception):
+    """Raised when delete() targets a run whose checkpoints the background Hub
+    publish (models.model_upload_manager) is uploading right now.
+
+    A publish reads the run's checkpoint dirs for minutes off the request
+    thread, so a delete that passes every other guard (the run IS terminal)
+    would rmtree the files out from under upload_folder mid-read — the upload
+    dies with an opaque OS/Hub error and its repo pin fails against a deleted
+    record. One guard here covers both delete surfaces, since POST
+    /models/delete's run branch reuses JobRegistry.delete."""
+
+    def __init__(self, job_id: str) -> None:
+        super().__init__(job_id)
+        self.job_id = job_id
+
+
 class JobSourceOfQueuedRunError(Exception):
     """Raised when delete() would take the checkpoint a QUEUED run will read.
 
@@ -3220,7 +3370,31 @@ class JobRegistry:
             return (1, float(seq), started)
         return (2, -record.started_at, 0.0)
 
-    def list(self, limit: int = 10) -> builtins.list[JobRecord]:
+    def list(self, limit: int = 10, *, with_checkpoints: bool = True) -> builtins.list[JobRecord]:
+        """The newest `limit` records, lineage-annotated.
+
+        `with_checkpoints=False` skips the per-record checkpoint count, and the
+        saving is not marginal. For a LOCAL record the count is a directory
+        walk, but for a cloud or imported-hub record it goes to the Hub through
+        `_list_cloud_cached` — serially, one record at a time, with no deadline
+        of its own (unlike the author fan-out, which has one). A page holding N
+        such records therefore costs N round-trips whenever the 30s cache is
+        cold, on whatever request happens to arrive first.
+
+        The /models listing was paying that toll three times per request for a
+        field it never reads: it scans up to 500 records only to classify them,
+        and resolves local checkpoint dirs itself. Callers that do not read
+        `checkpoint_count` should opt out.
+
+        Lineage (`child_ids` / `ancestor_ids`) is annotated either way — it is
+        in-memory index work over the snapshot, and the listing's
+        "one skill per resume chain" rule depends on it.
+
+        These are the registry's own record objects, not copies, so opting out
+        leaves whatever `checkpoint_count` the last stamping call wrote. That is
+        safe precisely because the readers of that field stamp it on their own
+        call; a skipped count is never what gets served.
+        """
         with self._lock:
             snapshot = dict(self._records)
         # ANNOTATE COPIES, never the shared records. These derived stamps used
@@ -3237,7 +3411,8 @@ class JobRegistry:
         children = build_child_index(snapshot.values())
         positions = self._queue_positions(snapshot)
         for r in records:
-            r.checkpoint_count = self._count_checkpoints(r)
+            if with_checkpoints:
+                r.checkpoint_count = self._count_checkpoints(r)
             self._annotate_lineage(r, snapshot, children)
             self._annotate_queue(r, positions)
         return records
@@ -4775,6 +4950,39 @@ class JobRegistry:
         self._notify_change()
         return record
 
+    def set_hf_repo_id(self, job_id: str, repo_id: str) -> JobRecord:
+        """Record the Hub model repo a LOCAL run has been published to.
+
+        Unlike `rename` this is identity, not decoration. It is what makes a
+        SECOND publish land in the same repo as the first — models.
+        `upload_local_model` defaults its target to `record.hf_repo_id` — and
+        what the training dialog reads to render "View on Hub" and to offer
+        "add more checkpoints" instead of a fresh publish.
+
+        Cloud runs get theirs at submit time (see `start`); this is the
+        local-run equivalent, written after the first successful upload.
+        Idempotent: re-publishing to the same repo rewrites the same value."""
+        target = repo_id.strip()
+        if not target:
+            raise ValueError("Hub repo id cannot be empty.")
+        with self._lock:
+            record = self._records.get(job_id)
+            if record is None:
+                raise JobNotFoundError(job_id)
+            if record.hf_repo_id == target:
+                return record
+            record.hf_repo_id = target
+            # Zeroed before the write, then restamped after — the same derived-
+            # field protocol `rename`, `start` and `reorder_queue` follow, so a
+            # position a read stamped onto the live record never freezes into
+            # job.json. (Publish targets terminal runs, whose position is 0
+            # anyway — the convention holds so no caller has to prove that.)
+            record.queue_position = 0
+            self._persist(record, force=True)
+            self._annotate_queue(record, self._queue_positions(self._records))
+        self._notify_change()
+        return record
+
     def stop(self, job_id: str, expect_state: JobState | None = None) -> JobRecord:
         """Ask a running job to stop, and record that we asked.
 
@@ -4969,6 +5177,53 @@ class JobRegistry:
             raise JobNotFoundError(job_id)
         return self._checkpoints_for(record)
 
+    def list_chain_checkpoints(self, job_id: str) -> builtins.list[JobCheckpoint]:
+        """Every checkpoint reachable from ``job_id``: its own plus those of the
+        runs it resumed, deduplicated and ascending by step.
+
+        A resume chain is one model trained across several records, so the tip
+        alone is the wrong answer for anything that asks "which checkpoints can
+        I run / deploy?" — the earlier steps live on the ancestors, and a tip
+        that died before its first save has none of its own at all.
+
+        Deduplicated on ``ref`` rather than step: one lineage can legitimately
+        hold two DIFFERENT checkpoints at the same step (a rewind re-trains past
+        a step its ancestor already saved), and both must stay selectable.
+        """
+        with self._lock:
+            snapshot = dict(self._records)
+        record = snapshot.get(job_id)
+        if record is None:
+            raise JobNotFoundError(job_id)
+
+        chain = [record]
+        for ancestor_id in ancestor_ids_of(snapshot, job_id):
+            ancestor = snapshot.get(ancestor_id)
+            if ancestor is not None:
+                chain.append(ancestor)
+
+        seen: set[str] = set()
+        out: builtins.list[JobCheckpoint] = []
+        for link in chain:
+            for ckpt in self._checkpoints_for(link):
+                if ckpt.ref in seen:
+                    continue
+                seen.add(ckpt.ref)
+                # Stamp the owner. Without it two same-step checkpoints from a
+                # rewind are indistinguishable to every caller, and there is no
+                # way to address one of them by step.
+                out.append(
+                    ckpt.model_copy(
+                        update={
+                            "owner_job_id": link.id,
+                            "owner_job_number": link.job_number,
+                            "owner_name": link.display_name or link.config.job_name or link.id,
+                        }
+                    )
+                )
+        out.sort(key=lambda c: c.step)
+        return out
+
     def _list_cloud_cached(
         self, repo_id: str | None, fetch=_list_hub_checkpoints
     ) -> builtins.list[JobCheckpoint]:
@@ -4991,17 +5246,56 @@ class JobRegistry:
     def get_policy_config_summary(self, job_id: str, step: int) -> dict[str, object]:
         """Read the checkpoint's pretrained_model/config.json and return only
         the UX-relevant slice: policy type, expected camera names + their
-        height/width, and whether the policy needs a --task string."""
+        height/width, whether the policy needs a --task string, the flat
+        state/action widths, and the arm the checkpoint was trained on.
+
+        The arm isn't in config.json — it's recovered via train_config.json's
+        dataset repo id → that dataset's meta/info.json robot_type. None
+        whenever any hop can't be made (an imported flat model, a deleted
+        training dataset, an untagged one); the fine-tune panel treats None as
+        "can't tell", not "matches"."""
         with self._lock:
             record = self._records.get(job_id)
         if record is None:
             raise JobNotFoundError(job_id)
+        # Own checkpoints first, then the rest of the resume chain. The Run
+        # picker lists a chain's checkpoints under its tip (see
+        # list_chain_checkpoints), so a step owned by an ANCESTOR is offered
+        # there — and resolving single-run only made those 404, which left them
+        # listed but undeployable: the panel gates its Start button on this
+        # summary. Own-first preserves the tip's checkpoint on a same-step
+        # collision, matching how the picker resolves a step today.
         ckpts = self.list_checkpoints(job_id)
         match = next((c for c in ckpts if c.step == step), None)
         if match is None:
-            raise FileNotFoundError(f"No checkpoint at step {step} for job {record.id}")
+            match = next((c for c in self.list_chain_checkpoints(job_id) if c.step == step), None)
+        if match is None:
+            raise FileNotFoundError(
+                f"No checkpoint at step {step} for job {record.id} or the runs it resumed"
+            )
         cfg = _read_checkpoint_config(match)
         policy_type = cfg.get("type")
+        # The arm the checkpoint was trained on, for the fine-tune panel's
+        # cross-arm warning: train_config.json names the training dataset, and
+        # that dataset's meta/info.json names the robot. LOCAL checkpoints only
+        # — for a hub checkpoint read_checkpoint_train_config is itself a Hub
+        # download, and read_dataset_robot_type (local-only) would almost
+        # always return None for its training dataset anyway. Not worth a
+        # network round-trip on this synchronous GET.
+        train_cfg = read_checkpoint_train_config(match) if match.source == "local" else {}
+        train_dataset = train_cfg.get("dataset")
+        base_dataset_repo_id = (
+            train_dataset.get("repo_id") if isinstance(train_dataset, dict) else None
+        ) or record.config.dataset_repo_id
+        trained_on_robot_type = (
+            read_dataset_robot_type(base_dataset_repo_id)
+            # "(imported)" is the placeholder an import's config carries — not a
+            # real repo id, so don't even try to resolve it.
+            if isinstance(base_dataset_repo_id, str)
+            and base_dataset_repo_id
+            and base_dataset_repo_id != "(imported)"
+            else None
+        )
         input_features = cfg.get("input_features") or {}
         image_features: dict[str, dict[str, int]] = {}
         for full_name, feat in input_features.items():
@@ -5019,6 +5313,14 @@ class JobRegistry:
             "policy_type": policy_type,
             "image_features": image_features,
             "requires_task": policy_type in _LANGUAGE_CONDITIONED_POLICY_TYPES,
+            # Whether this architecture can run the Real-Time Chunking engine,
+            # so the launch UI can offer the engine choice only where it works
+            # instead of letting the run die inside the subprocess with the arm
+            # already claimed. null = unknown type (a fork newer than our table)
+            # — the UI must treat that as "offer it", matching the server-side
+            # guard in rollout.handle_start_inference, which only refuses on a
+            # definite False.
+            "supports_rtc": (policy_type_supports_rtc(policy_type) if isinstance(policy_type, str) else None),
             # Flat proprioceptive state / action widths. For an SO-101 arm this
             # is 6 (one per joint); a bimanual-trained checkpoint carries 12
             # (two arms). The inference modal compares this against the selected
@@ -5026,6 +5328,9 @@ class JobRegistry:
             # the user hits Start. None when the checkpoint omits the feature.
             "state_dim": _flat_feature_dim(input_features.get("observation.state")),
             "action_dim": _flat_feature_dim((cfg.get("output_features") or {}).get("action")),
+            # Raw lerobot robot_type string (e.g. "maker_follower"); the client
+            # normalises it. None when it can't be established.
+            "trained_on_robot_type": trained_on_robot_type,
         }
 
     def _queued_dependents_of(self, record: JobRecord) -> builtins.list[str]:
@@ -5124,6 +5429,18 @@ class JobRegistry:
             )
 
     def delete(self, job_id: str) -> None:
+        # Refuse while the background Hub publish is reading this run's
+        # checkpoint dirs (lazy import: models imports from this module).
+        # Checked BEFORE our lock so the two locks are never held together —
+        # the publish worker takes this registry's lock (set_hf_repo_id)
+        # without holding the manager's. The unlocked read leaves a tiny
+        # start-after-check window, which is fine: a publish that starts after
+        # this point 404s on the deleted run instead of racing the rmtree.
+        from .models import model_upload_manager
+
+        publish = model_upload_manager.get_status()
+        if publish["state"] == "running" and publish["model_id"] == job_id:
+            raise JobPublishInProgressError(job_id)
         with self._lock:
             record = self._records.get(job_id)
             if record is None:
@@ -5150,8 +5467,131 @@ class JobRegistry:
         self._discard_job_dir(job_id)
         self._notify_change()
 
+    def stop_local_for_shutdown(self) -> builtins.list[str]:
+        """End every locally-running job because this process is going away.
+
+        Called from the FastAPI shutdown event, which fires on Ctrl+C, on a
+        `systemctl restart`, and on every `--dev` reload.
+
+        This does not decide the trainer's fate — it only makes it honest. A
+        local trainer dies either way: its stdout is a `subprocess.PIPE` owned
+        by this process, so once we exit, its next write raises BrokenPipeError
+        and it exits 1 with the traceback going into the closed pipe. Nothing
+        is captured, and the run lands in history as `failed` /
+        "Subprocess exited with code 1" — indistinguishable from a real
+        training bug, which is exactly how a healthy run gets mistaken for a
+        broken model. `start_new_session=True` does not prevent this: it
+        escapes the process group, not the pipe (nor, under systemd, the unit's
+        cgroup). Stopping the run here converts that silent accident into a
+        deliberate, explained `interrupted`.
+
+        Cloud runs are deliberately untouched. They execute on HF's GPUs and do
+        not care that this process is exiting, so cancelling one here would
+        throw away a paid run every time somebody saved a .py file under
+        `--dev`.
+
+        Returns the ids it stopped, for the caller to log.
+        """
+        # Take the watchdog out of the picture first, so this method is the
+        # only finaliser. A tick racing it would derive `stop_requested` as
+        # `asked_to_stop and stop_signalled() is not False` — and
+        # LocalJobRunner.stop() reports nothing when the process is ALREADY
+        # gone, which is the normal case under systemd, where the unit's
+        # cgroup TERM reaches the trainer at the same instant it reaches us.
+        # That tick would file `failed`, contradicting the message below.
+        self._stop_watchdog.set()
+
+        with self._lock:
+            targets: builtins.list[tuple[str, JobRunner]] = []
+            for jid, record in self._records.items():
+                if record.state != "running" or record.runner != "local":
+                    continue
+                runner = self._runners.get(jid)
+                if runner is None:
+                    continue
+                targets.append((jid, runner))
+                # Intent recorded BEFORE any signal leaves this process, for
+                # the same reason stop() does it: a watchdog tick that races us
+                # must finalise `interrupted`, never `failed`.
+                self._stop_requested.add(jid)
+                # Pre-set so a racing tick uses this wording rather than
+                # STOPPED_BY_REQUEST_MESSAGE — the user did not request a
+                # reload-driven stop, and telling them they did is a small lie
+                # that costs them the next debugging session.
+                if record.error_message is None:
+                    record.error_message = STOPPED_BY_SERVER_SHUTDOWN_MESSAGE
+
+        for jid, runner in targets:
+            try:
+                runner.stop()
+            except Exception:
+                logger.exception("Error stopping job %s during shutdown", jid)
+
+        # Finalise here instead of leaving it to the watchdog: the process is
+        # exiting, so there is no guarantee another tick ever runs. Mirrors
+        # _tick()'s terminal block for the stop-requested case.
+        finalised: builtins.list[JobRecord] = []
+        with self._lock:
+            for jid, runner in targets:
+                record = self._records.get(jid)
+                if record is None:
+                    continue
+                if record.state != "running":
+                    # A tick already in flight when we set the event above beat
+                    # us. Reconcile rather than leaving a record whose state and
+                    # message disagree: `failed` here is that tick's
+                    # stop_signalled()==False reading of a run WE are ending, not
+                    # evidence of a training bug.
+                    if record.state == "failed":
+                        record.state = "interrupted"
+                        record.error_message = STOPPED_BY_SERVER_SHUTDOWN_MESSAGE
+                        finalised.append(record)
+                    elif record.state == "done" and (
+                        record.error_message == STOPPED_BY_SERVER_SHUTDOWN_MESSAGE
+                    ):
+                        # It finished on its own; the message we pre-set for the
+                        # racing tick's benefit must not outlive that race.
+                        record.error_message = None
+                        finalised.append(record)
+                    continue
+                # returncode() is a required Protocol method, not an optional
+                # hook — but one runner raising here during teardown must not
+                # cost the others their finalisation.
+                try:
+                    rc = runner.returncode()
+                except Exception:
+                    logger.exception("Error reading exit code for job %s", jid)
+                    rc = None
+                if rc is None:
+                    # The runner cannot confirm a code — killed before it could
+                    # report one. We asked, and it is going away with us, so
+                    # `interrupted` is the honest label; classify_terminal_state
+                    # would fall through to `failed` on a missing code, which is
+                    # the assertion we must not make.
+                    record.state = "interrupted"
+                else:
+                    record.state = classify_terminal_state(
+                        returncode=rc, stop_requested=True, terminal_stage=None
+                    )
+                record.ended_at = time.time()
+                record.exit_code = rc
+                if record.state == "done":
+                    # It finished on its own between our intent and our signal.
+                    # It was never stopped, so the message must not survive.
+                    record.error_message = None
+                elif record.error_message is None:
+                    record.error_message = STOPPED_BY_SERVER_SHUTDOWN_MESSAGE
+                self._runners.pop(jid, None)
+                self._stop_requested.discard(jid)
+                finalised.append(record)
+
+        # Outside the lock, as _tick does — _write_meta touches the disk.
+        for record in finalised:
+            self._persist(record, force=True)
+        return [jid for jid, _ in targets]
+
     def shutdown(self) -> None:
-        """Stop the watchdog. Called from FastAPI's shutdown hook and by tests.
+        """Stop the watchdog thread, leaving every record as it stands.
 
         Stops only the WATCHDOG, never a run: a training already in flight is
         left alone, exactly as it is across a restart (it is reattached by
@@ -5159,6 +5599,10 @@ class JobRegistry:
         while the server is going away — `LocalJobRunner` spawns a detached
         wrapper, so such a run would outlive the process that started it with no
         UI left to stop it.
+
+        For tests and an orderly process exit. The FastAPI lifespan calls
+        stop_local_for_shutdown() instead, which sets the same event and also
+        ends (and finalises) the runs this process is about to take down.
         """
         self._stop_watchdog.set()
 
@@ -6292,6 +6736,7 @@ __all__ = [
     "parse_metrics_into",
     "classify_terminal_state",
     "STOPPED_BY_REQUEST_MESSAGE",
+    "STOPPED_BY_SERVER_SHUTDOWN_MESSAGE",
     "UNQUEUEABLE_RUNNER_MESSAGE",
     "UNCONFIRMED_OUTCOME_MESSAGE",
 ]
