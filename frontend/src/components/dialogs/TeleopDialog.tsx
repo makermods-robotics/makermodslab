@@ -2,9 +2,10 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import UrdfViewer from "@/components/UrdfViewer";
+import JointAngleReadout from "@/components/control/JointAngleReadout";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
-import { useRobots } from "@/hooks/useRobots";
+import { useRobots, armHasUrdf } from "@/hooks/useRobots";
 import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
 import { useUnloadWarning } from "@/hooks/useUnloadWarning";
 import { stopSession } from "@/lib/sessionApi";
@@ -38,6 +39,10 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({
   // it's bimanual.
   const { selectedRecord } = useRobots();
   const bimanual = selectedRecord?.mode === "bimanual";
+  // Same rule as the Teleoperation page: an arm type with a shipped URDF drives
+  // the 3D model, the Metal arm shows the numeric readout instead.
+  const armType = selectedRecord?.arm_type ?? "so101";
+  const readoutOnly = !armHasUrdf(selectedRecord?.arm_type);
 
   // Stop teleoperation exactly once, however the user leaves, so Done, the
   // dialog close, and the unmount safety net can't double-stop or
@@ -294,7 +299,16 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({
                 {t("dialogs.teleop.leftArm")}
               </span>
               <div className="h-[400px] overflow-hidden rounded-md border border-border">
-                <UrdfViewer jointsKey="joints" variant="light" compact />
+                {readoutOnly ? (
+                  <JointAngleReadout jointsKey="joints_deg" />
+                ) : (
+                  <UrdfViewer
+                    jointsKey="joints"
+                    variant="light"
+                    compact
+                    armType={armType}
+                  />
+                )}
               </div>
             </div>
             <div className="flex-1">
@@ -302,13 +316,26 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({
                 {t("dialogs.teleop.rightArm")}
               </span>
               <div className="h-[400px] overflow-hidden rounded-md border border-border">
-                <UrdfViewer jointsKey="joints_right" variant="light" compact />
+                {readoutOnly ? (
+                  <JointAngleReadout jointsKey="joints_deg_right" />
+                ) : (
+                  <UrdfViewer
+                    jointsKey="joints_right"
+                    variant="light"
+                    compact
+                    armType={armType}
+                  />
+                )}
               </div>
             </div>
           </div>
         ) : (
           <div className="h-[440px] overflow-hidden rounded-md border border-border">
-            <UrdfViewer variant="light" compact />
+            {readoutOnly ? (
+              <JointAngleReadout />
+            ) : (
+              <UrdfViewer variant="light" compact armType={armType} />
+            )}
           </div>
         )}
       </div>

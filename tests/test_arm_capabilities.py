@@ -11,6 +11,7 @@ from makermodslab.arm_capabilities import (
     arm_type_from_robot_type,
     arm_type_of_robot_config,
     joints_per_arm,
+    ships_urdf,
     supports_auto_calibration,
     supports_dagger,
     uses_feetech_bus,
@@ -61,6 +62,19 @@ def test_dagger_is_refused_on_the_maker_and_metal_arms() -> None:
     assert supports_dagger("so101") is True
 
 
+def test_urdf_ships_for_the_so101_and_maker_arms_but_not_metal() -> None:
+    """Which arm types have a 3D model that ships in `frontend/public/`.
+
+    Gates the teleop broadcast (URDF joint angles under `joints` vs the raw
+    numeric `joints_deg` readout) and the frontend's viewer-vs-readout choice.
+    The SO-101 and the Maker arm each ship a URDF; the Metal arm does not yet,
+    so it stays on the numeric readout.
+    """
+    assert ships_urdf("so101") is True
+    assert ships_urdf("maker") is True
+    assert ships_urdf("metal") is False
+
+
 @pytest.mark.parametrize("value", [None, "", "SO101", "star", 7, object()])
 def test_unknown_arm_types_fall_back_to_so101(value: object) -> None:
     """A corrupted or future-dated record must never make a robot unopenable.
@@ -70,6 +84,9 @@ def test_unknown_arm_types_fall_back_to_so101(value: object) -> None:
     """
     assert uses_feetech_bus(value) is True
     assert joints_per_arm(value) == 6
+    # so101 ships a URDF, so the fallback keeps the 3D viewer rather than
+    # silently dropping to the readout.
+    assert ships_urdf(value) is True
 
 
 def test_arm_type_read_back_off_a_built_robot_config() -> None:

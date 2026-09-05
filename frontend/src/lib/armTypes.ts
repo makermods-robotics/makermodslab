@@ -16,11 +16,13 @@
  *   per arm, range-sweep calibration (manual or automatic).
  * - "maker" — Maker Arm v1: a 7-DOF RobStride CAN follower driven by a Star
  *   Arm 102 leader on UART servos. Zero-pose calibration only, no automatic
- *   calibration, and no 3D viewer (no Maker URDF ships yet).
+ *   calibration. Ships a 3D URDF, so teleop drives the model (six revolute
+ *   joints; the gripper reads out numerically).
  * - "metal" — Metal arm: a 7-DOF Damiao CAN follower driven by the same Star
  *   Arm 102 leader with a Metal joint-mapping preset. Same UI seams as the
- *   Maker arm (zero-pose calibration, probe detection, numeric readout); its
- *   zero POSE differs (upright, gripper closed vs folded, gripper open).
+ *   Maker arm (zero-pose calibration, probe detection); no Metal URDF ships
+ *   yet, so it keeps the numeric readout. Its zero POSE differs (upright,
+ *   gripper closed vs folded, gripper open).
  *
  * Records created before the Maker arm existed have no arm_type on disk; the
  * backend reads those back as "so101", so this is never undefined in practice.
@@ -28,13 +30,26 @@
 export type ArmType = "so101" | "maker" | "metal";
 
 /**
- * True for the CAN families (Maker, Metal) — every UI seam they share:
+ * True for the CAN families (Maker, Metal) — the UI seams they share:
  * zero-pose calibration in place of the range sweep, no auto-calibration, no
- * wiggle/Feetech identity, protocol-probe port detection, and the numeric
- * joint readout in place of the SO-101 URDF viewer.
+ * wiggle/Feetech identity, and protocol-probe port detection.
+ *
+ * NOT the right check for the 3D viewer any more — the Maker arm is a CAN arm
+ * that DOES ship a URDF. Use `armHasUrdf` for that.
  */
 export function isCanArmType(armType: ArmType | undefined): boolean {
   return armType === "maker" || armType === "metal";
+}
+
+/**
+ * True when a 3D URDF for this arm type ships in `frontend/public/`, so the
+ * teleop panel shows `UrdfViewer` rather than `JointAngleReadout`. Mirrors
+ * `ships_urdf` in makermodslab/arm_capabilities.py — change them together.
+ *
+ * `undefined` → true: a record with no arm_type is an SO-101, which ships one.
+ */
+export function armHasUrdf(armType: ArmType | undefined): boolean {
+  return armType === undefined || armType === "so101" || armType === "maker";
 }
 
 /**

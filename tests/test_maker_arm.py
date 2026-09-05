@@ -6,6 +6,7 @@ zero-calibration worker, the port probe's bus I/O) are deliberately NOT
 exercised here; they are verified against real hardware instead.
 """
 
+import math
 from pathlib import Path
 
 import pytest
@@ -645,6 +646,125 @@ def test_auto_calibration_refuses_a_maker_robot(tmp_lerobot_home: Path) -> None:
 
     assert excinfo.value.status_code == 400
     assert "zero-pose" in excinfo.value.detail
+
+
+# ---------------------------------------------------------------------------
+# URDF joint mapping for the 3D teleop viewer
+# ---------------------------------------------------------------------------
+
+
+class _MakerObsArm:
+    """A Maker follower stand-in that only has to answer get_observation().
+
+    `pos` is degrees keyed by motor name (the Maker follower's native unit),
+    optionally left_/right_ prefixed for a bimanual rig.
+    """
+
+    def __init__(self, pos: dict[str, float]):
+        self.pos = dict(pos)
+
+    def get_observation(self):
+        return {f"{m}.pos": v for m, v in self.pos.items()}
+
+
+_MAKER_MOTORS_ZEROED = {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": 0.0,
+    "elbow_flex": 0.0,
+    "wrist_flex": 0.0,
+    "wrist_yaw": 0.0,
+    "wrist_roll": 0.0,
+    "gripper": -60.0,
+}
+
+
+def test_maker_urdf_mapping_converts_motor_degrees_to_urdf_radians() -> None:
+    """The Maker follower reports true joint angles in degrees about its
+    calibration zero, so the viewer mapping is a direct degrees->radians (the
+    SO-101's affine range->range remap is only needed because Feetech norm
+    values are not physical angles)."""
+    from makermodslab.teleoperate import get_maker_joint_positions_from_robot
+
+    arm = _MakerObsArm({**_MAKER_MOTORS_ZEROED, "shoulder_pan": 90.0, "elbow_flex": -45.0})
+    joints = get_maker_joint_positions_from_robot(arm)
+
+    assert joints["link_002_joint"] == pytest.approx(math.pi / 2)
+    assert joints["link_004_joint"] == pytest.approx(-math.pi / 4)
+    assert joints["link_003_joint"] == pytest.approx(0.0)
+
+
+def test_maker_urdf_mapping_has_no_gripper_joint() -> None:
+    """The shipped Maker URDF is 6 revolute joints; the gripper geometry is
+    rigid on the last link. Its angle still travels in `joints_deg` for the
+    numeric value, just not into the model."""
+    from makermodslab.teleoperate import get_maker_joint_positions_from_robot
+
+    joints = get_maker_joint_positions_from_robot(_MakerObsArm(_MAKER_MOTORS_ZEROED))
+
+    assert len(joints) == 6
+    assert not any("gripper" in name or "jaw" in name.lower() for name in joints)
+
+
+def test_maker_urdf_mapping_applies_per_joint_sign_and_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`sign` (motor-increasing vs URDF-increasing) and `offset` (URDF zero vs
+    the arm's folded calibration zero) are the two per-joint facts that can
+    only be confirmed against real hardware, so the mapping must honour them."""
+    from makermodslab import teleoperate
+
+    monkeypatch.setitem(teleoperate._MAKER_URDF_JOINTS, "wrist_roll", ("link_007_joint", -1, math.pi / 2))
+    arm = _MakerObsArm({**_MAKER_MOTORS_ZEROED, "wrist_roll": 90.0})
+
+    joints = teleoperate.get_maker_joint_positions_from_robot(arm)
+
+    # -radians(90) + pi/2 == 0
+    assert joints["link_007_joint"] == pytest.approx(0.0)
+
+
+def test_maker_urdf_mapping_falls_back_to_zero_for_a_missing_motor(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A dropped motor key must not drop the whole model — the joint holds at
+    zero and the gap is logged, mirroring get_joint_positions_from_robot."""
+    from makermodslab.teleoperate import get_maker_joint_positions_from_robot
+
+    incomplete = {k: v for k, v in _MAKER_MOTORS_ZEROED.items() if k != "wrist_yaw"}
+    joints = get_maker_joint_positions_from_robot(_MakerObsArm(incomplete))
+
+    assert joints["link_006_joint"] == 0.0
+    assert "wrist_yaw" in caplog.text
+
+
+def test_maker_urdf_mapping_pulls_one_side_of_a_bimanual_rig() -> None:
+    """A bimanual Maker follower prefixes its observation keys left_/right_."""
+    from makermodslab.teleoperate import get_maker_joint_positions_from_robot
+
+    both = {f"left_{m}": 0.0 for m in _MAKER_MOTORS_ZEROED}
+    both.update({f"right_{m}": 0.0 for m in _MAKER_MOTORS_ZEROED})
+    both["right_shoulder_pan"] = 90.0
+    arm = _MakerObsArm(both)
+
+    left = get_maker_joint_positions_from_robot(arm, prefix="left_")
+    right = get_maker_joint_positions_from_robot(arm, prefix="right_")
+
+    assert left["link_002_joint"] == pytest.approx(0.0)
+    assert right["link_002_joint"] == pytest.approx(math.pi / 2)
+
+
+def test_maker_urdf_mapping_never_raises_on_a_dead_bus() -> None:
+    """Runs inside the broadcast tick; an exception here would kill the
+    teleop loop's telemetry. Return zeros, same contract as the SO-101 path."""
+    from makermodslab.teleoperate import _MAKER_URDF_JOINTS, get_maker_joint_positions_from_robot
+
+    class _DeadArm:
+        def get_observation(self):
+            raise RuntimeError("CAN bus died")
+
+    joints = get_maker_joint_positions_from_robot(_DeadArm())
+
+    assert set(joints) == {urdf for urdf, _, _ in _MAKER_URDF_JOINTS.values()}
+    assert all(v == 0.0 for v in joints.values())
 
 
 # ---------------------------------------------------------------------------

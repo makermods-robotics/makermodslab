@@ -100,6 +100,27 @@ def uses_zero_calibration(arm_type: object) -> bool:
     return normalize_arm_type(arm_type) in ("maker", "metal")
 
 
+def ships_urdf(arm_type: object) -> bool:
+    """True when a URDF for this arm type ships in ``frontend/public/``.
+
+    Two things read it, and they must agree:
+
+    * ``teleoperate.py`` — an arm type that ships a URDF broadcasts live joint
+      angles in radians under ``joints`` (keyed by URDF joint name) for the 3D
+      viewer to drive. One that does not broadcasts ``joints_deg`` (raw degrees
+      by motor name) for the numeric readout instead.
+    * the frontend — ``ships_urdf`` decides the teleop panel shows ``UrdfViewer``
+      rather than ``JointAngleReadout`` (mirrored in ``lib/armTypes.ts``).
+
+    The SO-101 (``frontend/public/so-101-urdf``) and the Maker arm
+    (``frontend/public/maker-urdf``) each ship one. The Metal arm does not yet —
+    same 7-DOF class as the Maker follower but a different geometry, so the
+    Maker model cannot stand in for it — so a Metal session stays on the
+    readout.
+    """
+    return normalize_arm_type(arm_type) in ("so101", "maker")
+
+
 def supports_dagger(arm_type: object) -> bool:
     """True when this arm type can run a DAgger / smooth-handover rollout.
 
