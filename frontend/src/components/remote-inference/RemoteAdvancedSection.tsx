@@ -10,60 +10,29 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { AdvancedSection } from "@/components/studio/panel/primitives";
-import {
-  effectiveGpuKnobs,
-  FLOW_STEPS,
-  GPU_TYPES,
-  MODEL_DTYPES,
-  type GpuKnobSupport,
-  type GpuType,
-  type ModelDtype,
-  type UseGpuKnobs,
-} from "@/hooks/useGpuLauncher";
 import { VIDEO_CODECS, type RemoteRunConfig } from "./remoteRunConfig";
 
 /**
- * The transport knobs — and, since S3.8e, the two GPU-side ones — behind
- * Advanced.
+ * The TRANSPORT knobs behind Advanced — and only those.
  *
- * They are not defaults anyone should tune casually. The transport four MUST
- * match the GPU side (Portal fingerprints the wire schema, so a disagreement
- * silently drops every packet instead of raising); the two below them change
- * what the GPU loads and what it loads onto, which is money and latency rather
- * than a broken stream. That is exactly why all of them are collapsed with
- * their values on the summary line: readable at a glance, without inviting a
- * fiddle.
+ * They are not defaults anyone should tune casually: all four MUST match the
+ * GPU side (Portal fingerprints the wire schema, so a disagreement silently
+ * drops every packet instead of raising). That is exactly why they are
+ * collapsed with their values on the summary line: readable at a glance,
+ * without inviting a fiddle.
  *
- * The engine is NOT here. It is one shared field beside the task, because it is
- * the one choice on this screen that changes how the policy behaves rather than
- * how the two sides agree to talk.
+ * What is NOT here is the point of the split. Precision, GPU type and flow
+ * steps live on the "Policy server on Modal" card, beside Start GPU and beside
+ * who pays, because they describe what that ONE side loads and what it loads
+ * onto — nothing on the robot has to agree with them. The engine is not here
+ * either: it is one shared field beside the task, because it is the one choice
+ * on this screen that changes how the policy behaves rather than how the two
+ * sides agree to talk.
  */
-
-/** Radix refuses a `SelectItem` with an empty value, and "" is exactly what
- * "as the checkpoint saved it" IS on the wire. So the option carries this
- * sentinel and the mapping happens at the boundary — it never leaves this
- * file, and it is never sent. */
-const CHECKPOINT_DTYPE = "__checkpoint__";
-/** Same trick for the step count, whose "leave it alone" is `null` rather than
- * `""` — Radix still refuses an empty option value, and `null` is not a string
- * at all. Mapped at the boundary; never sent. */
-const CHECKPOINT_FLOW_STEPS = "__checkpoint__";
 
 const RemoteAdvancedSection: React.FC<{
   config: RemoteRunConfig;
   onChange: (next: RemoteRunConfig) => void;
-  /** Precision + GPU type. Beside the config rather than on it: everything on
-   * `RemoteRunConfig` goes to BOTH halves of the run, and these two go only to
-   * the GPU. */
-  knobs: UseGpuKnobs;
-  /** Which of the two per-checkpoint knobs the SELECTED checkpoint can use,
-   * and the number to show beside "Checkpoint default". The picks are
-   * remembered per browser while the checkpoint changes under them, so a knob
-   * its config has no field for is disabled here and blanked on the wire —
-   * before this, a precision picked for MolmoAct2 and left selected for
-   * SmolVLA cost a cold start ending in the container's own refusal.
-   * Fail-open: a config that has not arrived reports both as available. */
-  knobSupport: GpuKnobSupport;
   /** The checkpoint's `n_action_steps` — how many steps it actually returns
    * per chunk, and therefore the CEILING on the horizon. Null when its config
    * doesn't say, which is when the engine defaults stand alone. */
@@ -74,8 +43,6 @@ const RemoteAdvancedSection: React.FC<{
 }> = ({
   config,
   onChange,
-  knobs,
-  knobSupport,
   checkpointHorizon,
   open,
   onOpenChange,
@@ -87,23 +54,11 @@ const RemoteAdvancedSection: React.FC<{
     value: RemoteRunConfig[K],
   ) => onChange({ ...config, [key]: value });
 
-  // The GPU-side half of the summary, built from DATA alone — a Modal GPU spec
-  // and a torch dtype name, with the separator the rest of the line uses. It is
-  // interpolated rather than concatenated with translated words so a translator
-  // still owns the whole sentence. The precision appears only when it was
-  // chosen: unset is the checkpoint's own, which is not a value to display.
-  //
-  // Built from what will ACTUALLY be sent, not from what is remembered: a knob
-  // this checkpoint cannot use is blanked, and a summary claiming it would be
-  // describing a flag that is not going out.
-  const effective = effectiveGpuKnobs(knobs, knobSupport);
-  const extra =
-    ` · ${effective.gpu}` +
-    (effective.modelDtype ? ` · ${effective.modelDtype}` : "") +
-    (effective.flowSteps ? ` · ${effective.flowSteps} steps` : "");
-  // Every other value on the line is live and is DATA too — the codec id is the
-  // wire value, the numbers are the ones that go out. `s_min` only reaches the
-  // wire for rtc, so it is only claimed there.
+  // Every value on the line is live and is DATA — the codec id is the wire
+  // value, the numbers are the ones that go out. `s_min` only reaches the wire
+  // for rtc, so it is only claimed there. The GPU-side knobs used to be
+  // appended here; they are on their own card now, and a summary claiming
+  // settings this section no longer owns would be the worst of both.
   const summary =
     config.engine === "rtc"
       ? t("remoteInference.form.advancedSummaryRtc", {
@@ -111,21 +66,16 @@ const RemoteAdvancedSection: React.FC<{
           fps: config.fps,
           codec: config.videoCodec,
           sMin: config.sMin,
-          extra,
         })
       : t("remoteInference.form.advancedSummary", {
           horizon: config.horizon,
           fps: config.fps,
           codec: config.videoCodec,
-          extra,
         });
 
   return (
     <AdvancedSection open={open} onOpenChange={onOpenChange} summary={summary}>
       <div className="space-y-4">
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          {t("remoteInference.form.transportGroupHint")}
-        </p>
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-1.5">
             <Label htmlFor="remote-horizon" className="text-xs">
@@ -228,132 +178,6 @@ const RemoteAdvancedSection: React.FC<{
             {t("remoteInference.form.sMinHint")}
           </p>
         ) : null}
-        {/* The GPU side's own two. Separated from the group above because they
-            are the opposite kind of setting: nothing here has to MATCH the
-            robot — these decide what the container loads and what it loads
-            onto, i.e. whether the policy fits its latency budget at all, and
-            what the hour costs. --------------------------------------- */}
-        <div className="space-y-3 border-t border-border pt-3">
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            {t("remoteInference.form.gpuGroupHint")}
-          </p>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="remote-precision" className="text-xs">
-                {t("remoteInference.form.precisionLabel")}
-              </Label>
-              <Select
-                value={effective.modelDtype || CHECKPOINT_DTYPE}
-                disabled={disabled || !knobSupport.modelDtype}
-                onValueChange={(v) =>
-                  knobs.setModelDtype(
-                    v === CHECKPOINT_DTYPE ? "" : (v as ModelDtype),
-                  )
-                }
-              >
-                <SelectTrigger id="remote-precision">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {/* The one option that is prose rather than a value: it
-                      stands for sending no flag at all. */}
-                  <SelectItem value={CHECKPOINT_DTYPE}>
-                    {t("remoteInference.form.precisionCheckpoint")}
-                  </SelectItem>
-                  {/* torch dtype names — wire values AND their own labels. */}
-                  {MODEL_DTYPES.map((dtype) => (
-                    <SelectItem key={dtype} value={dtype}>
-                      {dtype}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {/* Said where the disabled control is, not in the group hint:
-                  the reason belongs to THIS checkpoint, and the operator is
-                  looking at a select that will not open. */}
-              {!knobSupport.modelDtype ? (
-                <p className="text-xs leading-relaxed text-muted-foreground">
-                  {t("remoteInference.form.precisionUnavailable")}
-                </p>
-              ) : null}
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="remote-flow-steps" className="text-xs">
-                {t("remoteInference.form.flowStepsLabel")}
-              </Label>
-              <Select
-                value={
-                  effective.flowSteps == null
-                    ? CHECKPOINT_FLOW_STEPS
-                    : String(effective.flowSteps)
-                }
-                disabled={disabled || !knobSupport.flowSteps}
-                onValueChange={(v) =>
-                  knobs.setFlowSteps(
-                    v === CHECKPOINT_FLOW_STEPS ? null : Number(v),
-                  )
-                }
-              >
-                <SelectTrigger id="remote-flow-steps">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {/* Prose, like the precision's first option: it stands for
-                      sending no flag at all. The NUMBER in it is data, shown
-                      only when the checkpoint's config actually carries one —
-                      MolmoAct2 saves none, and inventing 10 (which lives in
-                      its backbone's config) would be a guess. */}
-                  <SelectItem value={CHECKPOINT_FLOW_STEPS}>
-                    {knobSupport.flowStepsDefault != null
-                      ? t("remoteInference.form.flowStepsCheckpointKnown", {
-                          steps: knobSupport.flowStepsDefault,
-                        })
-                      : t("remoteInference.form.flowStepsCheckpoint")}
-                  </SelectItem>
-                  {/* Step counts — numbers, their own labels. */}
-                  {FLOW_STEPS.map((steps) => (
-                    <SelectItem key={steps} value={String(steps)}>
-                      {steps}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {!knobSupport.flowSteps ? (
-                <p className="text-xs leading-relaxed text-muted-foreground">
-                  {t("remoteInference.form.flowStepsUnavailable")}
-                </p>
-              ) : null}
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="remote-gpu" className="text-xs">
-                {t("remoteInference.form.gpuLabel")}
-              </Label>
-              <Select
-                value={knobs.gpu}
-                disabled={disabled}
-                onValueChange={(v) => knobs.setGpu(v as GpuType)}
-              >
-                <SelectTrigger id="remote-gpu">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {/* Modal's own GPU specs — identifiers, never translated. */}
-                  {GPU_TYPES.map((gpu) => (
-                    <SelectItem key={gpu} value={gpu}>
-                      {gpu}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            {t("remoteInference.form.precisionHint")}
-          </p>
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            {t("remoteInference.form.flowStepsHint")}
-          </p>
-        </div>
       </div>
     </AdvancedSection>
   );

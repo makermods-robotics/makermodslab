@@ -126,6 +126,7 @@ const RemoteSessionDialog: React.FC<{
             status={status}
             gpuProfile={gpu.status?.profile ?? null}
             gpuDeviceName={gpu.status?.device_name ?? null}
+            gpuType={gpu.status?.gpu ?? null}
             onStop={() => void handleStop()}
             stopping={stopping}
             onClose={onExit}

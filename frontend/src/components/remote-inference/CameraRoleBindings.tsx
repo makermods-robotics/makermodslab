@@ -118,11 +118,6 @@ const CameraRoleBindings: React.FC<{
       <p className="text-xs font-semibold text-foreground">
         {t("remoteInference.cameraRoles.title")}
       </p>
-      {slots.length > 0 ? (
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          {t("remoteInference.cameraRoles.hint")}
-        </p>
-      ) : null}
       {nameMatchedCount > 0 ? (
         <p className="text-xs text-muted-foreground">
           {t("remoteInference.cameraRoles.nameMatched", {
@@ -231,11 +226,6 @@ const CameraRoleBindings: React.FC<{
               : t("remoteInference.cameraRoles.addRoleHint")}
           </p>
         </div>
-      ) : null}
-      {slots.length > 0 ? (
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          {t("remoteInference.cameraRoles.identityNote")}
-        </p>
       ) : null}
     </div>
   );

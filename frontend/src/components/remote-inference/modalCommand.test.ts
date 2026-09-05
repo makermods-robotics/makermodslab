@@ -232,13 +232,13 @@ describe("what the pasted line runs as, and what it runs on", () => {
       ...rtcCloud,
       profile: "work-account",
       gpu: "A100-80GB",
-      modelDtype: "float16",
+      modelDtype: "float32",
     });
     expect(line).toBe(
       "MODAL_PROFILE=work-account DRTC_GPU=A100-80GB modal run " +
         "makermodslab/drtc/modal_policy_rtc.py " +
         "--policy-path makermods/pick-place " +
-        "--model-dtype float16 " +
+        "--model-dtype float32 " +
         "--horizon 50 --fps 30 --s-min 4 --video-codec H264 " +
         "--livekit-room portal-lerobot-inference",
     );

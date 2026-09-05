@@ -1,9 +1,6 @@
 export default {
   form: {
     hubIdLabel: "Hub policy id",
-    hubIdHint:
-      "The repo the GPU container loads. It is not downloaded here — this machine only drives the arm.",
-    hubIdInherited: "Left empty, this run's own output repo is used.",
     // The engine's LABELS live under `studio.deploy.engine` — it is one field
     // for both places a run can happen. These hints are the pair that survived
     // the merge, because they describe what the two engines DO rather than
@@ -23,16 +20,12 @@ export default {
     // The Advanced trigger's summary line. Every value is live and is DATA —
     // the codec id is the wire value, the numbers are the ones that go out.
     // Two whole sentences rather than one plus a fragment: `s_min` only
-    // reaches the wire for rtc, so it is only claimed there.
-    // {{extra}} is the GPU side's own half of the line — " · A100 · bfloat16",
-    // built from identifiers alone, so there is nothing inside it to translate
-    // and it is appended rather than concatenated with words.
-    advancedSummary:
-      "Transport: horizon {{horizon}} · {{fps}} fps · {{codec}}{{extra}}",
+    // reaches the wire for rtc, so it is only claimed there. The GPU's own
+    // knobs used to be appended here; they live on the Modal card now, and the
+    // line says "Transport" because that is all it still describes.
+    advancedSummary: "Transport: horizon {{horizon}} · {{fps}} fps · {{codec}}",
     advancedSummaryRtc:
-      "Transport: horizon {{horizon}} · {{fps}} fps · {{codec}} · minimum budget {{sMin}}{{extra}}",
-    transportGroupHint:
-      "These must match the GPU side exactly. A mismatch is not an error: the wire schema is fingerprinted, so mismatched packets are dropped silently and the run looks healthy while receiving nothing.",
+      "Transport: horizon {{horizon}} · {{fps}} fps · {{codec}} · minimum budget {{sMin}}",
     horizonLabel: "Horizon",
     fpsLabel: "Frames per second",
     codecLabel: "Video codec",
@@ -47,16 +40,14 @@ export default {
     // identifier in this panel.
     sMinHint:
       "Steps of the plan the arm keeps in hand for the round trip. It must be the same number as --s-min in the command above: the arm works out which part of the next chunk is still fresh from it, and the GPU takes that answer on trust.",
-    // The two GPU-side knobs (S3.8e). Nothing here has to match the arm — they
-    // decide what the container loads and what it loads onto.
-    gpuGroupHint:
-      "These two are the GPU's alone: they decide how fast a chunk comes back, and what the hour costs. Changing either needs the GPU restarted.",
+    // The GPU-side knobs, which live on the Modal card rather than under
+    // Advanced: nothing here has to match the arm — they decide what the
+    // container loads and what it loads onto. Labels only; the card is a strip
+    // of selects beside Start GPU and carries no prose of its own.
     precisionLabel: "Precision",
     // The one option that is prose: it stands for passing no flag at all. The
     // others are torch dtype names — wire values, never translated.
     precisionCheckpoint: "Checkpoint default",
-    precisionHint:
-      "float32 is what most checkpoints are saved as, and it runs without autocast — the slowest path, and the one that runs out of memory first. bfloat16 is the lever to pull when a chunk takes too long to come back or the container is out of VRAM. Left at the checkpoint default, nothing is overridden.",
     gpuLabel: "GPU",
     gpuHint:
       "The Modal GPU the policy server runs on. Bigger is faster and dearer per hour; it is the second lever after precision, and it is billed either way.",
@@ -72,8 +63,6 @@ export default {
     // which is data — the server works it out, never this file.
     flowStepsCheckpoint: "Checkpoint default",
     flowStepsCheckpointKnown: "Checkpoint default ({{steps}})",
-    flowStepsHint:
-      "How many passes the model makes to shape one chunk of movement. Fewer is faster and coarser — the cheapest way to cut the wait, and the first one to cost quality. MolmoAct2 runs 10, and its work on the GPU currently takes about 880 ms against a 777 ms budget at horizon 30 and 30 fps.",
     flowStepsUnavailable:
       "This checkpoint does not build its actions in steps, so there is nothing to shorten.",
   },
@@ -81,7 +70,6 @@ export default {
   // matched nothing by name, so most runs never see it.
   cameraRoles: {
     title: "Camera roles",
-    hint: "This checkpoint names cameras that nothing on this robot is called. Choose which camera plays each role for this run.",
     // Roles that bound themselves and need no control.
     nameMatched_one: "{{count}} other camera matched by name.",
     nameMatched_other: "{{count}} other cameras matched by name.",
@@ -90,8 +78,6 @@ export default {
     unbound: "Not chosen",
     noCameras: "This robot has no cameras — add one in Robot settings.",
     disconnected: "Not plugged in right now.",
-    identityNote:
-      "The choice is remembered for this checkpoint and robot, and is sent with this run only. Nothing is renamed: the camera keeps the name it has in Robot settings, and the server still finds the device by it.",
     // S3.8g — a view the checkpoint does not declare at all. The role NAME
     // interpolated below is data (cam2), rendered verbatim in every language.
     addRole: "Add a camera role",
@@ -270,9 +256,10 @@ export default {
     policyLine: "policy: {{ref}} · remote · {{room}} on {{source}}",
     policyLineNoRoom: "policy: {{ref}} · remote",
     gpuCardTitle: "Remote GPU",
-    // {{profile}} is Modal's own profile name — data. A100 and "billing" are
-    // facts about what this costs, said where the operator is watching it run.
-    gpuBilling: "Modal · {{profile}} · A100 · billing",
+    // {{profile}} is Modal's own profile name and {{gpu}} is Modal's GPU spec
+    // string — both data. They and "billing" are facts about what this costs,
+    // said where the operator is watching it run.
+    gpuBilling: "Modal · {{profile}} · {{gpu}} · billing",
     // The child writes a log FILE and reports its path; nothing is streamed to
     // the browser, so the log slot holds the path for the operator to open.
     noLogYet: "No log path yet — the run hasn't opened one.",

@@ -435,7 +435,7 @@ export default {
       // different remedy: a robot camera's name is its identity and is never
       // renamed to suit a checkpoint.
       unmatchedRemote:
-        "The policy expects camera <0>{{name}}</0> and no camera on this robot has that name — choose which camera plays that role above.",
+        "The policy expects camera <0>{{name}}</0> and no camera on this robot has that name — choose which camera plays that role just above this notice.",
       // Matched by name, but the robot captures at a different size than the
       // checkpoint trained at. All four numbers are raw pixel dimensions.
       resolutionMismatch:
@@ -446,8 +446,10 @@ export default {
       released: "Released",
       noPreview: "No preview",
     },
+    // ACT's action-selection knob. No longer behind an Advanced disclosure —
+    // it takes the slot the engine select leaves empty for ACT, which is why
+    // the disclosure's own summary line is gone.
     advanced: {
-      summary: "Temporal ensembling for ACT",
       actionSelection: "Action selection",
       temporalEnsemble: "Temporal ensembling",
       temporalEnsembleHint:
@@ -463,10 +465,6 @@ export default {
     // `runMode.<mode>.title`; this is the strip's accessible name.
     tabs: {
       groupLabel: "What you do",
-      // Under the strip while Remote GPU is selected, saying why the second
-      // tab is disabled rather than leaving it mysteriously dead.
-      coachNeedsLocal:
-        "Human in the loop needs the policy on this machine — a remote run can't hand the arm to the leader yet.",
     },
     // Why a verb can't run, keyed so deployGuards.ts stays pure prose-free.
     blocked: {

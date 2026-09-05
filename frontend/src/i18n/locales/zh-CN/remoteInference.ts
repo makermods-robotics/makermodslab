@@ -1,8 +1,6 @@
 export default {
   form: {
     hubIdLabel: "Hub 策略 id",
-    hubIdHint: "GPU 容器要加载的仓库。本机不会下载它 — 本机只负责驱动机械臂。",
-    hubIdInherited: "留空时将使用本次运行自己的输出仓库。",
     // 引擎的标签位于 `studio.deploy.engine` —— 它现在是本地与远程共用的一个
     // 字段。这里只保留两条说明文案，因为它们讲的是两种引擎各自做什么，
     // 而不是谁是默认值。
@@ -14,15 +12,11 @@ export default {
     },
     // “高级参数”折叠标题下的摘要行。其中每个取值都是实时数据 —— 编码 id 是
     // 线上取值，数字就是实际发出的数字。写成两句完整的话而不是一句加片段：
-    // s_min 只有 rtc 才会真正上线，因此只在那一句里提到它。
-    // {{extra}} 是 GPU 侧的那一半（形如 " · A100 · bfloat16"），全部由标识符
-    // 组成，里面没有可翻译的内容，因此整体拼接而不拆成词。
-    advancedSummary:
-      "传输：horizon {{horizon}} · {{fps}} fps · {{codec}}{{extra}}",
+    // s_min 只有 rtc 才会真正上线，因此只在那一句里提到它。GPU 侧的参数原先
+    // 也拼在这里，现在它们移到了 Modal 卡片上，这一行只描述传输。
+    advancedSummary: "传输：horizon {{horizon}} · {{fps}} fps · {{codec}}",
     advancedSummaryRtc:
-      "传输：horizon {{horizon}} · {{fps}} fps · {{codec}} · 最小预留 {{sMin}}{{extra}}",
-    transportGroupHint:
-      "这几项必须与 GPU 侧完全一致。不一致不会报错：线上协议带有 schema 指纹，不匹配的数据包会被静默丢弃，运行看上去正常却收不到任何东西。",
+      "传输：horizon {{horizon}} · {{fps}} fps · {{codec}} · 最小预留 {{sMin}}",
     horizonLabel: "Horizon",
     fpsLabel: "帧率",
     codecLabel: "视频编码",
@@ -35,16 +29,13 @@ export default {
     // "--s-min" 是命令行标志名，与本面板中其他标识符一样保留拉丁文写法。
     sMinHint:
       "机械臂为一次往返预留的计划步数。它必须和上面命令里的 --s-min 完全一致：机械臂据此算出下一个动作块中还“新鲜”的部分，而 GPU 会直接采信这个结果。",
-    // GPU 侧的两个参数（S3.8e）。它们不需要与机械臂一致 —— 决定的是容器加载
-    // 什么、跑在什么硬件上。
-    gpuGroupHint:
-      "这两项只属于 GPU 侧：它们决定一个动作块多久返回，以及每小时的花费。修改任一项都需要重启 GPU。",
+    // GPU 侧的参数。它们放在 Modal 卡片上而不是“高级参数”里：它们不需要与
+    // 机械臂一致 —— 决定的是容器加载什么、跑在什么硬件上。这里只保留标签，
+    // 卡片上是紧挨“启动 GPU”的一排下拉框，本身不带说明文案。
     precisionLabel: "精度",
     // 只有这一个选项是文案：它表示不传任何标志。其余都是 torch dtype 名称，
     // 属于线上取值，不翻译。
     precisionCheckpoint: "检查点默认值",
-    precisionHint:
-      "float32 是多数检查点保存时的精度，而且不会走 autocast —— 最慢的一条路，也是最先耗尽显存的一条。当一个动作块返回太慢、或容器显存不足时，bfloat16 就是可以拉的那根杠杆。保持检查点默认值时，不会覆盖任何设置。",
     gpuLabel: "GPU",
     gpuHint:
       "策略服务运行所用的 Modal GPU。越大越快、每小时也越贵；它是继精度之后的第二根杠杆，而且无论如何都在计费。",
@@ -57,21 +48,16 @@ export default {
     // 实际会用的步数，属于数据 —— 由服务端算出，不在本文件里写死。
     flowStepsCheckpoint: "检查点默认值",
     flowStepsCheckpointKnown: "检查点默认值（{{steps}}）",
-    flowStepsHint:
-      "模型为生成一个动作块要推理多少遍。次数越少越快、动作也越粗糙 —— 这是缩短等待最便宜的办法，也是最先牺牲质量的办法。MolmoAct2 用 10 次；在 horizon 30、30 fps 下，它在 GPU 上的耗时目前约 880 毫秒，而预算是 777 毫秒。",
     flowStepsUnavailable: "该检查点不是分步生成动作的，因此没有可缩短的步数。",
   },
   // 按角色绑定摄像头。只有当检查点的某个摄像头在机器人上找不到同名摄像头时才会出现。
   cameraRoles: {
     title: "摄像头角色",
-    hint: "该检查点使用的摄像头名称在这台机器人上不存在。请为本次运行选择由哪个摄像头承担每个角色。",
     nameMatched_other: "另有 {{count}} 个摄像头按名称自动匹配。",
     capturesAt: "策略的训练分辨率为 {{width}}×{{height}}。",
     unbound: "尚未选择",
     noCameras: "该机器人没有摄像头 — 请在机器人设置中添加。",
     disconnected: "当前未接入。",
-    identityNote:
-      "该选择会按此检查点与机器人记住，并且只随本次运行发送。不会重命名任何东西：摄像头仍沿用机器人设置中的名称，服务端也仍按该名称查找设备。",
     // S3.8g —— 检查点本身并未声明的视角。下面插值的角色名是数据（cam2），各语言均原样呈现。
     addRole: "添加摄像头角色",
     addRoleHint:
@@ -231,9 +217,10 @@ export default {
     policyLine: "策略：{{ref}} · 远程 · {{room}}，来自 {{source}}",
     policyLineNoRoom: "策略：{{ref}} · 远程",
     gpuCardTitle: "远程 GPU",
-    // {{profile}} 是 Modal 自己的 profile 名，属于数据。A100 与“计费”说明的是
-    // 这次运行的成本，就写在操作者盯着它运行的地方。
-    gpuBilling: "Modal · {{profile}} · A100 · 计费中",
+    // {{profile}} 是 Modal 自己的 profile 名，{{gpu}} 是 Modal 的 GPU 规格
+    // 字符串，二者都属于数据。它们与“计费”说明的是这次运行的成本，就写在
+    // 操作者盯着它运行的地方。
+    gpuBilling: "Modal · {{profile}} · {{gpu}} · 计费中",
     // 子进程会写一个日志文件并报告它的路径；浏览器这边没有任何流式日志，
     // 因此日志区域显示这个路径，由操作者自行打开。
     noLogYet: "尚无日志路径 — 本次运行还没有创建。",

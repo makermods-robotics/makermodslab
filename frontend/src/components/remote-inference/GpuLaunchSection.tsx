@@ -20,13 +20,26 @@ import {
 } from "@/components/ui/select";
 import {
   effectiveGpuKnobs,
+  FLOW_STEPS,
+  GPU_TYPES,
+  MODEL_DTYPES,
   type GpuKnobSupport,
+  type GpuType,
   type UseGpuKnobs,
   type UseGpuLauncher,
   type UseGpuTargets,
+  type ModelDtype,
 } from "@/hooks/useGpuLauncher";
 import { MODAL_WRAPPERS } from "./modalCommand";
 import type { RemoteRunConfig } from "./remoteRunConfig";
+
+/** Sentinel for "as the checkpoint saved it" — sends no flag. Never on the
+ * wire; mapped at the boundary below. */
+const CHECKPOINT_DTYPE = "__checkpoint__";
+/** Same trick for the step count, whose "leave it alone" is `null` rather than
+ * `""` — Radix still refuses an empty option value, and `null` is not a string
+ * at all. Mapped at the boundary; never sent. */
+const CHECKPOINT_FLOW_STEPS = "__checkpoint__";
 
 /**
  * Start and stop the policy server on Modal, from here.
@@ -64,9 +77,9 @@ const GpuLaunchSection: React.FC<{
   /** This machine's Modal profiles + the selected profile's environments, and
    * the remembered selection. */
   targets: UseGpuTargets;
-  /** Precision + GPU type, chosen under Advanced. GPU-side only, which is why
-   * they are not on `config`: the arm neither knows nor cares what dtype the
-   * policy loaded at. */
+  /** Precision, GPU type and flow steps, chosen on this card. GPU-side only,
+   * which is why they are not on `config`: the arm neither knows nor cares
+   * what dtype the policy loaded at. */
   knobs: UseGpuKnobs;
   /** Which of them the SELECTED checkpoint can use. A knob its config has no
    * field for is blanked here rather than sent: the picks are remembered per
@@ -372,6 +385,132 @@ const GpuLaunchSection: React.FC<{
           ) : null}
         </div>
       ) : null}
+
+      {/* WHAT LOADS, AND ONTO WHAT. GPU-side only, beside who pays: these
+          decide whether the policy fits its latency budget and what the hour
+          costs, and describe what WAS launched until that GPU is stopped —
+          which is why they read here rather than under Advanced, where only
+          the knobs both SIDES have to agree on remain.
+
+          Two of the three belong to the CHECKPOINT rather than to the
+          machine: a precision or a step count its config has no field for is
+          disabled with the reason under it and blanked on the wire, because
+          the picks are remembered per browser while the checkpoint changes
+          under them. `effectiveGpuKnobs` is what is actually sent, so the
+          controls show it — a select claiming a flag that is not going out
+          is the bug this replaced. */}
+      <div className="grid gap-2 sm:grid-cols-2">
+        <div className="space-y-1">
+          <Label htmlFor="remote-precision" className="text-xs">
+            {t("remoteInference.form.precisionLabel")}
+          </Label>
+          <Select
+            value={effective.modelDtype || CHECKPOINT_DTYPE}
+            disabled={busy || running || !knobSupport.modelDtype}
+            onValueChange={(v) =>
+              knobs.setModelDtype(
+                v === CHECKPOINT_DTYPE ? "" : (v as ModelDtype),
+              )
+            }
+          >
+            <SelectTrigger id="remote-precision" className="h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {/* The one option that is prose rather than a value: it stands
+                  for sending no flag at all. */}
+              <SelectItem value={CHECKPOINT_DTYPE} className="text-xs">
+                {t("remoteInference.form.precisionCheckpoint")}
+              </SelectItem>
+              {/* torch dtype names — wire values AND their own labels. */}
+              {MODEL_DTYPES.map((dtype) => (
+                <SelectItem key={dtype} value={dtype} className="text-xs">
+                  <span className="font-mono">{dtype}</span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {/* Said where the disabled control is: the reason belongs to THIS
+              checkpoint, and the operator is looking at a select that will
+              not open. */}
+          {!knobSupport.modelDtype ? (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              {t("remoteInference.form.precisionUnavailable")}
+            </p>
+          ) : null}
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="remote-gpu" className="text-xs">
+            {t("remoteInference.form.gpuLabel")}
+          </Label>
+          <Select
+            value={knobs.gpu}
+            disabled={busy || running}
+            onValueChange={(v) => knobs.setGpu(v as GpuType)}
+          >
+            <SelectTrigger id="remote-gpu" className="h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {/* Modal's own GPU specs — identifiers, never translated. */}
+              {GPU_TYPES.map((gpu) => (
+                <SelectItem key={gpu} value={gpu} className="text-xs">
+                  <span className="font-mono">{gpu}</span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="remote-flow-steps" className="text-xs">
+            {t("remoteInference.form.flowStepsLabel")}
+          </Label>
+          <Select
+            value={
+              effective.flowSteps == null
+                ? CHECKPOINT_FLOW_STEPS
+                : String(effective.flowSteps)
+            }
+            disabled={busy || running || !knobSupport.flowSteps}
+            onValueChange={(v) =>
+              knobs.setFlowSteps(v === CHECKPOINT_FLOW_STEPS ? null : Number(v))
+            }
+          >
+            <SelectTrigger id="remote-flow-steps" className="h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {/* Prose, like the precision's first option: it stands for
+                  sending no flag at all. The NUMBER in it is data, shown only
+                  when the checkpoint's config actually carries one — MolmoAct2
+                  saves none, and inventing 10 (which lives in its backbone's
+                  config) would be a guess. */}
+              <SelectItem value={CHECKPOINT_FLOW_STEPS} className="text-xs">
+                {knobSupport.flowStepsDefault != null
+                  ? t("remoteInference.form.flowStepsCheckpointKnown", {
+                      steps: knobSupport.flowStepsDefault,
+                    })
+                  : t("remoteInference.form.flowStepsCheckpoint")}
+              </SelectItem>
+              {/* Step counts — numbers, their own labels. */}
+              {FLOW_STEPS.map((steps) => (
+                <SelectItem
+                  key={steps}
+                  value={String(steps)}
+                  className="text-xs"
+                >
+                  <span className="font-mono">{steps}</span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {!knobSupport.flowSteps ? (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              {t("remoteInference.form.flowStepsUnavailable")}
+            </p>
+          ) : null}
+        </div>
+      </div>
 
       {listing?.error ? (
         // The backend's own text, verbatim. NOT a blocker: Start GPU stays

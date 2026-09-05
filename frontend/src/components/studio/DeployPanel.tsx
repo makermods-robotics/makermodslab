@@ -101,7 +101,6 @@ import ModelsLibrary from "@/components/jobs/ModelsLibrary";
 import ModelPicker from "@/components/landing/ModelPicker";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 import {
-  AdvancedSection,
   LibrarySection,
   PanelEntryControl,
   PanelHeader,
@@ -414,10 +413,9 @@ const DeployPanel: React.FC = () => {
   const [temporalEnsembleCoeff, setTemporalEnsembleCoeff] = useState<
     number | undefined
   >(DEFAULT_TEMPORAL_ENSEMBLE_COEFF);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  // The REMOTE Advanced block (the transport knobs) opens independently of the
-  // ACT one above: they are never both on screen, but sharing one flag would
-  // make opening one silently open the other on the next switch.
+  // The remote transport knobs are the only Advanced block left on this panel:
+  // ACT's temporal ensembling now sits in the engine select's slot, where the
+  // one policy type that has it can be configured without a disclosure.
   const [transportAdvancedOpen, setTransportAdvancedOpen] = useState(false);
 
   const [policyConfig, setPolicyConfig] = useState<PolicyConfigSummary | null>(
@@ -1897,21 +1895,17 @@ const DeployPanel: React.FC = () => {
                   placeholder={hubIdDefault || POLICY_PATH_PLACEHOLDER}
                   className="font-mono"
                 />
-                <p className="text-xs text-muted-foreground">
-                  {t("remoteInference.form.hubIdHint")}
-                  {remoteConfig.policyHubId.trim() === "" && hubIdDefault
-                    ? ` ${t("remoteInference.form.hubIdInherited")}`
-                    : ""}
-                </p>
               </div>
             ) : null}
 
-            {/* Run parameters — flat, each with its own <Label>; the old "Run
+            {/* ACT is not language-conditioned: no task to describe. */}
+            {!isAct ? (
+            /* Run parameters — flat, each with its own <Label>; the old "Run
                 parameters" eyebrow sat above two fields that already say what
                 they are. The block is no longer gated on the policy config
                 having loaded — that gate made half the form appear and vanish
                 with the skill. What IS gated is which fields a given run mode
-                actually uses. ---------------------------------------------- */}
+                actually uses. ---------------------------------------------- */
             <div className="space-y-2">
               <Label htmlFor="deploy-task">
                 {t("studio.deploy.task.label")}
@@ -1981,33 +1975,17 @@ const DeployPanel: React.FC = () => {
                 </div>
               )}
             </div>
-            {/* Camera roles — for EVERY combination, and only when there is a
-                decision to make. A checkpoint's camera name is a role, not a
-                claim about this robot (`lerobot/MolmoAct2-SO100_101-LeRobot`
-                names cam0/cam1, which no robot record has ever been called),
-                and a role nothing matches is a question only the operator can
-                answer. Renders nothing at all when every role matched by name,
-                which is the ordinary case. --------------------------------- */}
-            <CameraRoleBindings
-              slots={cameraRoleSlots}
-              cameras={cameraRoleOptions}
-              nameMatchedCount={cameraBindings.length - cameraRoleSlots.length}
-              onChange={setRemoteCameraRole}
-              // S3.8g — the offer to add a view the checkpoint never declared.
-              // Only for a remote run against a policy family whose view count
-              // lives in its lerobot wrapper; see `canAddCameraRoles`.
-              canAddRoles={canAddCameraRoles}
-              onAddRole={addCameraRole}
-              onRemoveRole={removeExtraRole}
-              addRolesFull={extraCameraRoles.length >= MAX_EXTRA_CAMERA_ROLES}
-              disabled={controlsLocked}
-            />
-
-            {/* Inference engine — ONE field, not two. It used to be asked twice
+            ) : null}
+            {/* ACT has one engine (sync — it cannot be in-painted), so the
+                selector would be a single greyed option; its action-selection
+                knob, temporal ensembling, takes the slot instead. Hidden for a
+                remote run: no local rollout for it to configure. */}
+            {!isAct ? (
+            /* Inference engine — ONE field, not two. It used to be asked twice
                 in two vocabularies ("Inference engine: Sync / RTC" for the
                 local rollout, "Chunk engine: Adaptive sync / Real-time
                 chunking" for the remote one), which read as two settings and
-                was one: which chunk player drives the arm. -------------- */}
+                was one: which chunk player drives the arm. -------------- */
             <div className="space-y-2">
               <Label htmlFor="deploy-engine">
                 {t("studio.deploy.engine.label")}
@@ -2056,6 +2034,62 @@ const DeployPanel: React.FC = () => {
                 </p>
               ) : null}
             </div>
+            ) : !remote ? (
+            <section className="space-y-3">
+              <h4 className={eyebrow}>
+                {t("studio.deploy.advanced.actionSelection")}
+              </h4>
+              <div className="flex items-center gap-3">
+                <Switch
+                  id="deploy-temporal-ensemble"
+                  checked={temporalEnsemble}
+                  onCheckedChange={setTemporalEnsemble}
+                  className="data-[state=checked]:bg-primary"
+                />
+                <Label htmlFor="deploy-temporal-ensemble">
+                  {t("studio.deploy.advanced.temporalEnsemble")}
+                </Label>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {t("studio.deploy.advanced.temporalEnsembleHint")}
+              </p>
+              {temporalEnsemble ? (
+                <div className="space-y-2">
+                  <Label htmlFor="deploy-temporal-ensemble-coeff">
+                    {t("studio.deploy.advanced.coeffLabel")}
+                  </Label>
+                  <NumberInput
+                    id="deploy-temporal-ensemble-coeff"
+                    integer={false}
+                    step="0.001"
+                    min={0}
+                    value={temporalEnsembleCoeff}
+                    onChange={setTemporalEnsembleCoeff}
+                    placeholder={t(
+                      "studio.deploy.advanced.coeffPlaceholder",
+                      { value: DEFAULT_TEMPORAL_ENSEMBLE_COEFF },
+                    )}
+                    aria-invalid={temporalEnsembleInvalid}
+                    className={cn(
+                      "w-40",
+                      temporalEnsembleInvalid && "border-destructive",
+                    )}
+                  />
+                  {temporalEnsembleInvalid ? (
+                    <p className="text-xs text-destructive">
+                      {t("studio.deploy.advanced.coeffInvalid")}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      {t("studio.deploy.advanced.coeffHint", {
+                        value: DEFAULT_TEMPORAL_ENSEMBLE_COEFF,
+                      })}
+                    </p>
+                  )}
+                </div>
+              ) : null}
+            </section>
+            ) : null}
 
             {/* Max duration — ONE field, whose 0 means two different things.
                 Unbounded for a remote run (the backend's own contract), and
@@ -2165,8 +2199,6 @@ const DeployPanel: React.FC = () => {
                 <RemoteAdvancedSection
                   config={remoteConfig}
                   onChange={setRemoteConfig}
-                  knobs={gpuKnobs}
-                  knobSupport={knobSupport}
                   checkpointHorizon={checkpointHorizon}
                   open={transportAdvancedOpen}
                   onOpenChange={setTransportAdvancedOpen}
@@ -2224,11 +2256,6 @@ const DeployPanel: React.FC = () => {
                   )}
                 </span>
               </p>
-              {remote ? (
-                <p className="text-xs leading-relaxed text-warn">
-                  {t("studio.deploy.tabs.coachNeedsLocal")}
-                </p>
-              ) : null}
 
               {/* Run — hands off. The scored-evaluation count is the only
                   thing this tab adds, and only when a prefill asked for one:
@@ -2380,8 +2407,8 @@ const DeployPanel: React.FC = () => {
                 button. Nothing is picked here: each camera the checkpoint was
                 trained with takes the robot camera of the SAME NAME (see
                 cameraBindings), a role that matches nothing is answered by the
-                picker above, and the two remaining ways it can go wrong are
-                reported once, below. ---------------------------------- */}
+                picker right under the list, and the two remaining ways it can
+                go wrong are reported once, below. -------------------- */}
             <div className="space-y-4">
               <SessionCameraList
                 cameras={robotCameras}
@@ -2391,6 +2418,36 @@ const DeployPanel: React.FC = () => {
                     ? t("studio.deploy.cameras.robotHasNone")
                     : t("studio.deploy.cameras.noRobot")
                 }
+              />
+
+              {/* Camera roles — for EVERY combination, and only when there is
+                  a decision to make. A checkpoint's camera name is a role, not
+                  a claim about this robot (`lerobot/MolmoAct2-SO100_101-LeRobot`
+                  names cam0/cam1, which no robot record has ever been called),
+                  and a role nothing matches is a question only the operator can
+                  answer. Renders nothing at all when every role matched by
+                  name, which is the ordinary case.
+
+                  Directly under the list rather than up beside the task: the
+                  question it asks is "which of THESE cameras plays that role",
+                  and the answer is easier to give while looking at them. The
+                  unmatched-camera alert below points back up at it. ------- */}
+              <CameraRoleBindings
+                slots={cameraRoleSlots}
+                cameras={cameraRoleOptions}
+                nameMatchedCount={
+                  cameraBindings.length - cameraRoleSlots.length
+                }
+                onChange={setRemoteCameraRole}
+                // S3.8g — the offer to add a view the checkpoint never
+                // declared. Only for a remote run against a policy family whose
+                // view count lives in its lerobot wrapper; see
+                // `canAddCameraRoles`.
+                canAddRoles={canAddCameraRoles}
+                onAddRole={addCameraRole}
+                onRemoveRole={removeExtraRole}
+                addRolesFull={extraCameraRoles.length >= MAX_EXTRA_CAMERA_ROLES}
+                disabled={controlsLocked}
               />
 
               {/* One alert for both failure modes, and only when there is one:
@@ -2420,7 +2477,7 @@ const DeployPanel: React.FC = () => {
                             Remote runs keep their own sentence: renaming a
                             robot camera is the WRONG remedy there — the name on
                             the record is that camera's identity, and the role
-                            picker above is the answer. */}
+                            picker just above this notice is the answer. */}
                         <Trans
                           i18nKey={
                             remote
@@ -2456,78 +2513,6 @@ const DeployPanel: React.FC = () => {
               ) : null}
             </div>
 
-            {/* Advanced parameters — same AdvancedSection trigger and inner
-                eyebrow/label/help-text rhythm as the Train form's AdvancedCard,
-                so the two panels read as one form. ACT-only for now: temporal
-                ensembling is an ACT config field, so for every other policy type
-                the block has nothing to hold and stays hidden. ------------- */}
-            {/* Hidden for a remote run for the same reason it is hidden for a
-                non-ACT policy: there is no local rollout whose action selection
-                this could configure. */}
-            {isAct && !remote ? (
-              <AdvancedSection
-                open={advancedOpen}
-                onOpenChange={setAdvancedOpen}
-                summary={t("studio.deploy.advanced.summary")}
-              >
-                <div className="space-y-6">
-                  <section className="space-y-3">
-                    <h4 className={eyebrow}>
-                      {t("studio.deploy.advanced.actionSelection")}
-                    </h4>
-                    <div className="flex items-center gap-3">
-                      <Switch
-                        id="deploy-temporal-ensemble"
-                        checked={temporalEnsemble}
-                        onCheckedChange={setTemporalEnsemble}
-                        className="data-[state=checked]:bg-primary"
-                      />
-                      <Label htmlFor="deploy-temporal-ensemble">
-                        {t("studio.deploy.advanced.temporalEnsemble")}
-                      </Label>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      {t("studio.deploy.advanced.temporalEnsembleHint")}
-                    </p>
-                    {temporalEnsemble ? (
-                      <div className="space-y-2">
-                        <Label htmlFor="deploy-temporal-ensemble-coeff">
-                          {t("studio.deploy.advanced.coeffLabel")}
-                        </Label>
-                        <NumberInput
-                          id="deploy-temporal-ensemble-coeff"
-                          integer={false}
-                          step="0.001"
-                          min={0}
-                          value={temporalEnsembleCoeff}
-                          onChange={setTemporalEnsembleCoeff}
-                          placeholder={t(
-                            "studio.deploy.advanced.coeffPlaceholder",
-                            { value: DEFAULT_TEMPORAL_ENSEMBLE_COEFF },
-                          )}
-                          aria-invalid={temporalEnsembleInvalid}
-                          className={cn(
-                            "w-40",
-                            temporalEnsembleInvalid && "border-destructive",
-                          )}
-                        />
-                        {temporalEnsembleInvalid ? (
-                          <p className="text-xs text-destructive">
-                            {t("studio.deploy.advanced.coeffInvalid")}
-                          </p>
-                        ) : (
-                          <p className="text-xs text-muted-foreground">
-                            {t("studio.deploy.advanced.coeffHint", {
-                              value: DEFAULT_TEMPORAL_ENSEMBLE_COEFF,
-                            })}
-                          </p>
-                        )}
-                      </div>
-                    ) : null}
-                  </section>
-                </div>
-              </AdvancedSection>
-            ) : null}
           </div>
         </CollapsibleContent>
       </Collapsible>

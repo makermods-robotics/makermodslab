@@ -320,7 +320,7 @@ export default {
       unmatched:
         "策略需要摄像头 <0>{{name}}</0>，但该机器人没有名为“{{name}}”的摄像头 — 请在机器人设置中重命名。",
       unmatchedRemote:
-        "策略需要摄像头 <0>{{name}}</0>，该机器人没有同名摄像头 — 请在上方选择由哪个摄像头承担该角色。",
+        "策略需要摄像头 <0>{{name}}</0>，该机器人没有同名摄像头 — 请在本提示正上方选择由哪个摄像头承担该角色。",
       resolutionMismatch:
         "<0>{{name}}</0> 在机器人设置中为 {{robotWidth}}×{{robotHeight}}，而策略是在 {{policyWidth}}×{{policyHeight}} 下训练的 — 运行时按策略的分辨率采集。",
     },
@@ -328,8 +328,9 @@ export default {
       released: "已释放",
       noPreview: "无预览",
     },
+    // ACT 的动作选择参数。它不再收在“高级参数”折叠里 —— 它占据了 ACT 用不到
+    // 的引擎下拉框的位置，因此折叠标题那一行的文案也随之删除。
     advanced: {
-      summary: "ACT 的时序集成",
       actionSelection: "动作选择",
       temporalEnsemble: "时序集成",
       temporalEnsembleHint:
@@ -344,10 +345,6 @@ export default {
     // 这里是标签栏的无障碍名称。
     tabs: {
       groupLabel: "你要做什么",
-      // 选中“远程 GPU”时显示在标签栏下方，说明第二个标签为什么被禁用，
-      // 而不是让它莫名其妙地点不动。
-      coachNeedsLocal:
-        "人在回路需要策略跑在本机上 — 远程运行还无法把机械臂交给主臂。",
     },
     // 某个动词无法运行的原因；以键的形式提供，好让 deployGuards.ts 不含文案。
     blocked: {

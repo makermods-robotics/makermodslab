@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { DEFAULT_GPU } from "@/hooks/useGpuLauncher";
 import { AlertTriangle, GraduationCap, Square } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -186,6 +187,11 @@ const RemoteSessionBody: React.FC<{
    * server prints it, which is when the billing line simply says less rather
    * than guessing. DATA — a vendor device string, never translated. */
   gpuDeviceName: string | null;
+  /** The GPU type the launch went out with, or "" when it used the wrapper's
+   * pin (the launcher's own default). What was ASKED FOR, which is why it
+   * reads beside `gpuDeviceName` rather than instead of it. DATA — Modal's
+   * spec string. */
+  gpuType: string | null;
   onStop: () => void;
   stopping: boolean;
   /** Close the dialog once the run has ended. */
@@ -197,6 +203,7 @@ const RemoteSessionBody: React.FC<{
   status,
   gpuProfile,
   gpuDeviceName,
+  gpuType,
   onStop,
   stopping,
   onClose,
@@ -421,12 +428,17 @@ const RemoteSessionBody: React.FC<{
           {gpuProfile ? (
             // `title` rather than a second line: the card is dense, and this
             // is the answer to a question only asked when the billing line
-            // looks wrong ("is it really on the card I picked?").
+            // looks wrong ("is it really on the card I picked?"). The line
+            // itself names the GPU the launch ASKED for; the tooltip names
+            // what answered.
             <span
               className="text-xs text-muted-foreground"
               title={gpuDeviceName ?? undefined}
             >
-              {t("remoteInference.status.gpuBilling", { profile: gpuProfile })}
+              {t("remoteInference.status.gpuBilling", {
+                profile: gpuProfile,
+                gpu: gpuType || DEFAULT_GPU,
+              })}
             </span>
           ) : null}
         </div>

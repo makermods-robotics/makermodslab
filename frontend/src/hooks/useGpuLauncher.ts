@@ -156,7 +156,7 @@ export interface GpuStartRequest {
  * `modal_launcher.MODEL_DTYPES`. `""` is not one of them: it is the ABSENCE of
  * the flag, and therefore the checkpoint's own saved dtype. Every value is a
  * torch dtype name — data, shown verbatim, never translated. */
-export const MODEL_DTYPES = ["float32", "bfloat16", "float16"] as const;
+export const MODEL_DTYPES = ["float32", "bfloat16"] as const;
 export type ModelDtype = (typeof MODEL_DTYPES)[number] | "";
 
 /** The GPUs a launch may ask Modal for, mirroring `modal_launcher.GPU_TYPES`
