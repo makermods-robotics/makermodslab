@@ -621,18 +621,53 @@ def test_robot_token_caps_the_room_at_two_participants() -> None:
     assert jwt.decode(token, options={"verify_signature": False})["roomConfig"]["maxParticipants"] == 2
 
 
-def test_hosting_refuses_can_arms_in_this_release(client, tmp_lerobot_home, _idle, monkeypatch) -> None:
+@pytest.mark.parametrize("arm_type", ["maker", "metal"])
+def test_can_hosting_reaches_sfu_preflight(client, tmp_lerobot_home, _idle, monkeypatch, arm_type) -> None:
     from makermodslab.utils import config as cfg
 
-    (Path(cfg.follower_config_path_for("maker")) / "FC.json").parent.mkdir(parents=True, exist_ok=True)
-    (Path(cfg.follower_config_path_for("maker")) / "FC.json").write_text("{}")
+    calibration = Path(cfg.follower_config_path_for(arm_type)) / "FC.json"
+    calibration.parent.mkdir(parents=True, exist_ok=True)
+    calibration.write_text("{}")
     cfg.save_robot_record(
-        "canbot", {"arm_type": "maker", "follower_port": "/dev/can", "follower_config": "FC"}
+        "canbot", {"arm_type": arm_type, "follower_port": "/dev/can", "follower_config": "FC"}
     )
-    monkeypatch.setenv(sfu.ENV_KEY_FILE, "/enabled")
+    monkeypatch.setattr(sfu, "sfu_enabled", lambda: False)
     resp = client.post("/api/v1/sessions", json={"kind": "hosting", "robot": "canbot"})
-    assert resp.status_code == 400
-    assert "SO-101" in resp.json()["detail"]
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "sfu.disabled"
+
+
+@pytest.mark.parametrize("arm_type", ["maker", "metal"])
+@pytest.mark.parametrize("mode", ["single", "bimanual"])
+def test_station_can_choose_a_ready_can_follower(
+    client, tmp_lerobot_home, _idle, monkeypatch, arm_type, mode
+) -> None:
+    from makermodslab.utils import config as cfg
+
+    monkeypatch.setattr(cfg, "STATION_FILE", str(Path(cfg.MAKERMODSLAB_HOME) / "station.json"))
+    monkeypatch.setattr(remote_host, "station_robot", None)
+    monkeypatch.setattr(remote_host, "_station_paused", False)
+    calibration = Path(cfg.follower_config_path_for(arm_type)) / "FC.json"
+    calibration.parent.mkdir(parents=True, exist_ok=True)
+    calibration.write_text("{}")
+    cfg.save_robot_record(
+        "canbot",
+        {
+            "arm_type": arm_type,
+            "mode": mode,
+            "arms": "follower",
+            "follower_port": "/dev/can",
+            "follower_config": "FC",
+            "right_follower_port": "/dev/can2" if mode == "bimanual" else "",
+            "right_follower_config": "FC" if mode == "bimanual" else "",
+        },
+    )
+    cfg.save_robot_record("unfinished", {"arm_type": arm_type, "follower_port": "/dev/can3"})
+    assert client.get("/api/v1/station").json()["hostable"] == ["canbot"]
+    response = client.put("/api/v1/station/robot", json={"robot": "canbot"})
+    assert response.status_code == 200
+    assert response.json()["robot"] == "canbot"
+    assert cfg.load_station_robot() == "canbot"
 
 
 def test_local_start_preempts_a_parked_unseated_hosting_session(

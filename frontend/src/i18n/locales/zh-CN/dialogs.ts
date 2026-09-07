@@ -155,7 +155,7 @@ export default {
     listLabel: "此工作站可托管的机器人",
     hostedNow: "正在托管",
     chosen: "已选择",
-    empty: "此工作站上还没有可托管的机器人。请先设置好某个机器人的从臂和摄像头 — 托管支持 SO-101。",
+    empty: "请先设置好从臂，即可在此托管 SO-101、Maker 或 Metal 机器人。",
     openSettings: "打开机器人设置",
     createRobot: "创建机器人",
     host: "托管此机器人",

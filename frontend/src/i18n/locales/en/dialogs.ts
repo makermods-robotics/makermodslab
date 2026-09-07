@@ -228,7 +228,7 @@ export default {
     chosen: "Chosen",
     // No saved robot has its follower side set up.
     empty:
-      "No robot on this station can be hosted yet. Set up a robot's follower arm and cameras first — hosting supports the SO-101.",
+      "Set up a follower arm to host an SO-101, Maker, or Metal robot here.",
     openSettings: "Open Robot settings",
     createRobot: "Create robot",
     host: "Host this robot",

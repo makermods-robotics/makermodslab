@@ -51,9 +51,10 @@ session ends. A local flow started at the station preempts a parked,
 unseated hosting session automatically (sessions.handle_start_session) —
 "local wins when idle"; a seated operator is a held session like any other.
 
-SO-101 only in this release: parking toggles torque mid-session, and the
-CAN arms' torque semantics (the Metal handshake IS the enable) need their
-own treatment. The plugin import is lazy: ``remote`` is an optional extra.
+SO-101, Maker and Metal followers use their own torque and rest-return
+paths. CAN targets are rate-limited in degrees, and parking clears retained
+MIT effort before torque-off. The plugin import is lazy: ``remote`` is an
+optional extra.
 """
 
 from __future__ import annotations
@@ -68,7 +69,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from . import sfu
+from . import remote_can, sfu
 from .api_errors import ApiError, ErrorCode
 from .arm_capabilities import uses_feetech_bus
 from .arm_identity import verify_devices
@@ -371,6 +372,21 @@ def observation_degrees(observation: dict[str, Any], prefix: str = "") -> dict[s
     return out
 
 
+def host_joint_data(observation: dict, ranges: dict, arm_type: str, bimanual: bool) -> dict:
+    """Match the station and operator viewers' units and per-arm WS keys."""
+    result = {}
+    feetech = uses_feetech_bus(arm_type)
+    for prefix, suffix in (("left_" if bimanual else "", ""), ("right_", "_right")):
+        result[f"joints{'' if feetech else '_deg'}{suffix}"] = (
+            observation_to_urdf_joints(observation, ranges, prefix=prefix)
+            if feetech
+            else observation_degrees(observation, prefix=prefix)
+        )
+        if not bimanual:
+            break
+    return result
+
+
 def build_descriptor(
     request: HostingRequest,
     *,
@@ -413,6 +429,9 @@ def _connect_follower(request: HostingRequest):
 
     camera_configs = _build_camera_configs(request.cameras, _platform_backend())
     robot = make_robot_from_config(build_follower_config(request, cameras=camera_configs))
+    feetech = uses_feetech_bus(request.arm_type)
+    if not feetech:
+        remote_can.prepare(robot)
     try:
         logger.info(
             f"Connecting to the follower arm(s) on {request.follower_port} with {len(camera_configs)} camera(s)..."
@@ -423,16 +442,27 @@ def _connect_follower(request: HostingRequest):
             raise RuntimeError(
                 f"Follower setup failed on {request.follower_port}: {format_exception(e)}"
             ) from e
+        if not feetech:
+            # Connect can energize CAN motors; park before joining the network.
+            remote_can.neutralize(robot)
+            _set_torque(robot, False)
+            return robot, []
         warnings = verify_devices(((robot, "follower"),), skip=request.skip_identity_check)
         warnings += reset_torque_limit(robot, FOLLOWER)
         warnings += clear_goal_velocity(robot, FOLLOWER)
         return robot, warnings
-    except Exception:
-        force_disconnect_partial(robot, "follower arm")
+    except Exception as exc:
+        exc.cleanup_error = (
+            " ".join(force_disconnect_partial(robot, "follower arm")) or None
+            if feetech
+            else remote_can.release(robot)
+        )
         raise
 
 
-def _release_follower(robot) -> str | None:
+def _release_follower(robot, arm_type: str = "so101") -> str | None:
+    if not uses_feetech_bus(arm_type):
+        return remote_can.release(robot)
     problems = force_disable_torque(robot, "follower arm")
     error = _safe_disconnect(robot, "follower arm")
     if error:
@@ -564,14 +594,6 @@ def handle_start_hosting(request: HostingRequest, websocket_manager=None) -> dic
             }
         # Preconditions that are NOT hardware, checked before the claim so a
         # refusal never emits a session event.
-        if not uses_feetech_bus(request.arm_type):
-            return {
-                "success": False,
-                "status_code": 400,
-                "message": "Hosting supports the SO-101 in this release: parking toggles torque mid-session, "
-                "and the CAN arms need their own treatment.",
-                "code": ErrorCode.ROBOT_NOT_READY,
-            }
         if not sfu.sfu_enabled():
             return {
                 "success": False,
@@ -598,6 +620,7 @@ def handle_start_hosting(request: HostingRequest, websocket_manager=None) -> dic
 
     notify_session_changed("hosting", True, phase="parked")
 
+    feetech = uses_feetech_bus(request.arm_type)
     robot = None
     teleop = None
     events: queue.Queue = queue.Queue()
@@ -612,7 +635,8 @@ def handle_start_hosting(request: HostingRequest, websocket_manager=None) -> dic
 
         # Wire contract from the connected robot: what lerobot says it has.
         motors, cameras = split_features(dict(robot.observation_features))
-        ranges = joint_ranges_deg(_calibrations_by_prefix(robot, request))
+        ranges = joint_ranges_deg(_calibrations_by_prefix(robot, request)) if feetech else {}
+        can_rest_pose = remote_can.rest_pose(remote_can.read_pose(robot)) if not feetech else {}
         room = sfu.default_room(get_instance_id())
         api_key, api_secret = sfu.api_keys()
         token, _expires = sfu.mint_token(
@@ -653,7 +677,7 @@ def handle_start_hosting(request: HostingRequest, websocket_manager=None) -> dic
         # gripper is excluded from the return (it may hold something).
         follower_rest_poses = [
             (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
-            for bus in _device_buses(robot)
+            for bus in (_device_buses(robot) if feetech else [])
         ]
         _set_torque(robot, False)
 
@@ -668,7 +692,11 @@ def handle_start_hosting(request: HostingRequest, websocket_manager=None) -> dic
                 teleop.disconnect()
             except Exception as disconnect_error:
                 logger.warning(f"Portal disconnect after a failed start: {disconnect_error}")
-        cleanup_error = _release_follower(robot) if robot is not None else None
+        cleanup_error = (
+            _release_follower(robot, request.arm_type)
+            if robot is not None
+            else getattr(e, "cleanup_error", None)
+        )
         with _state_lock:
             hosting_active = False
             last_cleanup_error = cleanup_error
@@ -691,13 +719,26 @@ def handle_start_hosting(request: HostingRequest, websocket_manager=None) -> dic
         last_broadcast = 0.0
         last_action_ts: int | None = None
         soft_start: tuple[dict[str, float], float] | None = None  # (origin pose, t0)
+        can_target: dict[str, float] = {}
+        can_target_time = 0.0
+
+        def return_to_rest() -> str | None:
+            if feetech:
+                _return_followers_to_rest(follower_rest_poses, _release_now)
+                return None
+            arrived, reason = remote_can.return_to_rest(robot, can_rest_pose, _release_now)
+            if not arrived and reason != "cut-short":
+                return f"Could not return the hosted follower to rest: {reason}"
+            return None
 
         def engage() -> None:
-            nonlocal soft_start
+            nonlocal soft_start, can_target, can_target_time
             if phase in ("engaged", "engaging"):
                 return
             _set_phase("engaging")
-            origin = _energize_at_present(robot)
+            origin = _energize_at_present(robot) if feetech else remote_can.engage(robot)
+            can_target = origin
+            can_target_time = time.monotonic()
             soft_start = (origin, time.monotonic())
             logger.info(f"Engaged for operator {monitor.seat!r} (soft start {SOFT_START_S:.1f}s)")
 
@@ -708,7 +749,11 @@ def handle_start_hosting(request: HostingRequest, websocket_manager=None) -> dic
                 return
             _set_phase("parking")
             logger.info(f"Parking: {reason}")
-            _return_followers_to_rest(follower_rest_poses, _release_now)
+            error = return_to_rest()
+            if error:
+                raise RuntimeError(error)
+            if not feetech:
+                remote_can.neutralize(robot)
             _set_torque(robot, False)
             _set_phase("parked")
 
@@ -721,7 +766,7 @@ def handle_start_hosting(request: HostingRequest, websocket_manager=None) -> dic
         try:
             while hosting_active:
                 tick = time.monotonic()
-                observation = robot.get_observation()
+                observation = robot.get_observation() if feetech else remote_can.get_observation(robot)
                 teleop.send_feedback(observation)
 
                 # Latest action, with the sender's clock so a still leader
@@ -773,12 +818,26 @@ def handle_start_hosting(request: HostingRequest, websocket_manager=None) -> dic
                     engage()
 
                 if action and phase in ("engaging", "engaged"):
+                    if not feetech:
+                        # Validate before blending so NaN or a missing motor
+                        # cannot become a seemingly healthy interpolated pose.
+                        action = remote_can.clamp_action(robot, action)
                     if soft_start is not None:
                         origin, t0 = soft_start
                         blend = soft_start_blend(time.monotonic() - t0)
-                        robot.send_action(blend_action(origin, action, blend))
+                        action = blend_action(origin, action, blend)
                         if blend >= 1.0:
                             soft_start = None
+                            if feetech:
+                                _set_phase("engaged")
+                    if not feetech:
+                        action_time = time.monotonic()
+                        target = action
+                        action = remote_can.limit_action(can_target, target, action_time - can_target_time)
+                        remote_can.send_action(robot, action, can_target)
+                        can_target_time = action_time
+                        can_target = action
+                        if soft_start is None and phase == "engaging" and action == target:
                             _set_phase("engaged")
                     else:
                         robot.send_action(action)
@@ -787,13 +846,7 @@ def handle_start_hosting(request: HostingRequest, websocket_manager=None) -> dic
                 if now - last_broadcast >= _BROADCAST_INTERVAL_S:
                     try:
                         joint_data: dict[str, Any] = {"type": "joint_update", "timestamp": now}
-                        joint_data["joints"] = observation_to_urdf_joints(
-                            observation, ranges, prefix="left_" if is_bimanual else ""
-                        )
-                        if is_bimanual:
-                            joint_data["joints_right"] = observation_to_urdf_joints(
-                                observation, ranges, prefix="right_"
-                            )
+                        joint_data.update(host_joint_data(observation, ranges, request.arm_type, is_bimanual))
                         if websocket_manager and websocket_manager.active_connections:
                             websocket_manager.broadcast_joint_data_sync(joint_data)
                         last_broadcast = now
@@ -812,11 +865,13 @@ def handle_start_hosting(request: HostingRequest, websocket_manager=None) -> dic
                 teleop.disconnect()
             except Exception as e:
                 logger.warning(f"Portal disconnect on stop: {e}")
-            if phase != "parked" and not _release_now.is_set():
+            return_error = None
+            if phase not in ("parked", "parking") and not _release_now.is_set():
                 releasing = True
                 notify_session_changed("hosting", True, phase="releasing")
-                _return_followers_to_rest(follower_rest_poses, _release_now)
-            cleanup_error = _release_follower(robot)
+                return_error = return_to_rest()
+            cleanup_error = _release_follower(robot, request.arm_type)
+            cleanup_error = " ".join(e for e in (return_error, cleanup_error) if e) or None
             with _state_lock:
                 last_cleanup_error = cleanup_error
                 last_session_error = loop_error or cleanup_error
@@ -945,15 +1000,10 @@ def handle_hosting_status(request_host: str) -> dict[str, Any]:
 
 
 def hostable_robots() -> list[str]:
-    """Saved robots this station could host: follower side set up (the arm
-    scope hosting drives) and an SO-101 (this release's family)."""
+    """Saved robots with their follower side set up, for every supported family."""
     from .utils.config import is_robot_record_clean, list_robot_records
 
-    return [
-        r["name"]
-        for r in list_robot_records()
-        if uses_feetech_bus(r.get("arm_type")) and is_robot_record_clean(r, arms="follower")
-    ]
+    return [r["name"] for r in list_robot_records() if is_robot_record_clean(r, arms="follower")]
 
 
 def pick_station_robot(remembered: str | None, hostable: list[str]) -> str | None:
@@ -980,12 +1030,6 @@ def set_station_robot(robot: str | None) -> dict[str, Any]:
         record = get_robot_record(robot) if is_valid_robot_name(robot) else None
         if record is None:
             raise ApiError(404, f"No robot named {robot!r}.", code=ErrorCode.ROBOT_NOT_FOUND)
-        if not uses_feetech_bus(record.get("arm_type")):
-            raise ApiError(
-                400,
-                "Hosting supports the SO-101 in this release.",
-                code=ErrorCode.ROBOT_NOT_READY,
-            )
         if not is_robot_record_clean(record, arms="follower"):
             raise ApiError(
                 400,

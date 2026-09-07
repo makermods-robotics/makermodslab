@@ -2,6 +2,9 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Loader2, Plus, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import makerArmPhoto from "@/assets/arms/maker.jpg";
+import metalArmPhoto from "@/assets/arms/metal.jpg";
+import so101ArmPhoto from "@/assets/arms/so101.jpg";
 import {
   Dialog,
   DialogContent,
@@ -16,6 +19,13 @@ import { useStationStatus } from "@/hooks/useStationStatus";
 import { useRobots } from "@/hooks/useRobots";
 import { formatStationRefusal, setStationRobot } from "@/lib/remoteApi";
 import { cn } from "@/lib/utils";
+import { ARM_TYPE_LABEL, type ArmType } from "@/lib/armTypes";
+
+const ARM_ICONS: Record<ArmType, string> = {
+  maker: makerArmPhoto,
+  metal: metalArmPhoto,
+  so101: so101ArmPhoto,
+};
 
 export interface StationRobotDialogProps {
   open: boolean;
@@ -34,7 +44,7 @@ export interface StationRobotDialogProps {
  * chip says so; this dialog is where the choice is made and later changed.
  *
  * The list is the backend's `hostable` (saved robots whose follower side is
- * set up — SO-101 only in this release), rendered as radio rows with the
+ * set up, including Maker and Metal), rendered as radio rows with the
  * current choice pre-selected. "Host this robot" PUTs the choice — the
  * station remembers it and re-arms hosting within seconds, a parked,
  * unseated session of the previous robot yielding on its own; "Stop hosting"
@@ -182,6 +192,10 @@ const StationRobotDialog: React.FC<StationRobotDialogProps> = ({
           >
             {hostable.map((name) => {
               const checked = picked === name;
+              const armType = records[name]?.arm_type ?? "so101";
+              const armLabel = t(`robot.corner.armType.${armType}` as never, {
+                defaultValue: ARM_TYPE_LABEL[armType],
+              });
               // Robot names are data — verbatim.
               return (
                 <button
@@ -212,6 +226,14 @@ const StationRobotDialog: React.FC<StationRobotDialogProps> = ({
                       <span className="absolute inset-[2.5px] rounded-full bg-primary" />
                     ) : null}
                   </span>
+                  <img
+                    src={ARM_ICONS[armType]}
+                    alt={armLabel}
+                    title={armLabel}
+                    width={40}
+                    height={30}
+                    className="h-[30px] w-10 shrink-0 rounded border border-border/50 bg-white object-contain"
+                  />
                   <span
                     className={cn(
                       "min-w-0 flex-1 truncate text-sm font-medium",

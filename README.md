@@ -113,7 +113,14 @@ It needs the `livekit-server` binary on your PATH — `brew install livekit` on 
 hint if it is missing. Peers fetch short-lived room tokens from `POST /api/v1/sfu/token`; the signing
 secret stays in a 0600 file on the station. Open `7880/tcp`, `7881/tcp` and `7882/udp` for remote peers.
 
-**Remote teleoperation.** Start the station in station mode — `makermodslab --sfu --host` (or
+**Remote teleoperation.** Supports SO-101, Maker, and Metal, with single or bimanual layouts.
+Maker and Metal use a Star Arm 102 leader configured for the same follower family on the operator
+machine. Both ends must select the same arm family and layout. Their seven joint angles and
+cameras appear on both the station and operator screens. Place the follower in a supported resting
+pose before hosting; Home and Stop hosting return it there before releasing torque. CAN targets
+are limited to 30 degrees per second, so a large initial alignment can take longer than one second.
+
+Start the station in station mode — `makermodslab --sfu --host` (or
 `makermodslab-station --sfu --host` headless; add a robot name to pick one from the command line): the
 station hosts its saved robot — the remembered choice, the only hostable one, or the one you pick in the
 station's UI — with its follower and cameras joining the room **parked** (torque off, streaming, listening).
