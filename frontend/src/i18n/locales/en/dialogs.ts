@@ -176,8 +176,9 @@ export default {
   // host. Robot names, operator identities and room names are data; the
   // phase VALUES (remote_host.PHASES) are data too, only the labels localize.
   hosting: {
-    title: "Hosting for remote teleop",
-    titleWithRobot: "Hosting {{robot}} for remote teleop",
+    details: "Technical details",
+    title: "Hosting",
+    titleWithRobot: "Hosting {{robot}}",
     // The stop: hands the arm back to whoever is at the station.
     release: "Release for local use",
     releaseNow: "Release now",
@@ -204,7 +205,7 @@ export default {
     endedWithWarning: "Hosting ended with a cleanup warning",
     failed: "Hosting failed",
     // Station mode only: opens the hosted-robot picker (StationRobotDialog).
-    changeRobot: "Change hosted robot…",
+    changeRobot: "Change robot",
     toast: {
       stoppedCheckArm: "Hosting stopped — check the arm",
       stopped: "Hosting stopped",
@@ -218,8 +219,7 @@ export default {
   // `hostable` (saved robots whose follower side is set up).
   stationRobot: {
     title: "Hosted robot",
-    description:
-      "The robot this station hosts for remote teleoperation. Hosting re-arms on your choice within a few seconds; a parked, unseated session of the previous robot yields on its own.",
+    description: "Choose the robot to host for remote control.",
     listLabel: "Robots this station can host",
     // The row of the robot hosted right now.
     hostedNow: "Hosted now",

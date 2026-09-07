@@ -736,6 +736,7 @@ def test_station_status_and_choice_routes(client, tmp_lerobot_home, _idle, monke
 
     monkeypatch.setattr(remote_host, "station_mode", True)
     monkeypatch.setattr(remote_host, "station_robot", None)
+    monkeypatch.setattr(remote_host, "_station_paused", False)
     monkeypatch.setattr(cfg, "STATION_FILE", str(Path(cfg.MAKERMODSLAB_HOME) / "station.json"))
     _make_robot("arm1", leader=False, follower=True)
     _make_robot("laptop", leader=True, follower=False)  # not hostable: no follower
@@ -757,6 +758,9 @@ def test_station_status_and_choice_routes(client, tmp_lerobot_home, _idle, monke
     assert chosen["robot"] == "arm1"
     assert cfg.load_station_robot() == "arm1"  # remembered across restarts
     assert client.put("/api/v1/station/robot", json={"robot": None}).json()["robot"] is None
+    assert remote_host._station_paused  # a lone hostable robot must not auto-restart
+    client.put("/api/v1/station/robot", json={"robot": "arm1"})
+    assert not remote_host._station_paused
 
 
 def test_changing_the_hosted_robot_is_refused_while_an_operator_drives(
@@ -883,3 +887,14 @@ def test_remote_teleoperation_stop_for_shutdown_is_the_normal_stop(monkeypatch) 
     monkeypatch.setattr(rt, "handle_stop_remote_teleoperation", lambda: called.append(1) or {"success": True})
     assert rt.stop_for_shutdown() is True
     assert called == [1]
+
+
+def test_hosting_camera_timeout_keeps_actionable_hint():
+    from makermodslab.utils.errors import friendly_hint
+
+    hint = friendly_hint(
+        "RuntimeError: Follower setup failed on /dev/tty.usb: TimeoutError: "
+        "Timed out waiting for frame from camera OpenCVCamera(0) after 1000 ms."
+    )
+    assert "camera isn't delivering frames" in hint
+    assert "arm" not in hint

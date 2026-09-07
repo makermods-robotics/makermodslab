@@ -72,6 +72,7 @@ from . import sfu
 from .api_errors import ApiError, ErrorCode
 from .arm_capabilities import uses_feetech_bus
 from .arm_identity import verify_devices
+from .camera_preview import camera_preview_manager
 from .motor_power import FOLLOWER, clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose
 from .session_events import notify_session_changed
@@ -126,6 +127,7 @@ current_teleop: Any = None
 seat: SeatMonitor | None = None
 station_mode = False
 station_robot: str | None = None
+_station_paused = False
 last_cleanup_error: str | None = None
 last_session_outcome: str | None = None
 last_session_error: str | None = None
@@ -419,8 +421,7 @@ def _connect_follower(request: HostingRequest):
             robot.connect(calibrate=False)
         except Exception as e:
             raise RuntimeError(
-                f"Could not connect to the follower arm on {request.follower_port} (or one of its cameras). "
-                "Make sure it's plugged in and powered on, and that no browser preview holds the camera."
+                f"Follower setup failed on {request.follower_port}: {format_exception(e)}"
             ) from e
         warnings = verify_devices(((robot, "follower"),), skip=request.skip_identity_check)
         warnings += reset_torque_limit(robot, FOLLOWER)
@@ -604,6 +605,9 @@ def handle_start_hosting(request: HostingRequest, websocket_manager=None) -> dic
         from lerobot_teleoperator_livekit import LiveKitTeleoperator, LiveKitTeleoperatorConfig
         from livekit.portal import VideoCodec
 
+        # Claim first so preview requests are refused, then release existing
+        # captures before opening the follower's cameras (as recording does).
+        camera_preview_manager.stop_all()
         robot, warnings = _connect_follower(request)
 
         # Wire contract from the connected robot: what lerobot says it has.
@@ -658,7 +662,7 @@ def handle_start_hosting(request: HostingRequest, websocket_manager=None) -> dic
             current_teleop = teleop
             seat = SeatMonitor()
     except Exception as e:
-        logger.error(f"Hosting setup failed: {e}")
+        logger.exception("Hosting setup failed")
         if teleop is not None:
             try:
                 teleop.disconnect()
@@ -969,7 +973,7 @@ def set_station_robot(robot: str | None) -> dict[str, Any]:
     (the supervisor re-hosts within seconds); an engaged/seated one is a held
     session — refused with session.held so an operator is never dropped by a
     click at the station."""
-    global station_robot
+    global station_robot, _station_paused
     from .utils.config import get_robot_record, is_robot_record_clean, is_valid_robot_name, save_station_robot
 
     if robot is not None:
@@ -1000,6 +1004,7 @@ def set_station_robot(robot: str | None) -> dict[str, Any]:
     save_station_robot(robot)
     with _state_lock:
         station_robot = robot
+        _station_paused = robot is None
     return handle_station_status()
 
 
@@ -1026,10 +1031,11 @@ def start_station_mode(robot_name: str | None, websocket_manager=None) -> thread
     else nothing until the station's UI picks (set_station_robot). Refusals
     are logged and retried with a backoff, so a camera that is unplugged at
     boot comes back later."""
-    global station_mode, station_robot
+    global station_mode, station_robot, _station_paused
     from .utils.config import load_station_robot, save_station_robot
 
     station_mode = True
+    _station_paused = False
     if robot_name:
         save_station_robot(robot_name)
     station_robot = robot_name or load_station_robot()
@@ -1049,7 +1055,7 @@ def start_station_mode(robot_name: str | None, websocket_manager=None) -> thread
             if not station_mode:
                 break
             delay = _STATION_RETRY_S
-            if hosting_active or held_by() is not None:
+            if _station_paused or hosting_active or held_by() is not None:
                 continue
             if hosting_thread is not None and hosting_thread.is_alive():
                 continue  # previous session still releasing

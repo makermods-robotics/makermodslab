@@ -241,6 +241,14 @@ def friendly_hint(error_text: str | None) -> str | None:
         "connect" in low or "reach" in low or "retries" in low or "timed out" in low or "timeout" in low
     ):
         return "Couldn't download the model — check your internet connection, then confirm the repo id."
+    if "camera" in low and any(
+        marker in low
+        for marker in ("timed out waiting for frame", "read failed", "failed to capture", "failed to open")
+    ):
+        return (
+            "The camera isn't delivering frames — close other camera apps/previews, reconnect its USB cable, "
+            "and check camera settings and macOS camera access before retrying."
+        )
     if "could not connect" in low or "failed to connect" in low or "not connected" in low:
         return "Couldn't connect to the arm — make sure it's plugged in, powered on, and on the right port."
     if "frame is too old" in low or "no frame" in low or "frame timeout" in low:

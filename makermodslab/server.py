@@ -4733,6 +4733,11 @@ def camera_preview_stream(index: int, unique_id: str | None = None):
             status_code=409,
             detail="Inference is active — the cameras are in use. Stop the run to preview them.",
         )
+    if remote_host.hosting_active or remote_host.releasing:
+        raise HTTPException(
+            status_code=409,
+            detail="Hosting is active — the cameras are in use. Stop hosting to preview them.",
+        )
     identified = identify_cv2_index(unique_id, index)
     if identified is None:
         raise HTTPException(

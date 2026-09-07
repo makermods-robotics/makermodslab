@@ -10,7 +10,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import RobotLayoutChip from "@/components/launchpad/RobotLayoutChip";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { useStationStatus } from "@/hooks/useStationStatus";
@@ -183,7 +182,6 @@ const StationRobotDialog: React.FC<StationRobotDialogProps> = ({
           >
             {hostable.map((name) => {
               const checked = picked === name;
-              const rec = records[name];
               // Robot names are data — verbatim.
               return (
                 <button
@@ -222,7 +220,6 @@ const StationRobotDialog: React.FC<StationRobotDialogProps> = ({
                   >
                     {name}
                   </span>
-                  <RobotLayoutChip arms={rec?.arms} />
                   {name === hostedNow ? (
                     <span className="flex shrink-0 items-center gap-1.5 text-[11px] font-semibold text-ok">
                       <span aria-hidden className="h-2 w-2 rounded-full bg-ok" />

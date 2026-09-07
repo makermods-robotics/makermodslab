@@ -34,7 +34,7 @@ export default {
     teleop: "Teleop",
     // The primary button on a leader-only controller (Teleop's slot): drive
     // a station's robot with this leader.
-    drive: "Drive remote",
+    drive: "Remote control",
     // The remote-teleoperation menu beside Teleop: drive a station's robot
     // with this leader. (Hosting is not started from the UI — a station is
     // launched with `makermodslab --sfu --host <robot>`.)
@@ -62,6 +62,16 @@ export default {
     // yet (opens the hosted-robot picker), or a chosen robot whose hosting is
     // down right now (opens the status view). {{robot}} is data.
     station: {
+      checking: "Station · Checking…",
+      unreachable: "Station · Unknown",
+      unreachableTooltip: "Could not check hosting status. The last status is unverified; checking again automatically.",
+      failed: "Station · Failed",
+      failedTooltip: "Hosting failed. Open the status view for details.",
+      waiting: "Station · Waiting",
+      waitingTooltip: "Hosting is not active yet. Open the status view to check progress or errors.",
+
+      label: "Station",
+      tooltip: "Manage hosting for remote control",
       chooseChip: "Station · choose a robot to host",
       chooseTooltip:
         "This station has no robot to host yet. Pick a saved robot whose follower arm is set up.",

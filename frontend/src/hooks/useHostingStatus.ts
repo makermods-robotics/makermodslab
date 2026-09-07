@@ -12,7 +12,9 @@ import { getHostingStatus, type HostingStatus } from "@/lib/remoteApi";
  * the fetch (CLAUDE.md "WebSocket broadcast").
  *
  * A failed read KEEPS the last status rather than blanking it, the same
- * stale-but-visible rule useNodes follows. `status` is null until the first
+ * stale-but-visible rule useNodes follows. `isError` marks that cached status
+ * as unverified so live indicators cannot stay green after a failed check.
+ * `status` is null until the first
  * read lands.
  */
 export function useHostingStatus(
@@ -22,6 +24,7 @@ export function useHostingStatus(
   const { baseUrl, fetchWithHeaders } = useApi();
   const sessionEvent = useSessionEvent();
   const [status, setStatus] = useState<HostingStatus | null>(null);
+  const [isError, setIsError] = useState(false);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -34,9 +37,12 @@ export function useHostingStatus(
   const refresh = useCallback(async () => {
     try {
       const next = await getHostingStatus(baseUrl, fetchWithHeaders);
-      if (mountedRef.current) setStatus(next);
+      if (mountedRef.current) {
+        setStatus(next);
+        setIsError(false);
+      }
     } catch {
-      /* best-effort; the next poll or hint retries */
+      if (mountedRef.current) setIsError(true);
     }
   }, [baseUrl, fetchWithHeaders]);
 
@@ -54,5 +60,5 @@ export function useHostingStatus(
     refresh();
   }, [enabled, sessionEvent, refresh]);
 
-  return { status, refresh };
+  return { status, isError, refresh };
 }

@@ -118,8 +118,9 @@ export default {
     },
   },
   hosting: {
-    title: "远程遥操作托管中",
-    titleWithRobot: "正在托管 {{robot}} 用于远程遥操作",
+    details: "技术详情",
+    title: "托管",
+    titleWithRobot: "托管 {{robot}}",
     release: "释放以供本地使用",
     releaseNow: "立即松开",
     releasingBanner: "正在让机械臂回到休息位置，然后松开力矩。点击“立即松开”可跳过回位。",
@@ -139,7 +140,7 @@ export default {
     rightArm: "右臂",
     endedWithWarning: "托管已结束，但清理时有警告",
     failed: "托管失败",
-    changeRobot: "更改托管的机器人…",
+    changeRobot: "更换机器人",
     toast: {
       stoppedCheckArm: "托管已停止 — 请检查机械臂",
       stopped: "托管已停止",
@@ -150,8 +151,7 @@ export default {
   },
   stationRobot: {
     title: "托管的机器人",
-    description:
-      "此工作站用于远程遥操作所托管的机器人。选择后几秒内托管会自动重新启动；上一个机器人已停放且无人驱动的会话会自行让出。",
+    description: "选择要托管以供远程控制的机器人。",
     listLabel: "此工作站可托管的机器人",
     hostedNow: "正在托管",
     chosen: "已选择",

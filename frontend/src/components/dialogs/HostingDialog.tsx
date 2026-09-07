@@ -3,14 +3,14 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import UrdfViewer from "@/components/UrdfViewer";
 import JointAngleReadout from "@/components/control/JointAngleReadout";
-import RobotLayoutChip from "@/components/launchpad/RobotLayoutChip";
+import { X } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { useHostingStatus } from "@/hooks/useHostingStatus";
 import { useStationStatus } from "@/hooks/useStationStatus";
 import { useRobots } from "@/hooks/useRobots";
 import { isCanArmType, type ArmType } from "@/lib/armTypes";
-import { getHostingStatus, type HostingPhase } from "@/lib/remoteApi";
+import { formatStationRefusal, getHostingStatus, setStationRobot, type HostingPhase } from "@/lib/remoteApi";
 import { getCurrentSession, stopSession } from "@/lib/sessionApi";
 import { cn } from "@/lib/utils";
 
@@ -39,22 +39,9 @@ const PHASE_STYLES: Record<HostingPhase, string> = {
   parking: "border-warn/40 bg-warn/10 text-warn",
 };
 
-/**
- * The station side of remote teleoperation as a STATUS VIEW. Hosting is not
- * started here — a station is launched with `makermodslab --sfu --host
- * <robot>` and hosts from startup, re-arming after any local session — so
- * this dialog only shows the live session (phase, seat holder, room, the
- * follower on the same viewer local teleop uses) and offers the one action
- * a person at the station needs: releasing the arm for local use.
- *
- * That release is a stop of the hosting session by id (resolved from
- * /api/v1/sessions/current — station mode starts the session owner-less, so
- * there is no lease to heartbeat). Engaged, it follows teleoperation's
- * two-press contract (return to rest, then release; a second press releases
- * now); parked, the arm is already at rest with torque off and the stop is
- * immediate. Closing the dialog (ESC, the Close button, unmount) never stops
- * anything: the station keeps hosting whether or not anyone is watching.
- */
+/** Hosting status. Station stops clear the hosted choice, matching the picker,
+ * so the supervisor stays stopped. Non-station sessions retain the safe
+ * return-to-rest stop. Closing this view never stops hosting. */
 const HostingDialog: React.FC<HostingDialogProps> = ({
   open,
   onOpenChange,
@@ -194,6 +181,32 @@ const HostingDialog: React.FC<HostingDialogProps> = ({
     }
   }, [stopping, baseUrl, fetchWithHeaders, onOpenChange, toast, t]);
 
+  const stopHosting = async () => {
+    if (!station?.station_mode) {
+      await pressRelease();
+      return;
+    }
+    if (stopping) return;
+    setStopping(true);
+    try {
+      await setStationRobot(baseUrl, fetchWithHeaders, null);
+      toast({
+        title: t("dialogs.stationRobot.toast.stoppedTitle"),
+        description: t("dialogs.stationRobot.toast.stoppedDescription"),
+      });
+      onOpenChange(false);
+    } catch (error) {
+      toast({
+        title: t("robot.station.failedTitle"),
+        description: formatStationRefusal(t, error, t("robot.station.failedFallback"))
+          ?? t("common.connectionError.description"),
+        variant: "destructive",
+      });
+    } finally {
+      setStopping(false);
+    }
+  };
+
   // ESC closes the status view — it never stops hosting.
   useEffect(() => {
     if (!open) return;
@@ -219,8 +232,6 @@ const HostingDialog: React.FC<HostingDialogProps> = ({
     | undefined;
   const readoutOnly = isCanArmType(armType);
   const bimanual = (descriptor?.mode ?? hostedRecord?.mode) === "bimanual";
-  // The layout chip beside the name — from the hosted robot's local record.
-  const layoutArms = hostedRecord?.arms;
   const title = robotName
     ? t("dialogs.hosting.titleWithRobot", { robot: robotName })
     : t("dialogs.hosting.title");
@@ -243,65 +254,25 @@ const HostingDialog: React.FC<HostingDialogProps> = ({
     <div
       role="dialog"
       aria-label={title}
-      className={`fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-border bg-background shadow-2xl ${
+      className={`fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 max-h-[90vh] flex-col overflow-y-auto rounded-lg border border-border bg-background shadow-2xl ${
         bimanual ? "w-[min(94vw,1000px)]" : "w-[min(92vw,640px)]"
       }`}
     >
-      <div className="flex items-center gap-2 border-b border-border px-4 py-2">
-        <span
-          className={cn(
-            "h-2 w-2 rounded-full",
-            phase === "engaged"
-              ? "animate-pulse bg-destructive"
-              : active
-                ? "bg-ok"
-                : "bg-muted-foreground/60",
-          )}
-        />
-        <span className="text-sm font-semibold text-foreground">{title}</span>
-        <RobotLayoutChip arms={layoutArms} />
+      <div className="flex shrink-0 items-center gap-3 border-b border-border px-4 py-3">
+        <span aria-hidden className={cn("h-2 w-2 shrink-0 rounded-full", active ? "bg-ok" : died ? "bg-destructive" : "bg-muted-foreground/60")} />
+        <div className="min-w-0 flex-1">
+          <h2 className="text-sm font-semibold">{t("dialogs.hosting.title")}</h2>
+          {robotName && <p className="break-words text-sm text-muted-foreground">{robotName}</p>}
+        </div>
         {phase && (
-          <span
-            className={cn(
-              "rounded-full border px-2 py-px text-[11px] font-semibold",
-              PHASE_STYLES[phase],
-            )}
-          >
+          <span className={cn("shrink-0 rounded-full border px-2 py-px text-[11px] font-semibold", PHASE_STYLES[phase])}>
             {t(PHASE_KEYS[phase] as never, { defaultValue: phase })}
           </span>
         )}
-        <div className="ml-auto flex items-center gap-1.5">
-          {station?.station_mode && onChangeRobot && (
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={stopping || releasing}
-              onClick={() => {
-                onOpenChange(false);
-                onChangeRobot();
-              }}
-            >
-              {t("dialogs.hosting.changeRobot")}
-            </Button>
-          )}
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => onOpenChange(false)}
-          >
-            {t("common.close")}
-          </Button>
-          <Button
-            size="sm"
-            onClick={pressRelease}
-            disabled={!active || stopping || pressesRef.current >= 2}
-            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-          >
-            {releasing
-              ? t("dialogs.hosting.releaseNow")
-              : t("dialogs.hosting.release")}
-          </Button>
-        </div>
+        <Button size="sm" variant="ghost" aria-label={t("common.close")}
+          className="h-8 w-8 shrink-0 p-0" onClick={() => onOpenChange(false)}>
+          <X className="h-4 w-4" />
+        </Button>
       </div>
 
       <div className="flex flex-col gap-3 p-3">
@@ -346,9 +317,10 @@ const HostingDialog: React.FC<HostingDialogProps> = ({
                 </p>
               )}
               {status.error && (
-                <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs text-muted-foreground">
-                  {status.error}
-                </pre>
+                <details className="mt-3 text-xs text-muted-foreground">
+                  <summary className="cursor-pointer">{t("dialogs.hosting.details")}</summary>
+                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2">{status.error}</pre>
+                </details>
               )}
             </div>
           ) : (
@@ -358,46 +330,13 @@ const HostingDialog: React.FC<HostingDialogProps> = ({
           )
         )}
 
-        {/* Phase, operator identity and room name are data — verbatim. */}
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-          {phase && (
-            <span className="flex items-center gap-1.5">
-              <span>{t("dialogs.hosting.phaseLabel")}:</span>
-              <span className="font-medium text-foreground">
-                {t(PHASE_KEYS[phase] as never, { defaultValue: phase })}
-              </span>
-            </span>
-          )}
-          <span className="flex items-center gap-1.5">
-            <span
-              aria-hidden
-              className={`h-2 w-2 rounded-full ${
-                descriptor?.active_operator
-                  ? "bg-ok"
-                  : "animate-pulse bg-muted-foreground/60"
-              }`}
-            />
-            <span>{t("dialogs.hosting.operatorLabel")}:</span>
-            <span className="font-mono text-foreground">
-              {descriptor?.active_operator ??
-                t("dialogs.hosting.waitingOperator")}
-            </span>
-          </span>
-          {descriptor?.room && (
-            <span className="flex items-center gap-1.5">
-              <span>{t("dialogs.hosting.roomLabel")}:</span>
-              <span className="font-mono text-foreground">{descriptor.room}</span>
-            </span>
-          )}
-        </div>
-
-        {descriptor?.station_mode && (
+        {active && descriptor && (
           <p className="text-xs text-muted-foreground">
-            {t("dialogs.hosting.stationModeNote")}
+            {descriptor.active_operator ?? t("dialogs.hosting.waitingOperator")}
           </p>
         )}
 
-        {bimanual ? (
+        {active && descriptor && (bimanual ? (
           <div className="flex gap-3">
             <div className="flex-1">
               <span className="mb-1 block text-xs text-muted-foreground">
@@ -420,7 +359,21 @@ const HostingDialog: React.FC<HostingDialogProps> = ({
           <div className="h-[440px] overflow-hidden rounded-md border border-border">
             {viewer("joints")}
           </div>
+        ))}
+      </div>
+      <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-border px-4 py-3">
+        {station?.station_mode && onChangeRobot && (
+          <Button size="sm" variant="ghost" disabled={stopping || releasing}
+            onClick={() => { onOpenChange(false); onChangeRobot(); }}>
+            {t("dialogs.hosting.changeRobot")}
+          </Button>
         )}
+        <Button size="sm" onClick={stopHosting}
+          disabled={stopping || (station?.station_mode ? !station.robot : !active || pressesRef.current >= 2)}
+          className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+          {stopping ? t("dialogs.stationRobot.applying") : releasing
+            ? t("dialogs.hosting.releaseNow") : t("dialogs.stationRobot.stopHosting")}
+        </Button>
       </div>
     </div>
   );
