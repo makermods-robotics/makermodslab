@@ -555,8 +555,11 @@ def _connect_stubs(monkeypatch):
     monkeypatch.setattr(
         "makermodslab.replay.setup_follower_calibration_file", lambda cfg, arm_type="so101": "fid"
     )
-    monkeypatch.setattr("makermodslab.replay.verify_devices", lambda *a, **k: [])
-    monkeypatch.setattr("makermodslab.replay.reset_torque_limit", lambda *a, **k: [])
+    # The connect preflight runs through the arm family, which calls these
+    # modules; replay's own _ensure_uncapped still calls clear_goal_velocity.
+    monkeypatch.setattr("makermodslab.arm_identity.verify_devices", lambda *a, **k: [])
+    monkeypatch.setattr("makermodslab.motor_power.reset_torque_limit", lambda *a, **k: [])
+    monkeypatch.setattr("makermodslab.motor_power.clear_goal_velocity", lambda *a, **k: [])
     monkeypatch.setattr("makermodslab.replay.clear_goal_velocity", lambda *a, **k: [])
     monkeypatch.setattr("makermodslab.replay.time.sleep", lambda s: None)
 
@@ -665,9 +668,9 @@ def test_stop_during_ease_in_signals_the_same_abort_event_and_still_returns_gent
             return False, "cut-short"
         return True, "returned: max delta 0 ticks ()"
 
-    monkeypatch.setattr(replay, "capture_rest_pose", fake_capture_rest_pose)
-    monkeypatch.setattr(replay, "return_to_rest_pose", fake_return_to_rest_pose)
-    monkeypatch.setattr(replay, "force_disable_torque", lambda robot, label: None)
+    monkeypatch.setattr("makermodslab.rest_pose.capture_rest_pose", fake_capture_rest_pose)
+    monkeypatch.setattr("makermodslab.rest_pose.return_to_rest_pose", fake_return_to_rest_pose)
+    monkeypatch.setattr("makermodslab.torque.force_disable_torque", lambda robot, label: None)
 
     action_series = {
         "action_names": ["shoulder_pan.pos"],
@@ -756,9 +759,11 @@ def _run_ease_in_worker(monkeypatch, verdict, bus):
     from makermodslab import replay
 
     monkeypatch.setattr(replay, "replay_active", True)
-    monkeypatch.setattr(replay, "capture_rest_pose", lambda bus, normalize=False: {"shoulder_pan": 10})
+    monkeypatch.setattr(
+        "makermodslab.rest_pose.capture_rest_pose", lambda bus, normalize=False: {"shoulder_pan": 10}
+    )
     monkeypatch.setattr(replay, "_ensure_uncapped", lambda robot, label: None)
-    monkeypatch.setattr(replay, "force_disable_torque", lambda robot, label: None)
+    monkeypatch.setattr("makermodslab.torque.force_disable_torque", lambda robot, label: None)
 
     def fake_return_to_rest_pose(
         bus, target, abort_event=None, label="arm", normalize=False, tolerance=None, stall_min_progress=None
@@ -766,7 +771,7 @@ def _run_ease_in_worker(monkeypatch, verdict, bus):
         # normalize=True is the ease-in; the raw-ticks call is the stopping return.
         return verdict if normalize else (True, "returned: max delta 0 ticks ()")
 
-    monkeypatch.setattr(replay, "return_to_rest_pose", fake_return_to_rest_pose)
+    monkeypatch.setattr("makermodslab.rest_pose.return_to_rest_pose", fake_return_to_rest_pose)
 
     robot = _EaseRobot(bus)
     replay._replay_worker(robot, _EASE_FRAMES, None)
@@ -879,3 +884,81 @@ def test_replay_status_elapsed_freezes_once_the_session_ends(monkeypatch) -> Non
     monkeypatch.setattr(replay, "_replay_meta", {"phase": "done", "played_s": 8.3})
 
     assert replay.handle_replay_status()["elapsed_s"] == 8.3
+
+
+# --- the stopping-phase return must not be aborted by the stop that caused it --
+#
+# The stop that ends playback sets _stop_event. The return that follows used
+# to be handed that same event as its abort_event, so it aborted on its first
+# frame: torque was released wherever playback stopped and a CAN arm dropped
+# under gravity (seen on a Maker arm). The return may only be cut short by a
+# SECOND stop press, exactly as in teleoperation.
+
+
+def _worker_with_stubbed_family(monkeypatch, returns: list) -> tuple:
+    from makermodslab import replay
+
+    class _Bus:
+        motors = {"shoulder_pan": None}
+
+        def disconnect(self, disable_torque=False):
+            pass
+
+    class _Robot:
+        bus = _Bus()
+
+    class _Family:
+        uses_feetech_bus = True
+
+        def capture_rest_poses(self, robot, include_gripper=False):
+            return [(robot.bus, {"shoulder_pan": 10})]
+
+        def return_to_rest(self, rest_poses, abort_event=None):
+            returns.append(abort_event)
+
+        def release_torque(self, device, label="device"):
+            return []
+
+    monkeypatch.setattr(replay.arm_registry, "get", lambda arm_type: _Family())
+    return replay, _Robot()
+
+
+def test_a_user_stop_hands_the_return_an_unset_abort_event(monkeypatch) -> None:
+    returns: list = []
+    replay, robot = _worker_with_stubbed_family(monkeypatch, returns)
+    monkeypatch.setattr(replay, "replay_active", True)
+    replay._stop_event.clear()
+    replay._release_now.clear()
+    # The stop that ends playback: sets _stop_event before the return runs.
+    replay.handle_stop_replay()
+    assert replay._stop_event.is_set()
+
+    replay._replay_worker(robot, {"action_names": [], "timestamps": [], "values": []}, None)
+
+    assert len(returns) == 1
+    abort_event = returns[0]
+    assert abort_event is replay._release_now
+    assert not abort_event.is_set(), "the stop that ended playback must not abort the return"
+
+
+def test_a_second_stop_during_the_return_releases_now(monkeypatch) -> None:
+    import threading
+
+    returns: list = []
+    replay, robot = _worker_with_stubbed_family(monkeypatch, returns)
+    replay._release_now.clear()
+    # A live worker "in its return": handle_stop_replay sees replay inactive
+    # but the thread alive, and must set _release_now instead of refusing.
+    gate = threading.Event()
+    worker = threading.Thread(target=gate.wait, daemon=True)
+    worker.start()
+    monkeypatch.setattr(replay, "replay_active", False)
+    monkeypatch.setattr(replay, "replay_thread", worker)
+    try:
+        result = replay.handle_stop_replay()
+        assert result["success"] is True
+        assert replay._release_now.is_set()
+    finally:
+        gate.set()
+        worker.join(timeout=1.0)
+        replay._release_now.clear()

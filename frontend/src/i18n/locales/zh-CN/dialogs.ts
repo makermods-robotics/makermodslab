@@ -59,6 +59,7 @@ export default {
     start: "在硬件上回放",
     movesArmWarning: "将移动 {{robot}} 的机械臂 — 请确保周围区域无障碍物。",
     stop: "停止",
+    releaseNow: "立即释放",
     toast: {
       failedTitle: "回放失败",
       seeLog: "详情请查看服务器日志。",

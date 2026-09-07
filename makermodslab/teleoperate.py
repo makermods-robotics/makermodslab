@@ -30,20 +30,13 @@ from lerobot.teleoperators.so_leader import SO101Leader
 from lerobot.utils.errors import DeviceNotConnectedError
 
 from .api_errors import ErrorCode
-from .arm_capabilities import uses_feetech_bus
-from .arm_identity import verify_devices
-from .maker_rest_pose import (
-    capture_maker_pose,
-    maker_follower_arms,
-    return_maker_arms_to_rest,
-)
-from .motor_power import FOLLOWER, clear_goal_velocity, reset_torque_limit
-from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
+from .arms import registry as arm_registry
+from .rest_pose import RETURN_CEILING_S
 from .session_events import notify_session_changed
-from .torque import de_energize_can_device, release_maker_torque
+from .torque import de_energize_can_device, device_buses as _device_buses, force_disable_torque
 from .utils.devices import _force_close_device_resources
 from .utils.errors import classify_outcome, format_exception, friendly_hint
-from .utils.robot_factory import build_bimanual_configs, build_single_configs
+from .utils.robot_factory import build_bimanual_configs, build_single_configs, request_arm_type
 
 logger = logging.getLogger(__name__)
 
@@ -286,63 +279,6 @@ def stop_and_wait(timeout: float = _STOP_AND_WAIT_TIMEOUT_S) -> None:
         logger.warning("Teleoperation worker still alive after forcing release; giving up the wait")
 
 
-def _return_one_follower_to_rest(bus, pose: dict, abort_event: threading.Event) -> None:
-    """Drive one follower bus back to its captured pose; log start and outcome.
-
-    The per-arm body of _return_followers_to_rest, run on its own thread so
-    the two bimanual followers return concurrently. return_to_rest_pose never
-    raises, but guard anyway so one arm's failure can never take down the
-    thread (and thus block its join) before the outcome is logged.
-    """
-    port = getattr(bus, "port", None) or "unknown port"
-    label = f"follower arm on {port}"
-    logger.info(f"Rest-pose return starting for the {label}")
-    try:
-        _arrived, reason = return_to_rest_pose(bus, pose, abort_event=abort_event, label=label)
-        logger.info(f"Rest-pose return finished for the {label}: {reason}")
-    except Exception as e:
-        # return_to_rest_pose is documented never-raises; this is belt-and-braces
-        # so a surprise failure on one arm can't prevent the other's thread from
-        # being joined or the wrapper from returning to run the torque release.
-        logger.warning(f"Rest-pose return errored for the {label}: {e}")
-
-
-def _return_followers_to_rest(rest_poses: list[tuple], abort_event: threading.Event) -> None:
-    """Drive every follower bus back to its captured session-start pose, at once.
-
-    Runs immediately before the torque release on a NORMAL stop only (no timed
-    hold: the servos hold their last goal on their own until the return goals
-    land). Best-effort: each bus's outcome is logged (returned | settled |
-    stalled | ceiling | cut-short | no-pose | comm-error) and every failure
-    falls through to the unconditional torque release. NEVER called with a
-    leader bus — the leader is human-held with torque off; driving it would
-    fight the user's hand.
-
-    Each follower is its own serial bus on its own USB port (no shared bus),
-    so the returns run CONCURRENTLY: one thread per (bus, pose), all joined
-    before this returns. Bimanual arms therefore land at the same time instead
-    of one-after-the-other. The shared ``abort_event`` (a second stop /
-    release-now) cuts every arm's return short promptly; the wrapper still
-    returns only after all per-arm threads have wound down, because the
-    downstream torque-release ordering depends on this having finished. A
-    single-arm session is the same shape — one thread, joined — preserving the
-    existing single-arm timing and semantics.
-    """
-    threads = [
-        threading.Thread(
-            target=_return_one_follower_to_rest,
-            args=(bus, pose, abort_event),
-            name=f"rest-return-{getattr(bus, 'port', None) or i}",
-            daemon=True,
-        )
-        for i, (bus, pose) in enumerate(rest_poses)
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-
-
 class TeleoperateRequest(BaseModel):
     leader_port: str
     follower_port: str
@@ -470,139 +406,10 @@ def get_maker_joint_degrees(robot, prefix: str = "") -> dict[str, float]:
     return out
 
 
-def _device_buses(device) -> list:
-    """The motor bus(es) of a robot/teleop device.
-
-    A single-arm device exposes ``.bus``; a bimanual BiSO device exposes
-    ``left_arm``/``right_arm`` sub-arms which each carry their own bus.
-    """
-    if device is None:
-        return []
-    arms = [
-        arm
-        for arm in (getattr(device, "left_arm", None), getattr(device, "right_arm", None))
-        if arm is not None
-    ]
-    targets = arms if arms else [device]
-    return [target.bus for target in targets if getattr(target, "bus", None) is not None]
-
-
 def _device_ports(device) -> str:
     """Comma-separated serial port(s) of a device, for error messages."""
     ports = [str(bus.port) for bus in _device_buses(device) if getattr(bus, "port", None)]
     return ", ".join(ports) if ports else "unknown port"
-
-
-def _bus_has_a_responding_motor(bus) -> bool:
-    """True when at least one motor on ``bus`` answers a ping.
-
-    Used only to choose the *wording* of the alarm after the torque-disable
-    pass below has already failed on every motor on this bus — it never gates
-    whether that pass runs. A degraded-but-recoverable bus (a brownout that
-    recovers, EMI, a long cable, the moments right after the control loop died
-    on a comms error) can fail every zero-retry ping while a retried write
-    would have landed, so the probe must not be allowed to veto the write.
-
-    ``is_connected`` can't stand in for this: it's literally
-    ``port_handler.is_open`` (lerobot ``motors_bus.py``), and
-    ``MotorsBus._connect`` calls ``openPort()`` *before* ``_handshake()`` and
-    does not close the port when the handshake fails — so an unpowered,
-    browned-out, or wrong-baud arm leaves ``is_connected`` True on a bus that
-    no motor is listening on.
-
-    ``ping`` is the right probe: it is a read (so it works whatever the torque
-    state is) and it returns ``None`` rather than raising on comm failure.
-    Short-circuits on the first motor that answers.
-
-    Defaults to True (assume the bus is alive, keep the loud alarm) for
-    anything that can't be probed: a bus with no ``motors``, a bus without a
-    ``ping`` method, or a test double that models neither.
-    """
-    motors = getattr(bus, "motors", None) or {}
-    ping = getattr(bus, "ping", None)
-    if not motors or not callable(ping):
-        return True
-    for motor in motors:
-        try:
-            if ping(motor) is not None:
-                return True
-        except Exception:
-            continue
-    return False
-
-
-def force_disable_torque(device, label: str = "device") -> list[str]:
-    """Explicitly disable torque on every motor of a device, motor by motor.
-
-    Belt-and-braces step to run *before* ``device.disconnect()``. lerobot's
-    disconnect does disable torque itself, but any exception on the way there
-    leaves the arm energized: one motor's failed write aborts the disable for
-    all remaining motors (and skips closing the port), and the error is easy
-    to swallow on a cleanup path. Going motor by motor means one bad motor
-    can't leave the other joints locked.
-
-    Returns a list of problem descriptions — empty when torque was disabled on
-    every motor. Each problem is also logged at ERROR level naming the port.
-    """
-    problems: list[str] = []
-    for bus in _device_buses(device):
-        # A bus whose port never opened at all (the device node was missing or
-        # busy, so openPort() itself raised) has nothing to disable — writing
-        # to a closed port just produces a false "TORQUE MAY STILL BE ENABLED"
-        # alarm. Note this covers *only* that case: is_connected is
-        # port_handler.is_open, so it stays True when the port opened and the
-        # handshake then failed. The unpowered/wrong-baud arm is caught by the
-        # liveness probe below, not here. Test doubles that don't model
-        # connection state default to True so torque-only tests are unaffected.
-        if not getattr(bus, "is_connected", True):
-            continue
-        # The Dynamixel SDK port handler can be left flagged "in use" after a
-        # failed read/write in the control loop. LeRobot's normal
-        # bus.disconnect() clears this before disabling torque; mirror that here
-        # because this belt-and-braces path deliberately bypasses disconnect()
-        # to disable motors one by one.
-        port_handler = getattr(bus, "port_handler", None)
-        if port_handler is not None:
-            with contextlib.suppress(Exception):
-                port_handler.clearPort()
-            with contextlib.suppress(Exception):
-                port_handler.is_using = False
-        port = getattr(bus, "port", None) or "unknown port"
-        # Always attempt the disable, whatever the liveness probe below would
-        # say: a degraded-but-recoverable bus can fail every zero-retry ping
-        # while the retried write here still lands, and skipping the write on
-        # a failed probe would leave a genuinely energized arm rigid. The
-        # probe is only consulted after a failure, to pick the wording.
-        failed: list[str] = []
-        for motor in getattr(bus, "motors", None) or {}:
-            try:
-                bus.disable_torque(motor, num_retry=5)
-            except Exception as e:
-                failed.append(f"{motor}: {e}")
-        if failed:
-            if _bus_has_a_responding_motor(bus):
-                # Something is listening, so the failed writes are a real
-                # "this joint may stay rigid" condition.
-                message = (
-                    f"TORQUE MAY STILL BE ENABLED on {port} ({label}; failed motors — {'; '.join(failed)}). "
-                    "The arm can stay rigid; unplug its power to release it."
-                )
-                logger.error(message)
-            else:
-                # Nothing on this bus is listening: the port opened but no
-                # motor answers (arm unpowered, browned-out servos, wrong
-                # baud, or a valid-but-wrong serial device). Reporting that as
-                # "TORQUE MAY STILL BE ENABLED — unplug its power" is actively
-                # misleading on an arm that has no power. Say what was
-                # actually observed, and keep the rigid-arm advice as a
-                # conditional rather than an assertion.
-                message = (
-                    f"No motor answered on {port} ({label}) — the torque disable failed on every motor. "
-                    "Check the arm's power and USB cable. If the arm is rigid, unplug its power to release it."
-                )
-                logger.warning(message)
-            problems.append(message)
-    return problems
 
 
 def _safe_disconnect(device, label: str = "device") -> str | None:
@@ -763,6 +570,7 @@ def _connect_bimanual(request: TeleoperateRequest):
     error if any library file is missing (before connect() drops into
     interactive recalibration, which would hang this thread).
     """
+    family = arm_registry.get(request_arm_type(request))
     robot_config, teleop_config = build_bimanual_configs(request)
 
     robot = BiSOFollower(robot_config)
@@ -789,7 +597,7 @@ def _connect_bimanual(request: TeleoperateRequest):
         # ids are BiSO staging aliases, so pass the real library stems (in
         # arm-iteration order: left follower, right follower, left leader, right
         # leader) for the identity comparison.
-        identity_warnings = verify_devices(
+        identity_warnings = family.verify_identity(
             ((robot, "follower"), (teleop_device, "leader")),
             skip=request.skip_identity_check,
             config_names=[
@@ -808,15 +616,11 @@ def _connect_bimanual(request: TeleoperateRequest):
             arm.bus.write_calibration(arm.calibration)
         robot.configure()
         teleop_device.configure()
-        # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) —
-        # followers only, never the human-held leader. Clears any torque cap a
-        # previous auto-calibration left in RAM; a failed write degrades to
-        # the previous limit and is surfaced as a warning.
-        identity_warnings += reset_torque_limit(robot, FOLLOWER, "follower arms")
-        # Clear any leftover Goal_Velocity speed cap a previous arm-driving
-        # feature stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400);
-        # followers only, never the human-held leader. See makermodslab/motor_power.py.
-        identity_warnings += clear_goal_velocity(robot, FOLLOWER, "follower arms")
+        # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) and a
+        # cleared Goal_Velocity speed cap — followers only, never the
+        # human-held leader; a failed write degrades to the previous value and
+        # is surfaced as a warning. See makermodslab/motor_power.py.
+        identity_warnings += family.prepare_follower_registers(robot, "follower arms")
         logger.info("Successfully connected to both bimanual arms")
         return robot, teleop_device, identity_warnings
     except Exception as e:
@@ -832,7 +636,7 @@ def _connect_bimanual(request: TeleoperateRequest):
 
 def _can_family_label(request) -> str:
     """Human name of a CAN request's follower family, for messages and logs."""
-    return "Metal" if getattr(request, "arm_type", None) == "metal" else "Maker"
+    return arm_registry.get(request_arm_type(request)).short_label
 
 
 def _connect_can(request: TeleoperateRequest):
@@ -1019,7 +823,8 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             f"Starting teleoperation with leader port: {request.leader_port}, follower port: {request.follower_port}"
         )
 
-        if not uses_feetech_bus(request.arm_type):
+        family = arm_registry.get(request_arm_type(request))
+        if not family.uses_feetech_bus:
             robot, teleop_device, identity_warnings = _connect_can(request)
         elif request.mode == "bimanual":
             robot, teleop_device, identity_warnings = _connect_bimanual(request)
@@ -1060,7 +865,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             # Must run BEFORE write_calibration below stamps the (possibly wrong)
             # file into the servos' EEPROM. Raises on mismatch; the except path
             # below disconnects both devices and surfaces the message.
-            identity_warnings = verify_devices(
+            identity_warnings = family.verify_identity(
                 ((robot, "follower"), (teleop_device, "leader")), skip=request.skip_identity_check
             )
 
@@ -1075,16 +880,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             logger.info("Configuring motors...")
             robot.configure()
             teleop_device.configure()
-            # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) —
-            # follower only, never the human-held leader. Clears any torque
-            # cap a previous auto-calibration left in RAM; a failed write
-            # degrades to the previous limit and is surfaced as a warning.
-            identity_warnings += reset_torque_limit(robot, FOLLOWER)
-            # Clear any leftover Goal_Velocity speed cap a previous arm-driving
-            # feature stamped in RAM (auto-cal fold/unfold=1000, rest-pose
-            # return=400); follower only, never the human-held leader. See
-            # makermodslab/motor_power.py.
-            identity_warnings += clear_goal_velocity(robot, FOLLOWER)
+            # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) and
+            # a cleared Goal_Velocity speed cap — follower only, never the
+            # human-held leader; a failed write degrades to the previous value
+            # and is surfaced as a warning. See makermodslab/motor_power.py.
+            identity_warnings += family.prepare_follower_registers(robot)
             logger.info("Successfully connected to both devices")
 
         current_robot = robot
@@ -1103,15 +903,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         # (rest_pose.py), a Maker arm by interpolating its MIT setpoint
         # (maker_rest_pose.py), because a RobStride joint has no
         # Goal_Position/Goal_Velocity register to hand the motion off to.
-        if uses_feetech_bus(request.arm_type):
-            follower_rest_poses = [
-                (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
-                for bus in _device_buses(robot)
-            ]
-            maker_rest_poses = []
-        else:
-            follower_rest_poses = []
-            maker_rest_poses = [(arm, capture_maker_pose(arm)) for arm, _label in maker_follower_arms(robot)]
+        rest_poses = family.capture_rest_poses(robot)
 
         # Stream the arms in the background; the worker owns disconnect so stop()
         # does not race the serial bus from the request thread.
@@ -1126,7 +918,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         # sampling loop below a no-op for a Maker arm without branching in it.
         telemetry_targets = (
             list(zip(_device_buses(robot), ["left_", "right_"] if is_bimanual else [""], strict=False))
-            if uses_feetech_bus(request.arm_type)
+            if family.uses_feetech_bus
             else []
         )
 
@@ -1156,11 +948,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                                 for bus, prefix in telemetry_targets:
                                     telemetry.sample(bus, prefix)
                                 last_current_sample_time = current_time
-                            if not uses_feetech_bus(request.arm_type):
-                                # No Maker URDF ships yet, so `joints` stays
-                                # empty (the viewer has nothing to drive) and
-                                # the angles travel under `joints_deg` for the
-                                # numeric readout. See get_maker_joint_degrees.
+                            if family.telemetry_kind == "degrees":
+                                # No URDF ships for this family, so `joints`
+                                # stays empty (the viewer has nothing to drive)
+                                # and the angles travel under `joints_deg` for
+                                # the numeric readout. See get_maker_joint_degrees.
                                 joint_data = {
                                     "type": "joint_update",
                                     "joints": {},
@@ -1225,17 +1017,18 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                     # Still energized and holding the ports — a phase of this
                     # session, not idle yet (mirrors the status payload).
                     notify_session_changed("teleoperation", True, phase="releasing")
-                    _return_followers_to_rest(follower_rest_poses, _release_now)
-                    return_maker_arms_to_rest(maker_rest_poses, _release_now)
+                    family.return_to_rest(rest_poses, _release_now)
                 # Belt and braces: disable torque explicitly before disconnect.
                 # disconnect() disables torque too, but if it fails partway the
                 # error is swallowed here and the arm stays energized (rigid) —
                 # so make the disable explicit, and make any failure loud.
-                if uses_feetech_bus(request.arm_type):
-                    problems = force_disable_torque(robot, "follower arm")
-                    problems += force_disable_torque(teleop_device, "leader arm")
+                # Every family releases the follower; only a family whose
+                # leader has motors (the SO-101) has a leader to release too.
+                if family.uses_feetech_bus:
+                    problems = family.release_torque(robot, "follower arm")
+                    problems += family.release_torque(teleop_device, "leader arm")
                 else:
-                    problems = release_maker_torque(robot, f"{_can_family_label(request)} follower arm")
+                    problems = family.release_torque(robot, f"{family.short_label} follower arm")
                 for device, label in ((robot, "follower arm"), (teleop_device, "leader arm")):
                     error = _safe_disconnect(device, label)
                     if error:

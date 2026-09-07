@@ -34,21 +34,28 @@ The three arm types:
   everywhere a bus is touched casually: the Damiao HANDSHAKE is the motor
   enable command, so even a "read-only" ping energizes the arm.
 
-Import this instead of writing the comparison inline.
+Import this instead of writing the comparison inline. The answers come from
+the arm-family registry (``makermodslab/arms``); each predicate here is a
+named lookup that keeps the hardware reasoning next to the flag it gates.
 """
 
-from .utils.config import normalize_arm_type
+from .arms import registry as _registry
+from .utils.config import DEFAULT_ARM_TYPE, normalize_arm_type
 
-# Flat proprioceptive width of ONE follower arm — one dim per joint. The SO-101
-# has 6; the CAN arms have 7 (6 joints plus a permanent gripper). This is the
-# number a bimanual robot doubles, and the number a trained checkpoint's
-# observation.state must match.
-_JOINTS_PER_ARM = {"so101": 6, "maker": 7, "metal": 7}
+
+def _family(arm_type: object):
+    return _registry.get(normalize_arm_type(arm_type))
 
 
 def joints_per_arm(arm_type: object) -> int:
-    """Joint count of a single follower arm of this type."""
-    return _JOINTS_PER_ARM[normalize_arm_type(arm_type)]
+    """Joint count of a single follower arm of this type.
+
+    Flat proprioceptive width of ONE follower arm — one dim per joint. The
+    SO-101 has 6; the CAN arms have 7 (6 joints plus a permanent gripper).
+    This is the number a bimanual robot doubles, and the number a trained
+    checkpoint's observation.state must match.
+    """
+    return _family(arm_type).joints_per_arm
 
 
 def uses_feetech_bus(arm_type: object) -> bool:
@@ -70,7 +77,7 @@ def uses_feetech_bus(arm_type: object) -> bool:
     A Maker or Metal session skips all of them; ``maker_ports`` provides the
     CAN/UART port detection that replaces identify/wiggle.
     """
-    return normalize_arm_type(arm_type) == "so101"
+    return _family(arm_type).uses_feetech_bus
 
 
 def supports_auto_calibration(arm_type: object) -> bool:
@@ -87,7 +94,7 @@ def supports_auto_calibration(arm_type: object) -> bool:
     mechanical stops. All their calibration has to establish is where zero
     is, which is what ``zero_calibrate`` does — with torque OFF, by hand.
     """
-    return normalize_arm_type(arm_type) == "so101"
+    return _family(arm_type).supports_auto_calibration
 
 
 def uses_zero_calibration(arm_type: object) -> bool:
@@ -97,7 +104,7 @@ def uses_zero_calibration(arm_type: object) -> bool:
     not the same question and need not stay complementary as arm types
     arrive — keep them separate.
     """
-    return normalize_arm_type(arm_type) in ("maker", "metal")
+    return _family(arm_type).uses_zero_calibration
 
 
 def supports_dagger(arm_type: object) -> bool:
@@ -119,19 +126,7 @@ def supports_dagger(arm_type: object) -> bool:
     is a value to read rather than a fact somebody has to rediscover from the
     hardware; ``tests/test_arm_capabilities.py`` pins both halves.
     """
-    return normalize_arm_type(arm_type) == "so101"
-
-
-# lerobot `RobotConfig` choice-registry keys, mapped to the arm type they
-# describe. Kept as REGISTERED type strings rather than an isinstance check
-# so this module never has to import the device classes (which would drag the
-# python-can / motorbridge stack into every import of it).
-_ROBOT_TYPE_TO_ARM_TYPE = {
-    "maker_follower": "maker",
-    "bi_maker_follower": "maker",
-    "metal_follower": "metal",
-    "bi_metal_follower": "metal",
-}
+    return _family(arm_type).supports_dagger
 
 
 def arm_type_of_robot_config(robot_config: object) -> str:
@@ -141,30 +136,27 @@ def arm_type_of_robot_config(robot_config: object) -> str:
     original request (recording's ``record_with_web_events`` takes a
     ``RecordConfig``), this reads the arm type back off the config instead of
     threading a parallel parameter that could drift out of agreement with it.
+    Matched on the config's REGISTERED type string rather than by isinstance
+    so this module never imports the device classes (which would drag the
+    python-can / motorbridge stack into every import of it).
     """
-    return _ROBOT_TYPE_TO_ARM_TYPE.get(getattr(robot_config, "type", None), "so101")
+    return _registry.family_for_robot_config_type(getattr(robot_config, "type", None)).id
 
 
 # Human-readable name per arm type, for prose a user reads (merge/fine-tune
 # compatibility warnings). Not localized — the backend never is (see
 # frontend/docs/localization.md).
-ARM_TYPE_LABEL = {"so101": "an SO-101 arm", "maker": "a Maker arm", "metal": "a Metal arm"}
+ARM_TYPE_LABEL = {family.id: family.indefinite_label for family in _registry.families()}
 
-# Substrings that identify an arm family inside a dataset's free-form
-# ``robot_type`` string. "maker"/"metal" are unambiguous; the SO family is
-# every string carrying an ``so100``/``so101`` marker or the bare
-# ``so_follower``/``so_leader`` device names lerobot writes for a bimanual SO
-# rig (``bi_so_follower``).
-_ROBOT_TYPE_STRING_MARKERS = (
-    ("maker", "maker"),
-    ("metal", "metal"),
-    ("so100", "so101"),
-    ("so101", "so101"),
-    ("so-100", "so101"),
-    ("so-101", "so101"),
-    ("so_follower", "so101"),
-    ("so_leader", "so101"),
-)
+
+def _marker_scan_order():
+    """Families in registry order with the default family LAST: its markers
+    are the loosest (``so_follower``, ``so_leader``), so a string naming a
+    specific family must get that family."""
+    families = _registry.families()
+    return [f for f in families if f.id != DEFAULT_ARM_TYPE] + [
+        f for f in families if f.id == DEFAULT_ARM_TYPE
+    ]
 
 
 def arm_type_from_robot_type(robot_type: object) -> str | None:
@@ -173,7 +165,9 @@ def arm_type_from_robot_type(robot_type: object) -> str | None:
     lerobot writes the recording robot's ``.name`` there — ``so101_follower``,
     ``bi_maker_follower``, ``metal_follower`` — but a dataset recorded outside
     this app (or imported from the Hub) can carry anything: ``so100``,
-    ``so-101``, ``aloha``, a custom string, or nothing at all.
+    ``so-101``, ``aloha``, a custom string, or nothing at all. Each family
+    declares the substrings that identify it (``robot_type_markers``); a
+    marker anywhere in the string wins, deliberately greedily.
 
     Returns ``None`` — NOT the ``so101`` default ``arm_type_of_robot_config``
     falls back to — when the string is missing, non-string or unrecognized.
@@ -186,7 +180,8 @@ def arm_type_from_robot_type(robot_type: object) -> str | None:
     text = robot_type.strip().lower()
     if not text:
         return None
-    for marker, arm_type in _ROBOT_TYPE_STRING_MARKERS:
-        if marker in text:
-            return arm_type
+    for family in _marker_scan_order():
+        for marker in family.robot_type_markers:
+            if marker in text:
+                return family.id
     return None

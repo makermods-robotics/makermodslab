@@ -38,22 +38,20 @@ from pydantic import BaseModel
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
+from . import rest_pose as _rest_pose
 from .api_errors import ErrorCode
-from .arm_capabilities import ARM_TYPE_LABEL, arm_type_from_robot_type, uses_feetech_bus
-from .arm_identity import verify_devices
+from .arm_capabilities import ARM_TYPE_LABEL, arm_type_from_robot_type
+from .arms import registry as arm_registry
 from .datasets import get_episode_action_series, read_dataset_robot_type
-from .maker_rest_pose import capture_maker_pose, return_maker_to_pose
-from .motor_power import FOLLOWER, clear_goal_velocity, reset_torque_limit
+from .maker_rest_pose import return_maker_to_pose
+from .motor_power import FOLLOWER, clear_goal_velocity
 from .rest_pose import (
     RETURN_CEILING_S,
     _clamp_to_representable_range,
-    capture_rest_pose,
-    return_to_rest_pose,
 )
 from .session_events import notify_session_changed
-from .teleoperate import _cleanup_after_setup_failure, force_disable_torque
-from .torque import release_maker_torque
-from .utils.config import get_robot_record, setup_follower_calibration_file
+from .teleoperate import _cleanup_after_setup_failure
+from .utils.config import get_robot_record, normalize_arm_type, setup_follower_calibration_file
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +152,14 @@ _replay_started_at: float | None = None
 # set left a stop pressed during the ease-in with nothing to notice it. Reset
 # at the start of every new session (see handle_start_replay).
 _stop_event = threading.Event()
+# The second-stop-press event, mirroring teleoperate.py's _release_now. It is
+# NOT _stop_event: by the time the stopping-phase return runs, _stop_event is
+# already set by the stop that ended playback, so handing it to the return as
+# its abort_event cut the return short on its first frame — on a CAN arm that
+# released torque wherever playback stopped and dropped the arm under gravity
+# (seen on a Maker arm, 2026-09-07). The return only aborts on THIS event,
+# which a second Stop press sets.
+_release_now = threading.Event()
 # {phase, episode_index, elapsed_s, duration_s, error, hint} — see
 # handle_replay_status. phase is one of: idle | easing_in | playing |
 # stopping | done | error.
@@ -326,6 +332,9 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
 
         replay_active = True
         _stop_event.clear()
+        # A stale release-now from a previous session's double-stop must not
+        # skip this session's return (same guard as teleoperate.py).
+        _release_now.clear()
         _replay_started_at = time.time()
         _replay_meta = {
             "phase": "easing_in",
@@ -373,13 +382,11 @@ def _connect_can_follower(request: ReplayRequest):
     from lerobot.robots import make_robot_from_config
 
     from .torque import de_energize_can_device
-    from .utils.robot_factory import maker_follower_config, metal_follower_config
 
-    is_metal = request.arm_type == "metal"
-    family = "Metal" if is_metal else "Maker"
-    builder = metal_follower_config if is_metal else maker_follower_config
+    arm_family = arm_registry.get(normalize_arm_type(request.arm_type))
+    family = arm_family.short_label
     follower_id = setup_follower_calibration_file(request.follower_config, request.arm_type)
-    robot = make_robot_from_config(builder(request.follower_port, follower_id))
+    robot = make_robot_from_config(arm_family.single_follower_config(request.follower_port, follower_id))
     try:
         robot.connect(calibrate=False)
     except Exception as e:
@@ -402,7 +409,8 @@ def _connect_follower(request: ReplayRequest):
     configure → reset_torque_limit → clear_goal_velocity), follower-only.
     Raises on a connection or hard identity-mismatch failure; the caller
     (handle_start_replay) is responsible for cleanup on that path."""
-    if not uses_feetech_bus(request.arm_type):
+    family = arm_registry.get(normalize_arm_type(request.arm_type))
+    if not family.uses_feetech_bus:
         return _connect_can_follower(request)
 
     follower_id = setup_follower_calibration_file(request.follower_config, request.arm_type)
@@ -415,7 +423,7 @@ def _connect_follower(request: ReplayRequest):
             "Make sure it's plugged in and powered on, then try again."
         ) from e
 
-    identity_warnings = verify_devices(((robot, "follower"),), skip=request.skip_identity_check)
+    identity_warnings = family.verify_identity(((robot, "follower"),), skip=request.skip_identity_check)
 
     # A dropped serial packet during configure() ("Failed to write 'Lock' ...
     # no status packet") turned roughly one start in twenty into a hard 500,
@@ -438,8 +446,7 @@ def _connect_follower(request: ReplayRequest):
             )
             time.sleep(_CONNECT_RETRY_DELAY_S)
 
-    identity_warnings += reset_torque_limit(robot, FOLLOWER)
-    identity_warnings += clear_goal_velocity(robot, FOLLOWER)
+    identity_warnings += family.prepare_follower_registers(robot)
     return robot, identity_warnings
 
 
@@ -560,17 +567,15 @@ def _replay_worker(
     # gripper, matching what capture_rest_pose does here for the SO-101 —
     # replay drives the gripper from the dataset, so its start width is part of
     # the pose being restored.
-    feetech = uses_feetech_bus(arm_type)
-    if feetech:
-        start_pose = capture_rest_pose(robot.bus, normalize=False)
-    else:
-        start_pose = capture_maker_pose(robot, include_gripper=True)
+    family = arm_registry.get(normalize_arm_type(arm_type))
+    feetech = family.uses_feetech_bus
+    rest_poses = family.capture_rest_poses(robot, include_gripper=True)
 
     try:
         if frames:
             frame0 = dict(zip(action_names, frames[0], strict=True))
             if feetech:
-                arrived, reason = return_to_rest_pose(
+                arrived, reason = _rest_pose.return_to_rest_pose(
                     robot.bus,
                     _bus_keyed(frame0, robot.bus),
                     abort_event=_stop_event,
@@ -742,10 +747,10 @@ def _replay_worker(
         # Playback is over but the arm is still energized for the return —
         # a phase of this session, not idle yet.
         notify_session_changed("replay", True, phase=_replay_meta.get("phase"))
-        if feetech:
-            return_to_rest_pose(robot.bus, start_pose, label="follower arm")
-        else:
-            return_maker_to_pose(robot, start_pose, abort_event=_stop_event, label="follower arm")
+        # Every family returns to the session-start pose before torque is
+        # released; only a second Stop press (_release_now) cuts it short.
+        # Never _stop_event here — it is already set, see its definition.
+        family.return_to_rest(rest_poses, abort_event=_release_now)
     except Exception as e:
         logger.error(f"Replay worker error: {e}")
         with _state_lock:
@@ -753,13 +758,13 @@ def _replay_worker(
             _replay_meta["error"] = str(e)
     finally:
         if feetech:
-            force_disable_torque(robot, "follower arm")
+            family.release_torque(robot, "follower arm")
             try:
                 robot.bus.disconnect(disable_torque=False)
             except Exception as e:
                 logger.warning(f"Could not disconnect the follower after replay: {e}")
         else:
-            release_maker_torque(robot, "CAN follower arm")
+            family.release_torque(robot, "CAN follower arm")
             try:
                 # disconnect() (not bus.disconnect(disable_torque=False)):
                 # MakerFollower.disconnect honours disable_torque_on_disconnect,
@@ -801,14 +806,32 @@ def handle_replay_status() -> dict[str, Any]:
 
 
 def handle_stop_replay() -> dict[str, Any]:
+    """Stop playback; the worker then returns the arm and releases it.
+
+    A SECOND stop while that return is still running (the worker is alive
+    but playback is over) releases the arm now instead — the same two-press
+    contract as teleoperation. A stop with nothing running is a 409.
+    """
     global replay_active
     with _state_lock:
-        if not replay_active:
-            return {"success": False, "status_code": 409, "message": "No replay is active"}
-        replay_active = False
-        _stop_event.set()
-        _replay_meta["phase"] = "stopping"
-    return {"success": True, "message": "Replay stopping"}
+        if replay_active:
+            replay_active = False
+            _stop_event.set()
+            _replay_meta["phase"] = "stopping"
+            return {
+                "success": True,
+                "releasing": True,
+                "message": (
+                    "Replay stopping — the arm returns to its starting position, "
+                    "then goes limp. Press Stop again to release it now."
+                ),
+            }
+        worker = replay_thread
+    if worker is not None and worker.is_alive():
+        logger.info("Second stop during the replay rest-pose return — releasing the arm now")
+        _release_now.set()
+        return {"success": True, "message": "Releasing the arm now"}
+    return {"success": False, "status_code": 409, "message": "No replay is active"}
 
 
 def stop_and_wait(timeout: float = _STOP_AND_WAIT_TIMEOUT_S) -> None:
@@ -822,5 +845,12 @@ def stop_and_wait(timeout: float = _STOP_AND_WAIT_TIMEOUT_S) -> None:
     if worker is None or not worker.is_alive():
         return
     worker.join(timeout=timeout)
+    if not worker.is_alive():
+        return
+    logger.warning(
+        "Replay worker did not finish its graceful release within %.0fs; forcing release now", timeout
+    )
+    _release_now.set()
+    worker.join(timeout=5.0)
     if worker.is_alive():
-        logger.warning("Replay worker did not finish releasing within %.0fs", timeout)
+        logger.warning("Replay worker still alive after forcing release; giving up the wait")
