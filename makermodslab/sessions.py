@@ -757,6 +757,15 @@ def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict
             code=ErrorCode.ROBOT_NOT_FOUND,
         )
 
+    # BEFORE the readiness gate: a record whose arm type nothing registered
+    # (an extension not installed, a hand-edited file) can never be ready, and
+    # the 400 must name THAT reason — not "needs ports and calibrations". Every
+    # builder below resolves the family from this value, so this is also what
+    # keeps the registry's UnknownArmType unreachable from here.
+    from .arm_capabilities import require_known_arm_type
+
+    require_known_arm_type(record["arm_type"])
+
     # The setup kinds skip the record-clean gate (they exist to make records
     # clean); their builders below still refuse a slot with no port.
     if kind not in _SETUP_KINDS:

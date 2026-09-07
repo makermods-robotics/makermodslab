@@ -229,6 +229,26 @@ def test_arm_count_mismatch_none_for_unrecognised_width() -> None:
     assert _arm_count_mismatch("bimanual", 7) is None
 
 
+def test_arm_count_mismatch_reads_the_arm_width_live_from_the_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A width table captured at import is stale for a family registered
+    later (an extension's), and against the SO-101's 6 a 9-dim checkpoint is
+    neither <= 6 nor a multiple of it — the guard would fall through the
+    odd-width escape on every run. Read the width off the family instead."""
+    from makermodslab.arms import registry
+    from makermodslab.rollout import _arm_count_mismatch
+    from tests.mocks import make_arm_family, scratch_registry
+
+    scratch_registry(monkeypatch)
+    registry.register(make_arm_family("nine", joints_per_arm=9))
+
+    assert _arm_count_mismatch("single", 9, "nine") is None
+    assert _arm_count_mismatch("bimanual", 18, "nine") is None
+    assert _arm_count_mismatch("bimanual", 9, "nine") is not None
+    assert _arm_count_mismatch("single", 18, "nine") is not None
+
+
 def test_detect_device_returns_cpu_when_neither_cuda_nor_mps(monkeypatch: pytest.MonkeyPatch) -> None:
     import torch
 

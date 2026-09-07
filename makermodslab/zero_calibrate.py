@@ -68,7 +68,8 @@ from lerobot.robots import make_robot_from_config
 from lerobot.teleoperators import make_teleoperator_from_config
 from lerobot.utils.utils import init_logging
 
-from .api_errors import ErrorCode
+from .api_errors import ApiError, ErrorCode
+from .arm_capabilities import require_known_arm_type, uses_zero_calibration
 from .session_events import notify_session_changed
 from .utils.config import calibration_dir_for_device, save_robot_record
 
@@ -140,11 +141,13 @@ class ZeroCalibrationRequest:
     robot_name: str | None = None
     overwrite: bool = False
     arm: Literal["left", "right"] = "left"
-    # Which CAN family this run calibrates. Decides the device configs built
-    # in _connect, the zero-pose text shown to the user, and the library the
-    # name-collision check reads. Defaults to maker so a request built before
-    # the Metal arm existed is unchanged.
-    arm_type: Literal["maker", "metal"] = "maker"
+    # Which family this run calibrates. Decides the device configs built in
+    # _connect, the zero-pose text shown to the user, and the library the
+    # name-collision check reads. Any registered id (an extension's family
+    # rides this same request); start() refuses an unknown one and a family
+    # calibrated by a range sweep, by the family's flags. Defaults to maker so
+    # a request built before the Metal arm existed is unchanged.
+    arm_type: str = "maker"
 
 
 class ZeroCalibrationManager:
@@ -283,7 +286,22 @@ class ZeroCalibrationManager:
 
     def start(self, request: ZeroCalibrationRequest) -> dict[str, Any]:
         """Claim the bus and spawn the worker. Same response shape as
-        ``CalibrationManager.start_calibration``."""
+        ``CalibrationManager.start_calibration`` — except the two argument
+        refusals below, which RAISE (400) the way sessions'
+        _build_auto_calibration_request does for the mirror case, so the
+        app-wide handler renders the coded body."""
+        # Outside the try: an ApiError must reach the caller, not be folded
+        # into the generic "Failed to start" dict below.
+        require_known_arm_type(request.arm_type)
+        if not uses_zero_calibration(request.arm_type):
+            raise ApiError(
+                status_code=400,
+                detail=(
+                    "This arm is calibrated by a range sweep, not a zero pose — its joint "
+                    "limits are measured, not fixed. Run the range-sweep calibration instead."
+                ),
+                code=ErrorCode.ROBOT_NOT_READY,
+            )
         try:
             # Check-and-claim atomically, for the same reason the SO-101
             # manager does: two concurrent callers must not both spawn a

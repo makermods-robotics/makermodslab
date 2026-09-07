@@ -77,13 +77,11 @@ FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "so_follower")
 # leader on FashionStar UART servos. The two share no bus protocol, no
 # calibration procedure and no port-detection method, so the arm type is the
 # discriminant every hardware path branches on.
-# The registry (makermodslab/arms) is the source of truth for which families
-# exist; ARM_TYPES mirrors it. The Literal is still hand-written because the
-# request models are typed with it and the API contract snapshot names its
-# members — tests/test_arm_registry.py pins the two in agreement until the
-# extension work opens the set (TB5 in docs/extensions/plan.md).
-ArmType = Literal["so101", "maker", "metal"]
-ARM_TYPES: tuple[str, ...] = arm_registry.ids()
+# The registry (makermodslab/arms) is the ONLY source of truth for which
+# families exist, and it is open: an extension can register one after this
+# module is imported. Nothing here captures the set (a tuple or a Literal
+# taken at import is stale the moment that happens); is_known_arm_type asks
+# the registry on every call.
 DEFAULT_ARM_TYPE = arm_registry.DEFAULT_ID
 
 # lerobot derives a device's calibration directory from the device CLASS's
@@ -106,15 +104,34 @@ MAKER_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "maker_f
 METAL_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "metal_follower")
 
 
-def normalize_arm_type(value: object) -> str:
-    """Coerce any stored/received arm_type to a known one, defaulting to so101.
+def is_known_arm_type(value: object) -> bool:
+    """True iff ``value`` is a string the arm registry has a family for.
 
-    Unknown values fall back rather than raising for the same reason
-    ``clamp_motor_power`` does: a corrupted or future-dated record must never
-    make a robot unopenable. so101 is the safe default — it is what every
-    record written before the Maker arm existed implicitly is.
+    Read live from the registry on every call — a set captured at import is
+    stale the moment an extension registers a family. False for a non-string
+    (a corrupted field) as well as for an unknown string.
     """
-    return value if value in ARM_TYPES else DEFAULT_ARM_TYPE
+    return isinstance(value, str) and value in arm_registry.ids()
+
+
+def normalize_arm_type(value: object) -> str:
+    """The arm type a stored/received value means: MISSING defaults, a string is kept.
+
+    ``None``, ``""`` and any non-string read as DEFAULT_ARM_TYPE — records
+    written before the Maker arm existed carry no arm_type and ARE SO-101s.
+    A string is returned UNCHANGED, known or not: an unknown id is a family
+    this install does not have, and it is preserved so the record can be
+    listed as unavailable (``arm_available: false``) and every start refused
+    with robot.arm_type.unavailable, instead of silently becoming an SO-101
+    and opening a Feetech serial path at whatever the hardware really is.
+    The callers that need a family go through the registry, which raises
+    UnknownArmType on an unknown id; the API gates
+    (arm_capabilities.require_known_arm_type) make that raise unreachable
+    from a request.
+    """
+    if isinstance(value, str) and value:
+        return value
+    return DEFAULT_ARM_TYPE
 
 
 # Each arm type owns a SEPARATE calibration library: a Maker zero-pose
@@ -734,6 +751,8 @@ def get_robot_record(name: str) -> dict | None:
         record["mode"] = _DEFAULT_MODE
     # Records written before the Maker arm existed carry no arm_type; they are
     # SO-101s by definition, which is exactly what normalize_arm_type returns.
+    # A hand-edited UNKNOWN string is kept as is: the record lists as
+    # unavailable and refuses to start, rather than masquerading as an SO-101.
     record["arm_type"] = normalize_arm_type(record.get("arm_type"))
     # Older records have no motor_power (→ full power via _empty_record); an
     # out-of-range or corrupted value on disk is clamped so every consumer
@@ -779,8 +798,14 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
 
     record = existing if existing is not None else _empty_record(name)
     # Decided BEFORE the merge below, because the switch blanks hardware-bound
-    # fields and must not blank ones this same payload is setting.
-    switching_arm_type = data.get("arm_type") in ARM_TYPES and data["arm_type"] != record.get("arm_type")
+    # fields and must not blank ones this same payload is setting. Only a
+    # KNOWN arm type switches: arm_type is not in _ROBOT_STRING_FIELDS, so an
+    # unknown one handed to this layer writes nothing at all (the API layer
+    # refuses it with 400 robot.arm_type.unavailable before it gets here; a
+    # hand edit of the JSON is the only way an unknown id lands on disk).
+    switching_arm_type = is_known_arm_type(data.get("arm_type")) and data["arm_type"] != record.get(
+        "arm_type"
+    )
     for field in _ROBOT_STRING_FIELDS:
         if field in data and isinstance(data[field], str):
             record[field] = data[field]
@@ -1063,6 +1088,15 @@ def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
         value = record.get(field, "")
         if not isinstance(value, str) or not value.strip():
             return False
+
+    # An arm type nothing registered can never be ready — there is no family
+    # to build its devices from, and no library to look its calibrations up
+    # in (the lookup below would raise UnknownArmType). Checked BEFORE the
+    # library resolution for that reason. Normalized first: a record with NO
+    # arm_type (a raw dict, or one written before arm types existed) is an
+    # SO-101, the same reading the library lookups below give it.
+    if not is_known_arm_type(normalize_arm_type(record.get("arm_type"))):
+        return False
 
     # Resolve the libraries by THIS record's arm type: the SO-101 and Maker
     # pairs keep separate directories, so checking the SO-101 ones for a Maker

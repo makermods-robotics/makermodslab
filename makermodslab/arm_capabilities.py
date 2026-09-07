@@ -19,7 +19,15 @@ have. Those predicates live here, once, rather than as `arm_type == "maker"`
 literals scattered across teleoperate/record/rollout/replay — a scattered
 check is a check somebody forgets to add to the next flow.
 
-The three arm types:
+The set of arm types is OPEN: the registry (``makermodslab/arms``) holds
+the three built-ins below plus whatever an extension registers, and every
+predicate here asks it live. A MISSING arm type (None — a record written
+before arm types existed) reads as the default SO-101; an unknown STRING
+raises the registry's ``UnknownArmType`` rather than masquerading as an
+SO-101, and ``require_known_arm_type`` is the one refusal every request
+gate uses so that raise is never reached from a request.
+
+The three built-in arm types:
 
 * ``so101`` — SO-101 leader/follower. Feetech STS3215 smart servos on a USB
   serial bus. Registers are readable and writable (EEPROM + RAM), which is
@@ -39,12 +47,44 @@ the arm-family registry (``makermodslab/arms``); each predicate here is a
 named lookup that keeps the hardware reasoning next to the flag it gates.
 """
 
+from collections.abc import Iterator, Mapping
+
+from .api_errors import ApiError, ErrorCode
 from .arms import registry as _registry
-from .utils.config import DEFAULT_ARM_TYPE, normalize_arm_type
+from .utils.config import DEFAULT_ARM_TYPE, is_known_arm_type, normalize_arm_type
 
 
 def _family(arm_type: object):
+    """The family for an arm type: None/non-string → the default; an unknown
+    string → UnknownArmType (KeyError). See utils.config.normalize_arm_type."""
     return _registry.get(normalize_arm_type(arm_type))
+
+
+def require_known_arm_type(arm_type: object) -> None:
+    """Refuse (400 robot.arm_type.unavailable) an arm type nothing registered.
+
+    THE gate every request path calls before an arm type reaches the
+    registry or a device builder: the sessions front door, the legacy start
+    handlers, the robot-record upsert, the calibration-library routes and
+    the CAN-only routes. One helper so every refusal carries the same
+    status, code and remedy.
+
+    Reads its input the way normalize_arm_type does: None, "" and a
+    non-string mean "unspecified" and pass as the default family (an absent
+    ``arm_type`` in a request body or an empty ``?arm_type=`` query is an
+    SO-101, exactly as a pre-Maker record on disk is); only a STRING nothing
+    registered is refused. A known id returns None.
+    """
+    resolved = normalize_arm_type(arm_type)
+    if not is_known_arm_type(resolved):
+        raise ApiError(
+            status_code=400,
+            detail=(
+                f"Arm type {resolved!r} is not installed. Install the extension that "
+                "provides it, or delete this robot and create it again with an installed arm type."
+            ),
+            code=ErrorCode.ROBOT_ARM_TYPE_UNAVAILABLE,
+        )
 
 
 def joints_per_arm(arm_type: object) -> int:
@@ -143,10 +183,25 @@ def arm_type_of_robot_config(robot_config: object) -> str:
     return _registry.family_for_robot_config_type(getattr(robot_config, "type", None)).id
 
 
-# Human-readable name per arm type, for prose a user reads (merge/fine-tune
-# compatibility warnings). Not localized — the backend never is (see
-# frontend/docs/localization.md).
-ARM_TYPE_LABEL = {family.id: family.indefinite_label for family in _registry.families()}
+class _ArmTypeLabels(Mapping[str, str]):
+    """Human-readable name per arm type, for prose a user reads (merge /
+    fine-tune / replay compatibility warnings). Not localized — the backend
+    never is (see frontend/docs/localization.md). A live view of the registry
+    rather than a dict captured at import, so a family registered later (an
+    extension's) has a label the moment ``arm_type_from_robot_type`` can
+    return its id."""
+
+    def __getitem__(self, arm_type: str) -> str:
+        return _registry.get(arm_type).indefinite_label
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(_registry.ids())
+
+    def __len__(self) -> int:
+        return len(_registry.ids())
+
+
+ARM_TYPE_LABEL: Mapping[str, str] = _ArmTypeLabels()
 
 
 def _marker_scan_order():

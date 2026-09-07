@@ -61,7 +61,7 @@ from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 
 from .api_errors import ErrorCode
-from .arm_capabilities import supports_dagger, uses_feetech_bus
+from .arm_capabilities import joints_per_arm, require_known_arm_type, supports_dagger, uses_feetech_bus
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
 from .arms import registry as _arm_registry
 from .camera_preview import camera_preview_manager
@@ -149,9 +149,9 @@ logger = logging.getLogger(__name__)
 # 6, so this MUST be read per arm type: a 7-dim Maker checkpoint measured
 # against the SO-101's 6 is neither <= 6 nor a clean multiple of it, and the
 # guard would silently disable itself on exactly the mismatch it exists to
-# catch.
-_ARM_STATE_DIMS = {family.id: family.joints_per_arm for family in _arm_registry.families()}
-_SINGLE_ARM_STATE_DIM = _arm_registry.default().joints_per_arm
+# catch. The width is read LIVE off the family (arm_capabilities.joints_per_arm)
+# rather than from a table captured at import, so a family registered later
+# (an extension's) is measured at its own width too.
 
 
 class PolicyCameraDims(BaseModel):
@@ -1782,7 +1782,7 @@ def _arm_count_mismatch(
     """
     if checkpoint_state_dim is None:
         return None
-    arm_dim = _ARM_STATE_DIMS.get(arm_type, _SINGLE_ARM_STATE_DIM)
+    arm_dim = joints_per_arm(arm_type)
     robot_is_bimanual = mode == "bimanual"
     # The checkpoint is bimanual iff its state is (a multiple of) two arms wide.
     if checkpoint_state_dim <= arm_dim:
@@ -3115,6 +3115,11 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         teleoperate as _teleoperate,
         wiggle as _wiggle,
     )
+
+    # Argument validation first: an arm type nothing registered is refused
+    # (400 robot.arm_type.unavailable) before the slot is claimed — the
+    # arm-count guard and the CLI robot type both read the family off it.
+    require_known_arm_type(request.arm_type)
 
     with _state_lock:
         if _teleoperate.teleoperation_active:

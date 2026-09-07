@@ -211,16 +211,23 @@ class ArmFamily(ABC):
 
         return getattr(config, self.follower_library_attr)
 
-    def default_calibration_name(self, record_name: str) -> str:
-        """The default calibration id for a robot record's empty slot (single mode).
+    @property
+    def calibration_name_suffix(self) -> str:
+        """What default_calibration_name appends to a robot record's name.
 
         Mints the family id into the name: the CAN families' Star-leader
         calibrations live in ONE shared library while the presets' zero poses
         differ, so an unsuffixed default would let a Maker robot and a Metal
         robot silently share a zero that is wrong for one of them. The SO-101
-        overrides this to keep its historical bare name.
+        overrides this to "" to keep its historical bare name. Published in
+        the arms manifest so the UI predicts the same id the server mints —
+        one property serves both, so the two cannot drift.
         """
-        return f"{record_name}_{self.id}"
+        return f"_{self.id}"
+
+    def default_calibration_name(self, record_name: str) -> str:
+        """The default calibration id for a robot record's empty slot (single mode)."""
+        return f"{record_name}{self.calibration_name_suffix}"
 
     # --- calibration procedure -----------------------------------------------
 

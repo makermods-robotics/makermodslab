@@ -25,10 +25,11 @@ from makermodslab.utils import config as cfg
 
 
 def test_metal_is_a_known_arm_type() -> None:
-    """ "metal" must stop falling back to so101 — the fallback would silently
-    re-enable every Feetech-register guard on a bus that has no registers."""
+    """ "metal" must never read as so101 — that would silently re-enable every
+    Feetech-register guard on a bus that has no registers. Asked of the live
+    registry (TB5 retired the tuple captured at import)."""
     assert cfg.normalize_arm_type("metal") == "metal"
-    assert "metal" in cfg.ARM_TYPES
+    assert cfg.is_known_arm_type("metal") is True
 
 
 def test_metal_capabilities_match_its_hardware() -> None:
@@ -408,10 +409,14 @@ def test_rollout_names_the_metal_robot_type(arm_type: str, mode: str, expected: 
 
 def test_arm_count_guard_measures_a_metal_checkpoint_at_seven_dims() -> None:
     """Same 7-dim contract as the Maker arm — pinned separately so a future
-    per-family divergence has to come past a test."""
-    from makermodslab.rollout import _ARM_STATE_DIMS
+    per-family divergence has to come past a test. Asserted through the guard
+    itself (the width is read live off the family, not off a table)."""
+    from makermodslab.rollout import _arm_count_mismatch
 
-    assert _ARM_STATE_DIMS["metal"] == 7
+    assert _arm_count_mismatch("single", 7, "metal") is None
+    assert _arm_count_mismatch("bimanual", 14, "metal") is None
+    assert _arm_count_mismatch("single", 14, "metal") is not None
+    assert _arm_count_mismatch("bimanual", 7, "metal") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -711,14 +716,13 @@ def test_release_torque_reports_a_failed_disable_loudly(monkeypatch: pytest.Monk
     assert any("TORQUE MAY STILL BE ENABLED" in p for p in result["problems"])
 
 
-def test_release_torque_request_rejects_an_so101_arm() -> None:
+def test_release_torque_request_takes_any_arm_type_string() -> None:
     """An SO-101 arm goes limp on its own when the process dies — there is
-    nothing for this endpoint to recover, and pointing a CAN de-energize at a
-    Feetech serial port would be nonsense. The request model refuses it at
-    the schema level."""
-    import pydantic
-
+    nothing for this endpoint to recover. That refusal moved OUT of the
+    schema (TB5 opened the Literal so an extension's CAN family can use the
+    route) and into the handler, by the family's `uses_feetech_bus` flag —
+    see tests/test_arms_manifest.py. The model itself now takes any string."""
     from makermodslab.can_recovery import ReleaseCanTorqueRequest
 
-    with pytest.raises(pydantic.ValidationError):
-        ReleaseCanTorqueRequest(arm_type="so101", port="/dev/tty0")
+    assert ReleaseCanTorqueRequest(arm_type="so101", port="/dev/tty0").arm_type == "so101"
+    assert ReleaseCanTorqueRequest(arm_type="so101_twin", port="/dev/can9").arm_type == "so101_twin"

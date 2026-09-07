@@ -58,6 +58,10 @@ export default {
     duplicate: "已存在同名机器人。",
     armLayout: "机械臂配置",
     armTypeLabel: "机械臂类型",
+    armTypesLoading: "正在加载机械臂类型…",
+    armTypesFailed:
+      "无法从服务器加载机械臂类型 — 正在重试。在服务器响应之前无法创建。",
+    providedBy: "由 {{extension}} 提供",
     armTypes: {
       so101: {
         label: "SO-101",

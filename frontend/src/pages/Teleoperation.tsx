@@ -5,7 +5,9 @@ import VisualizerPanel from "@/components/control/VisualizerPanel";
 import TeleopCameraPanel from "@/components/control/TeleopCameraPanel";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
-import { useRobots, isCanArmType } from "@/hooks/useRobots";
+import { useRobots } from "@/hooks/useRobots";
+import { useArms } from "@/hooks/useArms";
+import { telemetryKind } from "@/lib/armTypes";
 
 const TeleoperationPage = () => {
   const navigate = useNavigate();
@@ -15,11 +17,14 @@ const TeleoperationPage = () => {
   // The teleop session is for the currently-selected robot; show two arms when
   // it's bimanual.
   const { selectedRecord } = useRobots();
+  const { byId } = useArms();
   const bimanual = selectedRecord?.mode === "bimanual";
-  // No URDF ships for the CAN arms (Maker, Metal) yet, so their sessions show
-  // the live numeric joint readout in the viewer's place rather than animating
-  // the SO-101 model with a different arm's angles. See JointAngleReadout.
-  const readoutOnly = isCanArmType(selectedRecord?.arm_type);
+  // A family whose telemetry is "degrees" ships no URDF (the CAN arms today),
+  // so its sessions show the live numeric joint readout in the viewer's place
+  // rather than animating the SO-101 model with a different arm's angles. See
+  // JointAngleReadout.
+  const readoutOnly =
+    telemetryKind(byId(selectedRecord?.arm_type)) === "degrees";
 
   // Stop teleoperation exactly once, however the user leaves, so the back
   // button, an in-app link, and the unmount safety net can't double-stop or

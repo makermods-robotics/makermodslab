@@ -258,6 +258,10 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # process died holding torque. Not a session (see the module
         # docstring), and no flat mirror for the same only-shrinks reason.
         "POST /api/v1/arms/release-torque",
+        # The arms manifest (TB5, arms/manifest.py): the one document the UI
+        # reads arm capabilities from, so an extension's family renders with
+        # no frontend change. Born versioned like the CAN routes above.
+        "GET /api/v1/arms",
         # Peer-job drill-in proxies: record + incremental log tail (GET, any
         # HTTP failure = node.unreachable) and forwarded stop/delete (the
         # peer's own coded refusals pass through with THEIR status and body).

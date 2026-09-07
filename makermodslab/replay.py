@@ -40,7 +40,7 @@ from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from . import rest_pose as _rest_pose
 from .api_errors import ErrorCode
-from .arm_capabilities import ARM_TYPE_LABEL, arm_type_from_robot_type
+from .arm_capabilities import ARM_TYPE_LABEL, arm_type_from_robot_type, require_known_arm_type
 from .arms import registry as arm_registry
 from .datasets import get_episode_action_series, read_dataset_robot_type
 from .maker_rest_pose import return_maker_to_pose
@@ -187,6 +187,11 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
         teleoperate as _teleoperate,
         wiggle as _wiggle,
     )
+
+    # Argument validation first: an arm type nothing registered is refused
+    # (400 robot.arm_type.unavailable) before the record and the episode are
+    # loaded or the follower connected.
+    require_known_arm_type(request.arm_type)
 
     with _state_lock:
         if _teleoperate.teleoperation_active:
