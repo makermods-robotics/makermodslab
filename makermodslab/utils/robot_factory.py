@@ -53,6 +53,32 @@ as subprocess CLI args, not as config objects, so it does not use this
 module — the follower-only asymmetry lives there, not here.
 """
 
+# Eager, deliberately: every device config class the three families build is
+# imported HERE at module import (server.py imports this module through
+# teleoperate/record), so a missing or broken CAN extra — `maker`, `damiao`,
+# `rebot` — refuses to start the server, as it always has, instead of
+# surfacing as the first Maker/Metal session's start failure. The families
+# themselves import lazily inside their builders so that importing
+# `makermodslab.arms` (which utils.config does) stays cheap; this block is
+# the one place the whole stack is pulled in up front. Unused names on
+# purpose.
+from lerobot.robots.bi_maker_follower import BiMakerFollowerConfig  # noqa: F401
+from lerobot.robots.bi_metal_follower import BiMetalFollowerConfig  # noqa: F401
+from lerobot.robots.bi_so_follower import BiSOFollowerConfig  # noqa: F401
+from lerobot.robots.maker_follower import MakerFollowerConfig  # noqa: F401
+from lerobot.robots.metal_follower import MetalFollowerConfig  # noqa: F401
+from lerobot.robots.so_follower import SO101FollowerConfig  # noqa: F401
+from lerobot.teleoperators.bi_rebot_102_leader import BiRebot102LeaderConfig  # noqa: F401
+from lerobot.teleoperators.bi_so_leader import BiSOLeaderConfig  # noqa: F401
+from lerobot.teleoperators.rebot_102_leader import RebotArm102LeaderMakerConfig  # noqa: F401
+from lerobot.teleoperators.rebot_102_leader.config_rebot_102_leader_maker import (  # noqa: F401
+    RebotArm102LeaderMakerTeleopConfig,
+)
+from lerobot.teleoperators.rebot_102_leader.config_rebot_102_leader_metal import (  # noqa: F401
+    RebotArm102LeaderMetalTeleopConfig,
+)
+from lerobot.teleoperators.so_leader import SO101LeaderConfig  # noqa: F401
+
 from ..arms import MAKER, METAL, registry as arm_registry
 from .config import (
     bimanual_base_id,
