@@ -94,6 +94,8 @@ export default {
     // {{robot}} is the robot's own name — data.
     movesArmWarning: "Moves {{robot}}'s arm — make sure the area is clear.",
     stop: "Stop",
+    // Second press while the arm returns to its start pose.
+    releaseNow: "Release now",
     toast: {
       failedTitle: "Replay failed",
       // Last-resort fallback: the backend hint and error text win when present.

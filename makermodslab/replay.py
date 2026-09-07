@@ -152,6 +152,14 @@ _replay_started_at: float | None = None
 # set left a stop pressed during the ease-in with nothing to notice it. Reset
 # at the start of every new session (see handle_start_replay).
 _stop_event = threading.Event()
+# The second-stop-press event, mirroring teleoperate.py's _release_now. It is
+# NOT _stop_event: by the time the stopping-phase return runs, _stop_event is
+# already set by the stop that ended playback, so handing it to the return as
+# its abort_event cut the return short on its first frame — on a CAN arm that
+# released torque wherever playback stopped and dropped the arm under gravity
+# (seen on a Maker arm, 2026-09-07). The return only aborts on THIS event,
+# which a second Stop press sets.
+_release_now = threading.Event()
 # {phase, episode_index, elapsed_s, duration_s, error, hint} — see
 # handle_replay_status. phase is one of: idle | easing_in | playing |
 # stopping | done | error.
@@ -324,6 +332,9 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
 
         replay_active = True
         _stop_event.clear()
+        # A stale release-now from a previous session's double-stop must not
+        # skip this session's return (same guard as teleoperate.py).
+        _release_now.clear()
         _replay_started_at = time.time()
         _replay_meta = {
             "phase": "easing_in",
@@ -736,12 +747,10 @@ def _replay_worker(
         # Playback is over but the arm is still energized for the return —
         # a phase of this session, not idle yet.
         notify_session_changed("replay", True, phase=_replay_meta.get("phase"))
-        # The abort asymmetry is deliberate and pre-dates the family: the SO-101
-        # return runs to completion (the stop that ended playback already set
-        # _stop_event, so passing it would cut the return short at once), while
-        # the CAN return is handed that same event. Kept as-is — see the
-        # hardware checklist in the arm-family refactor notes.
-        family.return_to_rest(rest_poses, abort_event=None if feetech else _stop_event)
+        # Every family returns to the session-start pose before torque is
+        # released; only a second Stop press (_release_now) cuts it short.
+        # Never _stop_event here — it is already set, see its definition.
+        family.return_to_rest(rest_poses, abort_event=_release_now)
     except Exception as e:
         logger.error(f"Replay worker error: {e}")
         with _state_lock:
@@ -797,14 +806,32 @@ def handle_replay_status() -> dict[str, Any]:
 
 
 def handle_stop_replay() -> dict[str, Any]:
+    """Stop playback; the worker then returns the arm and releases it.
+
+    A SECOND stop while that return is still running (the worker is alive
+    but playback is over) releases the arm now instead — the same two-press
+    contract as teleoperation. A stop with nothing running is a 409.
+    """
     global replay_active
     with _state_lock:
-        if not replay_active:
-            return {"success": False, "status_code": 409, "message": "No replay is active"}
-        replay_active = False
-        _stop_event.set()
-        _replay_meta["phase"] = "stopping"
-    return {"success": True, "message": "Replay stopping"}
+        if replay_active:
+            replay_active = False
+            _stop_event.set()
+            _replay_meta["phase"] = "stopping"
+            return {
+                "success": True,
+                "releasing": True,
+                "message": (
+                    "Replay stopping — the arm returns to its starting position, "
+                    "then goes limp. Press Stop again to release it now."
+                ),
+            }
+        worker = replay_thread
+    if worker is not None and worker.is_alive():
+        logger.info("Second stop during the replay rest-pose return — releasing the arm now")
+        _release_now.set()
+        return {"success": True, "message": "Releasing the arm now"}
+    return {"success": False, "status_code": 409, "message": "No replay is active"}
 
 
 def stop_and_wait(timeout: float = _STOP_AND_WAIT_TIMEOUT_S) -> None:
@@ -818,5 +845,12 @@ def stop_and_wait(timeout: float = _STOP_AND_WAIT_TIMEOUT_S) -> None:
     if worker is None or not worker.is_alive():
         return
     worker.join(timeout=timeout)
+    if not worker.is_alive():
+        return
+    logger.warning(
+        "Replay worker did not finish its graceful release within %.0fs; forcing release now", timeout
+    )
+    _release_now.set()
+    worker.join(timeout=5.0)
     if worker.is_alive():
-        logger.warning("Replay worker did not finish releasing within %.0fs", timeout)
+        logger.warning("Replay worker still alive after forcing release; giving up the wait")
