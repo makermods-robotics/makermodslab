@@ -13,6 +13,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ArmType, RobotMode } from "@/hooks/useRobots";
+import { useArms } from "@/hooks/useArms";
 import { cn } from "@/lib/utils";
 import makerArmPhoto from "@/assets/arms/maker.jpg";
 import metalArmPhoto from "@/assets/arms/metal.jpg";
@@ -61,39 +62,28 @@ const MODE_OPTIONS: {
 ];
 
 /**
- * The hardware-family options. Same logic/display split as MODE_OPTIONS above:
- * `value` is what the form submits and the backend stores, so it stays the
- * literal "so101"/"maker"/"metal"; the label/description halves hold catalog
- * KEYS.
+ * The hardware-family cards come from the arms manifest (GET /api/v1/arms),
+ * so a family an extension registers appears beside the built-ins with no
+ * change here. The submitted `value` is the manifest id — what the backend
+ * stores, verbatim. Display is the catalog's per-id label/description where
+ * it has one (the built-ins), else the manifest's own label and no
+ * description: manifest prose is backend text and renders in English in
+ * every language, the same as any server message.
  *
- * `image` is the card's product photo. ArmTypePhoto retains a same-sized
- * placeholder fallback so a future hardware family can land before its photo.
+ * Product photos are the one bundled asset keyed by built-in id. ArmTypePhoto
+ * renders its same-sized placeholder for a family without one, so an
+ * extension's arm lands before its photo does.
  */
-const ARM_TYPE_OPTIONS: {
-  value: ArmType;
-  labelKey: string;
-  descriptionKey: string;
-  image: string | null;
-}[] = [
-  {
-    value: "so101",
-    labelKey: "landing.createRobot.armTypes.so101.label",
-    descriptionKey: "landing.createRobot.armTypes.so101.description",
-    image: so101ArmPhoto,
-  },
-  {
-    value: "maker",
-    labelKey: "landing.createRobot.armTypes.maker.label",
-    descriptionKey: "landing.createRobot.armTypes.maker.description",
-    image: makerArmPhoto,
-  },
-  {
-    value: "metal",
-    labelKey: "landing.createRobot.armTypes.metal.label",
-    descriptionKey: "landing.createRobot.armTypes.metal.description",
-    image: metalArmPhoto,
-  },
-];
+const ARM_PHOTOS: Record<string, string> = {
+  so101: so101ArmPhoto,
+  maker: makerArmPhoto,
+  metal: metalArmPhoto,
+};
+
+/** The card the dialog preselects: the SO-101 when the manifest has it, else
+ * the first family served (the registry's default). */
+const defaultArmType = (ids: string[]): ArmType =>
+  ids.includes("so101") ? "so101" : (ids[0] ?? "so101");
 
 /**
  * Name + arm-layout form for creating a new robot. Extracted from RobotSelector
@@ -110,10 +100,27 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
   onCreateNew,
 }) => {
   const { t } = useTranslation();
+  const { arms, loading: armsLoading, error: armsError } = useArms();
+  // No manifest and not fetching: the load failed (ArmsProvider is retrying
+  // on its own). There is nothing valid to submit, so Create is held.
+  const armsFailed = arms.length === 0 && !armsLoading;
+  const armIds = arms.map((a) => a.id);
   const [newName, setNewName] = useState("");
   const [newMode, setNewMode] = useState<RobotMode>(defaultMode);
-  const [newArmType, setNewArmType] = useState<ArmType>("so101");
+  const [newArmType, setNewArmType] = useState<ArmType>(
+    defaultArmType(armIds),
+  );
   const [creating, setCreating] = useState(false);
+
+  // The manifest can resolve after the dialog is already open (first load);
+  // when the selection is not a card on screen, fall back to the default so
+  // the form never submits an id the manifest does not list.
+  React.useEffect(() => {
+    if (armIds.length > 0 && !armIds.includes(newArmType)) {
+      setNewArmType(defaultArmType(armIds));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [arms]);
 
   const nameExists = (name: string) =>
     availableNames.some((n) => n.toLowerCase() === name.toLowerCase());
@@ -125,14 +132,15 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
       const seed = (seedName ?? "").trim();
       setNewName(seed !== "" && !nameExists(seed) ? seed : "");
       setNewMode(defaultMode);
-      setNewArmType("so101");
+      setNewArmType(defaultArmType(armIds));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const trimmedNewName = newName.trim();
   const newNameExists = trimmedNewName !== "" && nameExists(trimmedNewName);
-  const canConfirm = trimmedNewName !== "" && !newNameExists && !creating;
+  const canConfirm =
+    trimmedNewName !== "" && !newNameExists && !creating && arms.length > 0;
 
   const handleCreateConfirm = async () => {
     if (!canConfirm) return;
@@ -145,7 +153,7 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
         onOpenChange(false);
         setNewName("");
         setNewMode(defaultMode);
-        setNewArmType("so101");
+        setNewArmType(defaultArmType(armIds));
       }
     } finally {
       setCreating(false);
@@ -160,7 +168,7 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
         if (!o) {
           setNewName("");
           setNewMode(defaultMode);
-          setNewArmType("so101");
+          setNewArmType(defaultArmType(armIds));
         }
       }}
     >
@@ -209,16 +217,26 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
               // overflows the dialog past the viewport.
               className="mt-1 grid grid-cols-3 gap-2"
             >
-              {ARM_TYPE_OPTIONS.map((opt) => {
-                const selected = newArmType === opt.value;
-                const label = t(opt.labelKey as never);
+              {arms.map((info) => {
+                const selected = newArmType === info.id;
+                // Runtime-built keys (the id is data), so `as never`; the
+                // manifest's label is the default for an id the catalog does
+                // not know, and such an id has no description of its own.
+                const label = t(
+                  `landing.createRobot.armTypes.${info.id}.label` as never,
+                  { defaultValue: info.label },
+                );
+                const description = t(
+                  `landing.createRobot.armTypes.${info.id}.description` as never,
+                  { defaultValue: "" },
+                );
                 return (
                   <button
-                    key={opt.value}
+                    key={info.id}
                     type="button"
                     role="radio"
                     aria-checked={selected}
-                    onClick={() => setNewArmType(opt.value)}
+                    onClick={() => setNewArmType(info.id)}
                     className={cn(
                       "rounded-md border p-2 text-left transition-colors",
                       selected
@@ -226,7 +244,7 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
                         : "border-border bg-card hover:bg-accent"
                     )}
                   >
-                    <ArmTypePhoto src={opt.image} alt={label} />
+                    <ArmTypePhoto src={ARM_PHOTOS[info.id] ?? null} alt={label} />
                     <div className="mt-2 flex items-start justify-between gap-1">
                       <span className="text-sm font-medium leading-tight text-foreground">
                         {label}
@@ -235,13 +253,36 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
                         <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
                       )}
                     </div>
-                    <p className="mt-0.5 text-xs leading-snug text-muted-foreground">
-                      {t(opt.descriptionKey as never)}
-                    </p>
+                    {description && (
+                      <p className="mt-0.5 text-xs leading-snug text-muted-foreground">
+                        {description}
+                      </p>
+                    )}
+                    {info.provided_by !== "builtin" && (
+                      <p className="mt-0.5 text-[10px] leading-snug text-muted-foreground">
+                        {t("landing.createRobot.providedBy", {
+                          extension: info.provided_by,
+                        })}
+                      </p>
+                    )}
                   </button>
                 );
               })}
             </div>
+            {/* Nothing to pick yet: the manifest has not answered. The grid
+                above is simply empty meanwhile — no card, no crash. */}
+            {arms.length === 0 && armsLoading && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                {t("landing.createRobot.armTypesLoading")}
+              </p>
+            )}
+            {armsFailed && (
+              <p className="mt-1 text-xs text-destructive">
+                {t("landing.createRobot.armTypesFailed")}
+                {/* Server / network prose, rendered verbatim after our line. */}
+                {armsError ? ` (${armsError})` : ""}
+              </p>
+            )}
           </div>
           <div>
             <Label className="text-foreground">

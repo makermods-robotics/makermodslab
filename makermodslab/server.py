@@ -60,7 +60,9 @@ from . import (
 # Import our custom calibration functionality
 from .__version__ import __version__
 from .api_errors import ApiError, ErrorCode, install_error_handlers
+from .arm_capabilities import require_known_arm_type
 from .arms import registry as arm_registry
+from .arms.manifest import arms_manifest
 from .auto_calibrate import (
     AutoCalibrationBatchRequest,
     AutoCalibrationRequest,
@@ -223,6 +225,7 @@ from .schemas.sessions import (
     SessionStopResponse,
 )
 from .schemas.system import (
+    ArmFamiliesResponse,
     AvailableCamerasResponse,
     AvailablePortsResponse,
     ExtraStatus,
@@ -281,6 +284,7 @@ from .utils.config import (
     get_instance_id,
     get_robot_record,
     get_saved_robot_port,
+    is_known_arm_type,
     is_robot_record_clean,
     is_valid_robot_name,
     list_robot_records,
@@ -3696,6 +3700,10 @@ def auto_calibration_batch_status():
 @router.get("/calibration-configs/{device_type}")
 def get_calibration_configs(device_type: str, arm_type: str = "so101"):
     """Get all calibration config files for a specific device type"""
+    # `?arm_type=nope` is a 400, never the SO-101 library — and outside the
+    # try, so the coded ApiError reaches the app-wide handler. Same on every
+    # calibration-configs route below.
+    require_known_arm_type(arm_type)
     try:
         config_path = calibration_dir_for_device(device_type, arm_type)
         if config_path is None:
@@ -3730,6 +3738,7 @@ def get_calibration_configs(device_type: str, arm_type: str = "so101"):
 @router.delete("/calibration-configs/{device_type}/{config_name}")
 def delete_calibration_config(device_type: str, config_name: str, arm_type: str = "so101"):
     """Delete a calibration config file"""
+    require_known_arm_type(arm_type)
     try:
         config_path = calibration_dir_for_device(device_type, arm_type)
         if config_path is None:
@@ -3789,6 +3798,7 @@ def download_calibration_config(device_type: str, config_name: str, arm_type: st
     drop-in: shareable, hand-copyable, and re-importable anywhere. The arm's
     side/name are supplied by the caller on re-import, not stored in the file.
     """
+    require_known_arm_type(arm_type)
     config_path = calibration_dir_for_device(device_type, arm_type)
     if config_path is None:
         return JSONResponse(status_code=400, content={"success": False, "message": "Invalid device type"})
@@ -3833,6 +3843,7 @@ def upload_calibration_config(device_type: str, body: dict, arm_type: str = "so1
     "data": {<raw lerobot calibration>}}. The data is shape-validated; an
     existing name is never overwritten (409 → caller renames).
     """
+    require_known_arm_type(arm_type)
     name = (body or {}).get("name", "")
     data = (body or {}).get("data")
     if not isinstance(name, str):
@@ -3869,6 +3880,7 @@ def rename_calibration_config_endpoint(
     Rename a calibration config file. Body: {"new_name": "..."}. Never
     overwrites; robot records referencing the old name are repointed.
     """
+    require_known_arm_type(arm_type)
     new_name = (body or {}).get("new_name", "")
     if not isinstance(new_name, str):
         return JSONResponse(
@@ -3890,9 +3902,9 @@ def rename_calibration_config_endpoint(
 
 class OpenCalibrationFolderRequest(BaseModel):
     device_type: str  # "teleop" (leader) or "robot" (follower)
-    # Which arm type's library to open — "so101" or "maker". The two live in
-    # separate directories (so_leader/so_follower vs
-    # rebot_102_leader/maker_follower).
+    # Which family's library to open (any registered id; an unknown one is a
+    # 400). Each family keeps its own directories (so_leader/so_follower vs
+    # rebot_102_leader/maker_follower, ...).
     arm_type: str = "so101"
 
 
@@ -3901,8 +3913,9 @@ def open_calibration_folder(request: OpenCalibrationFolderRequest):
     """Open a side's calibration folder in the OS file browser (Finder/Explorer/
     xdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.
     The dir is created if missing so a fresh install opens an empty folder rather
-    than failing. An unknown device_type is rejected with 400.
+    than failing. An unknown device_type or arm_type is rejected with 400.
     """
+    require_known_arm_type(request.arm_type)
     path = calibration_dir_for_device(request.device_type, request.arm_type)
     if path is None:
         return JSONResponse(
@@ -3961,22 +3974,25 @@ class IdentifyArmRequest(BaseModel):
 class MakerProbePortsRequest(BaseModel):
     # Candidate ports to probe; empty/omitted = every detected serial port.
     ports: list[str] | None = None
-    # Which CAN family the follower probe should speak: "maker" (RobStride) or
-    # "metal" (Damiao). The leader probe is identical either way (both
-    # families use the Star Arm 102). Defaults to maker so a client that
-    # predates the Metal arm is unchanged.
-    arm_type: Literal["maker", "metal"] = "maker"
+    # Which family's protocol the follower probe should speak (RobStride for
+    # "maker", Damiao for "metal", an extension's own for its family). Any
+    # registered id; the handler refuses an unknown one (400
+    # robot.arm_type.unavailable) and a family without a protocol probe (400
+    # robot.not_ready) by the family's flags. Defaults to maker so a client
+    # that predates the Metal arm is unchanged.
+    arm_type: str = "maker"
 
 
 class MakerIdentifyArmRequest(BaseModel):
-    # "robot" (the CAN follower) or "teleop" (the UART leader). Unlike the
-    # SO-101, the two halves of a Maker rig need different bus drivers, so the
-    # caller must say which side it is asking about.
+    # "robot" (the follower) or "teleop" (the leader). Unlike the SO-101, the
+    # two halves of a CAN rig need different bus drivers, so the caller must
+    # say which side it is asking about.
     device_type: str
     ports: list[str] | None = None
-    # See MakerProbePortsRequest. For "metal" the follower side is refused
-    # (opening a Damiao bus energizes it mid-gesture); the leader side works.
-    arm_type: Literal["maker", "metal"] = "maker"
+    # Any registered family (every one implements identify_by_motion); an
+    # unknown id is refused. A family whose follower bus energizes on open
+    # (the Metal arm's Damiao handshake) refuses the follower side itself.
+    arm_type: str = "maker"
 
 
 @v1_router.post("/maker/probe-ports", response_model=MakerProbePortsResponse, tags=["system"])
@@ -3990,8 +4006,23 @@ async def probe_maker_arm_ports(request: MakerProbePortsRequest):
     follower probe briefly enables the gravity-neutral base joint and disables
     it again (the Damiao handshake is the enable command — see
     maker_ports._open_metal_follower_bus).
+
+    Refused by the family's flag, never by id: a family whose two halves
+    share one protocol (the SO-101) has nothing to ask a port and is told to
+    identify by the gesture instead.
     """
-    return await arm_registry.get(request.arm_type).probe_ports(request.ports)
+    require_known_arm_type(request.arm_type)
+    family = arm_registry.get(request.arm_type)
+    if family.follower_probe_protocol is None:
+        raise ApiError(
+            status_code=400,
+            detail=(
+                f"The {family.short_label} has no protocol probe: its leader and follower speak "
+                "the same protocol. Identify the arm by the hand gesture instead."
+            ),
+            code=ErrorCode.ROBOT_NOT_READY,
+        )
+    return await family.probe_ports(request.ports)
 
 
 # exclude_none: success carries `port`, failure omits it entirely (never null),
@@ -4009,9 +4040,24 @@ async def identify_maker_arm(request: MakerIdentifyArmRequest):
     Only needed for a BIMANUAL Maker robot: both arms ship with identical CAN
     and servo ids, so probing alone cannot say which is left and which is
     right. The user swings one arm's base and we report the port that saw it.
-    Read-only — no motor writes.
+    Read-only — no motor writes. Any registered family (each implements the
+    gesture); an unknown id is a 400.
     """
+    require_known_arm_type(request.arm_type)
     return await arm_registry.get(request.arm_type).identify_by_motion(request.device_type, request.ports)
+
+
+@v1_router.get("/arms", response_model=ArmFamiliesResponse, tags=["system"])
+def list_arm_families():
+    """The arms manifest: every registered arm family and what it can do.
+
+    The one document the UI reads arm capabilities from, so a family an
+    extension registers renders with no frontend change. Registry order,
+    default family FIRST — a client scanning `robot_type_markers` checks the
+    default family LAST (its markers are the loosest), exactly as
+    arm_capabilities.arm_type_from_robot_type does. See arms/manifest.py.
+    """
+    return {"arms": arms_manifest()}
 
 
 @v1_router.post("/arms/release-torque", response_model=ReleaseCanTorqueResponse, tags=["system"])
@@ -4344,9 +4390,13 @@ def _record_with_clean(record: dict) -> dict:
     `is_clean` folds every arm of the mode (gates teleop/record, which drive
     leaders AND followers); `follower_ready` scopes to the follower side so
     follower-only activities (inference, replay) aren't blocked by a leader arm
-    they never touch."""
+    they never touch). `arm_available` says whether the record's arm type is a
+    family this install has registered: a hand-edited or extension-provided
+    id nobody installed lists (never hidden, never rewritten) as unavailable,
+    is never clean, and cannot start anything."""
     return {
         **record,
+        "arm_available": is_known_arm_type(record.get("arm_type")),
         "is_clean": is_robot_record_clean(record),
         "follower_ready": is_robot_record_clean(record, arms="follower"),
     }
@@ -4390,6 +4440,13 @@ def upsert_robot(name: str, data: dict, create: bool = False):
 
     body = data or {}
     existing = get_robot_record(name) or {}
+
+    # An arm type nothing registered is refused on BOTH the create and the
+    # patch path — the whole body, so a record is never left half-switched
+    # (the disk layer would otherwise ignore the key and merge the rest). An
+    # absent or null arm_type is "unspecified" and passes (the disk layer
+    # then keeps the existing value, or the SO-101 default on create).
+    require_known_arm_type(body.get("arm_type"))
 
     # Mode is fixed at creation. A bimanual rig is a different machine (different
     # robot_type on datasets, forced _left/_right calibration naming, different

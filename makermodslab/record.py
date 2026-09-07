@@ -31,6 +31,7 @@ from lerobot.datasets import LeRobotDataset
 from lerobot.scripts.lerobot_record import RecordConfig
 
 from .api_errors import ErrorCode
+from .arm_capabilities import require_known_arm_type
 from .arm_identity import ArmIdentityError
 from .arms import registry as arm_registry
 from .bus_retry import BUS_SYNC_READ_RETRIES as _BUS_SYNC_READ_RETRIES  # noqa: F401
@@ -624,6 +625,11 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         teleoperate as _teleoperate,
         wiggle as _wiggle,
     )
+
+    # Argument validation first: an arm type nothing registered is refused
+    # (400 robot.arm_type.unavailable) before the flag is claimed or a device
+    # config built.
+    require_known_arm_type(request.arm_type)
 
     # Claim the active flag under the lock so two concurrent starts can't both
     # pass the precondition check.

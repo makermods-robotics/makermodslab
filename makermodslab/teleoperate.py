@@ -30,6 +30,7 @@ from lerobot.teleoperators.so_leader import SO101Leader
 from lerobot.utils.errors import DeviceNotConnectedError
 
 from .api_errors import ErrorCode
+from .arm_capabilities import require_known_arm_type
 from .arms import registry as arm_registry
 from .rest_pose import RETURN_CEILING_S
 from .session_events import notify_session_changed
@@ -733,6 +734,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         rollout as _rollout,
         wiggle as _wiggle,
     )
+
+    # Argument validation first: an arm type nothing registered is refused
+    # (400 robot.arm_type.unavailable) before anything is released, claimed
+    # or built — build_single_configs would otherwise ask the registry for it.
+    require_known_arm_type(request.arm_type)
 
     # A previous session (teleop or recording) may still be holding torque for
     # its release grace — cut it short so this start doesn't fail on a busy

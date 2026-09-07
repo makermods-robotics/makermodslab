@@ -18,6 +18,7 @@ export default {
       maker: "Maker",
       metal: "Metal",
     },
+    armUnavailable: "未安装",
     status: {
       ready: "就绪",
       needsSetup: "需要设置",
@@ -49,6 +50,8 @@ export default {
     failedTitle: "无法启动遥操作",
     failedFallback: "启动失败。",
     disabledReason: "{{name}}{{gap}} — 请打开机器人设置",
+    disabledArmUnavailable:
+      "{{name}} 使用的机械臂类型“{{armType}}”未安装 — 请安装提供它的扩展，或删除该机器人并用已安装的机械臂类型重新创建",
   },
   setupGap: {
     missingCalibration: "缺少{{arms}}的标定",

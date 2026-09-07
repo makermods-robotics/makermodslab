@@ -25,6 +25,182 @@
         "title": "AddNodeBody",
         "type": "object"
       },
+      "ArmCalibrationInfo": {
+        "description": "How a family is calibrated: a range sweep (the SO-101's manual or\ndriven flows) or a zero pose set by hand. `zero_pose` is null — not\nabsent — for a range-sweep family, so the route must NOT exclude None.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "range_sweep",
+              "zero_pose"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "zero_pose": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArmZeroPose"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "zero_pose"
+        ],
+        "title": "ArmCalibrationInfo",
+        "type": "object"
+      },
+      "ArmCapabilities": {
+        "description": "The family's capability flags (arms/base.py), plus two derived from\nits port-detection facts: `supports_port_probe` (a protocol probe exists,\nso no gesture is needed) and `motion_identify_energizes_follower` (the\nfollower side of the gesture is refused because opening its bus would\nenergize it).",
+        "properties": {
+          "motion_identify_energizes_follower": {
+            "title": "Motion Identify Energizes Follower",
+            "type": "boolean"
+          },
+          "supports_auto_calibration": {
+            "title": "Supports Auto Calibration",
+            "type": "boolean"
+          },
+          "supports_dagger": {
+            "title": "Supports Dagger",
+            "type": "boolean"
+          },
+          "supports_port_probe": {
+            "title": "Supports Port Probe",
+            "type": "boolean"
+          },
+          "uses_feetech_bus": {
+            "title": "Uses Feetech Bus",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "uses_feetech_bus",
+          "supports_auto_calibration",
+          "supports_dagger",
+          "supports_port_probe",
+          "motion_identify_energizes_follower"
+        ],
+        "title": "ArmCapabilities",
+        "type": "object"
+      },
+      "ArmFamiliesResponse": {
+        "description": "GET /api/v1/arms (server.py list_arm_families) — registry order,\ndefault family first.",
+        "properties": {
+          "arms": {
+            "items": {
+              "$ref": "#/components/schemas/ArmFamilyInfo"
+            },
+            "title": "Arms",
+            "type": "array"
+          }
+        },
+        "required": [
+          "arms"
+        ],
+        "title": "ArmFamiliesResponse",
+        "type": "object"
+      },
+      "ArmFamilyInfo": {
+        "description": "One entry of the arms manifest (arms/manifest.py describe_family).\n\n`robot_types` are the lerobot RobotConfig type strings the family's\nfollowers register under (single, then bimanual); `robot_type_markers`\nthe substrings that identify it in a dataset's free-form robot_type;\n`calibration_name_suffix` what the server appends to a robot record's\nname when it mints a default calibration id (\"\" for the SO-101).",
+        "properties": {
+          "calibration": {
+            "$ref": "#/components/schemas/ArmCalibrationInfo"
+          },
+          "calibration_name_suffix": {
+            "title": "Calibration Name Suffix",
+            "type": "string"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/ArmCapabilities"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "joints_per_arm": {
+            "title": "Joints Per Arm",
+            "type": "integer"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "provided_by": {
+            "title": "Provided By",
+            "type": "string"
+          },
+          "robot_type_markers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Robot Type Markers",
+            "type": "array"
+          },
+          "robot_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Robot Types",
+            "type": "array"
+          },
+          "short_label": {
+            "title": "Short Label",
+            "type": "string"
+          },
+          "supports_bimanual": {
+            "title": "Supports Bimanual",
+            "type": "boolean"
+          },
+          "telemetry_kind": {
+            "enum": [
+              "urdf",
+              "degrees"
+            ],
+            "title": "Telemetry Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "short_label",
+          "provided_by",
+          "joints_per_arm",
+          "supports_bimanual",
+          "calibration",
+          "telemetry_kind",
+          "capabilities",
+          "robot_types",
+          "robot_type_markers",
+          "calibration_name_suffix"
+        ],
+        "title": "ArmFamilyInfo",
+        "type": "object"
+      },
+      "ArmZeroPose": {
+        "description": "The pose text a zero-pose calibration shows, per side (the family's\nown zero_pose_instructions, verbatim — the backend is never localized).",
+        "properties": {
+          "follower": {
+            "title": "Follower",
+            "type": "string"
+          },
+          "leader": {
+            "title": "Leader",
+            "type": "string"
+          }
+        },
+        "required": [
+          "leader",
+          "follower"
+        ],
+        "title": "ArmZeroPose",
+        "type": "object"
+      },
       "AutoCalibrationBatchArm": {
         "description": "One arm in a concurrent auto-calibration batch. Same fields as the\nsingle-arm request minus robot_name (batch-level, shared by every arm).",
         "properties": {
@@ -2420,10 +2596,6 @@
         "properties": {
           "arm_type": {
             "default": "maker",
-            "enum": [
-              "maker",
-              "metal"
-            ],
             "title": "Arm Type",
             "type": "string"
           },
@@ -2494,10 +2666,6 @@
         "properties": {
           "arm_type": {
             "default": "maker",
-            "enum": [
-              "maker",
-              "metal"
-            ],
             "title": "Arm Type",
             "type": "string"
           },
@@ -3856,10 +4024,6 @@
       "ReleaseCanTorqueRequest": {
         "properties": {
           "arm_type": {
-            "enum": [
-              "maker",
-              "metal"
-            ],
             "title": "Arm Type",
             "type": "string"
           },
@@ -5698,6 +5862,28 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/arms": {
+      "get": {
+        "description": "The arms manifest: every registered arm family and what it can do.\n\nThe one document the UI reads arm capabilities from, so a family an\nextension registers renders with no frontend change. Registry order,\ndefault family FIRST — a client scanning `robot_type_markers` checks the\ndefault family LAST (its markers are the loosest), exactly as\narm_capabilities.arm_type_from_robot_type does. See arms/manifest.py.",
+        "operationId": "list_arm_families",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArmFamiliesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Arm Families",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/api/v1/arms/release-torque": {
       "post": {
         "description": "De-energize a CAN follower after a crash left it holding torque.\n\nA SIGKILL or power loss leaves Damiao motors rigid at their last command\nwith no session and no device object to clean up through. This reopens\nthe named bus WITHOUT the energizing handshake, broadcasts the disable,\nand closes. Refused (409 session.held) while any live session holds the\nhardware; not a session itself — no lease, no session events (see\ncan_recovery.py).",
@@ -8234,7 +8420,7 @@
     },
     "/api/v1/maker/identify-arm": {
       "post": {
-        "description": "Tell one Maker arm from its twin by watching for a hand gesture.\n\nOnly needed for a BIMANUAL Maker robot: both arms ship with identical CAN\nand servo ids, so probing alone cannot say which is left and which is\nright. The user swings one arm's base and we report the port that saw it.\nRead-only — no motor writes.",
+        "description": "Tell one Maker arm from its twin by watching for a hand gesture.\n\nOnly needed for a BIMANUAL Maker robot: both arms ship with identical CAN\nand servo ids, so probing alone cannot say which is left and which is\nright. The user swings one arm's base and we report the port that saw it.\nRead-only — no motor writes. Any registered family (each implements the\ngesture); an unknown id is a 400.",
         "operationId": "identify_maker_arm",
         "requestBody": {
           "content": {
@@ -8276,7 +8462,7 @@
     },
     "/api/v1/maker/probe-ports": {
       "post": {
-        "description": "Find which ports carry a Maker follower and which carry its Star 102 leader.\n\nA CAN rig's two halves speak different protocols on different adapters\n(RobStride/Damiao over CAN vs FashionStar over UART), so unlike the SO-101\nthis needs NO gesture from the user — asking each port which protocol\nanswers is enough. The maker probe is strictly read-only; the METAL\nfollower probe briefly enables the gravity-neutral base joint and disables\nit again (the Damiao handshake is the enable command — see\nmaker_ports._open_metal_follower_bus).",
+        "description": "Find which ports carry a Maker follower and which carry its Star 102 leader.\n\nA CAN rig's two halves speak different protocols on different adapters\n(RobStride/Damiao over CAN vs FashionStar over UART), so unlike the SO-101\nthis needs NO gesture from the user — asking each port which protocol\nanswers is enough. The maker probe is strictly read-only; the METAL\nfollower probe briefly enables the gravity-neutral base joint and disables\nit again (the Damiao handshake is the enable command — see\nmaker_ports._open_metal_follower_bus).\n\nRefused by the family's flag, never by id: a family whose two halves\nshare one protocol (the SO-101) has nothing to ask a port and is told to\nidentify by the gesture instead.",
         "operationId": "probe_maker_arm_ports",
         "requestBody": {
           "content": {
@@ -9519,7 +9705,7 @@
     },
     "/api/v1/open-calibration-folder": {
       "post": {
-        "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type is rejected with 400.",
+        "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type or arm_type is rejected with 400.",
         "operationId": "open_calibration_folder",
         "requestBody": {
           "content": {
@@ -13655,7 +13841,7 @@
     },
     "/open-calibration-folder": {
       "post": {
-        "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type is rejected with 400.",
+        "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type or arm_type is rejected with 400.",
         "operationId": "open_calibration_folder_open_calibration_folder_post",
         "requestBody": {
           "content": {

@@ -30,13 +30,18 @@ def test_records_written_before_the_maker_arm_read_back_as_so101(tmp_lerobot_hom
 
 
 def test_a_corrupted_arm_type_on_disk_falls_back_rather_than_raising(tmp_lerobot_home: Path) -> None:
-    """Same contract as motor_power's clamp: a bad value must never make a
-    robot unopenable."""
+    """A NON-STRING arm_type is a corrupted field, not a family: it reads as
+    the SO-101 default rather than raising, the same contract as
+    motor_power's clamp. An unknown STRING is a different thing — TB5 keeps
+    it verbatim so the record lists as unavailable and refuses to start
+    (tests/test_arms_manifest.py) instead of silently becoming an SO-101."""
     robots = Path(cfg.ROBOTS_PATH)
     robots.mkdir(exist_ok=True)
-    (robots / "weird.json").write_text('{"name": "weird", "arm_type": "definitely-not-an-arm"}')
+    (robots / "weird.json").write_text('{"name": "weird", "arm_type": 7}')
+    (robots / "nulled.json").write_text('{"name": "nulled", "arm_type": null}')
 
     assert cfg.get_robot_record("weird")["arm_type"] == "so101"
+    assert cfg.get_robot_record("nulled")["arm_type"] == "so101"
 
 
 def test_creating_a_maker_robot_persists_its_arm_type(tmp_lerobot_home: Path) -> None:

@@ -60,9 +60,10 @@ class SO101Family(ArmFamily):
 
     telemetry_kind = "urdf"
 
-    def default_calibration_name(self, record_name: str) -> str:
+    @property
+    def calibration_name_suffix(self) -> str:
         """Historical default: the bare record name, no family suffix."""
-        return record_name
+        return ""
 
     def single_follower_config(self, port: str, config_id: str):
         from lerobot.robots.so_follower import SO101FollowerConfig

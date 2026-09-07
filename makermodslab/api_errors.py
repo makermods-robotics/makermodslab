@@ -49,6 +49,11 @@ class ErrorCode(StrEnum):
     # (arm still energized, driving back to rest) — retry shortly.
     ROBOT_NOT_FOUND = "robot.not_found"
     ROBOT_NOT_READY = "robot.not_ready"
+    # The record's arm_type names a family this install has not registered
+    # (an extension that is not installed, or a hand-edited record). Never
+    # normalized to the SO-101: a silent fallback would open a Feetech serial
+    # path at whatever the hardware really is. 400 wherever it is raised.
+    ROBOT_ARM_TYPE_UNAVAILABLE = "robot.arm_type.unavailable"
     ROBOT_BUSY_RECORDING = "robot.busy.recording"
     ROBOT_BUSY_TELEOPERATION = "robot.busy.teleoperation"
     ROBOT_BUSY_INFERENCE = "robot.busy.inference"

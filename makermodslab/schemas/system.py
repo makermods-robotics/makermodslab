@@ -22,6 +22,8 @@ so the schema cannot drift from the wire format.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict
 
 # Handlers in makermodslab/update.py return these models' dumps directly.
@@ -37,6 +39,11 @@ from makermodslab.utils.system import (
 )
 
 __all__ = [
+    "ArmCalibrationInfo",
+    "ArmCapabilities",
+    "ArmFamiliesResponse",
+    "ArmFamilyInfo",
+    "ArmZeroPose",
     "AvailableCamerasResponse",
     "AvailablePortsResponse",
     "CameraInfo",
@@ -225,3 +232,65 @@ class MakerIdentifyArmResponse(BaseModel):
     message: str
     port: str | None = None
     skipped: list[str] = []
+
+
+class ArmZeroPose(BaseModel):
+    """The pose text a zero-pose calibration shows, per side (the family's
+    own zero_pose_instructions, verbatim — the backend is never localized)."""
+
+    leader: str
+    follower: str
+
+
+class ArmCalibrationInfo(BaseModel):
+    """How a family is calibrated: a range sweep (the SO-101's manual or
+    driven flows) or a zero pose set by hand. `zero_pose` is null — not
+    absent — for a range-sweep family, so the route must NOT exclude None."""
+
+    kind: Literal["range_sweep", "zero_pose"]
+    zero_pose: ArmZeroPose | None
+
+
+class ArmCapabilities(BaseModel):
+    """The family's capability flags (arms/base.py), plus two derived from
+    its port-detection facts: `supports_port_probe` (a protocol probe exists,
+    so no gesture is needed) and `motion_identify_energizes_follower` (the
+    follower side of the gesture is refused because opening its bus would
+    energize it)."""
+
+    uses_feetech_bus: bool
+    supports_auto_calibration: bool
+    supports_dagger: bool
+    supports_port_probe: bool
+    motion_identify_energizes_follower: bool
+
+
+class ArmFamilyInfo(BaseModel):
+    """One entry of the arms manifest (arms/manifest.py describe_family).
+
+    `robot_types` are the lerobot RobotConfig type strings the family's
+    followers register under (single, then bimanual); `robot_type_markers`
+    the substrings that identify it in a dataset's free-form robot_type;
+    `calibration_name_suffix` what the server appends to a robot record's
+    name when it mints a default calibration id ("" for the SO-101).
+    """
+
+    id: str
+    label: str
+    short_label: str
+    provided_by: str
+    joints_per_arm: int
+    supports_bimanual: bool
+    calibration: ArmCalibrationInfo
+    telemetry_kind: Literal["urdf", "degrees"]
+    capabilities: ArmCapabilities
+    robot_types: list[str]
+    robot_type_markers: list[str]
+    calibration_name_suffix: str
+
+
+class ArmFamiliesResponse(BaseModel):
+    """GET /api/v1/arms (server.py list_arm_families) — registry order,
+    default family first."""
+
+    arms: list[ArmFamilyInfo]

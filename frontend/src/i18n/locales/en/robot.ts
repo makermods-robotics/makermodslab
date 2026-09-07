@@ -17,11 +17,17 @@ export default {
     // Short family tags for the picker rows; the long-form names live in
     // landing.createRobot.armTypes. The VALUES "so101"/"maker"/"metal" are
     // data (robot records on disk) — only these display labels localize.
+    // These are per-id OVERRIDES of the arms manifest's own label: an arm an
+    // extension registers has no entry here and shows the manifest's English
+    // label (see lib/armTypes.armLabel).
     armType: {
       so101: "SO-101",
       maker: "Maker",
       metal: "Metal",
     },
+    // Badge beside the arm type of a record whose arm_type no installed
+    // family answers to (a hand-edited record, or an extension since removed).
+    armUnavailable: "not installed",
     status: {
       ready: "ready",
       needsSetup: "needs setup",
@@ -57,6 +63,9 @@ export default {
     failedFallback: "Failed to start.",
     // {{gap}} is the rendered setup-gap phrase below.
     disabledReason: "{{name}} {{gap}} — open Robot settings",
+    // {{armType}} is the record's raw arm_type id — data, rendered verbatim.
+    disabledArmUnavailable:
+      "{{name}} uses arm type \"{{armType}}\", which is not installed — install the extension that provides it, or delete this robot and create it again with an installed arm type",
   },
   // Setup-gap rendering. `robotSetupGaps()` (hooks/useRobots) returns structure;
   // these turn it into a sentence. English output must stay byte-identical to

@@ -496,6 +496,16 @@ Real examples from this codebase, all deliberately untranslated:
 | `HF_HUB_OFFLINE`, `Torque_Limit`, `job.read`                                         | Identifiers quoted inside a sentence. Keep them literal inside the `<Trans>` slot.                                                                                        |
 | Product names — MakerMods, LeRobot, Hugging Face, W&B, ACT, SmolVLA, GitHub, Discord | Names.                                                                                                                                                                    |
 
+**Manifest-provided prose is backend text.** The arms manifest (`GET /api/v1/arms`, read
+through `useArms()`) carries each arm family's `label` and its zero-pose instruction text.
+Like every other server string, that prose renders in English in every language. The
+built-ins are localized through per-id catalog **overrides** — `robot.corner.armType.<id>`,
+`landing.createRobot.armTypes.<id>.*`, `robotConfig.calib.zeroPose.instructionsFor.<id>.*`,
+`robotConfig.port.detectLiveFor.<id>` — resolved with `t(key, { defaultValue })` so an id the
+catalog does not know (an extension's arm) falls through to the manifest text. Add an
+override when a family ships in the core; never translate the manifest's own strings, and
+never add a catalog entry for an id that is not a built-in.
+
 **The label/value split.** Where a constant currently serves as both, split it — translate
 the label, keep the value:
 

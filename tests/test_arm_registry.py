@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from typing import get_args
 
 import pytest
 
 from makermodslab.arms import ArmFamily, registry
 from makermodslab.arms.base import REQUIRED_ATTRIBUTES
 from makermodslab.utils import config as cfg
+from tests.mocks import make_arm_family, scratch_registry
 
 # Concrete types each required attribute must carry. A typed check rather
 # than isinstance-on-a-Protocol: the contract is data, and a wrong TYPE (a
@@ -96,6 +96,18 @@ def test_zero_pose_text_exists_exactly_for_zero_calibrated_families(family: ArmF
         assert "leader" in leader_text and "leader" not in follower_text
     else:
         assert follower_text == "" and leader_text == ""
+
+
+@pytest.mark.parametrize("family", registry.families(), ids=lambda f: f.id)
+def test_default_calibration_name_is_the_record_name_plus_the_family_suffix(family: ArmFamily) -> None:
+    """The suffix is published in the manifest so the UI can predict the
+    default calibration id a record's empty slot will get (the CAN families
+    mint their id in because they share the Star-leader library; the SO-101
+    keeps its historical bare name). One property, used by the minting rule
+    and served on the wire, so the two can never disagree."""
+    expected = "" if family.id == registry.DEFAULT_ID else f"_{family.id}"
+    assert family.calibration_name_suffix == expected
+    assert family.default_calibration_name("bot") == "bot" + family.calibration_name_suffix
 
 
 def test_the_can_followers_zero_poses_are_opposites_on_the_gripper() -> None:
@@ -299,12 +311,41 @@ def test_family_for_robot_config_type_falls_back_to_the_default() -> None:
     assert registry.family_for_robot_config_type(None).id == "so101"
 
 
-def test_config_arm_types_mirror_the_registry() -> None:
-    """utils.config's ArmType literal is still hand-written (TB5 opens it);
-    until then it must agree with what is registered."""
-    assert registry.ids() == cfg.ARM_TYPES
-    assert set(get_args(cfg.ArmType)) == set(registry.ids())
+def test_config_reads_the_registry_live_instead_of_freezing_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TB5 opened the set: the hand-written Literal and the tuple captured at
+    import are gone (both were stale the moment an extension registered a
+    family), and the one predicate left asks the registry on every call."""
+    assert not hasattr(cfg, "ArmType")
+    assert not hasattr(cfg, "ARM_TYPES")
     assert cfg.DEFAULT_ARM_TYPE == registry.DEFAULT_ID
+    assert cfg.is_known_arm_type("nine") is False
+    scratch_registry(monkeypatch)
+    registry.register(make_arm_family("nine"))
+    assert cfg.is_known_arm_type("nine") is True
+
+
+def test_get_raises_unknown_arm_type_naming_the_id_and_the_registered_ones() -> None:
+    """A KeyError subclass (so existing `except KeyError` sites keep working)
+    whose message says what was asked for and what exists — the text a log
+    line shows when a gate was bypassed."""
+    with pytest.raises(registry.UnknownArmType) as excinfo:
+        registry.get("nope")
+    assert isinstance(excinfo.value, KeyError)
+    message = str(excinfo.value)
+    assert "nope" in message
+    for known in registry.ids():
+        assert known in message
+
+
+def test_provenance_defaults_to_builtin_and_records_an_extension(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The manifest tells the user WHO provides a family; the built-ins say
+    "builtin" and an extension's registration (TB6) passes its own name."""
+    for family_id in registry.ids():
+        assert registry.provided_by(family_id) == "builtin"
+    scratch_registry(monkeypatch)
+    registry.register(make_arm_family("nine"), provided_by="ext")
+    assert registry.provided_by("nine") == "ext"
+    assert registry.get("nine").joints_per_arm == 9
 
 
 def test_duplicate_ids_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:

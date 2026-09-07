@@ -61,15 +61,30 @@ def test_dagger_is_refused_on_the_maker_and_metal_arms() -> None:
     assert supports_dagger("so101") is True
 
 
-@pytest.mark.parametrize("value", [None, "", "SO101", "star", 7, object()])
-def test_unknown_arm_types_fall_back_to_so101(value: object) -> None:
-    """A corrupted or future-dated record must never make a robot unopenable.
-
-    so101 is the safe default: it is what every record written before the
-    Maker arm existed implicitly is.
-    """
+@pytest.mark.parametrize("value", [None, "", 7, object()])
+def test_missing_or_non_string_arm_types_fall_back_to_so101(value: object) -> None:
+    """A record written before the Maker arm existed carries no arm_type and
+    IS an SO-101; a non-string is a corrupted field, not a family. Both read
+    as the default rather than making the robot unopenable."""
     assert uses_feetech_bus(value) is True
     assert joints_per_arm(value) == 6
+
+
+@pytest.mark.parametrize("value", ["SO101", "star", "nope"])
+def test_unknown_arm_type_strings_raise_instead_of_masquerading_as_so101(value: str) -> None:
+    """TB5's locked decision: an unknown STRING is a family this install does
+    not have, and answering "SO-101" for it would send a Feetech serial path
+    at whatever the hardware really is. The predicates raise the registry's
+    UnknownArmType (a KeyError); the refusal gates upstream make the raise
+    unreachable from a request."""
+    from makermodslab.arms.registry import UnknownArmType
+
+    with pytest.raises(UnknownArmType):
+        uses_feetech_bus(value)
+    with pytest.raises(UnknownArmType) as excinfo:
+        joints_per_arm(value)
+    assert isinstance(excinfo.value, KeyError)
+    assert value in str(excinfo.value)
 
 
 def test_arm_type_read_back_off_a_built_robot_config() -> None:
