@@ -34,6 +34,10 @@ dataset, and draccus rejects CLI flags it does not know about. So
 parks them here for the sampler that is about to be built. It is process-global
 because there is exactly one training run per process and exactly one
 ``EpisodeAwareSampler`` in it (the eval dataloader uses none).
+
+Provenance: ``WeightedEpisodeAwareSampler.__init__`` re-derives the episode
+boundary arrays the same way lerobot's ``EpisodeAwareSampler.__init__`` does
+(``lerobot/datasets/sampler.py``), hence the HuggingFace line in the header.
 """
 
 from __future__ import annotations

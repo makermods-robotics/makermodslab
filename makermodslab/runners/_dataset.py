@@ -21,6 +21,10 @@ HF Jobs pod and a LAN peer alike have no view of this machine's
 deliberate design decision for this phase — and this module is the single
 implementation of "push it there first when it only exists here", so the two
 runners cannot drift on when a push happens or what it looks like.
+
+Provenance: ``ensure_dataset_on_hub`` descends from leLab's
+``HFCloudJobRunner._ensure_dataset_on_hub`` (``lelab/runners/hf_cloud.py``),
+hence the HuggingFace line in the header.
 """
 
 from __future__ import annotations

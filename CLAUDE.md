@@ -26,6 +26,17 @@ Run `/review-upstream` ([`.claude/commands/review-upstream.md`](.claude/commands
 
 Both projects are Apache-2.0. Credit ports with the upstream SHA, and send fixes back when they apply to code we still share.
 
+### Copyright headers
+
+The header names who wrote the file, not the style of the repo — never copy `Copyright 2025 The HuggingFace Inc. team` onto a new file "for consistency". The rule is by provenance:
+
+- A file we wrote gets `# Copyright 2026 MakerMods. All rights reserved.` (then the Apache boilerplate). That is every file that never existed in leLab.
+- A file inherited from leLab keeps the HuggingFace line, however heavily we have since rewritten it.
+- A file of ours that contains code copied or adapted from leLab or lerobot carries BOTH lines, HuggingFace first, and says in its docstring what was taken from where (`dagger_runner.py`, `sampling.py`, `camera_identity.py`, `runners/_dataset.py` are the current four). Modelling a file on an upstream one (same interface, same shape) is not copying; lifting a block is.
+- `vendor/` files keep whatever notice they arrived with.
+
+When a port from upstream lands in a MakerMods-owned file, add the HuggingFace line at that point — don't leave it for a later sweep.
+
 ## Common commands
 
 Install and run: see [README.md](README.md) Quick Start (uv editable install; `makermodslab` / `makermodslab --dev`). Requires Python ≥3.12. Use the repo `.venv` — pytest fails to collect under other interpreters because of the pinned lerobot.
