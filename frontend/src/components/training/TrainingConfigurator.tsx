@@ -167,6 +167,15 @@ interface TrainingConfiguratorProps {
    * null ⇒ the slot isn't mounted yet; render nothing (avoids a one-frame
    * inline flash before the ref callback fires). */
   actionsContainer?: HTMLElement | null;
+  /** "Combine datasets" mode: run before every launch to produce the dataset
+   * repo id the run trains on (the Train panel merges its selected sources into
+   * a throwaway dataset here). Returning null aborts the launch with nothing
+   * submitted. When set, `datasetRepoId` may be blank and `datasetReady` gates
+   * the Start button instead. */
+  prepareDatasetRepoId?: () => Promise<string | null>;
+  /** Whether Start may fire while `prepareDatasetRepoId` is set (the owner
+   * judges its own source selection). Ignored otherwise. */
+  datasetReady?: boolean;
 }
 
 // PI0.5 is a 4B-parameter VLA — a real cloud run OOM'd an 80GB A100 on step 1
@@ -259,6 +268,8 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   onFinetuneCheckpointChange,
   onStarted,
   actionsContainer,
+  prepareDatasetRepoId,
+  datasetReady,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { auth } = useHfAuth();
@@ -668,13 +679,22 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
 
   // The actual job launch, factored out so it can run either directly (dataset
   // already on the Hub) or as the upload's success continuation.
-  const launchJob = useCallback(async () => {
+  // `datasetOverride` is the repo id `prepareDatasetRepoId` resolved to — the
+  // Train panel's "combine datasets" mode merges its sources into a throwaway
+  // dataset and passes the minted name here, since `config.dataset_repo_id`
+  // (controlled) is still blank for that launch.
+  const launchJob = useCallback(async (datasetOverride?: string) => {
     setIsStarting(true);
     try {
       const job = await startTrainingJob(
         baseUrl,
         fetchWithHeaders,
-        configToRequest(config, checkpointUploadKind),
+        configToRequest(
+          datasetOverride
+            ? { ...config, dataset_repo_id: datasetOverride }
+            : config,
+          checkpointUploadKind,
+        ),
       );
       // The job's name is data — shown exactly as the backend returned it.
       // A busy local slot QUEUES the run rather than refusing (PR #83): say
@@ -759,7 +779,24 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   });
 
   const handleStart = async () => {
-    if (!datasetRepoId) {
+    // "Combine datasets" mode: phase one is a merge that mints the dataset this
+    // run trains on. Run it first; a null result means it was refused or failed
+    // (the owner has already surfaced why) and nothing is submitted.
+    let datasetOverride: string | undefined;
+    if (prepareDatasetRepoId) {
+      setIsStarting(true);
+      let prepared: string | null = null;
+      try {
+        prepared = await prepareDatasetRepoId();
+      } catch {
+        prepared = null;
+      }
+      if (!prepared) {
+        setIsStarting(false);
+        return;
+      }
+      datasetOverride = prepared;
+    } else if (!datasetRepoId) {
       toast({
         title: t("training.configurator.toast.errorTitle"),
         description: t("training.configurator.toast.datasetRequired"),
@@ -858,7 +895,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       return;
     }
 
-    await launchJob();
+    await launchJob(datasetOverride);
   };
 
   if (trainingExtraAvailable === null) {
@@ -900,10 +937,13 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   // first, which offline mode makes impossible — a hard block, exactly like the
   // dataset case above.
   const checkpointUploadBlockedOffline = needsCheckpointUpload && offline;
+  // In "combine datasets" mode the dataset id is minted at launch, so the
+  // owner's source-selection readiness gates Start instead of a live repo id.
+  const datasetGateOk = prepareDatasetRepoId ? !!datasetReady : !!datasetRepoId;
   const startDisabled =
     isStarting ||
     uploading ||
-    !datasetRepoId ||
+    !datasetGateOk ||
     (targetRequiresAuth && !authenticated) ||
     targetMissingFlavor ||
     uploadBlockedOffline ||

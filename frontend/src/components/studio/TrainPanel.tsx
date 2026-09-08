@@ -15,6 +15,7 @@ import { useDatasets } from "@/hooks/useDatasets";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -36,10 +37,15 @@ import { JobRecord, getJob, importModel, jobDisplayName } from "@/lib/jobsApi";
 import { listJobCheckpoints } from "@/lib/checkpointsApi";
 import {
   DatasetItem,
+  MAX_SOURCE_WEIGHT,
+  MergeStatus,
   getDatasetInfo,
+  getDatasetMergeStatus,
   saveCustomDataset,
+  startDatasetMerge,
 } from "@/lib/replayApi";
 import { HUB_REPO_ID_RE } from "@/lib/repoId";
+import { cn } from "@/lib/utils";
 import TrainingConfigurator, {
   FinetuneSeed,
   ResumeSeed,
@@ -48,6 +54,9 @@ import TrainingJobDialog from "@/components/training/TrainingJobDialog";
 import JobsLibrary from "@/components/jobs/JobsLibrary";
 import { useJobsData } from "@/components/jobs/JobsDataContext";
 import DatasetPicker from "@/components/landing/DatasetPicker";
+import { DatasetWeightPicker } from "@/components/landing/DatasetWeightPicker";
+import { MergeProgress } from "@/components/landing/MergeProgress";
+import { runTemporaryMerge } from "@/components/studio/combineMerge";
 import {
   LibrarySection,
   PanelEntryControl,
@@ -226,9 +235,35 @@ const TrainPanel: React.FC = () => {
   // and the configurator switches to resume mode.
   const [resumeSeed, setResumeSeed] = useState<ResumeSeed | null>(null);
 
+  // ── Combine multiple datasets ─────────────────────────────────────────────
+  // A blended fine-tune: pick several datasets + per-source weights, and Start
+  // merges them into a throwaway dataset (phase one) that the run then trains
+  // on (phase two). The two phases are one click — see combineMergeAndTrain.
+  const [combine, setCombine] = useState(false);
+  const [combineSources, setCombineSources] = useState<string[]>([]);
+  const [combineWeights, setCombineWeights] = useState<Record<string, number>>(
+    {},
+  );
+  // Episode counts for the selected sources, feeding the mix preview. null = a
+  // lookup that failed (Hub-only / offline).
+  const [combineEpisodes, setCombineEpisodes] = useState<
+    Record<string, number | null>
+  >({});
+  const [merge, setMerge] = useState<MergeStatus | null>(null);
+  const merging = merge?.state === "running";
+
   const toggleForm = (open: boolean) => {
     setFormOpen(open);
     setJobsOpen(!open);
+    // A launch (or a manual close) starts the next run from scratch — drop any
+    // half-built combine selection and the finished merge's progress panel.
+    if (!open) {
+      setCombine(false);
+      setCombineSources([]);
+      setCombineWeights({});
+      setCombineEpisodes({});
+      setMerge(null);
+    }
     // Closing the form is the way out of a resume: resume mode hides the
     // dataset and starting-point controls (both are the parent run's and not
     // editable), so unlike a fine-tune — which can be dropped by setting
@@ -504,6 +539,120 @@ const TrainPanel: React.FC = () => {
       });
   };
 
+  // ── Combine mode: source list, weights, the two-phase launch ──────────────
+  // A temporary merge must never itself become a merge source.
+  const combinableDatasets = useMemo(
+    () => datasets.filter((d) => !d.merge?.temporary),
+    [datasets],
+  );
+  // Selected sources in list order (stable regardless of click order), so the
+  // weight rows and the merge request line up with what is on screen.
+  const orderedCombineSources = useMemo(
+    () =>
+      combinableDatasets
+        .map((d) => d.repo_id)
+        .filter((id) => combineSources.includes(id)),
+    [combinableDatasets, combineSources],
+  );
+
+  const toggleCombineSource = (repoId: string) =>
+    setCombineSources((prev) =>
+      prev.includes(repoId)
+        ? prev.filter((id) => id !== repoId)
+        : [...prev, repoId],
+    );
+
+  // Fetch episode counts for the selected sources (mix preview). Only the
+  // selected ones, so ticking the box is what triggers the lookup.
+  useEffect(() => {
+    if (!combine) return;
+    const missing = orderedCombineSources.filter(
+      (id) => !(id in combineEpisodes),
+    );
+    if (missing.length === 0) return;
+    const controller = new AbortController();
+    let cancelled = false;
+    void (async () => {
+      const entries = await Promise.all(
+        missing.map(async (repoId) => {
+          try {
+            const info = await getDatasetInfo(
+              baseUrl,
+              fetchWithHeaders,
+              repoId,
+              controller.signal,
+            );
+            return [repoId, info.total_episodes] as const;
+          } catch {
+            return [repoId, null] as const;
+          }
+        }),
+      );
+      if (!cancelled)
+        setCombineEpisodes((prev) => ({
+          ...prev,
+          ...Object.fromEntries(entries),
+        }));
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [combine, orderedCombineSources, combineEpisodes, baseUrl, fetchWithHeaders]);
+
+  // Phase one of a combine launch: merge the selected sources into a throwaway
+  // dataset and resolve to the repo id the backend minted. Passed to the
+  // configurator as `prepareDatasetRepoId`, so a single Start does merge → train.
+  const combineMergeAndTrain = useCallback(async (): Promise<string | null> => {
+    const sources = combinableDatasets
+      .map((d) => d.repo_id)
+      .filter((id) => combineSources.includes(id));
+    const weights = sources.map((id) => combineWeights[id] ?? 1);
+    setMerge({ state: "running", error: null, output_repo_id: null, logs: [] });
+    try {
+      const outputRepoId = await runTemporaryMerge({
+        startMerge: () =>
+          startDatasetMerge(
+            baseUrl,
+            fetchWithHeaders,
+            sources,
+            "",
+            weights,
+            [],
+            true /* acknowledge cross-arm warnings — the operator chose these */,
+            true /* temporary */,
+          ),
+        getStatus: () => getDatasetMergeStatus(baseUrl, fetchWithHeaders),
+        onStatus: setMerge,
+      });
+      refreshDatasets();
+      return outputRepoId;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setMerge((prev) => ({
+        state: "error",
+        error: message,
+        output_repo_id: prev?.output_repo_id ?? null,
+        logs: prev?.logs ?? [],
+      }));
+      toast({
+        title: t("studio.train.combine.mergeFailed"),
+        description: message,
+        variant: "destructive",
+      });
+      return null;
+    }
+  }, [
+    combinableDatasets,
+    combineSources,
+    combineWeights,
+    baseUrl,
+    fetchWithHeaders,
+    refreshDatasets,
+    toast,
+    t,
+  ]);
+
   // Both the <Select> placeholder and the "no base model" option's label. The
   // submitted option VALUE ("__none__") is untouched.
   const noStartingPointLabel = FOUNDATION_POLICY_TYPES.has(policyType)
@@ -561,9 +710,102 @@ const TrainPanel: React.FC = () => {
               </div>
             ) : (
               <div className="space-y-2">
-                <Label htmlFor="train-dataset-search">
-                  {t("studio.train.dataset.label")}
-                </Label>
+                <div className="flex items-center justify-between gap-2">
+                  <Label htmlFor="train-dataset-search">
+                    {t("studio.train.dataset.label")}
+                  </Label>
+                  <label
+                    className={cn(
+                      "flex items-center gap-1.5 text-xs",
+                      merging
+                        ? "opacity-50"
+                        : "cursor-pointer text-muted-foreground",
+                    )}
+                  >
+                    <Checkbox
+                      checked={combine}
+                      disabled={merging}
+                      onCheckedChange={(v) => setCombine(v === true)}
+                    />
+                    {t("studio.train.combine.toggle")}
+                  </label>
+                </div>
+                {combine ? (
+                  <div className="space-y-3">
+                    <p className="text-xs text-muted-foreground">
+                      {t("studio.train.combine.hint")}
+                    </p>
+                    <div className="max-h-48 divide-y divide-border overflow-auto rounded-md border border-border">
+                      {combinableDatasets.length === 0 ? (
+                        <p className="px-3 py-4 text-sm text-muted-foreground">
+                          {t("studio.train.dataset.hint")}
+                        </p>
+                      ) : (
+                        combinableDatasets.map((d) => (
+                          <label
+                            key={d.repo_id}
+                            className={cn(
+                              "flex items-center gap-2 px-3 py-2 text-sm",
+                              merging
+                                ? "cursor-not-allowed opacity-60"
+                                : "cursor-pointer hover:bg-muted/50",
+                            )}
+                          >
+                            <Checkbox
+                              className="shrink-0"
+                              checked={combineSources.includes(d.repo_id)}
+                              disabled={merging}
+                              onCheckedChange={() =>
+                                toggleCombineSource(d.repo_id)
+                              }
+                            />
+                            <span className="min-w-0 flex-1 truncate font-mono text-foreground">
+                              {d.repo_id}
+                            </span>
+                          </label>
+                        ))
+                      )}
+                    </div>
+                    {orderedCombineSources.length >= 2 ? (
+                      <DatasetWeightPicker
+                        value={orderedCombineSources.map((id) => ({
+                          repo_id: id,
+                          weight: combineWeights[id] ?? 1,
+                          baseEpisodes: combineEpisodes[id] ?? null,
+                        }))}
+                        onChange={(rows) =>
+                          setCombineWeights(
+                            Object.fromEntries(
+                              rows.map((r) => [r.repo_id, r.weight]),
+                            ),
+                          )
+                        }
+                        maxWeight={MAX_SOURCE_WEIGHT}
+                        disabled={merging}
+                      />
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        {t("studio.train.combine.sourcesRequired")}
+                      </p>
+                    )}
+                    {merge && merge.state !== "idle" ? (
+                      <div className="space-y-1.5">
+                        {merging ? (
+                          <p className="text-xs font-medium text-foreground">
+                            {t("studio.train.combine.merging")}
+                          </p>
+                        ) : null}
+                        <MergeProgress
+                          logs={merge.logs.map((l) => l.message)}
+                          state={merge.state}
+                          error={merge.error}
+                          outputRepoId={merge.output_repo_id}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <>
                 {selectedId ? (
                   <div className="flex flex-wrap gap-1.5">
                     <span className="inline-flex max-w-full items-center gap-1 rounded-md border border-border bg-muted/40 py-1 pl-2 pr-1 font-mono text-xs text-foreground">
@@ -675,6 +917,8 @@ const TrainPanel: React.FC = () => {
                     {t("studio.train.dataset.hint")}
                   </p>
                 ) : null}
+                  </>
+                )}
               </div>
             )}
 
@@ -771,8 +1015,17 @@ const TrainPanel: React.FC = () => {
               }::${finetuneSeed?.jobId ?? "fresh"}`}
               policyType={policyType}
               onPolicyTypeChange={setPolicyType}
-              datasetRepoId={trainingDatasetRepoId}
-              episodeIndices={trainingEpisodeIndices}
+              // Combine mode mints the dataset at launch (prepareDatasetRepoId),
+              // so the controlled id is blank and `datasetReady` gates Start on
+              // the source selection instead.
+              datasetRepoId={combine ? "" : trainingDatasetRepoId}
+              episodeIndices={combine ? undefined : trainingEpisodeIndices}
+              prepareDatasetRepoId={combine ? combineMergeAndTrain : undefined}
+              datasetReady={
+                combine
+                  ? orderedCombineSources.length >= 2 && !merging
+                  : undefined
+              }
               finetuneSeed={finetuneSeed}
               // The seed owns the chosen base checkpoint, so the pick survives
               // a remount of the form below. `checkpointSource` moves with it:

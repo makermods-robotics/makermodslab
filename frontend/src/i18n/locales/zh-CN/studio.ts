@@ -153,6 +153,13 @@ export default {
       description:
         "可在上方的任务列表中查看进度。训练完成后，可在「部署」面板中在机器人上运行。",
     },
+    combine: {
+      toggle: "合并多个数据集",
+      hint: "在多个数据集的加权组合上进行微调。它们会被合并成一个仅用于本次训练的临时数据集。",
+      merging: "正在合并数据集 — 合并完成后即开始训练。",
+      mergeFailed: "无法合并这些数据集",
+      sourcesRequired: "至少选择两个数据集进行合并。",
+    },
   },
 
   // 指导结束后的交接卡片，与 Launchpad 上的 CollectHandoff 并列：

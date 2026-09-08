@@ -15,6 +15,10 @@ export interface DatasetItem {
    * datasets with a local copy; absent for Hub-only rows, where it is unknown
    * rather than false — so read it as `weighted === true`, never `!weighted`. */
   weighted?: boolean;
+  /** Present when this dataset was produced by a merge (the backend surfaces
+   * its sidecar here). `temporary` marks a throwaway merge minted for a single
+   * combine-and-train launch — never offer one as a merge source. */
+  merge?: { temporary: boolean; weighted: boolean; source_count: number };
 }
 
 export async function listDatasets(
@@ -512,7 +516,10 @@ export interface MergeStartResult {
  * `started: false` and `droppable_features`; re-call with `dropFeatures` set to
  * those names. When the sources span more than one arm family it is refused
  * with `started: false` and a non-empty `warnings`; re-call with
- * `acknowledgeWarnings: true` to proceed. */
+ * `acknowledgeWarnings: true` to proceed.
+ *
+ * `temporary` marks a throwaway merge for a single combine-and-train launch:
+ * pass `outputRepoId: ""` with it and the backend mints the output name. */
 export async function startDatasetMerge(
   baseUrl: string,
   fetcher: Fetcher,
@@ -521,6 +528,7 @@ export async function startDatasetMerge(
   sourceWeights?: number[],
   dropFeatures: string[] = [],
   acknowledgeWarnings?: boolean,
+  temporary?: boolean,
 ): Promise<MergeStartResult> {
   // Only send weights when at least one is non-default, so an ordinary merge
   // keeps the exact request body it had before weights existed.
@@ -534,6 +542,7 @@ export async function startDatasetMerge(
       ...(weighted ? { source_weights: sourceWeights } : {}),
       drop_features: dropFeatures,
       ...(acknowledgeWarnings ? { acknowledge_warnings: true } : {}),
+      ...(temporary ? { temporary: true } : {}),
     },
     action: "Merge datasets",
   });
