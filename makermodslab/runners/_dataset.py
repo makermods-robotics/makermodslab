@@ -25,6 +25,7 @@ runners cannot drift on when a push happens or what it looks like.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 from ..datasets import (
     hub_copy_has_data,
@@ -33,6 +34,26 @@ from ..datasets import (
     push_dataset_to_hub,
 )
 from ..utils.config import with_makermodslab_tag
+
+
+def _local_dataset_dir(local_repo_id: str) -> Path:
+    from lerobot.utils.constants import HF_LEROBOT_HOME
+
+    return Path(HF_LEROBOT_HOME) / local_repo_id
+
+
+def _dataset_upload_plan(local_repo_id: str, hub_repo_id: str) -> tuple[bool, bool]:
+    """(`private`, `is_temporary_merge`) for an implicit pre-run upload.
+
+    A temporary merge is throwaway scratch, so it goes up PRIVATE — a narrow,
+    deliberate exception to "implicit uploads are public" (spec §6.6). Every
+    other dataset keeps the public default.
+    """
+    from ..merge_manifest import read_merge_manifest
+
+    manifest = read_merge_manifest(_local_dataset_dir(local_repo_id))
+    is_temp = bool(manifest and manifest.temporary)
+    return (is_temp, is_temp)
 
 
 def ensure_dataset_on_hub(local_repo_id: str, hub_repo_id: str, log: Callable[[str], None]) -> None:
@@ -83,20 +104,36 @@ def ensure_dataset_on_hub(local_repo_id: str, hub_repo_id: str, log: Callable[[s
             )
         return
 
+    # Public by default: MakerMods Lab's global policy is that datasets it pushes
+    # to the Hub are public and carry the required org/product tags (see
+    # with_makermodslab_tag / REQUIRED_HUB_TAGS) so all MakerMods Lab-produced
+    # datasets are discoverable. The lone exception is a temporary merge — a
+    # throwaway scratch dataset — which goes up private.
+    private, is_temp = _dataset_upload_plan(local_repo_id, hub_repo_id)
+    visibility = "private" if private else "public"
     reason = (
         "exists on the Hub but holds no data (an earlier upload didn't finish)" if exists else "not on Hub"
     )
-    log(f"[upload] dataset {hub_repo_id} {reason}; pushing local copy (public)...")
+    log(f"[upload] dataset {hub_repo_id} {reason}; pushing local copy ({visibility})...")
     try:
-        # Public by default: MakerMods Lab's global policy is that datasets it pushes
-        # to the Hub are public and carry the required org/product tags (see
-        # with_makermodslab_tag / REQUIRED_HUB_TAGS). This implicit pre-run upload
-        # follows that same default so all MakerMods Lab-produced datasets are
-        # discoverable. (This intentionally reverses the earlier private
-        # default — an implicit upload of a local-only dataset is now public.)
-        push_dataset_to_hub(local_repo_id, tags=with_makermodslab_tag(None), private=False)
+        push_dataset_to_hub(local_repo_id, tags=with_makermodslab_tag(None), private=private)
     except Exception as exc:
         msg = f"Failed to upload local dataset {local_repo_id} to Hub: {exc}"
         log(f"[upload] {msg}")
         raise RuntimeError(msg) from exc
     log(f"[upload] dataset {hub_repo_id} uploaded.")
+
+    if is_temp:
+        # Record where it landed so "clean up temporary merges" can delete the
+        # Hub copy too — the ONLY signal that authorises a Hub delete. A missing
+        # back-ref only costs us that later cleanup, so never let it raise.
+        try:
+            from ..merge_manifest import read_merge_manifest, write_merge_manifest
+
+            d = _local_dataset_dir(local_repo_id)
+            m = read_merge_manifest(d)
+            if m is not None and m.hub_repo != hub_repo_id:
+                m.hub_repo = hub_repo_id
+                write_merge_manifest(d, m)
+        except Exception as exc:
+            log(f"[upload] could not record the Hub repo on the merge sidecar: {exc}")
