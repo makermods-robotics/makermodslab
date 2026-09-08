@@ -291,6 +291,9 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # run is launched with. Read/replace only — never deletes an episode.
         "GET /api/v1/datasets/excluded-episodes",
         "PUT /api/v1/datasets/excluded-episodes",
+        # Temporary-merge cleanup: manual removal of throwaway training mixes,
+        # local dir plus any MakerMods-created Hub copy.
+        "POST /api/v1/datasets/merge/cleanup",
     ]
 )
 

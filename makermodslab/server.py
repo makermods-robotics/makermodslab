@@ -177,6 +177,7 @@ from .schemas.datasets import (
     EpisodeSummary,
     ExcludedEpisodesResponse,
     ImportResponse,
+    MergeCleanupResponse,
     MergeStartResponse,
     MergeStatusResponse,
     SetExcludedEpisodesResponse,
@@ -1671,6 +1672,18 @@ def datasets_merge(request: MergeRequest):
 def datasets_merge_status():
     """Current merge state + drained log lines (idle | running | done | error)."""
     return handle_merge_status()
+
+
+class MergeCleanupRequest(BaseModel):
+    repo_ids: list[str] | None = None
+
+
+@v1_router.post("/datasets/merge/cleanup", response_model=MergeCleanupResponse, tags=["datasets"])
+def datasets_merge_cleanup(request: MergeCleanupRequest):
+    """Delete temporary merged datasets — the local directory and any
+    MakerMods-created Hub copy. Manual only; nothing here runs on a schedule. A
+    dataset a training run is using (or queued to) is skipped and reported."""
+    return dataset_browser.cleanup_temporary_merges(request.repo_ids)
 
 
 @router.websocket("/ws/joint-data")

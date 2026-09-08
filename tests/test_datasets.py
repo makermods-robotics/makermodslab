@@ -3597,3 +3597,196 @@ def test_read_dataset_robot_type_is_local_only_never_hits_the_hub() -> None:
         ),
     ):
         assert ds.read_dataset_robot_type("bob/not-cached") is None
+
+
+# --- Temporary-merge cleanup (Task 6) -------------------------------------------
+
+
+def _make_temp_merge(root: Path, repo_id: str, *, temporary: bool, hub_repo: str | None = None) -> None:
+    """A local dataset dir carrying a merge sidecar."""
+    from makermodslab.merge_manifest import MergeManifest, MergeManifestSource, write_merge_manifest
+
+    _make_dataset(root, repo_id, episodes=2)
+    write_merge_manifest(
+        root / repo_id,
+        MergeManifest(
+            created_at=1.0,
+            weighted=False,
+            temporary=temporary,
+            hub_repo=hub_repo,
+            sources=[MergeManifestSource(repo_id="ns/a", weight=1)],
+        ),
+    )
+
+
+def test_cleanup_skips_dataset_in_use(tmp_lerobot_home: Path, monkeypatch) -> None:
+    from makermodslab import datasets as ds
+
+    _make_temp_merge(tmp_lerobot_home, "ns/mix", temporary=True)
+    monkeypatch.setattr(ds, "_dataset_in_use", lambda rid: "A local training run is using this dataset.")
+
+    out = ds.cleanup_temporary_merges()
+    assert out["deleted"] == []
+    assert out["skipped"] == [{"repo_id": "ns/mix", "reason": "A local training run is using this dataset."}]
+    assert (tmp_lerobot_home / "ns/mix").exists()
+
+
+def test_cleanup_never_touches_a_non_temporary_sidecar(tmp_lerobot_home: Path, monkeypatch) -> None:
+    from makermodslab import datasets as ds
+
+    _make_temp_merge(tmp_lerobot_home, "ns/plainmerge", temporary=False)
+    monkeypatch.setattr(ds, "_dataset_in_use", lambda rid: None)
+
+    out = ds.cleanup_temporary_merges()
+    assert out["deleted"] == []
+    assert (tmp_lerobot_home / "ns/plainmerge").exists()
+
+
+def test_cleanup_ignores_a_dataset_with_no_sidecar(tmp_lerobot_home: Path, monkeypatch) -> None:
+    from makermodslab import datasets as ds
+
+    _make_dataset(tmp_lerobot_home, "ns/plain", episodes=2)
+    monkeypatch.setattr(ds, "_dataset_in_use", lambda rid: None)
+
+    out = ds.cleanup_temporary_merges()
+    assert out["deleted"] == []
+    assert (tmp_lerobot_home / "ns/plain").exists()
+
+
+def test_cleanup_deletes_local_and_reports(tmp_lerobot_home: Path, monkeypatch) -> None:
+    from makermodslab import datasets as ds
+
+    _make_temp_merge(tmp_lerobot_home, "ns/mix", temporary=True)
+    monkeypatch.setattr(ds, "_dataset_in_use", lambda rid: None)
+    inval = MagicMock()
+    monkeypatch.setattr(ds, "invalidate_dataset_listing_cache", inval)
+
+    out = ds.cleanup_temporary_merges()
+    assert out["deleted"] == ["ns/mix"]
+    assert out["hub_deleted"] == []
+    assert out["hub_failed"] == []
+    assert not (tmp_lerobot_home / "ns/mix").exists()
+    inval.assert_called_once()
+
+
+def test_cleanup_respects_explicit_repo_ids(tmp_lerobot_home: Path, monkeypatch) -> None:
+    from makermodslab import datasets as ds
+
+    _make_temp_merge(tmp_lerobot_home, "ns/keep", temporary=True)
+    _make_temp_merge(tmp_lerobot_home, "ns/go", temporary=True)
+    monkeypatch.setattr(ds, "_dataset_in_use", lambda rid: None)
+
+    out = ds.cleanup_temporary_merges(["ns/go"])
+    assert out["deleted"] == ["ns/go"]
+    assert (tmp_lerobot_home / "ns/keep").exists()
+    assert not (tmp_lerobot_home / "ns/go").exists()
+
+
+def test_cleanup_deletes_recorded_hub_repo_when_guard_passes(tmp_lerobot_home: Path, monkeypatch) -> None:
+    from makermodslab import datasets as ds
+
+    _make_temp_merge(tmp_lerobot_home, "ns/mix", temporary=True, hub_repo="me/mix")
+    monkeypatch.setattr(ds, "_dataset_in_use", lambda rid: None)
+    monkeypatch.setattr(ds, "_may_delete_hub_repo", lambda repo: repo == "me/mix")
+    deleted: list[tuple[str, str]] = []
+
+    class _Api:
+        def delete_repo(self, repo_id, repo_type, missing_ok=False):
+            deleted.append((repo_id, repo_type))
+
+    monkeypatch.setattr(ds, "shared_hf_api", lambda: _Api())
+
+    out = ds.cleanup_temporary_merges()
+    assert out["deleted"] == ["ns/mix"]
+    assert out["hub_deleted"] == ["me/mix"]
+    assert deleted == [("me/mix", "dataset")]
+
+
+def test_cleanup_hub_delete_failure_never_fails_local_delete(tmp_lerobot_home: Path, monkeypatch) -> None:
+    from makermodslab import datasets as ds
+
+    _make_temp_merge(tmp_lerobot_home, "ns/mix", temporary=True, hub_repo="me/mix")
+    monkeypatch.setattr(ds, "_dataset_in_use", lambda rid: None)
+    monkeypatch.setattr(ds, "_may_delete_hub_repo", lambda repo: True)
+
+    class _Api:
+        def delete_repo(self, repo_id, repo_type, missing_ok=False):
+            raise RuntimeError("hub is down")
+
+    monkeypatch.setattr(ds, "shared_hf_api", lambda: _Api())
+
+    out = ds.cleanup_temporary_merges()
+    assert out["deleted"] == ["ns/mix"]
+    assert out["hub_deleted"] == []
+    assert out["hub_failed"] == [{"repo_id": "me/mix", "reason": "hub is down"}]
+    assert not (tmp_lerobot_home / "ns/mix").exists()
+
+
+def test_cleanup_hub_delete_skipped_when_guard_refuses(tmp_lerobot_home: Path, monkeypatch) -> None:
+    from makermodslab import datasets as ds
+
+    _make_temp_merge(tmp_lerobot_home, "ns/mix", temporary=True, hub_repo="someoneelse/mix")
+    monkeypatch.setattr(ds, "_dataset_in_use", lambda rid: None)
+    monkeypatch.setattr(ds, "_may_delete_hub_repo", lambda repo: False)
+
+    class _Api:
+        def delete_repo(self, *a, **k):
+            raise AssertionError("must not delete a repo the guard refused")
+
+    monkeypatch.setattr(ds, "shared_hf_api", lambda: _Api())
+
+    out = ds.cleanup_temporary_merges()
+    assert out["deleted"] == ["ns/mix"]
+    assert out["hub_deleted"] == []
+    assert len(out["hub_failed"]) == 1
+    assert out["hub_failed"][0]["repo_id"] == "someoneelse/mix"
+
+
+def test_may_delete_hub_repo_false_on_any_error(monkeypatch) -> None:
+    from makermodslab import datasets as ds
+
+    def _boom(*a, **k):
+        raise RuntimeError("whoami exploded")
+
+    monkeypatch.setattr(ds, "cached_whoami", _boom)
+    assert ds._may_delete_hub_repo("me/mix") is False
+    # No slash at all — not <ns>/<name>.
+    assert ds._may_delete_hub_repo("bareid") is False
+
+
+def test_may_delete_hub_repo_false_when_namespace_not_writable(monkeypatch) -> None:
+    from makermodslab import datasets as ds
+    from makermodslab.datasets import HubDatasetId
+
+    monkeypatch.setattr(ds, "cached_whoami", lambda *a, **k: {"name": "me"})
+    monkeypatch.setattr(
+        ds,
+        "resolve_hub_dataset_id",
+        lambda repo, who: HubDatasetId(repo_id=repo, namespace="other", writable=False),
+    )
+    assert ds._may_delete_hub_repo("other/mix") is False
+
+
+def test_may_delete_hub_repo_requires_makermods_tag(monkeypatch) -> None:
+    from makermodslab import datasets as ds
+    from makermodslab.datasets import HubDatasetId
+
+    monkeypatch.setattr(ds, "cached_whoami", lambda *a, **k: {"name": "me"})
+    monkeypatch.setattr(
+        ds,
+        "resolve_hub_dataset_id",
+        lambda repo, who: HubDatasetId(repo_id="me/mix", namespace="me", writable=True),
+    )
+
+    class _Api:
+        def __init__(self, tags):
+            self._tags = tags
+
+        def dataset_info(self, repo_id):
+            return type("I", (), {"tags": self._tags})()
+
+    monkeypatch.setattr(ds, "shared_hf_api", lambda: _Api(["makermods"]))
+    assert ds._may_delete_hub_repo("me/mix") is False
+
+    monkeypatch.setattr(ds, "shared_hf_api", lambda: _Api(["makermods", "MakerModsLab"]))
+    assert ds._may_delete_hub_repo("me/mix") is True

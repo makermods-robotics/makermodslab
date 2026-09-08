@@ -38,6 +38,7 @@ from huggingface_hub.errors import HfHubHTTPError
 from .merge_manifest import MergeManifest, read_merge_manifest
 from .sampling import SAMPLING_WEIGHT_COLUMN
 from .utils.config import (
+    MAKERMODSLAB_TAG,
     get_hidden_datasets,
     get_saved_custom_datasets,
     validate_dataset_name,
@@ -1802,6 +1803,122 @@ def _dataset_in_use(repo_id: str) -> str | None:
         return "A local training run is using this dataset, or is queued to. Stop or cancel it first."
 
     return None
+
+
+def _may_delete_hub_repo(hub_repo: str) -> bool:
+    """Guard for deleting a Hub DATASET repo during merge cleanup.
+
+    True only when ALL hold:
+      * `hub_repo` is `<namespace>/<name>`;
+      * `<namespace>` is the authenticated user's own writable namespace;
+      * the repo carries the MakerModsLab tag (our pushes stamp it).
+
+    Any lookup failure — no Hub identity, a 404, a network error — returns
+    False. A repo we cannot positively vouch for is never deleted.
+    """
+    if "/" not in hub_repo:
+        return False
+    try:
+        ident = resolve_hub_dataset_id(hub_repo, cached_whoami())
+        if not ident.writable:
+            logger.info("_may_delete_hub_repo(%s): refusing, namespace not writable", hub_repo)
+            return False
+        tags = getattr(shared_hf_api().dataset_info(ident.repo_id), "tags", None) or []
+        if MAKERMODSLAB_TAG not in tags:
+            logger.info("_may_delete_hub_repo(%s): refusing, no MakerModsLab tag", hub_repo)
+            return False
+        return True
+    except Exception as exc:
+        logger.info("_may_delete_hub_repo(%s): refusing, lookup failed: %s", hub_repo, exc)
+        return False
+
+
+def _delete_hub_dataset_repo(hub_repo: str) -> None:
+    """Delete a Hub dataset repo. Caller MUST have cleared `_may_delete_hub_repo`
+    first — this does no checking of its own."""
+    ident = resolve_hub_dataset_id(hub_repo, cached_whoami())
+    shared_hf_api().delete_repo(ident.repo_id, repo_type="dataset", missing_ok=True)
+
+
+def cleanup_temporary_merges(repo_ids: list[str] | None = None) -> dict[str, Any]:
+    """Delete temporary merged datasets (local dir + a MakerMods-created Hub
+    copy). Manual action only — nothing here runs on a timer.
+
+    Scope: local datasets whose `meta/makermodslab_merge.json` sidecar says
+    `temporary: true`. `repo_ids`, when given, narrows to that set (still
+    sidecar-gated). A dataset `_dataset_in_use` reports busy is skipped and
+    reported. A non-temporary dataset with a sidecar is NEVER touched.
+
+    Returns ``{deleted, skipped, hub_deleted, hub_failed}``.
+    """
+    cache_root = _lerobot_cache_root()
+    root_resolved = cache_root.resolve()
+    deleted: list[str] = []
+    skipped: list[dict[str, str]] = []
+    hub_deleted: list[str] = []
+    hub_failed: list[dict[str, str]] = []
+
+    candidates = list(repo_ids) if repo_ids is not None else [r["repo_id"] for r in list_local_datasets()]
+
+    for repo_id in candidates:
+        dataset_dir = cache_root / repo_id
+        manifest = read_merge_manifest(dataset_dir)
+        if manifest is None or not manifest.temporary:
+            continue  # not a temporary merge — never a candidate
+
+        busy = _dataset_in_use(repo_id)
+        if busy is not None:
+            skipped.append({"repo_id": repo_id, "reason": busy})
+            continue
+
+        # Traversal guard, mirroring handle_delete_dataset: the target must stay
+        # strictly inside the cache root.
+        try:
+            target = dataset_dir.resolve()
+        except OSError:
+            skipped.append({"repo_id": repo_id, "reason": "Invalid dataset path"})
+            continue
+        if target == root_resolved or root_resolved not in target.parents:
+            skipped.append({"repo_id": repo_id, "reason": "Invalid dataset path"})
+            continue
+
+        hub_repo = manifest.hub_repo
+        try:
+            shutil.rmtree(target)
+        except Exception as exc:
+            skipped.append({"repo_id": repo_id, "reason": f"Could not delete: {exc}"})
+            continue
+        deleted.append(repo_id)
+
+        # Best-effort Hub cleanup — only for a sidecar-recorded back-ref, and
+        # only when the guard positively vouches for the repo. Never undoes or
+        # fails the local delete above.
+        if hub_repo:
+            try:
+                if _may_delete_hub_repo(hub_repo):
+                    _delete_hub_dataset_repo(hub_repo)
+                    hub_deleted.append(hub_repo)
+                else:
+                    hub_failed.append(
+                        {
+                            "repo_id": hub_repo,
+                            "reason": "Not a MakerModsLab-created repo in your namespace.",
+                        }
+                    )
+            except Exception as exc:
+                hub_failed.append({"repo_id": hub_repo, "reason": str(exc)})
+
+    if deleted:
+        invalidate_dataset_listing_cache()
+        for repo_id in deleted:
+            invalidate_hub_status(repo_id)
+
+    return {
+        "deleted": deleted,
+        "skipped": skipped,
+        "hub_deleted": hub_deleted,
+        "hub_failed": hub_failed,
+    }
 
 
 def _invalidate_rename_caches(*ids: str | None) -> None:

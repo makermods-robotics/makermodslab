@@ -943,6 +943,11 @@
       "DeleteDatasetResponse": {
         "description": "record.py handle_delete_dataset — success False carries the refusal\nreason in `message` (still HTTP 200).",
         "properties": {
+          "hub_deleted": {
+            "default": false,
+            "title": "Hub Deleted",
+            "type": "boolean"
+          },
           "message": {
             "title": "Message",
             "type": "string"
@@ -2615,6 +2620,103 @@
           "message"
         ],
         "title": "MakerProbePortsResponse",
+        "type": "object"
+      },
+      "MergeCleanupHubFailure": {
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "reason"
+        ],
+        "title": "MergeCleanupHubFailure",
+        "type": "object"
+      },
+      "MergeCleanupRequest": {
+        "properties": {
+          "repo_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Ids"
+          }
+        },
+        "title": "MergeCleanupRequest",
+        "type": "object"
+      },
+      "MergeCleanupResponse": {
+        "description": "server.py datasets_merge_cleanup — what the manual \"clean up temporary\nmerges\" action removed. `skipped` names datasets left in place because they\nare in use; `hub_failed` names Hub repos the guard refused or the API\nrejected.",
+        "properties": {
+          "deleted": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Deleted",
+            "type": "array"
+          },
+          "hub_deleted": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Hub Deleted",
+            "type": "array"
+          },
+          "hub_failed": {
+            "items": {
+              "$ref": "#/components/schemas/MergeCleanupHubFailure"
+            },
+            "title": "Hub Failed",
+            "type": "array"
+          },
+          "skipped": {
+            "items": {
+              "$ref": "#/components/schemas/MergeCleanupSkip"
+            },
+            "title": "Skipped",
+            "type": "array"
+          }
+        },
+        "required": [
+          "deleted",
+          "skipped",
+          "hub_deleted",
+          "hub_failed"
+        ],
+        "title": "MergeCleanupResponse",
+        "type": "object"
+      },
+      "MergeCleanupSkip": {
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "reason"
+        ],
+        "title": "MergeCleanupSkip",
         "type": "object"
       },
       "MergeLogEntry": {
@@ -7194,6 +7296,48 @@
           }
         },
         "summary": "Datasets Merge",
+        "tags": [
+          "datasets"
+        ]
+      }
+    },
+    "/api/v1/datasets/merge/cleanup": {
+      "post": {
+        "description": "Delete temporary merged datasets — the local directory and any\nMakerMods-created Hub copy. Manual only; nothing here runs on a schedule. A\ndataset a training run is using (or queued to) is skipped and reported.",
+        "operationId": "datasets_merge_cleanup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MergeCleanupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergeCleanupResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Merge Cleanup",
         "tags": [
           "datasets"
         ]

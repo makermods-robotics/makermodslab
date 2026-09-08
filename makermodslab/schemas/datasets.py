@@ -56,6 +56,9 @@ __all__ = [
     "EpisodeSummary",
     "ExcludedEpisodesResponse",
     "ImportResponse",
+    "MergeCleanupHubFailure",
+    "MergeCleanupResponse",
+    "MergeCleanupSkip",
     "MergeLogEntry",
     "MergeStartResponse",
     "MergeStatusResponse",
@@ -311,3 +314,28 @@ class DeleteDatasetResponse(BaseModel):
 
     success: bool
     message: str
+    # True when a merge sidecar recorded a MakerMods-created Hub copy and it was
+    # deleted along with the local directory. Absent/False otherwise.
+    hub_deleted: bool = False
+
+
+class MergeCleanupSkip(BaseModel):
+    repo_id: str
+    reason: str
+
+
+class MergeCleanupHubFailure(BaseModel):
+    repo_id: str
+    reason: str
+
+
+class MergeCleanupResponse(BaseModel):
+    """server.py datasets_merge_cleanup — what the manual "clean up temporary
+    merges" action removed. `skipped` names datasets left in place because they
+    are in use; `hub_failed` names Hub repos the guard refused or the API
+    rejected."""
+
+    deleted: list[str]
+    skipped: list[MergeCleanupSkip]
+    hub_deleted: list[str]
+    hub_failed: list[MergeCleanupHubFailure]
