@@ -35,6 +35,7 @@ from huggingface_hub import (
 )
 from huggingface_hub.errors import HfHubHTTPError
 
+from .merge_manifest import MergeManifest, read_merge_manifest
 from .sampling import SAMPLING_WEIGHT_COLUMN
 from .utils.config import (
     get_hidden_datasets,
@@ -908,6 +909,37 @@ def _has_sampling_weight_column(path: Path) -> bool:
     return False
 
 
+def _merge_sidecar_block(path: Path) -> dict[str, Any] | None:
+    """The listing-row ``merge`` block for a local dataset dir, or None.
+
+    Just enough of ``meta/makermodslab_merge.json`` to group and badge the row;
+    the full recipe is on GET /datasets/info, not the listing.
+    """
+    manifest = read_merge_manifest(path)
+    if manifest is None:
+        return None
+    return {
+        "temporary": manifest.temporary,
+        "weighted": manifest.weighted,
+        "source_count": len(manifest.sources),
+    }
+
+
+def _local_listing_row(repo_id: str, path: Path) -> dict[str, Any]:
+    """One local ``list_local_datasets`` row, with a ``merge`` block when the
+    dataset carries a merge sidecar."""
+    row: dict[str, Any] = {
+        "repo_id": repo_id,
+        "last_modified": _dir_mtime_iso(path),
+        "private": False,
+        "weighted": _has_sampling_weight_column(path),
+    }
+    merge = _merge_sidecar_block(path)
+    if merge is not None:
+        row["merge"] = merge
+    return row
+
+
 def list_local_datasets() -> list[dict[str, Any]]:
     """Scan the LeRobot cache for local datasets (dirs containing meta/info.json).
 
@@ -937,14 +969,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
             # It IS a dataset (empty or not) — record it only if non-empty, but
             # don't descend into its subdirs either way.
             if _dataset_has_episodes(top):
-                out.append(
-                    {
-                        "repo_id": top.name,
-                        "last_modified": _dir_mtime_iso(top),
-                        "private": False,
-                        "weighted": _has_sampling_weight_column(top),
-                    }
-                )
+                out.append(_local_listing_row(top.name, top))
             continue
 
         # Not a dataset itself — descend one level.
@@ -959,14 +984,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
             except OSError:
                 continue
             if _is_dataset_dir(sub) and _dataset_has_episodes(sub):
-                out.append(
-                    {
-                        "repo_id": f"{top.name}/{sub.name}",
-                        "last_modified": _dir_mtime_iso(sub),
-                        "private": False,
-                        "weighted": _has_sampling_weight_column(sub),
-                    }
-                )
+                out.append(_local_listing_row(f"{top.name}/{sub.name}", sub))
 
     out.sort(key=lambda d: d["last_modified"] or "", reverse=True)
     return out
@@ -1287,6 +1305,18 @@ def list_episode_summaries(repo_id: str) -> list[dict[str, Any]] | None:
         )
     out.sort(key=lambda e: e["episode_index"])
     return out
+
+
+def read_merge_sidecar(repo_id: str) -> MergeManifest | None:
+    """The merge manifest for a LOCAL dataset, or None.
+
+    Local path only: the sidecar does not travel to the Hub, so a Hub-only row
+    has no recipe to show here.
+    """
+    path = _resolve_local_dataset_path(repo_id)
+    if path is None:
+        return None
+    return read_merge_manifest(path)
 
 
 def dataset_is_weighted(repo_id: str) -> bool:
@@ -2102,6 +2132,8 @@ def list_all_datasets() -> list[dict[str, Any]]:
             # likely to have been merged and pushed.
             if "weighted" in item:
                 existing["weighted"] = item["weighted"]
+            if "merge" in item:
+                existing["merge"] = item["merge"]
         else:
             merged[rid] = {**item, "source": "local"}
 

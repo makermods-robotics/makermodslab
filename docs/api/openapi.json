@@ -711,6 +711,16 @@
             ],
             "title": "Last Modified"
           },
+          "merge": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DatasetMergeInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "private": {
             "title": "Private",
             "type": "boolean"
@@ -738,6 +748,17 @@
             ],
             "title": "Source",
             "type": "string"
+          },
+          "weighted": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weighted"
           }
         },
         "required": [
@@ -747,6 +768,30 @@
           "source"
         ],
         "title": "DatasetListItem",
+        "type": "object"
+      },
+      "DatasetMergeInfo": {
+        "description": "Present on a GET /datasets row when the local dataset has a\n`meta/makermodslab_merge.json` sidecar (it was produced by a MakerMods\nmerge). The full recipe is on GET /datasets/info, not here — the row only\nneeds enough to group and badge.",
+        "properties": {
+          "source_count": {
+            "title": "Source Count",
+            "type": "integer"
+          },
+          "temporary": {
+            "title": "Temporary",
+            "type": "boolean"
+          },
+          "weighted": {
+            "title": "Weighted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "temporary",
+          "weighted",
+          "source_count"
+        ],
+        "title": "DatasetMergeInfo",
         "type": "object"
       },
       "DatasetRenameBody": {

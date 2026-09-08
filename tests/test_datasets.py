@@ -103,6 +103,66 @@ def test_list_local_datasets_hides_empty_dataset(
     assert "empty_ds" not in repo_ids
 
 
+def test_list_local_datasets_carries_merge_block(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import list_local_datasets
+    from makermodslab.merge_manifest import build_merge_manifest, write_merge_manifest
+
+    _make_dataset(tmp_lerobot_home, "ns/mix", episodes=3)
+    write_merge_manifest(
+        tmp_lerobot_home / "ns/mix",
+        build_merge_manifest(["ns/a", "ns/b"], [1, 3], [10, 30], temporary=True, created_at=1.0),
+    )
+
+    rows = {r["repo_id"]: r for r in list_local_datasets()}
+    assert rows["ns/mix"]["merge"] == {
+        "temporary": True,
+        "weighted": True,
+        "source_count": 2,
+    }
+
+
+def test_list_local_datasets_no_sidecar_has_no_merge_block(
+    tmp_lerobot_home: Path,
+) -> None:
+    from makermodslab.datasets import list_local_datasets
+
+    _make_dataset(tmp_lerobot_home, "ns/plain", episodes=3)
+    row = next(r for r in list_local_datasets() if r["repo_id"] == "ns/plain")
+    assert "merge" not in row
+
+
+def test_read_merge_sidecar_is_local_only(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+    from makermodslab.merge_manifest import build_merge_manifest, write_merge_manifest
+
+    _make_dataset(tmp_lerobot_home, "ns/mix", episodes=1)
+    write_merge_manifest(
+        tmp_lerobot_home / "ns/mix",
+        build_merge_manifest(["ns/a"], [1], [5], temporary=False, created_at=1.0),
+    )
+
+    manifest = ds.read_merge_sidecar("ns/mix")
+    assert manifest is not None
+    assert [s.repo_id for s in manifest.sources] == ["ns/a"]
+    assert ds.read_merge_sidecar("ns/not-local") is None
+
+
+def test_dataset_list_item_serializes_merge_and_weighted() -> None:
+    from makermodslab.schemas.datasets import DatasetListItem, DatasetMergeInfo
+
+    item = DatasetListItem(
+        repo_id="ns/mix",
+        last_modified=None,
+        private=False,
+        source="local",
+        weighted=True,
+        merge=DatasetMergeInfo(temporary=True, weighted=True, source_count=2),
+    )
+    dumped = item.model_dump(exclude_unset=True)
+    assert dumped["merge"]["source_count"] == 2
+    assert dumped["weighted"] is True
+
+
 def test_list_user_datasets_returns_empty_when_not_logged_in(
     tmp_lerobot_home: Path,
 ) -> None:
