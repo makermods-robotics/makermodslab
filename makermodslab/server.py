@@ -253,6 +253,7 @@ from .sessions import (
     handle_stop_session,
     held_by,
 )
+from .step_calibrate import step_calibration_is_active, step_calibration_manager
 
 # Import our custom teleoperation functionality
 from .teleoperate import (
@@ -326,7 +327,6 @@ from .utils.system import (
     warn_if_cuda_mismatch,
 )
 from .wiggle import wiggle_gripper
-from .zero_calibrate import zero_calibration_is_active, zero_calibration_manager
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -3620,11 +3620,11 @@ def stop_calibration():
     """Stop calibration process.
 
     Stops whichever calibration flow is live. Stopping is never owner-gated
-    and the two managers are mutually exclusive, so trying the zero-pose flow
+    and the two managers are mutually exclusive, so trying the step wizard
     first and falling through is unambiguous.
     """
-    if zero_calibration_is_active():
-        return zero_calibration_manager.stop()
+    if step_calibration_is_active():
+        return step_calibration_manager.stop()
     return calibration_manager.stop_calibration_process()
 
 
@@ -3633,24 +3633,33 @@ def calibration_status():
     """Get current calibration status, from whichever flow is live.
 
     The two status dataclasses are field-compatible where they overlap, so one
-    client shape reads both. `awaiting_pose` is present only on the zero-pose
-    flow and defaults to False for the SO-101 sweep, which is what lets the
-    frontend switch panels on it.
+    client shape reads both. `image_url` and `live_positions` are the step
+    wizard's own fields and default (null / False) for the SO-101 sweep, so
+    the frontend reads one shape whichever manager answers.
     """
     from dataclasses import asdict
 
-    if zero_calibration_is_active():
-        return asdict(zero_calibration_manager.get_status())
+    if step_calibration_is_active():
+        return asdict(step_calibration_manager.get_status())
     payload = asdict(calibration_manager.get_status())
-    payload.setdefault("awaiting_pose", False)
+    payload.setdefault("image_url", None)
+    payload.setdefault("live_positions", False)
     return payload
 
 
+class CompleteCalibrationStepRequest(BaseModel):
+    # The step number the client is confirming (the step wizard sends the one
+    # on screen). Optional: the range-sweep flow and older clients send no
+    # body. When present, a confirm for any other step is refused rather than
+    # carried over to the step the family published next.
+    step: int | None = None
+
+
 @router.post("/complete-calibration-step")
-def complete_calibration_step():
+def complete_calibration_step(request: CompleteCalibrationStepRequest | None = None):
     """Complete the current calibration step (either flow)."""
-    if zero_calibration_is_active():
-        return zero_calibration_manager.complete_step()
+    if step_calibration_is_active():
+        return step_calibration_manager.complete_step(request.step if request else None)
     return calibration_manager.complete_step()
 
 

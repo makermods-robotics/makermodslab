@@ -40,10 +40,11 @@ from makermodslab.utils.system import (
 
 __all__ = [
     "ArmCalibrationInfo",
+    "ArmCalibrationSide",
+    "ArmCalibrationSummary",
     "ArmCapabilities",
     "ArmFamiliesResponse",
     "ArmFamilyInfo",
-    "ArmZeroPose",
     "AvailableCamerasResponse",
     "AvailablePortsResponse",
     "CameraInfo",
@@ -234,21 +235,33 @@ class MakerIdentifyArmResponse(BaseModel):
     skipped: list[str] = []
 
 
-class ArmZeroPose(BaseModel):
-    """The pose text a zero-pose calibration shows, per side (the family's
-    own zero_pose_instructions, verbatim — the backend is never localized)."""
+class ArmCalibrationSide(BaseModel):
+    """What the config dialog shows BEFORE Start for one device side (the
+    family's own calibration_summary, verbatim — the backend is never
+    localized): the text and an optional served image."""
 
-    leader: str
-    follower: str
+    text: str
+    image_url: str | None
+
+
+class ArmCalibrationSummary(BaseModel):
+    """The pre-start summary per side; a side is null when the family has
+    nothing to show for it."""
+
+    leader: ArmCalibrationSide | None
+    follower: ArmCalibrationSide | None
 
 
 class ArmCalibrationInfo(BaseModel):
     """How a family is calibrated: a range sweep (the SO-101's manual or
-    driven flows) or a zero pose set by hand. `zero_pose` is null — not
-    absent — for a range-sweep family, so the route must NOT exclude None."""
+    driven flows), a step wizard the family drives (the CAN arms' zero pose),
+    or an extension's own panel at `panel_url`. `summary` and `panel_url` are
+    null — not absent — when they do not apply, so the route must NOT
+    exclude None."""
 
-    kind: Literal["range_sweep", "zero_pose"]
-    zero_pose: ArmZeroPose | None
+    kind: Literal["range_sweep", "steps", "panel"]
+    summary: ArmCalibrationSummary | None
+    panel_url: str | None
 
 
 class ArmCapabilities(BaseModel):
@@ -272,7 +285,9 @@ class ArmFamilyInfo(BaseModel):
     followers register under (single, then bimanual); `robot_type_markers`
     the substrings that identify it in a dataset's free-form robot_type;
     `calibration_name_suffix` what the server appends to a robot record's
-    name when it mints a default calibration id ("" for the SO-101).
+    name when it mints a default calibration id ("" for the SO-101);
+    `image_url` a served image for the create dialog (null for the built-ins,
+    whose photos the frontend bundles).
     """
 
     id: str
@@ -281,6 +296,7 @@ class ArmFamilyInfo(BaseModel):
     provided_by: str
     joints_per_arm: int
     supports_bimanual: bool
+    image_url: str | None
     calibration: ArmCalibrationInfo
     telemetry_kind: Literal["urdf", "degrees"]
     capabilities: ArmCapabilities

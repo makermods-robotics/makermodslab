@@ -7,6 +7,7 @@ silently re-enable a guard (or a feature) on hardware that cannot support it.
 
 import pytest
 
+from makermodslab import arm_capabilities
 from makermodslab.arm_capabilities import (
     arm_type_from_robot_type,
     arm_type_of_robot_config,
@@ -14,7 +15,6 @@ from makermodslab.arm_capabilities import (
     supports_auto_calibration,
     supports_dagger,
     uses_feetech_bus,
-    uses_zero_calibration,
 )
 
 
@@ -35,16 +35,35 @@ def test_feetech_only_helpers_are_off_for_the_maker_arm() -> None:
     assert uses_feetech_bus("maker") is False
 
 
-def test_auto_calibration_is_so101_only_and_zero_calibration_is_maker_only() -> None:
-    """Each arm type has exactly one calibration procedure, and they differ.
+def test_auto_calibration_is_so101_only_and_the_can_pair_are_step_wizards() -> None:
+    """Each arm type has exactly one calibration procedure, named by its kind.
 
-    The SO-101 sweeps each joint's range under torque; the Maker arm's limits
-    are fixed constants, so all it needs is a zero pose.
+    The SO-101 sweeps each joint's range under torque (``range_sweep``); the
+    CAN arms' limits are fixed constants, so all they need is a zero pose,
+    which the family runs as a step wizard (``steps``). The boolean
+    ``uses_zero_calibration`` is gone: an extension's kind may be ``panel``,
+    which no boolean could name.
     """
+    from makermodslab.arm_capabilities import calibration_kind
+
     assert supports_auto_calibration("so101") is True
     assert supports_auto_calibration("maker") is False
-    assert uses_zero_calibration("maker") is True
-    assert uses_zero_calibration("so101") is False
+    assert calibration_kind("so101") == "range_sweep"
+    assert calibration_kind("maker") == "steps"
+    assert calibration_kind("metal") == "steps"
+    assert not hasattr(arm_capabilities, "uses_zero_calibration")
+
+
+def test_calibration_kind_reads_the_registry_live(monkeypatch) -> None:
+    from makermodslab.arm_capabilities import calibration_kind
+    from makermodslab.arms import registry
+    from tests.mocks import make_arm_family, scratch_registry
+
+    scratch_registry(monkeypatch)
+    registry.register(
+        make_arm_family("paneled", calibration_kind="panel", calibration_panel_url="/api/v1/ext/p/static/cal")
+    )
+    assert calibration_kind("paneled") == "panel"
 
 
 def test_dagger_is_refused_on_the_maker_and_metal_arms() -> None:

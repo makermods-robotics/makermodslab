@@ -878,13 +878,14 @@ def calibration_is_active() -> bool:
     feature modules' reciprocal mutex checks (see CLAUDE.md) can't drift from
     the managers' own status.
 
-    Covers both calibration flows: the SO-101's step-by-step range sweep in
-    this module, and the Maker arm's zero-pose flow in ``zero_calibrate``.
-    They are separate managers because the procedures share nothing, but from
-    the mutual-exclusion standpoint they are one fact — "a calibration owns
-    this bus" — so every existing reciprocal check gets the Maker flow for
-    free, with no new ``robot.busy.*`` discriminant to register.
+    Covers both calibration managers: the SO-101's step-by-step range sweep
+    in this module, and the generic step wizard in ``step_calibrate`` that
+    runs a ``steps`` family's own procedure (the CAN arms' zero pose). They
+    are separate managers because the procedures share nothing, but from the
+    mutual-exclusion standpoint they are one fact — "a calibration owns this
+    bus" — so every existing reciprocal check gets the wizard for free, with
+    no new ``robot.busy.*`` discriminant to register.
     """
-    from .zero_calibrate import zero_calibration_is_active
+    from .step_calibrate import step_calibration_is_active
 
-    return calibration_manager.status.calibration_active or zero_calibration_is_active()
+    return calibration_manager.status.calibration_active or step_calibration_is_active()

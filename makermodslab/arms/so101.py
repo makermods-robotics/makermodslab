@@ -22,10 +22,103 @@ its joints, so it can be back-driven for a DAgger handover.
 
 from __future__ import annotations
 
+import logging
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .base import ArmFamily
+from .base import ArmFamily, FollowerPreflight
+
+logger = logging.getLogger(__name__)
+
+
+# --- the port-based follower preflights rollout runs before its subprocess -----
+# Module-level helpers (the family's preflight_ports override calls them) so a
+# test can stub them here. Everything they need is imported INSIDE them: this
+# package is imported by utils.config, i.e. by everything, and arm_identity /
+# motor_power import utils.config back.
+
+
+@contextmanager
+def _open_follower(port: str, follower_id: str):
+    """Open a bare follower bus on `port`, yield the connected robot, and
+    release the port read-only on exit.
+
+    Both rollout preflights connect one follower, do read-only work, then must
+    free the port for the subprocess to reopen. Torque is never enabled here,
+    so the release skips the torque-disable write (``disconnect(
+    disable_torque=False)``) — a plain port close. The disconnect runs on any
+    exit path (success or exception)."""
+    from lerobot.robots import make_robot_from_config
+
+    robot = make_robot_from_config(SO101.single_follower_config(port, follower_id))
+    robot.bus.connect()
+    try:
+        yield robot
+    finally:
+        robot.bus.disconnect(disable_torque=False)
+
+
+def _preflight_arm_identity(port: str, follower_id: str, config_name: str | None = None) -> list[str]:
+    """Read-only identity check of ONE follower arm before the rollout
+    subprocess starts.
+
+    The subprocess itself can't be guarded (its stdin is pre-seeded with a
+    newline, which auto-confirms lerobot's "use the calibration file" prompt
+    and stamps the file into EEPROM on mismatch), so the check happens here:
+    connect the bare bus, verify, and release the port for the subprocess to
+    reopen. Raises ArmIdentityError on a hard mismatch; returns the
+    warn-but-allow messages otherwise.
+
+    `follower_id` names the calibration the arm loads and is what identifies the
+    slot by default. For a bimanual staging alias id ("<base>_left"), pass the
+    real library stem as `config_name` so the guard compares against the library
+    entry rather than the alias (mirrors verify_devices' config_names in
+    record/teleop). Bimanual runs each follower bus through this separately —
+    each opens and releases its own port — so the two are never open at once."""
+    from ..arm_identity import verify_devices
+
+    # The counterpart lookup stays in rollout: it is that flow's knowledge
+    # (inference has no leader in the session, so the slot comes from the
+    # robot records), not the family's. Lazy — rollout imports this package.
+    from ..rollout import _counterpart_leader_slots
+
+    with _open_follower(port, follower_id) as robot:
+        return verify_devices(
+            ((robot, "follower"),),
+            extra_slots=_counterpart_leader_slots(config_name or follower_id),
+            config_names=[config_name] if config_name is not None else None,
+        )
+
+
+def _preflight_motor_registers(port: str, follower_id: str) -> list[str]:
+    """Prime the follower's RAM motor registers before the rollout subprocess
+    starts.
+
+    The subprocess itself can't be instrumented, but Torque_Limit and
+    Goal_Velocity are both RAM registers: they survive closing the serial port
+    (only a power cycle resets them), and the subprocess's connect()/configure()
+    never writes them — so setting them here and releasing the port is enough
+    for the whole rollout. Two priming steps:
+      - reset_torque_limit: restore stock torque (a previous auto-calibration's
+        working torque would otherwise cap the whole rollout).
+      - clear_goal_velocity: reset any leftover speed cap a previous
+        arm-driving feature stamped (auto-cal fold/unfold=1000, rest-pose
+        return=400), which would otherwise throttle the whole rollout.
+    Never raises: a failure degrades to the previous register value (logged)
+    and returns warning messages instead of aborting the start."""
+    from ..motor_power import FOLLOWER, clear_goal_velocity, reset_torque_limit
+
+    try:
+        with _open_follower(port, follower_id) as robot:
+            return reset_torque_limit(robot, FOLLOWER) + clear_goal_velocity(robot, FOLLOWER)
+    except Exception as exc:
+        message = (
+            f"Could not reset the motor registers on {port}: {exc}. "
+            "The arm runs at its previous torque/speed limits for this rollout."
+        )
+        logger.warning(message)
+        return [message]
 
 
 class SO101Family(ArmFamily):
@@ -39,7 +132,8 @@ class SO101Family(ArmFamily):
 
     uses_feetech_bus = True
     supports_auto_calibration = True
-    uses_zero_calibration = False
+    # The Feetech sweep managers (calibrate.py / auto_calibrate.py).
+    calibration_kind = "range_sweep"
     supports_dagger = True
 
     single_robot_type = "so101_follower"
@@ -87,6 +181,31 @@ class SO101Family(ArmFamily):
 
         warnings = reset_torque_limit(robot, FOLLOWER, label)
         warnings += clear_goal_velocity(robot, FOLLOWER, label)
+        return warnings
+
+    def preflight_ports(
+        self, followers: list[FollowerPreflight], *, skip_identity: bool = False
+    ) -> list[str]:
+        """Identity check THEN register priming, PER FOLLOWER, in order.
+
+        For two followers that is ``identity(a), registers(a), identity(b),
+        registers(b)`` — not identity on both and then registers on both, as
+        rollout once did: each follower's fingerprint is verified before
+        anything is primed on it, so a swapped arm is refused with nothing
+        written to it, and the ports are still opened one at a time. The
+        register reset is never optional (a previous auto-calibration's cap
+        would otherwise throttle the whole rollout); ``skip_identity`` skips
+        the fingerprint only, and is logged as the warning it always was.
+        """
+        if skip_identity:
+            logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
+        warnings: list[str] = []
+        for follower in followers:
+            if not skip_identity:
+                warnings += _preflight_arm_identity(
+                    follower.port, follower.calibration_id, config_name=follower.config_name
+                )
+            warnings += _preflight_motor_registers(follower.port, follower.calibration_id)
         return warnings
 
     def capture_rest_poses(self, robot: Any, *, include_gripper: bool = False) -> list[tuple[Any, dict]]:

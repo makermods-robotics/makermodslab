@@ -79,9 +79,8 @@ import starArm102LeaderZeroPose from "@/assets/calibration/star-arm-102-leader-z
  * showing one family's picture to the other would zero the gripper at the
  * wrong end of its travel. The Star Arm 102 leader is identical on both
  * built-in rigs, so their leader rows share one photographed reference
- * (`ZERO_POSE_LEADER_IMAGE`). A family without an entry (an extension's) has
- * no bundled photo yet — TB6 adds assets with the first extension arm — and
- * renders its zero-pose text alone.
+ * (`ZERO_POSE_LEADER_IMAGE`). A family without an entry (an extension's)
+ * shows whatever image its manifest summary / step serves, or its text alone.
  */
 const ZERO_POSE_IMAGES: Record<
   string,
@@ -117,11 +116,12 @@ import { PanelHeader, SLIDE } from "@/components/studio/panel/primitives";
 import { RobotRecord, formatRobotSetupGap } from "@/hooks/useRobots";
 import { useArms } from "@/hooks/useArms";
 import {
+  calibrationKind,
   supportsAutoCalibration,
   supportsPortProbe,
   usesFeetechBus,
-  usesZeroCalibration,
 } from "@/lib/armTypes";
+import { servedUrl } from "@/lib/armsApi";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
@@ -137,10 +137,11 @@ interface CalibrationStatus {
    * SO-101 range sweep: "idle" | "connecting" | "recording" | "completed" |
    * "error" | "stopping".
    *
-   * CAN zero-pose flow: "idle" | "connecting" | "awaiting_zero" | "saving" |
-   * "completed" | "error" | "stopping". `/calibration-status` serves whichever
-   * flow is live from one endpoint; the two payloads are field-compatible
-   * where they overlap.
+   * Step wizard (the CAN families' zero pose, and any family whose manifest
+   * says calibration.kind "steps"): "idle" | "connecting" | "awaiting_step" |
+   * "saving" | "completed" | "error" | "stopping". `/calibration-status`
+   * serves whichever flow is live from one endpoint; the two payloads are
+   * field-compatible where they overlap.
    */
   status: string;
   device_type: string | null;
@@ -154,11 +155,15 @@ interface CalibrationStatus {
     { min: number; max: number; current: number }
   > | null;
   /**
-   * Zero-pose flow only: the arm is connected with torque OFF and we are
-   * waiting for the user to pose it by hand. Always false on the SO-101 sweep
-   * (the backend defaults it), which is what lets the panel switch on it.
+   * Step wizard only, per published step: an image the family serves beside
+   * `message` (null → the bundled photo on step 1 of a built-in, else none),
+   * and whether the family asked for live joint readings under it. Both are
+   * defaulted (null / false) on the SO-101 sweep payload, so one client shape
+   * reads both flows; `step` counts up from 1 and `total_steps` is not known
+   * ahead of time (the wizard shows "Step N", never "N of M").
    */
-  awaiting_pose?: boolean;
+  image_url: string | null;
+  live_positions: boolean;
 }
 
 // One selectable (device_type, arm) slot — shared by the Device step's card
@@ -582,7 +587,12 @@ const RobotConfigWindow = ({
   // detect / wiggle / calibrate / start are all held until the entry exists.
   const armActionsBlocked = !!robot && !armInfo;
   const armsNotLoaded = armActionsBlocked && !armUnavailable;
-  const zeroCalibration = usesZeroCalibration(armInfo);
+  // Which calibration UI this record gets, off the manifest: the SO-101's
+  // sweep flows, the generic step wizard, or the extension's own panel
+  // (which nothing here can start yet — the rows say so and stay disabled).
+  const kind = calibrationKind(armInfo);
+  const stepCalibration = kind === "steps";
+  const panelCalibration = kind === "panel";
   const autoCalibration = supportsAutoCalibration(armInfo);
   const portProbe = supportsPortProbe(armInfo);
   const feetechBus = usesFeetechBus(armInfo);
@@ -1010,9 +1020,19 @@ const RobotConfigWindow = ({
       total_steps: 1,
       current_positions: null,
       recorded_ranges: null,
+      image_url: null,
+      live_positions: false,
     },
   );
   const [isPolling, setIsPolling] = useState(false);
+
+  // One /complete-calibration-step POST in flight at a time. A double-click
+  // on Next used to post twice, and on a multi-step family the second POST
+  // confirms the FOLLOWING step without the user. The ref is the guard (a
+  // second click can land before the state's re-render); the state disables
+  // the button so the guard is visible.
+  const completingStepRef = useRef(false);
+  const [completingStep, setCompletingStep] = useState(false);
 
   // Manual (step-by-step) calibration liveness. Set optimistically at start
   // (so the abort prompt already guards a close in the sub-second before the
@@ -1779,13 +1799,27 @@ const RobotConfigWindow = ({
     }
   };
 
-  const handleCompleteStep = async () => {
+  // `step` is the wizard step this click confirms. The step wizard sends the
+  // one it is showing, and the backend refuses a confirm for any other step
+  // ("Step N is not the current step") — the second half of the double-click
+  // guard above, for a click that lands after the step already advanced. The
+  // range-sweep flow has no step to name and posts no body, as before.
+  const handleCompleteStep = async (step?: number) => {
     if (!calibrationStatus.calibration_active) return;
+    if (completingStepRef.current) return;
+    completingStepRef.current = true;
+    setCompletingStep(true);
 
     try {
       const response = await fetchWithHeaders(
         `${baseUrl}/api/v1/complete-calibration-step`,
-        { method: "POST" },
+        step === undefined
+          ? { method: "POST" }
+          : {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ step }),
+            },
       );
 
       const data = await response.json();
@@ -1810,6 +1844,9 @@ const RobotConfigWindow = ({
         description: t("robotConfig.calib.toast.stepError"),
         variant: "destructive",
       });
+    } finally {
+      completingStepRef.current = false;
+      setCompletingStep(false);
     }
   };
 
@@ -2073,8 +2110,8 @@ const RobotConfigWindow = ({
           color: "bg-info",
           text: t("robotConfig.calib.status.recording"),
         };
-      // Zero-pose flow (CAN arms) — see CalibrationStatus.status.
-      case "awaiting_zero":
+      // Step wizard — see CalibrationStatus.status.
+      case "awaiting_step":
         return {
           color: "bg-info",
           text: t("robotConfig.calib.status.awaitingZero"),
@@ -2124,7 +2161,9 @@ const RobotConfigWindow = ({
     // it is one column, in the order things happen: choose, watch, pose,
     // start, follow the live data, save.
     const preStart = !running && !batchBusy;
-    const mode = zeroCalibration ? "zero" : calibMode;
+    // The auto/manual choice exists only for the sweep flows; a step or
+    // panel family never renders either branch, whatever the toggle holds.
+    const mode = kind === "range_sweep" ? calibMode : null;
 
     // The auto-calibration preamble: demo clip, the pose to start from, the
     // safety note, and the drive torque. A batch run and a single-arm run are
@@ -2151,41 +2190,66 @@ const RobotConfigWindow = ({
       ? armSlots
       : armSlots.filter((s) => armRunStatus(s));
 
-    // The pose the user has to put the arm in. Shown BEFORE Start (so the arm
-    // can be posed while reading) and again while awaiting zero (so it is on
-    // screen at the moment it is matched). Photos come from ZERO_POSE_IMAGES
-    // by manifest id; a family without one renders nothing here and relies on
-    // the instruction text below.
+    // The step wizard's pose reference and words, shared by the pre-start
+    // card and the running wizard so the picture the arm was posed against
+    // does not change between the two screens.
+    //
+    // Text: the catalog's per-id override for the built-ins (which is what
+    // localizes it), else the family's own words from the manifest — backend
+    // text, English in every language, the same way server messages are.
+    // Before Start that is the side's `calibration.summary`; while running it
+    // is the step the family published, and the override applies to step 1
+    // ONLY — later steps are the family's own words (the built-ins have one).
+    //
+    // Image: the bundled photo for the built-ins (ZERO_POSE_IMAGES), else the
+    // one the family serves (the summary's before Start, the step's while
+    // running); neither → no image, the text stands alone.
     //
     // object-cover, not contain: the follower sources are 4:3 on white with the
     // arm in the middle band, so a 16:9 centre crop trims background, not
     // hardware. The dedicated leader reference is already 16:9.
-    const isLeaderZeroPose = deviceType === "teleop";
-    const zeroPoseSide = isLeaderZeroPose ? "leader" : "follower";
-    const zeroPoseAssets = ZERO_POSE_IMAGES[armType];
-    const zeroPoseImage = zeroPoseAssets ? (
-      <img
-        src={
-          isLeaderZeroPose ? zeroPoseAssets.leader : zeroPoseAssets.follower
-        }
-        alt={
-          isLeaderZeroPose
+    const isLeaderStep = deviceType === "teleop";
+    const stepSide = isLeaderStep ? "leader" : "follower";
+    const bundledAssets = ZERO_POSE_IMAGES[armType];
+    const bundledImage = bundledAssets
+      ? {
+          src: isLeaderStep ? bundledAssets.leader : bundledAssets.follower,
+          alt: isLeaderStep
             ? t("robotConfig.calib.zeroPose.poseImageLeader")
-            : t(`robotConfig.calib.zeroPose.${zeroPoseAssets.altKey}`)
+            : t(`robotConfig.calib.zeroPose.${bundledAssets.altKey}`),
         }
-        loading="lazy"
-        className="aspect-video w-full rounded-md border border-border bg-muted object-cover"
-      />
-    ) : null;
-    // The pose text: the catalog's per-id override for the built-ins (which
-    // is what localizes it), else the manifest's own zero_pose prose — backend
-    // text, English in every language, the same way server messages are.
-    const zeroPoseInstructions = t(
-      `robotConfig.calib.zeroPose.instructionsFor.${armType}.${zeroPoseSide}` as never,
-      {
-        defaultValue: armInfo?.calibration.zero_pose?.[zeroPoseSide] ?? "",
-      },
-    );
+      : null;
+    const servedImage = (url: string | null) => {
+      const src = servedUrl(baseUrl, url);
+      // No caption of our own: the step text beside it describes the pose,
+      // and a bundled alt would mislabel a picture this code has never seen.
+      return src ? { src, alt: "" } : null;
+    };
+    const stepImage = (image: { src: string; alt: string } | null) =>
+      image ? (
+        <img
+          src={image.src}
+          alt={image.alt}
+          loading="lazy"
+          className="aspect-video w-full rounded-md border border-border bg-muted object-cover"
+        />
+      ) : null;
+    const overrideText = (fallback: string): string =>
+      t(
+        `robotConfig.calib.zeroPose.instructionsFor.${armType}.${stepSide}` as never,
+        { defaultValue: fallback },
+      );
+    const summarySide = armInfo?.calibration.summary?.[stepSide] ?? null;
+    const preStartText = summarySide ? overrideText(summarySide.text) : "";
+    const preStartImage =
+      bundledImage ?? servedImage(summarySide?.image_url ?? null);
+    const onFirstStep = calibrationStatus.step <= 1;
+    const stepText = onFirstStep
+      ? overrideText(calibrationStatus.message)
+      : calibrationStatus.message;
+    const stepImageNow =
+      servedImage(calibrationStatus.image_url) ??
+      (onFirstStep ? bundledImage : null);
 
     const autoPreamble = (
       <>
@@ -2215,17 +2279,13 @@ const RobotConfigWindow = ({
         </figure>
         <Alert className="border-info/40 bg-info/10 text-info">
           <Activity className="h-4 w-4" />
-          <AlertDescription>
-            {t("robotConfig.calib.autoNote")}
-          </AlertDescription>
+          <AlertDescription>{t("robotConfig.calib.autoNote")}</AlertDescription>
         </Alert>
         {robot && autoCalibration && (
           <Collapsible className="group space-y-3">
             <CollapsibleTrigger className="flex w-full items-start justify-between border-b border-border pb-2 text-sm font-semibold text-foreground">
               <span className="text-left">
-                <span className="block">
-                  {t("robotConfig.advanced.title")}
-                </span>
+                <span className="block">{t("robotConfig.advanced.title")}</span>
                 <span className="block text-xs font-normal text-muted-foreground">
                   {t("robotConfig.advanced.subtitle")}
                 </span>
@@ -2318,9 +2378,9 @@ const RobotConfigWindow = ({
         ) : null}
 
         {/* Mode first. The two flows differ in video, pose, and what happens
-            after Start, so nothing renders until one is picked. A zero-pose
+            after Start, so nothing renders until one is picked. A step
             family has exactly one flow and skips the question. */}
-        {preStart && !zeroCalibration && (
+        {preStart && kind === "range_sweep" && (
           <div className="grid grid-cols-2 gap-2">
             <Button
               type="button"
@@ -2406,28 +2466,28 @@ const RobotConfigWindow = ({
           </>
         )}
 
-        {/* Zero pose, before Start: one flow, same shape. */}
-        {preStart && zeroCalibration && (
+        {/* Steps, before Start: one flow, same shape. */}
+        {preStart && stepCalibration && (
           <>
-            {/* No demo clip slot here. Zero calibration is one act — pose the
-                arm by hand and press the button — so there is nothing to
+            {/* No demo clip slot here. A step is one act — pose the arm by
+                hand and press the button — so there is nothing to
                 demonstrate that the photo below does not already show. The
                 sweep flows keep their video because the MOTION is the thing
                 being taught there; a static pose is not. */}
-            {zeroPoseImage}
+            {stepImage(preStartImage)}
             <Alert className="border-info/40 bg-info/10 text-info">
               <Activity className="h-4 w-4" />
               <AlertDescription>
-                {t("robotConfig.calib.zeroNote")}
+                {/* The side's summary — what to have the arm in before
+                    Start. A family that answered nothing for this side gets
+                    the generic note. */}
+                {preStartText || t("robotConfig.calib.zeroNote")}
               </AlertDescription>
             </Alert>
             <Button
               onClick={() => handleStartCalibration()}
               disabled={
-                !robotName ||
-                !deviceType ||
-                !portDetected ||
-                armActionsBlocked
+                !robotName || !deviceType || !portDetected || armActionsBlocked
               }
               className="w-full"
             >
@@ -2446,24 +2506,31 @@ const RobotConfigWindow = ({
           </Alert>
         )}
 
-        {calibrationStatus.status === "awaiting_zero" && (
+        {calibrationStatus.status === "awaiting_step" && (
           <div className="space-y-3">
             {/* Reference pose. The words alone have never been enough here:
                 "folded against the base, gripper fully open" is a shape, and
                 a picture of the shape is what the user actually matches the
                 arm against. It sits ABOVE the instructions because it is the
-                thing being described, and above the confirm button because
-                the arm has to be in this position before zero is taken.
+                thing being described, and above the Next button because the
+                arm has to be in this position before the step is confirmed.
 
-                Same element the pre-start step shows, so the picture the arm
-                was posed against does not change between the two screens. */}
-            {zeroPoseImage}
+                On step 1 of a built-in this is the same picture the pre-start
+                card showed, so the pose the arm was matched against does not
+                change between the two screens; a family that serves a step
+                image gets that one instead. */}
+            {stepImage(stepImageNow)}
             <Alert className="border-info/40 bg-info/10 text-info">
               <Activity className="h-4 w-4" />
-              <AlertDescription>{zeroPoseInstructions}</AlertDescription>
+              <AlertDescription>{stepText}</AlertDescription>
             </Alert>
 
-            {calibrationStatus.current_positions &&
+            {/* Live readings only where the family asked for them: a step
+                that is not about joint positions (a button press, a cable)
+                has nothing to show here, and the backend reads the bus only
+                while `live_positions` is set. */}
+            {calibrationStatus.live_positions &&
+              calibrationStatus.current_positions &&
               Object.keys(calibrationStatus.current_positions).length > 0 && (
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">
@@ -2496,8 +2563,8 @@ const RobotConfigWindow = ({
               )}
 
             <Button
-              onClick={handleCompleteStep}
-              disabled={!calibrationStatus.calibration_active}
+              onClick={() => handleCompleteStep(calibrationStatus.step)}
+              disabled={!calibrationStatus.calibration_active || completingStep}
               className="w-full bg-ok text-primary-foreground hover:bg-ok/90"
             >
               <CheckCircle className="mr-2 h-4 w-4" />
@@ -2595,8 +2662,10 @@ const RobotConfigWindow = ({
                   </div>
                 )}
                 <Button
-                  onClick={handleCompleteStep}
-                  disabled={!calibrationStatus.calibration_active}
+                  onClick={() => handleCompleteStep()}
+                  disabled={
+                    !calibrationStatus.calibration_active || completingStep
+                  }
                   className={`w-full text-primary-foreground ${
                     allComplete
                       ? "bg-ok hover:bg-ok/90"
@@ -2675,9 +2744,7 @@ const RobotConfigWindow = ({
                 {listedSlots.map((slot) => {
                   const run = armRunStatus(slot);
                   // Ticked means "in this run" once one exists.
-                  const selected = picking
-                    ? !!batchSelected[slot.key]
-                    : !!run;
+                  const selected = picking ? !!batchSelected[slot.key] : !!run;
                   const assignedPort = slotPort(slot);
                   const hasPort = !!assignedPort;
                   // Distinguish "never assigned" from "assigned but
@@ -2999,6 +3066,7 @@ const RobotConfigWindow = ({
                         !robotName ||
                         !anyArmAvailable ||
                         armActionsBlocked ||
+                        panelCalibration ||
                         calibrationStatus.calibration_active ||
                         batchAutoCal.active
                       }
@@ -3042,6 +3110,18 @@ const RobotConfigWindow = ({
                   </Button>
                 </div>
               </div>
+              {/* An extension's own calibration page (manifest
+                  calibration.kind "panel"): nothing in this window can start
+                  it yet, so the rows' calibrate buttons stay disabled and
+                  this says why. TB6b mounts the panel here. */}
+              {panelCalibration && (
+                <Alert className="border-info/40 bg-info/10 text-info">
+                  <Activity className="h-4 w-4" />
+                  <AlertDescription>
+                    {t("robotConfig.calib.panel.notice")}
+                  </AlertDescription>
+                </Alert>
+              )}
               {(isBimanual
                 ? // Bimanual: each of the four slots gets the same free-naming
                   // picker as single mode — names are arbitrary now, and the
@@ -3155,7 +3235,7 @@ const RobotConfigWindow = ({
                       onCalibrate={() =>
                         toggleNewCalibration(row.cfgField, row.device, rowArm)
                       }
-                      calibrateDisabled={armActionsBlocked}
+                      calibrateDisabled={armActionsBlocked || panelCalibration}
                       calibrateOpen={isNewCalibOpen}
                     />
                     {/* Slides open in place, like the studio's entry forms. */}

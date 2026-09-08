@@ -37,11 +37,22 @@ the family id into the slot name (inherited from the base contract).
 
 from __future__ import annotations
 
+import contextlib
+import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .base import ArmFamily
+from .base import ArmFamily, CalibrationUI
+
+logger = logging.getLogger(__name__)
+
+# Settle time after unlocking a FashionStar servo before writing its origin
+# point. Mirrors lerobot's own `_SETTLE_SEC` in rebot_102_leader.py — the servo
+# needs a moment between the unlock and the write or the origin lands on a
+# stale reading.
+_SETTLE_SEC = 0.01
 
 
 @dataclass(frozen=True)
@@ -82,7 +93,8 @@ class CanArmFamily(ArmFamily):
 
     uses_feetech_bus = False
     supports_auto_calibration = False
-    uses_zero_calibration = True
+    # The zero-pose procedure below, run as the generic step wizard.
+    calibration_kind = "steps"
     supports_dagger = False
 
     leader_library_attr = "MAKER_LEADER_CONFIG_PATH"
@@ -95,10 +107,171 @@ class CanArmFamily(ArmFamily):
         """Import (lazily — python-can / motorbridge) and return this family's classes."""
         raise NotImplementedError
 
+    # --- the zero-pose calibration, as a step wizard ----------------------------
+    # The CAN arms need no range sweep: their joint limits are fixed constants
+    # measured once against the arms' mechanical stops (the follower configs'
+    # joint_limits, and the Star 102 leader presets' joint_ranges copied from
+    # them). The only thing calibration has to establish is WHERE ZERO IS: torque
+    # off, the user poses the arm by hand, we tell the motors "this is zero",
+    # and the calibration file's ranges come from the config. One step, no
+    # driving. A web reimplementation of lerobot's MakerFollower.calibrate() /
+    # RebotArm102Leader.calibrate(), which block on input().
+
     def zero_pose_instructions(self, device_type: object | None = None) -> str:
+        """The physical pose to ask for: the shared Star-leader pose for
+        "teleop", this family's follower pose otherwise (opposites on the
+        gripper between Maker and Metal). The families' own helper, not part
+        of the base contract — calibration_summary and calibrate serve it."""
         if device_type == "teleop":
             return _LEADER_ZERO_POSE
         return self.follower_zero_pose
+
+    def calibration_summary(self, device_type: object | None = None) -> dict | None:
+        # No served image: the frontend keeps its bundled photos for the built-ins.
+        return {"text": self.zero_pose_instructions(device_type), "image_url": None}
+
+    def open_for_calibration(self, device_type: str, port: str, config_id: str) -> Any:
+        """Open ONE device's bus with torque OFF, ready for the user to pose the arm."""
+        if device_type == "robot":
+            from lerobot.robots import make_robot_from_config
+
+            device = make_robot_from_config(self.single_follower_config(port, config_id))
+            # NOT device.connect(): both followers' connect() finishes by
+            # calling enable_torque(), which would lock the arm rigid exactly
+            # when the user needs to move it by hand. Open the bus directly
+            # and disable torque, which is what lerobot's own calibrate() does
+            # internally. The disable is not optional for Metal even here:
+            # the Damiao HANDSHAKE inside bus.connect() is itself the enable
+            # command, so the arm comes up energized and this write is what
+            # frees it for the user's hands.
+            try:
+                device.bus.connect()
+                device.bus.disable_torque()
+            except Exception:
+                # Either the handshake raised partway (a Damiao handshake is
+                # the per-motor enable, so the motors that answered are
+                # energized while is_connected reads False) or it completed
+                # and the write that frees the arm failed. Both: de-energize
+                # the bus the recovery way (reopen without the handshake if
+                # needed, broadcast the disable), close the port, then let the
+                # failure propagate. Same recovery the teleop/replay connect
+                # paths run; without it the arm holds torque with no device
+                # object left to release it through.
+                from .. import torque
+
+                torque.de_energize_can_device(device, f"{self.short_label} follower arm")
+                # Best effort: the original error is the one to raise.
+                with contextlib.suppress(Exception):
+                    device.bus.disconnect(False)
+                raise
+            return device
+
+        from lerobot.teleoperators import make_teleoperator_from_config
+
+        device = make_teleoperator_from_config(self.single_leader_config(port, config_id))
+        # The leader's bus is constructed inside connect(), so there is no
+        # bus-only path — but there is nothing to disable either: its joints
+        # hold encoders and no motors. connect(calibrate=False) leaves it
+        # unlocked and back-drivable, which is the state we want.
+        device.connect(calibrate=False)
+        return device
+
+    def calibrate(self, device: Any, device_type: str, ui: CalibrationUI) -> dict[str, Any]:
+        """One live-positions step at the zero pose, then set zero and build the file.
+
+        The two device SIDES differ in exactly one place, the zero write: the
+        followers speak CAN (RobStride and Damiao alike), and one whole-bus
+        ``set_zero_position()`` zeroes every motor at once; the Star 102 leader
+        speaks FashionStar UART, and each servo has to be unlocked and given
+        ``set_origin_point`` individually.
+        """
+        is_follower = device_type == "robot"
+        # Torque is off and stays off for this entire wait: the user is
+        # physically moving the arm.
+        ui.step(self.zero_pose_instructions(device_type), image_url=None, live_positions=True)
+        ui.message("Setting zero…")
+
+        pre_zero: dict[str, float] = {}
+        try:
+            pre_zero = self.read_positions(device)
+        except Exception as e:
+            logger.warning(f"Could not read pre-zero positions: {e}")
+        for motor, value in pre_zero.items():
+            # Logged so an offset against the PREVIOUS zero stays recoverable
+            # from the logs if this one turns out to have been taken in the
+            # wrong pose — same reason lerobot's own calibrate() logs them.
+            logger.info(f"Pre-zero position of {motor}: {value:.2f} deg")
+
+        self._set_zero(device, is_follower)
+        logger.info("Arm zero position set.")
+        return self._build_calibration(device, is_follower)
+
+    @staticmethod
+    def _set_zero(device: Any, is_follower: bool) -> None:
+        """Tell the motors that where they are now is zero."""
+        bus = device.bus
+        if is_follower:
+            # CAN (RobStride and Damiao alike): one broadcast zeroes every
+            # motor on the bus.
+            bus.set_zero_position()
+            # Mirror what MakerFollower.calibrate() resets alongside the zero,
+            # so the freshly zeroed arm is not still carrying the previous
+            # zero's multi-turn bookkeeping (which would make send_action
+            # refuse with a stale-zero error).
+            for attr, value in (
+                ("_turn_offset", dict.fromkeys(getattr(device, "_joint_motor_names", []), 0.0)),
+                ("_stale_zero", {}),
+                ("_last_positions", {}),
+            ):
+                if hasattr(device, attr):
+                    setattr(device, attr, value)
+            return
+
+        # FashionStar UART: no broadcast — unlock and origin each servo in turn.
+        for motor_id in dict(device.config.joint_ids).values():
+            bus.unlock(motor_id)
+            time.sleep(_SETTLE_SEC)
+            bus.set_origin_point(motor_id)
+
+    @staticmethod
+    def _build_calibration(device: Any, is_follower: bool) -> dict[str, Any]:
+        """The calibration file's contents: fixed ranges from the config.
+
+        ``homing_offset`` is 0 for every joint and that is correct, not a
+        placeholder — the zero now lives INSIDE the motor (RobStride's zero
+        position / FashionStar's origin point), so there is no software offset
+        left to apply on top. It is also why the Feetech EEPROM fingerprint in
+        ``arm_identity.py`` can say nothing about a Maker arm: every Maker
+        calibration file has the same all-zero offsets.
+        """
+        from lerobot.motors import MotorCalibration
+
+        config = device.config
+        if is_follower:
+            ids = config.motor_can_ids
+            ranges = config.joint_limits
+        else:
+            ids = config.joint_ids
+            ranges = {m: tuple(v) for m, v in config.joint_ranges.items()}
+        default = (-360.0, 360.0)
+
+        calibration: dict[str, MotorCalibration] = {}
+        for motor_name, motor_id in ids.items():
+            # The two CAN followers disagree about the id field's shape:
+            # Maker motor_can_ids are plain ints, Metal's are (send, recv)
+            # tuples. MotorCalibration.id is an int, and lerobot's own
+            # MetalFollower.calibrate() stores the SEND id.
+            if isinstance(motor_id, tuple):
+                motor_id = motor_id[0]
+            range_min, range_max = ranges.get(motor_name, default)
+            calibration[motor_name] = MotorCalibration(
+                id=motor_id,
+                drive_mode=0,
+                homing_offset=0,
+                range_min=int(range_min),
+                range_max=int(range_max),
+            )
+        return calibration
 
     def single_follower_config(self, port: str, config_id: str):
         return self._device_classes().follower(port=port, id=config_id)

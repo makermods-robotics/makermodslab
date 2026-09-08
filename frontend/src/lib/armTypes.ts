@@ -37,8 +37,19 @@ export type ArmType = string;
 // fallback keeps the page rendering, it does not make the arm usable.
 // ---------------------------------------------------------------------------
 
-export function usesZeroCalibration(info: ArmFamilyInfo | undefined): boolean {
-  return info ? info.calibration.kind === "zero_pose" : false;
+export type CalibrationKind = ArmFamilyInfo["calibration"]["kind"];
+
+/**
+ * Which calibration flow the config dialog renders for this family:
+ * "range_sweep" (the SO-101 sweep managers), "steps" (the generic step
+ * wizard the CAN families' zero pose runs on) or "panel" (the extension
+ * serves its own page). `undefined` answers "range_sweep" — the SO-101
+ * shape, like every other fallback here.
+ */
+export function calibrationKind(
+  info: ArmFamilyInfo | undefined,
+): CalibrationKind {
+  return info ? info.calibration.kind : "range_sweep";
 }
 
 export function supportsAutoCalibration(

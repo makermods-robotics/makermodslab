@@ -14,6 +14,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ArmType, RobotMode } from "@/hooks/useRobots";
 import { useArms } from "@/hooks/useArms";
+import { useApi } from "@/contexts/ApiContext";
+import { servedUrl } from "@/lib/armsApi";
 import { cn } from "@/lib/utils";
 import makerArmPhoto from "@/assets/arms/maker.jpg";
 import metalArmPhoto from "@/assets/arms/metal.jpg";
@@ -70,9 +72,10 @@ const MODE_OPTIONS: {
  * description: manifest prose is backend text and renders in English in
  * every language, the same as any server message.
  *
- * Product photos are the one bundled asset keyed by built-in id. ArmTypePhoto
- * renders its same-sized placeholder for a family without one, so an
- * extension's arm lands before its photo does.
+ * Product photos are the one bundled asset keyed by built-in id. A family
+ * without one shows the photo its manifest entry serves (`image_url`), and
+ * ArmTypePhoto renders its same-sized placeholder when there is neither, so
+ * an extension's arm lands before its photo does.
  */
 const ARM_PHOTOS: Record<string, string> = {
   so101: so101ArmPhoto,
@@ -101,6 +104,7 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
 }) => {
   const { t } = useTranslation();
   const { arms, loading: armsLoading, error: armsError } = useArms();
+  const { baseUrl } = useApi();
   // No manifest and not fetching: the load failed (ArmsProvider is retrying
   // on its own). There is nothing valid to submit, so Create is held.
   const armsFailed = arms.length === 0 && !armsLoading;
@@ -244,7 +248,13 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
                         : "border-border bg-card hover:bg-accent"
                     )}
                   >
-                    <ArmTypePhoto src={ARM_PHOTOS[info.id] ?? null} alt={label} />
+                    <ArmTypePhoto
+                      src={
+                        ARM_PHOTOS[info.id] ??
+                        servedUrl(baseUrl, info.image_url)
+                      }
+                      alt={label}
+                    />
                     <div className="mt-2 flex items-start justify-between gap-1">
                       <span className="text-sm font-medium leading-tight text-foreground">
                         {label}

@@ -31,13 +31,11 @@ _ATTRIBUTE_TYPES: dict[str, type | tuple[type, ...]] = {
     "supports_bimanual": bool,
     "uses_feetech_bus": bool,
     "supports_auto_calibration": bool,
-    "uses_zero_calibration": bool,
+    "calibration_kind": str,
     "supports_dagger": bool,
     "single_robot_type": str,
     "bimanual_robot_type": str,
     "robot_type_markers": tuple,
-    "leader_library_attr": str,
-    "follower_library_attr": str,
     "follower_probe_protocol": (str, type(None)),
     "motion_identify_energizes_follower": bool,
     "telemetry_kind": str,
@@ -66,9 +64,13 @@ def test_every_built_in_satisfies_the_contract(family: ArmFamily) -> None:
     assert family.robot_type_markers, "a family with no markers can never be read off a dataset"
     assert all(m == m.lower() for m in family.robot_type_markers), "markers are matched lower-cased"
     assert family.single_robot_type != family.bimanual_robot_type
-    # The library attrs must name real config constants — resolved at call time.
-    assert isinstance(family.leader_calibration_dir(), str)
-    assert isinstance(family.follower_calibration_dir(), str)
+    # The dir METHODS are the contract (the built-ins answer them through
+    # their library-attr constants, resolved at call time).
+    assert isinstance(family.leader_calibration_dir(), str) and family.leader_calibration_dir()
+    assert isinstance(family.follower_calibration_dir(), str) and family.follower_calibration_dir()
+    from makermodslab.arms.base import CALIBRATION_KINDS
+
+    assert family.calibration_kind in CALIBRATION_KINDS
 
 
 @pytest.mark.parametrize("family", registry.families(), ids=lambda f: f.id)
@@ -88,14 +90,32 @@ def test_single_device_configs_carry_the_port_and_id(family: ArmFamily) -> None:
 
 
 @pytest.mark.parametrize("family", registry.families(), ids=lambda f: f.id)
-def test_zero_pose_text_exists_exactly_for_zero_calibrated_families(family: ArmFamily) -> None:
-    follower_text = family.zero_pose_instructions("robot")
-    leader_text = family.zero_pose_instructions("teleop")
-    if family.uses_zero_calibration:
-        assert "ZERO POSE" in follower_text and "ZERO POSE" in leader_text
-        assert "leader" in leader_text and "leader" not in follower_text
+def test_calibration_summary_exists_exactly_for_steps_families(family: ArmFamily) -> None:
+    """What the config dialog shows BEFORE Start, per device side: the CAN
+    families answer their zero-pose text (no image — the frontend keeps its
+    bundled photos); a range-sweep family has nothing to summarize and
+    answers None, not an empty dict."""
+    follower = family.calibration_summary("robot")
+    leader = family.calibration_summary("teleop")
+    if family.calibration_kind == "steps":
+        assert set(follower) == {"text", "image_url"} == set(leader)
+        assert follower["image_url"] is None and leader["image_url"] is None
+        assert "ZERO POSE" in follower["text"] and "ZERO POSE" in leader["text"]
+        assert "leader" in leader["text"] and "leader" not in follower["text"]
     else:
-        assert follower_text == "" and leader_text == ""
+        assert follower is None and leader is None
+
+
+def test_the_built_in_calibration_kinds_and_panel_urls() -> None:
+    """so101 sweeps; the CAN pair are step wizards; nobody built in ships a
+    panel or a served image (TB6b fills those for extensions)."""
+    from makermodslab.arms.base import CALIBRATION_KINDS
+
+    assert CALIBRATION_KINDS == ("range_sweep", "steps", "panel")
+    assert [f.calibration_kind for f in registry.families()] == ["range_sweep", "steps", "steps"]
+    assert all(f.calibration_panel_url is None for f in registry.families())
+    assert all(f.image_url is None for f in registry.families())
+    assert ArmFamily.calibration_panel_url is None and ArmFamily.image_url is None
 
 
 @pytest.mark.parametrize("family", registry.families(), ids=lambda f: f.id)
@@ -112,9 +132,9 @@ def test_default_calibration_name_is_the_record_name_plus_the_family_suffix(fami
 
 def test_the_can_followers_zero_poses_are_opposites_on_the_gripper() -> None:
     maker, metal = registry.get("maker"), registry.get("metal")
-    assert "gripper fully open" in maker.zero_pose_instructions("robot")
-    assert "gripper closed" in metal.zero_pose_instructions("robot")
-    assert maker.zero_pose_instructions("teleop") == metal.zero_pose_instructions("teleop")
+    assert "gripper fully open" in maker.calibration_summary("robot")["text"]
+    assert "gripper closed" in metal.calibration_summary("robot")["text"]
+    assert maker.calibration_summary("teleop") == metal.calibration_summary("teleop")
 
 
 @pytest.mark.asyncio
@@ -399,6 +419,205 @@ def test_a_family_without_builders_cannot_even_be_instantiated() -> None:
         NoBuilders()  # type: ignore[abstract]
 
 
+def test_library_dirs_are_a_method_contract_not_attributes() -> None:
+    """TB6a: an extension family answers ``leader_calibration_dir()`` /
+    ``follower_calibration_dir()`` directly (typically from
+    utils.config.lerobot_calibration_dir); the ``*_library_attr`` names are
+    the built-ins' own way of resolving a monkeypatchable constant and no
+    longer part of the required contract."""
+    assert "leader_library_attr" not in REQUIRED_ATTRIBUTES
+    assert "follower_library_attr" not in REQUIRED_ATTRIBUTES
+    assert "uses_zero_calibration" not in REQUIRED_ATTRIBUTES
+    assert "calibration_kind" in REQUIRED_ATTRIBUTES
+
+
+def test_the_base_dir_methods_raise_not_implemented_without_a_library_attr() -> None:
+    family = make_arm_family("bare", dirs=False)
+    with pytest.raises(NotImplementedError, match="leader_calibration_dir"):
+        family.leader_calibration_dir()
+    with pytest.raises(NotImplementedError, match="follower_calibration_dir"):
+        family.follower_calibration_dir()
+
+
+def test_a_family_whose_dir_method_raises_is_refused_naming_the_method(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The library dirs are read by every readiness check and every staging
+    copy; a family that cannot answer would fail deep in the first flow that
+    asks. Refuse at registration, naming the method that failed."""
+    scratch_registry(monkeypatch)
+    with pytest.raises((TypeError, ValueError)) as excinfo:
+        registry.register(make_arm_family("bare", dirs=False))
+    assert "bare" in str(excinfo.value)
+    assert "calibration_dir" in str(excinfo.value)
+    assert "bare" not in registry.ids()
+
+
+def test_an_empty_dir_answer_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    scratch_registry(monkeypatch)
+    with pytest.raises((TypeError, ValueError), match="follower_calibration_dir"):
+        registry.register(make_arm_family("hollow", follower_dir=""))
+    assert "hollow" not in registry.ids()
+
+
+def test_a_follower_dir_collision_with_a_registered_family_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two families writing calibrations into one follower library would
+    load each other's files by name; the follower dir is unique per family,
+    full stop. Pinned against a built-in's dir AND between two fakes."""
+    scratch_registry(monkeypatch)
+    with pytest.raises(ValueError) as excinfo:
+        registry.register(make_arm_family("twin", follower_dir=cfg.MAKER_FOLLOWER_CONFIG_PATH))
+    assert "twin" in str(excinfo.value) and "maker" in str(excinfo.value)
+    assert "twin" not in registry.ids()
+
+    registry.register(make_arm_family("alpha", follower_dir="/lib/robots/alpha_follower"))
+    with pytest.raises(ValueError, match="alpha"):
+        registry.register(make_arm_family("beta", follower_dir="/lib/robots/alpha_follower"))
+    assert "beta" not in registry.ids()
+
+
+def test_a_shared_leader_dir_needs_a_calibration_name_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Maker/Metal case, mirrored with fakes: two families whose leaders
+    are the same device class share ONE leader library (lerobot derives the
+    dir from the class name), and that is legitimate only because
+    ``calibration_name_suffix`` mints each family's id into its default
+    names so the two never reuse a calibration written for the other. A
+    family with an empty suffix sharing a leader dir is refused, and the
+    message says so."""
+    scratch_registry(monkeypatch)
+    registry.register(make_arm_family("alpha", leader_dir="/lib/teleop/star_leader"))
+
+    with pytest.raises(ValueError) as excinfo:
+        registry.register(
+            make_arm_family("beta", leader_dir="/lib/teleop/star_leader", calibration_name_suffix="")
+        )
+    message = str(excinfo.value)
+    assert "beta" in message and "alpha" in message
+    assert "suffix" in message
+    assert "beta" not in registry.ids()
+
+    # The same sharing WITH a suffix (the default mints "_beta") is accepted.
+    registry.register(make_arm_family("beta", leader_dir="/lib/teleop/star_leader"))
+    assert "beta" in registry.ids()
+    assert registry.get("beta").leader_calibration_dir() == registry.get("alpha").leader_calibration_dir()
+
+
+def test_the_built_ins_share_the_star_leader_dir_legitimately() -> None:
+    """The real case the rule above encodes: Maker and Metal register, in
+    order, with one leader dir and distinct follower dirs and suffixes."""
+    maker, metal = registry.get("maker"), registry.get("metal")
+    assert maker.leader_calibration_dir() == metal.leader_calibration_dir()
+    assert maker.follower_calibration_dir() != metal.follower_calibration_dir()
+    assert maker.calibration_name_suffix and metal.calibration_name_suffix
+    assert registry.ids() == ("so101", "maker", "metal")
+
+
+def test_an_unknown_calibration_kind_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    scratch_registry(monkeypatch)
+    with pytest.raises(ValueError) as excinfo:
+        registry.register(make_arm_family("odd", calibration_kind="zero_pose"))
+    assert "odd" in str(excinfo.value) and "zero_pose" in str(excinfo.value)
+    assert "odd" not in registry.ids()
+
+
+def test_a_range_sweep_family_must_be_a_feetech_bus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sweep manager is Feetech register work (calibrate.py reads and
+    writes servo registers by name); a family without that bus cannot ride
+    it. A Feetech family may."""
+    scratch_registry(monkeypatch)
+    with pytest.raises(ValueError) as excinfo:
+        registry.register(make_arm_family("sweep", calibration_kind="range_sweep", uses_feetech_bus=False))
+    assert "sweep" in str(excinfo.value) and "range_sweep" in str(excinfo.value)
+    assert "uses_feetech_bus" in str(excinfo.value)
+    assert "sweep" not in registry.ids()
+
+    registry.register(make_arm_family("sweep", calibration_kind="range_sweep", uses_feetech_bus=True))
+    assert "sweep" in registry.ids()
+
+
+def test_a_steps_family_must_override_calibrate_and_open_for_calibration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The step manager runs ``family.calibrate`` after ``family.open_for_calibration``;
+    the base versions raise NotImplementedError, so a family that forgot one
+    would fail mid-flow with a bus open. The registry compares the methods
+    against the base's and names the missing one."""
+    scratch_registry(monkeypatch)
+    with pytest.raises(TypeError) as excinfo:
+        registry.register(make_arm_family("halfstep", step_methods=False))
+    message = str(excinfo.value)
+    assert "halfstep" in message
+    assert "calibrate" in message and "open_for_calibration" in message
+    assert "halfstep" not in registry.ids()
+
+    # One of the two is not enough either.
+    only_open = make_arm_family("halfstep", step_methods=False)
+    type(only_open).open_for_calibration = lambda self, device_type, port, config_id: object()
+    with pytest.raises(TypeError, match="calibrate"):
+        registry.register(only_open)
+    assert "halfstep" not in registry.ids()
+
+
+def test_the_base_calibrate_and_open_for_calibration_are_not_implemented() -> None:
+    family = make_arm_family("nine", step_methods=False)
+    with pytest.raises(NotImplementedError):
+        ArmFamily.open_for_calibration(family, "robot", "/dev/x", "cal")
+    with pytest.raises(NotImplementedError):
+        ArmFamily.calibrate(family, object(), "robot", object())
+
+
+def test_a_panel_family_must_name_its_panel_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    scratch_registry(monkeypatch)
+    for bad in (None, ""):
+        with pytest.raises((TypeError, ValueError)) as excinfo:
+            registry.register(make_arm_family("paneled", calibration_kind="panel", calibration_panel_url=bad))
+        assert "paneled" in str(excinfo.value) and "calibration_panel_url" in str(excinfo.value)
+        assert "paneled" not in registry.ids()
+
+    registry.register(
+        make_arm_family("paneled", calibration_kind="panel", calibration_panel_url="/api/v1/ext/p/static/cal")
+    )
+    assert registry.get("paneled").calibration_panel_url == "/api/v1/ext/p/static/cal"
+
+
+def test_a_complete_extension_family_registers_beside_the_built_ins(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The positive case every refusal above is measured against: the default
+    fake (own dirs, steps kind with both overrides) is accepted and the
+    built-ins are untouched and still first."""
+    scratch_registry(monkeypatch)
+    registry.register(make_arm_family("nine"), provided_by="ext")
+    assert registry.ids() == ("so101", "maker", "metal", "nine")
+
+
+def test_read_positions_default_prefers_the_raw_reader_then_the_bus() -> None:
+    """The base reader is today's zero-flow heuristic, documented as a read on
+    a torque-off bus: a device's private raw reader (the Maker follower and
+    the Star leader) wins, the bus's Present_Position sync_read (the Metal
+    follower) is the fallback, and a device with neither reads as empty."""
+
+    class _Raw:
+        def _read_raw_positions(self):
+            return {"j1": 1, "j2": 2.5}
+
+    class _Bus:
+        def sync_read(self, register):
+            assert register == "Present_Position"
+            return {"j1": 3}
+
+    class _WithBus:
+        bus = _Bus()
+
+    class _Bare:
+        pass
+
+    family = make_arm_family("nine")
+    assert family.read_positions(_Raw()) == {"j1": 1.0, "j2": 2.5}
+    assert family.read_positions(_WithBus()) == {"j1": 3.0}
+    assert family.read_positions(_Bare()) == {}
+
+
 def test_non_families_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(registry, "_FAMILIES", dict(registry._FAMILIES))
     with pytest.raises(TypeError, match="ArmFamily"):
@@ -466,7 +685,7 @@ def test_the_sweep_reads_the_files_it_claims_to() -> None:
         "rollout.py",
         "server.py",
         "teleoperate.py",
-        "zero_calibrate.py",
+        "step_calibrate.py",
         "utils/config.py",
         "utils/robot_factory.py",
     ):
