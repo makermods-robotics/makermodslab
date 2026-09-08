@@ -146,6 +146,24 @@ REQUIRED_ATTRIBUTES: tuple[str, ...] = (
 CALIBRATION_KINDS: tuple[str, ...] = ("range_sweep", "steps", "panel")
 
 
+def _in_joint_order(device: Any, positions: dict[str, float]) -> dict[str, float]:
+    """Reorder a position read to the device's own joint sequence.
+
+    A raw reader may return joints in bus reply-arrival order — the Star 102
+    leader over FashionStar UART does, and that order reshuffles between calls
+    — while the calibration wizard renders the readout in dict order. Pin it to
+    the device's declared joint list (``motor_names`` on the leader,
+    ``_joint_motor_names`` on a follower); a name the device does not list is
+    kept, after the ordered ones, rather than dropped.
+    """
+    order = getattr(device, "motor_names", None) or getattr(device, "_joint_motor_names", None)
+    if not order:
+        return positions
+    ordered = {name: positions[name] for name in order if name in positions}
+    ordered.update({name: value for name, value in positions.items() if name not in ordered})
+    return ordered
+
+
 @dataclass(frozen=True)
 class FollowerPreflight:
     """One follower a flow is about to hand to a subprocess (see
@@ -368,15 +386,22 @@ class ArmFamily(ABC):
         wins, the bus's ``sync_read("Present_Position")`` (the Metal follower)
         is the fallback, and a device with neither reads as empty. A failure
         is the caller's to skip.
+
+        The result is ordered by the device's own joint sequence: the Star 102
+        leader's raw reader hands joints back in UART reply-arrival order, which
+        reshuffles between calls, and the wizard renders the readout in dict
+        order — so an unpinned order churns the rows five times a second.
         """
         reader = getattr(device, "_read_raw_positions", None)
         if reader is not None:
-            return {m: float(v) for m, v in reader().items()}
-        bus = getattr(device, "bus", None)
-        sync_read = getattr(bus, "sync_read", None)
-        if sync_read is None:
-            return {}
-        return {m: float(v) for m, v in sync_read("Present_Position").items()}
+            raw = {m: float(v) for m, v in reader().items()}
+        else:
+            bus = getattr(device, "bus", None)
+            sync_read = getattr(bus, "sync_read", None)
+            if sync_read is None:
+                return {}
+            raw = {m: float(v) for m, v in sync_read("Present_Position").items()}
+        return _in_joint_order(device, raw)
 
     def calibrate(self, device: Any, device_type: str, ui: CalibrationUI) -> dict[str, Any]:
         """Run this family's "steps" procedure and return the calibration to write.

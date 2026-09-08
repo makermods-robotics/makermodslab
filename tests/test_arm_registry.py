@@ -618,6 +618,37 @@ def test_read_positions_default_prefers_the_raw_reader_then_the_bus() -> None:
     assert family.read_positions(_Bare()) == {}
 
 
+def test_read_positions_orders_joints_by_the_devices_own_sequence() -> None:
+    """The Star 102 leader's raw reader hands joints back in UART reply-arrival
+    order, which reshuffles between calls; the CAN followers do not. The wizard
+    renders the readout in dict order, so read_positions pins that order to the
+    device's own joint sequence (``motor_names`` on the leader,
+    ``_joint_motor_names`` on a follower). A name the device does not list is
+    kept, after the ordered ones, rather than dropped."""
+
+    canonical = ["shoulder_pan", "shoulder_lift", "elbow_flex", "gripper"]
+
+    class _ShuffledLeader:
+        motor_names = canonical
+
+        def _read_raw_positions(self):
+            return {"elbow_flex": 3.0, "gripper": 4.0, "shoulder_pan": 1.0, "shoulder_lift": 2.0}
+
+    class _ShuffledFollowerBus:
+        def sync_read(self, register):
+            assert register == "Present_Position"
+            return {"gripper": 9.0, "extra": 0.0, "shoulder_pan": 6.0}
+
+    class _ShuffledFollower:
+        _joint_motor_names = ["shoulder_pan", "gripper"]
+        bus = _ShuffledFollowerBus()
+
+    family = make_arm_family("nine")
+
+    assert list(family.read_positions(_ShuffledLeader())) == canonical
+    assert list(family.read_positions(_ShuffledFollower())) == ["shoulder_pan", "gripper", "extra"]
+
+
 def test_non_families_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(registry, "_FAMILIES", dict(registry._FAMILIES))
     with pytest.raises(TypeError, match="ArmFamily"):
