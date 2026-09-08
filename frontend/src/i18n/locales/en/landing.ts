@@ -203,6 +203,8 @@ export default {
       "This removes each temporary merge's local copy and any Hub copy MakerMods made for it. A merge a training run is currently using is kept.",
     cleanedUp_one: "{{count}} merge removed",
     cleanedUp_other: "{{count}} merges removed",
+    // The _one / _other text is intentionally divergent: the typed-`t` resolver
+    // rejects a plural key whose forms are byte-identical. Keep them distinct.
     cleanupSkipped_one: "{{count}} kept — still in use",
     cleanupSkipped_other: "{{count}} kept — still in use by a run",
     cleanupHubFailed_one: "{{count}} Hub copy could not be removed",

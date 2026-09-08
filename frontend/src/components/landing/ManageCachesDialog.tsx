@@ -57,8 +57,13 @@ const ManageCachesDialog: React.FC<Props> = ({
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
 
-  // Datasets whose local cache can be cleared = cached AND on the Hub.
-  const cached = datasets.filter((d) => d.source === "both");
+  // Datasets whose local cache can be cleared = cached AND on the Hub. A
+  // temporary merge is excluded even when it's on the Hub: clearing here does
+  // only the local half and orphans the MakerMods-created Hub repo — the temp
+  // section's "Clean up" is the action that removes both.
+  const cached = datasets.filter(
+    (d) => d.source === "both" && !d.merge?.temporary,
+  );
 
   // Throwaway merges minted for a combine-and-train launch. Filtered
   // independently of `cached`: a temp merge that was never pushed to the Hub is
@@ -201,9 +206,13 @@ const ManageCachesDialog: React.FC<Props> = ({
             count: res.hub_failed.length,
           }),
         );
+      const partial = res.skipped.length > 0 || res.hub_failed.length > 0;
       toast({
         title: t("landing.manageCaches.temporaryMergesTitle"),
         description: parts.join(" · "),
+        // A merge left behind (in use) or a Hub repo we couldn't remove is not
+        // a clean success — flag it so it doesn't read as one.
+        ...(partial ? { variant: "destructive" as const } : {}),
       });
       // Refresh the parent list so the removed merges drop out.
       onCleared();
@@ -328,13 +337,13 @@ const ManageCachesDialog: React.FC<Props> = ({
                         {t("landing.manageCaches.weightedChip")}
                       </span>
                     )}
-                    {d.merge && d.merge.source_count > 0 && (
+                    {d.merge?.source_count ? (
                       <span className="shrink-0 text-xs text-muted-foreground">
                         {t("landing.manageCaches.sourceCount", {
                           n: d.merge.source_count,
                         })}
                       </span>
-                    )}
+                    ) : null}
                   </div>
                 ))}
               </div>
