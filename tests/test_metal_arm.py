@@ -174,10 +174,9 @@ def test_calibrating_a_metal_robot_builds_a_step_calibration_request(tmp_lerobot
     — step_calibrate resolves the family (device configs, procedure) and the
     name-collision directory from it, and a request that defaulted to maker
     would connect a RobStride config to a Damiao bus."""
-    from makermodslab.step_calibrate import StepCalibrationRequest
-
     from makermodslab.schemas.sessions import CalibrationOptions
     from makermodslab.sessions import _build_calibration_request
+    from makermodslab.step_calibrate import StepCalibrationRequest
 
     cfg.save_robot_record(
         "mt4", {"arm_type": "metal", "mode": "single", "follower_port": "/dev/can0"}, allow_create=True
