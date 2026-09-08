@@ -261,9 +261,10 @@ export default {
     // 102 leader has one folded, closed-gripper pose on both rigs.
     zeroPose: {
       // Keyed by manifest id, then side — the VALUES are data. These are
-      // per-id overrides of the manifest's own zero_pose text (which the
-      // server's zero_pose_instructions() writes, and which a family without
-      // an entry here renders as-is, in English). Wording mirrors it.
+      // per-id overrides of the manifest's own calibration.summary text
+      // (which the server's calibration_summary() writes, and which a family
+      // without an entry here renders as-is, in English) and of the first
+      // step's text while the wizard runs. Wording mirrors it.
       instructionsFor: {
         maker: {
           leader:
@@ -325,6 +326,13 @@ export default {
       "Each arm moves on its own to find its joint limits. Keep the area clear.",
     zeroNote:
       "Put the arm in the position shown above, then set zero. Torque stays off, so it moves freely.",
+    // A family that calibrates through its extension's own served page
+    // (manifest calibration.kind "panel"). Shown in place of the calibrate
+    // controls until the panel is mounted here.
+    panel: {
+      notice:
+        "This arm is calibrated through its extension's own panel. It will appear here once the extension provides it.",
+    },
     videoAuto: "Auto-calibration demo",
     poseMiddle: "Start pose: middle position",
     poseAutoStart: "Start pose for auto-calibration",

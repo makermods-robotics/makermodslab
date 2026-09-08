@@ -10,14 +10,14 @@ import {
   supportsDagger,
   supportsPortProbe,
   telemetryKind,
+  calibrationKind,
   usesFeetechBus,
-  usesZeroCalibration,
 } from "./armTypes";
 
 // The client mirror of the backend's arm_capabilities.py predicates, now read
 // from the GET /api/v1/arms manifest instead of a closed id union. These
 // fixtures are the three built-ins EXACTLY as makermodslab/arms/manifest.py
-// serves them (mirroring arms/so101.py, maker.py, metal.py), plus two
+// serves them (mirroring arms/so101.py, maker.py, metal.py), plus three
 // families the core does not ship — the shape an extension registers — so
 // every predicate is proven to read the manifest's fields, never the id.
 
@@ -26,10 +26,11 @@ const SO101: ArmFamilyInfo = {
   label: "SO-101",
   short_label: "SO-101",
   provided_by: "builtin",
+  image_url: null,
   joints_per_arm: 6,
   calibration_name_suffix: "",
   supports_bimanual: true,
-  calibration: { kind: "range_sweep", zero_pose: null },
+  calibration: { kind: "range_sweep", summary: null, panel_url: null },
   telemetry_kind: "urdf",
   capabilities: {
     uses_feetech_bus: true,
@@ -54,17 +55,23 @@ const MAKER: ArmFamilyInfo = {
   label: "Maker Arm v1",
   short_label: "Maker",
   provided_by: "builtin",
+  image_url: null,
   joints_per_arm: 7,
   calibration_name_suffix: "_maker",
   supports_bimanual: true,
   calibration: {
-    kind: "zero_pose",
-    zero_pose: {
-      leader:
-        "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, gripper closed — then confirm.",
-      follower:
-        "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully open — then confirm.",
+    kind: "steps",
+    summary: {
+      leader: {
+        text: "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, gripper closed — then confirm.",
+        image_url: null,
+      },
+      follower: {
+        text: "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully open — then confirm.",
+        image_url: null,
+      },
     },
+    panel_url: null,
   },
   telemetry_kind: "degrees",
   capabilities: {
@@ -83,17 +90,23 @@ const METAL: ArmFamilyInfo = {
   label: "Metal Arm",
   short_label: "Metal",
   provided_by: "builtin",
+  image_url: null,
   joints_per_arm: 7,
   calibration_name_suffix: "_metal",
   supports_bimanual: true,
   calibration: {
-    kind: "zero_pose",
-    zero_pose: {
-      leader:
-        "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, gripper closed — then confirm.",
-      follower:
-        "Move the arm by hand to its ZERO POSE — standing upright, all joints at 0 degrees, gripper closed — then confirm.",
+    kind: "steps",
+    summary: {
+      leader: {
+        text: "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, gripper closed — then confirm.",
+        image_url: null,
+      },
+      follower: {
+        text: "Move the arm by hand to its ZERO POSE — standing upright, all joints at 0 degrees, gripper closed — then confirm.",
+        image_url: null,
+      },
     },
+    panel_url: null,
   },
   telemetry_kind: "degrees",
   capabilities: {
@@ -113,10 +126,11 @@ const SO101_TWIN: ArmFamilyInfo = {
   label: "SO-101 Twin",
   short_label: "Twin",
   provided_by: "hello",
+  image_url: null,
   joints_per_arm: 6,
   calibration_name_suffix: "_so101_twin",
   supports_bimanual: true,
-  calibration: { kind: "range_sweep", zero_pose: null },
+  calibration: { kind: "range_sweep", summary: null, panel_url: null },
   telemetry_kind: "urdf",
   capabilities: {
     uses_feetech_bus: true,
@@ -135,12 +149,17 @@ const NINE: ArmFamilyInfo = {
   label: "Nine Arm",
   short_label: "Nine",
   provided_by: "nine-ext",
+  image_url: null,
   joints_per_arm: 9,
   calibration_name_suffix: "_nine",
   supports_bimanual: false,
   calibration: {
-    kind: "zero_pose",
-    zero_pose: { leader: "Fold the nine leader.", follower: "Fold the nine." },
+    kind: "steps",
+    summary: {
+      leader: { text: "Fold the nine leader.", image_url: null },
+      follower: { text: "Fold the nine.", image_url: null },
+    },
+    panel_url: null,
   },
   telemetry_kind: "degrees",
   capabilities: {
@@ -154,19 +173,61 @@ const NINE: ArmFamilyInfo = {
   robot_type_markers: ["nine"],
 };
 
-/** Manifest order: registry order, the default (SO-101) family first. */
-const ARMS: ArmFamilyInfo[] = [SO101, MAKER, METAL, SO101_TWIN, NINE];
+/**
+ * An extension's family that calibrates through its own served page (kind
+ * "panel") and ships its own photo — the two served URLs the manifest can
+ * carry for a family the frontend bundles nothing for.
+ */
+const PANELED: ArmFamilyInfo = {
+  id: "paneled",
+  label: "Paneled Arm",
+  short_label: "Paneled",
+  provided_by: "paneled",
+  image_url: "/api/v1/ext/paneled/static/arm.jpg",
+  joints_per_arm: 7,
+  calibration_name_suffix: "_paneled",
+  supports_bimanual: false,
+  calibration: {
+    kind: "panel",
+    summary: null,
+    panel_url: "/api/v1/ext/paneled/static/calibrate.html",
+  },
+  telemetry_kind: "degrees",
+  capabilities: {
+    uses_feetech_bus: false,
+    supports_auto_calibration: false,
+    supports_dagger: false,
+    supports_port_probe: true,
+    motion_identify_energizes_follower: false,
+  },
+  robot_types: ["paneled_follower", "bi_paneled_follower"],
+  robot_type_markers: ["paneled"],
+};
 
-describe("usesZeroCalibration", () => {
-  it("is false for the range-sweep families (SO-101 and its twin)", () => {
-    expect(usesZeroCalibration(SO101)).toBe(false);
-    expect(usesZeroCalibration(SO101_TWIN)).toBe(false);
+/** Manifest order: registry order, the default (SO-101) family first. */
+const ARMS: ArmFamilyInfo[] = [SO101, MAKER, METAL, SO101_TWIN, NINE, PANELED];
+
+describe("calibrationKind", () => {
+  // The dialog picks its whole calibration UI off this one value (the sweep
+  // wizard, the step wizard, or the extension's panel notice), so it must
+  // come from the manifest's `calibration.kind` and never from the id.
+  it("is range_sweep for the SO-101 sweep families (built-in and twin)", () => {
+    expect(calibrationKind(SO101)).toBe("range_sweep");
+    expect(calibrationKind(SO101_TWIN)).toBe("range_sweep");
   });
 
-  it("is true for every zero-pose family, built-in or not", () => {
-    expect(usesZeroCalibration(MAKER)).toBe(true);
-    expect(usesZeroCalibration(METAL)).toBe(true);
-    expect(usesZeroCalibration(NINE)).toBe(true);
+  it("is steps for every step-wizard family, built-in or not", () => {
+    expect(calibrationKind(MAKER)).toBe("steps");
+    expect(calibrationKind(METAL)).toBe("steps");
+    expect(calibrationKind(NINE)).toBe("steps");
+  });
+
+  it("is panel for a family that calibrates through its own served page", () => {
+    expect(calibrationKind(PANELED)).toBe("panel");
+  });
+
+  it("is range_sweep for undefined — the SO-101 shape, like every other fallback", () => {
+    expect(calibrationKind(undefined)).toBe("range_sweep");
   });
 });
 
@@ -177,6 +238,7 @@ describe("supportsAutoCalibration", () => {
     expect(supportsAutoCalibration(MAKER)).toBe(false);
     expect(supportsAutoCalibration(METAL)).toBe(false);
     expect(supportsAutoCalibration(NINE)).toBe(false);
+    expect(supportsAutoCalibration(PANELED)).toBe(false);
   });
 });
 
@@ -187,6 +249,7 @@ describe("supportsPortProbe", () => {
     expect(supportsPortProbe(MAKER)).toBe(true);
     expect(supportsPortProbe(METAL)).toBe(true);
     expect(supportsPortProbe(NINE)).toBe(true);
+    expect(supportsPortProbe(PANELED)).toBe(true);
   });
 });
 
@@ -197,6 +260,7 @@ describe("usesFeetechBus", () => {
     expect(usesFeetechBus(MAKER)).toBe(false);
     expect(usesFeetechBus(METAL)).toBe(false);
     expect(usesFeetechBus(NINE)).toBe(false);
+    expect(usesFeetechBus(PANELED)).toBe(false);
   });
 });
 
@@ -207,6 +271,7 @@ describe("supportsDagger", () => {
     expect(supportsDagger(MAKER)).toBe(false);
     expect(supportsDagger(METAL)).toBe(false);
     expect(supportsDagger(NINE)).toBe(false);
+    expect(supportsDagger(PANELED)).toBe(false);
   });
 });
 
@@ -217,6 +282,7 @@ describe("jointsPerArm", () => {
     expect(jointsPerArm(MAKER)).toBe(7);
     expect(jointsPerArm(METAL)).toBe(7);
     expect(jointsPerArm(NINE)).toBe(9);
+    expect(jointsPerArm(PANELED)).toBe(7);
   });
 });
 
@@ -227,6 +293,7 @@ describe("telemetryKind", () => {
     expect(telemetryKind(MAKER)).toBe("degrees");
     expect(telemetryKind(METAL)).toBe("degrees");
     expect(telemetryKind(NINE)).toBe("degrees");
+    expect(telemetryKind(PANELED)).toBe("degrees");
   });
 });
 
@@ -236,7 +303,7 @@ describe("the undefined fallback", () => {
   // pre-manifest `?? "so101"` renders drew — so a loading page looks exactly
   // as it did. Callers gate an UNAVAILABLE arm on record.arm_available first.
   it("answers every predicate with the SO-101 shape", () => {
-    expect(usesZeroCalibration(undefined)).toBe(false);
+    expect(calibrationKind(undefined)).toBe("range_sweep");
     expect(supportsAutoCalibration(undefined)).toBe(true);
     expect(supportsPortProbe(undefined)).toBe(false);
     expect(usesFeetechBus(undefined)).toBe(true);
@@ -258,6 +325,7 @@ describe("armTypeFromRobotType", () => {
     expect(armTypeFromRobotType(ARMS, "metal_follower")).toBe("metal");
     expect(armTypeFromRobotType(ARMS, "bi_metal_follower")).toBe("metal");
     expect(armTypeFromRobotType(ARMS, "nine_follower")).toBe("nine");
+    expect(armTypeFromRobotType(ARMS, "paneled_follower")).toBe("paneled");
   });
 
   it("maps legacy / differently-cased / padded strings", () => {
@@ -331,6 +399,7 @@ describe("armLabel", () => {
   it("falls back to the manifest label for an id the catalog does not know", () => {
     expect(armLabel(NINE, "nine", fakeT)).toBe("Nine Arm");
     expect(armLabel(SO101_TWIN, "so101_twin", fakeT)).toBe("SO-101 Twin");
+    expect(armLabel(PANELED, "paneled", fakeT)).toBe("Paneled Arm");
   });
 
   it("falls back to the bare id when the manifest has no entry either (arm not installed)", () => {

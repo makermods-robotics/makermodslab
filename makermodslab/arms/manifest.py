@@ -40,12 +40,14 @@ from .base import ArmFamily
 
 def describe_family(family: ArmFamily) -> dict:
     """One manifest entry for ``family`` (the shape of ArmFamilyInfo)."""
-    zero_pose = (
+    # What the config dialog shows BEFORE Start, per side; None (not {}) for
+    # a family with nothing to summarize — the range-sweep SO-101 today.
+    summary = (
         {
-            "leader": family.zero_pose_instructions("teleop"),
-            "follower": family.zero_pose_instructions("robot"),
+            "leader": family.calibration_summary("teleop"),
+            "follower": family.calibration_summary("robot"),
         }
-        if family.uses_zero_calibration
+        if family.calibration_kind == "steps"
         else None
     )
     return {
@@ -55,9 +57,11 @@ def describe_family(family: ArmFamily) -> dict:
         "provided_by": registry.provided_by(family.id),
         "joints_per_arm": family.joints_per_arm,
         "supports_bimanual": family.supports_bimanual,
+        "image_url": family.image_url,
         "calibration": {
-            "kind": "zero_pose" if family.uses_zero_calibration else "range_sweep",
-            "zero_pose": zero_pose,
+            "kind": family.calibration_kind,
+            "summary": summary,
+            "panel_url": family.calibration_panel_url,
         },
         "telemetry_kind": family.telemetry_kind,
         "capabilities": {

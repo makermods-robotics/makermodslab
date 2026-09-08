@@ -624,16 +624,29 @@ def _resolve_slot(record: dict, device_type: str, arm: str, port: str | None, co
 def _build_calibration_request(record: dict, opts: CalibrationOptions):
     """Build the calibration request matching this robot's arm type.
 
+    The family's calibration_kind picks the procedure: ``range_sweep`` is the
+    SO-101 sweep manager's request, ``steps`` the step wizard's, and ``panel``
+    has no server-side procedure at all (the extension's own page runs it).
     The two request models share their common fields on purpose — only the
     class differs, and _dispatch_start reads that class to pick the manager.
-    The zero request additionally carries the record's arm_type: the flow
-    serves BOTH CAN families, and it decides which device configs to build,
-    which pose text to show, and which library the name-collision check reads.
+    The step request additionally carries the record's arm_type: the wizard
+    serves every ``steps`` family, and the arm type decides which family's
+    procedure runs and which library the name-collision check reads.
     """
-    from .arm_capabilities import uses_zero_calibration
+    from .arm_capabilities import calibration_kind
     from .calibrate import CalibrationRequest
-    from .zero_calibrate import ZeroCalibrationRequest
+    from .step_calibrate import StepCalibrationRequest
 
+    kind = calibration_kind(record["arm_type"])
+    if kind == "panel":
+        raise ApiError(
+            status_code=400,
+            detail=(
+                "This arm is calibrated through its extension's own panel; "
+                "open it from the robot's config window."
+            ),
+            code=ErrorCode.ROBOT_NOT_READY,
+        )
     port, config_file = _resolve_slot(record, opts.device_type, opts.arm, opts.port, opts.config_file)
     common = {
         "device_type": opts.device_type,
@@ -643,8 +656,8 @@ def _build_calibration_request(record: dict, opts: CalibrationOptions):
         "overwrite": opts.overwrite,
         "arm": opts.arm,
     }
-    if uses_zero_calibration(record["arm_type"]):
-        return ZeroCalibrationRequest(arm_type=record["arm_type"], **common)
+    if kind == "steps":
+        return StepCalibrationRequest(arm_type=record["arm_type"], **common)
     return CalibrationRequest(**common)
 
 
@@ -702,7 +715,7 @@ _REQUEST_BUILDERS = {
 
 
 def _dispatch_start(kind: str, request, websocket_manager) -> dict[str, Any]:
-    from . import auto_calibrate, calibrate, record, replay, rollout, teleoperate, zero_calibrate
+    from . import auto_calibrate, calibrate, record, replay, rollout, step_calibrate, teleoperate
 
     if kind == "teleoperation":
         return teleoperate.handle_start_teleoperation(request, websocket_manager)
@@ -711,12 +724,13 @@ def _dispatch_start(kind: str, request, websocket_manager) -> dict[str, Any]:
     if kind == "inference":
         return rollout.handle_start_inference(request)
     if kind == "calibration":
-        # One session kind, two procedures. The SO-101 sweeps each joint's
-        # range; the Maker arm only has to be told where zero is (its limits
-        # are fixed constants). _build_calibration_request has already built
-        # the matching request type, so this only picks the manager.
-        if isinstance(request, zero_calibrate.ZeroCalibrationRequest):
-            return zero_calibrate.zero_calibration_manager.start(request)
+        # One session kind, two managers. The SO-101 sweeps each joint's
+        # range; a "steps" family (the CAN arms' zero pose) runs its own
+        # procedure through the step wizard. _build_calibration_request has
+        # already built the matching request type, so this only picks the
+        # manager.
+        if isinstance(request, step_calibrate.StepCalibrationRequest):
+            return step_calibrate.step_calibration_manager.start(request)
         return calibrate.calibration_manager.start_calibration(request)
     if kind == "auto_calibration":
         return auto_calibrate.auto_calibration_batch_manager.start(request)
@@ -932,7 +946,7 @@ def handle_heartbeat_session(session_id: str, owner: str) -> dict[str, Any]:
 
 
 def _dispatch_stop(kind: str) -> dict[str, Any]:
-    from . import auto_calibrate, calibrate, record, replay, rollout, teleoperate, zero_calibrate
+    from . import auto_calibrate, calibrate, record, replay, rollout, step_calibrate, teleoperate
 
     if kind == "teleoperation":
         return teleoperate.handle_stop_teleoperation()
@@ -946,8 +960,8 @@ def _dispatch_stop(kind: str) -> dict[str, Any]:
         # Stopping is never owner-gated and the tracker only knows the KIND,
         # not which manager is live — so stop whichever one actually is
         # (mirroring the auto_calibration arm just below).
-        if zero_calibrate.zero_calibration_is_active():
-            return zero_calibrate.zero_calibration_manager.stop()
+        if step_calibrate.step_calibration_is_active():
+            return step_calibrate.step_calibration_manager.stop()
         return calibrate.calibration_manager.stop_calibration_process()
     if kind == "auto_calibration":
         # The aggregate spans the single-arm manager and the batch manager —

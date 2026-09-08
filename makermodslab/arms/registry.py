@@ -31,7 +31,7 @@ treats the registry as a set.
 
 from __future__ import annotations
 
-from .base import REQUIRED_ATTRIBUTES, ArmFamily
+from .base import CALIBRATION_KINDS, REQUIRED_ATTRIBUTES, ArmFamily
 
 # The family every record written before arm types existed implicitly is, and
 # what a MISSING arm_type reads as (see utils.config.normalize_arm_type). An
@@ -82,8 +82,84 @@ def register(family: ArmFamily, *, provided_by: str = BUILTIN_PROVIDER) -> None:
         raise TypeError(f"arm family {type(family).__name__} is missing required attributes: {missing}")
     if family.id in _FAMILIES:
         raise ValueError(f"arm family {family.id!r} is already registered")
+    _check_calibration_dirs(family)
+    _check_calibration_kind(family)
     _FAMILIES[family.id] = family
     _PROVIDERS[family.id] = provided_by
+
+
+def _calibration_dir(family: ArmFamily, method: str) -> str:
+    """Call one of the family's dir methods, refusing a family that cannot answer.
+
+    The library dirs are read by every readiness check and every staging
+    copy; a family that raises (the base's NotImplementedError when neither
+    the method nor the library attr is provided) or answers something other
+    than a non-empty path would fail deep in the first flow that asks.
+    """
+    try:
+        value = getattr(family, method)()
+    except Exception as exc:
+        raise TypeError(f"arm family {family.id!r} cannot answer {method}(): {exc}") from exc
+    if not isinstance(value, str) or not value:
+        raise ValueError(
+            f"arm family {family.id!r} must answer {method}() with a non-empty path, got {value!r}"
+        )
+    return value
+
+
+def _check_calibration_dirs(family: ArmFamily) -> None:
+    """Both dir methods answer; the follower dir is the family's alone; a
+    shared leader dir is allowed only behind a calibration_name_suffix."""
+    leader_dir = _calibration_dir(family, "leader_calibration_dir")
+    follower_dir = _calibration_dir(family, "follower_calibration_dir")
+    for other in _FAMILIES.values():
+        if other.follower_calibration_dir() == follower_dir:
+            raise ValueError(
+                f"arm family {family.id!r} names follower calibration dir {follower_dir!r}, which "
+                f"{other.id!r} already owns: two families writing one follower library would load "
+                "each other's files by name"
+            )
+        if other.leader_calibration_dir() == leader_dir and not family.calibration_name_suffix:
+            raise ValueError(
+                f"arm family {family.id!r} shares leader calibration dir {leader_dir!r} with "
+                f"{other.id!r} but has an empty calibration_name_suffix: sharing a leader library "
+                "(one lerobot leader class, several presets — the Maker/Metal Star-leader case) is "
+                "legitimate only when the suffix mints each family's id into its default calibration "
+                "names, so the two never reuse a calibration written for the other"
+            )
+
+
+def _check_calibration_kind(family: ArmFamily) -> None:
+    """The kind is one the core can run, and the family carries its prerequisites."""
+    kind = family.calibration_kind
+    if kind not in CALIBRATION_KINDS:
+        raise ValueError(
+            f"arm family {family.id!r} has calibration_kind {kind!r}; expected one of {CALIBRATION_KINDS}"
+        )
+    if kind == "range_sweep" and not family.uses_feetech_bus:
+        raise ValueError(
+            f"arm family {family.id!r} declares calibration_kind 'range_sweep' with uses_feetech_bus=False: "
+            "the sweep managers read and write Feetech servo registers by name"
+        )
+    if kind == "steps":
+        not_overridden = [
+            name
+            for name in ("calibrate", "open_for_calibration")
+            if getattr(type(family), name) is getattr(ArmFamily, name)
+        ]
+        if not_overridden:
+            raise TypeError(
+                f"arm family {family.id!r} declares calibration_kind 'steps' but does not override "
+                f"{' and '.join(not_overridden)}(): the step manager runs calibrate() on the device "
+                "open_for_calibration() returns, and the base versions raise NotImplementedError"
+            )
+    if kind == "panel":
+        url = family.calibration_panel_url
+        if not isinstance(url, str) or not url:
+            raise ValueError(
+                f"arm family {family.id!r} declares calibration_kind 'panel' but calibration_panel_url "
+                f"is {url!r}: the config dialog needs the served page to mount"
+            )
 
 
 def get(arm_type: str) -> ArmFamily:

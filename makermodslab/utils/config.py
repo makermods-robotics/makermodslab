@@ -24,8 +24,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
-from ..arms import registry as arm_registry
-
 logger = logging.getLogger(__name__)
 
 RobotSide = Literal["leader", "follower"]
@@ -81,8 +79,8 @@ FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "so_follower")
 # families exist, and it is open: an extension can register one after this
 # module is imported. Nothing here captures the set (a tuple or a Literal
 # taken at import is stale the moment that happens); is_known_arm_type asks
-# the registry on every call.
-DEFAULT_ARM_TYPE = arm_registry.DEFAULT_ID
+# the registry on every call. DEFAULT_ARM_TYPE is bound below the library
+# constants, where the registry is imported.
 
 # lerobot derives a device's calibration directory from the device CLASS's
 # `name` attribute (Robot.__init__ / Teleoperator.__init__ ->
@@ -102,6 +100,16 @@ DEFAULT_ARM_TYPE = arm_registry.DEFAULT_ID
 MAKER_LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "rebot_102_leader")
 MAKER_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "maker_follower")
 METAL_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "metal_follower")
+
+# Imported HERE, after every library constant, on purpose: importing the arms
+# package registers the built-in families, and registration validates each
+# family's calibration dirs by calling its dir methods — which resolve the
+# constants above off THIS module. Imported at the top, a process whose first
+# import is utils.config would reach that check with the constants not yet
+# bound (a circular import), so the import sits below what it needs.
+from ..arms import registry as arm_registry  # noqa: E402
+
+DEFAULT_ARM_TYPE = arm_registry.DEFAULT_ID
 
 
 def is_known_arm_type(value: object) -> bool:
@@ -138,11 +146,26 @@ def normalize_arm_type(value: object) -> str:
 # calibration is meaningless to an SO-101 and vice versa, and lerobot would not
 # look for it in the other directory anyway. Nothing merges the two listings.
 #
-# Each family NAMES its library constants (ArmFamily.leader_library_attr /
-# follower_library_attr) and resolves them off this module at CALL time rather
+# Each built-in family NAMES its library constants (ArmFamily.leader_library_attr
+# / follower_library_attr) and resolves them off this module at CALL time rather
 # than capturing a path at import, so a test (or an install with a relocated
 # cache) that monkeypatches LEADER_CONFIG_PATH still steers every caller — a
-# frozen table would silently ignore the patch.
+# frozen table would silently ignore the patch. An extension family answers
+# its dir methods with lerobot_calibration_dir() instead.
+
+
+def lerobot_calibration_dir(kind: Literal["robots", "teleoperators"], class_name: str) -> str:
+    """The calibration dir lerobot derives from a device class's ``name``.
+
+    lerobot reads a device's calibration from ``<base>/<class name>/`` —
+    ``CALIBRATION_BASE_PATH_ROBOTS`` for a robot (follower), ``..._TELEOP``
+    for a teleoperator (leader). An extension family returns this from its
+    ``leader_calibration_dir()`` / ``follower_calibration_dir()`` rather than
+    re-deriving the path; resolved at call time, like the built-ins'
+    constants, so a redirected base path is honoured.
+    """
+    base = CALIBRATION_BASE_PATH_ROBOTS if kind == "robots" else CALIBRATION_BASE_PATH_TELEOP
+    return os.path.join(base, class_name)
 
 
 def leader_config_path_for(arm_type: object = DEFAULT_ARM_TYPE) -> str:

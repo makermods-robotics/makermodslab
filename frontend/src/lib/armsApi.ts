@@ -7,15 +7,27 @@ import { apiRequest, type Fetcher } from "./apiClient";
  * extension's) appears here like a built-in, and the predicates in
  * lib/armTypes.ts read these fields rather than branching on the id.
  */
-export interface ArmZeroPose {
-  leader: string;
-  follower: string;
+export interface ArmCalibrationSide {
+  /** What the config dialog shows for this side BEFORE Start. */
+  text: string;
+  /** A served image beside the text, or null for none. */
+  image_url: string | null;
+}
+
+export interface ArmCalibrationSummary {
+  leader: ArmCalibrationSide | null;
+  follower: ArmCalibrationSide | null;
 }
 
 export interface ArmCalibrationInfo {
-  kind: "range_sweep" | "zero_pose";
-  /** Set for zero_pose families; null for range_sweep ones. */
-  zero_pose: ArmZeroPose | null;
+  /** range_sweep: the SO-101 sweep managers; steps: the generic step wizard
+   * (the CAN families' zero pose); panel: the extension serves its own page
+   * at `panel_url`. */
+  kind: "range_sweep" | "steps" | "panel";
+  /** Set for steps families; null for range_sweep (and panel) ones. */
+  summary: ArmCalibrationSummary | null;
+  /** The family's served calibration page, or null when it has none. */
+  panel_url: string | null;
 }
 
 export interface ArmCapabilities {
@@ -32,6 +44,9 @@ export interface ArmFamilyInfo {
   short_label: string;
   /** "builtin" for the shipped families; an extension's name otherwise. */
   provided_by: string;
+  /** A served photo for the create dialog; null for the built-ins, whose
+   * photos the frontend bundles (ARM_PHOTOS). */
+  image_url: string | null;
   joints_per_arm: number;
   /** Appended to a robot's name to mint its default calibration id ("" for
    * the SO-101, "_maker" / "_metal" for the CAN families — whose Star-leader
@@ -47,6 +62,22 @@ export interface ArmFamilyInfo {
   robot_types: string[];
   /** Substrings that identify a dataset's raw robot_type as this family. */
   robot_type_markers: string[];
+}
+
+/**
+ * Resolve a URL the manifest serves (`image_url`, a summary side's
+ * `image_url`, `panel_url` — root-relative `/api/v1/ext/<name>/static/...`
+ * paths) against the API origin. Under `makermodslab --dev` the page comes
+ * from Vite, not the backend, so a bare root-relative `<img src>` would miss
+ * the server — the same reason every camera and episode src is built on
+ * `baseUrl`. Anything not root-relative passes through; null stays null.
+ */
+export function servedUrl(
+  baseUrl: string,
+  url: string | null | undefined,
+): string | null {
+  if (!url) return null;
+  return url.startsWith("/") ? `${baseUrl}${url}` : url;
 }
 
 /** GET /api/v1/arms — the `arms` array, in manifest (registry) order: the

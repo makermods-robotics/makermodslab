@@ -750,11 +750,14 @@ def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp
     cache — we only inspect the argv handed to Popen. The resolve stub takes the
     `report` kwarg the worker now passes for download progress."""
     from makermodslab import rollout
+    from makermodslab.arms import so101
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda cfg, arm_type="so101": cfg)
-    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    # The SO-101 follower preflights live in arms/so101.py (TB6a); rollout
+    # reaches them through family.preflight_ports.
+    monkeypatch.setattr(so101, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(so101, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(
         rollout, "_resolve_policy_path", lambda ref, report=None: str(tmp_path / "pretrained_model")
     )
@@ -1353,6 +1356,7 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
     its stdout pump) run inline via _SyncThread and HOME is redirected so the log
     file lands in tmp."""
     from makermodslab import rollout
+    from makermodslab.arms import so101
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(rollout, "bimanual_base_id", lambda name: "dual_arm")
@@ -1361,8 +1365,10 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
         "stage_bimanual_follower_calibrations",
         lambda *a, **k: ("/staging/follower", "dual_arm"),
     )
-    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    # The SO-101 follower preflights live in arms/so101.py (TB6a); rollout
+    # reaches them through family.preflight_ports.
+    monkeypatch.setattr(so101, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(so101, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(
         rollout, "_resolve_policy_path", lambda ref, report=None: str(tmp_path / "pretrained_model")
     )
@@ -3003,10 +3009,13 @@ def test_eval_start_spawns_the_runner_with_stdin_left_open(monkeypatch, tmp_path
     """Eval mode gets ONE long-lived runner whose stdin is the command channel;
     the single-episode path still gets `lerobot-rollout` with stdin closed."""
     from makermodslab import rollout
+    from makermodslab.arms import so101
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    # The SO-101 follower preflights live in arms/so101.py (TB6a); rollout
+    # reaches them through family.preflight_ports.
+    monkeypatch.setattr(so101, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(so101, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda name, arm_type="so101": name)
     monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/local/model")
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
@@ -3061,10 +3070,13 @@ def test_single_episode_start_still_spawns_lerobot_rollout(monkeypatch, tmp_path
     """`eval_episodes == 1` is untouched by the redesign: same module, and stdin
     closed straight after the calibration seed."""
     from makermodslab import rollout
+    from makermodslab.arms import so101
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    # The SO-101 follower preflights live in arms/so101.py (TB6a); rollout
+    # reaches them through family.preflight_ports.
+    monkeypatch.setattr(so101, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(so101, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda name, arm_type="so101": name)
     monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/local/model")
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")

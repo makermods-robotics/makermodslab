@@ -30,31 +30,45 @@ What the contract covers TODAY (refactor step "4a" of docs/extensions/plan.md):
   label (a display name), indefinite_label (for prose: "a Metal arm");
 * shape — joints_per_arm, supports_bimanual;
 * capability flags — uses_feetech_bus, supports_auto_calibration,
-  uses_zero_calibration, supports_dagger (the predicates in
-  makermodslab/arm_capabilities.py read these; their docstrings carry the
-  hardware reasoning and stay the reference for what each flag gates);
+  supports_dagger (the predicates in makermodslab/arm_capabilities.py read
+  these; their docstrings carry the hardware reasoning and stay the
+  reference for what each flag gates);
 * lerobot registry keys — single_robot_type / bimanual_robot_type,
   the RobotConfig choice-registry names this family's followers register
   under, used both to name --robot.type for a subprocess and to read the
   family back off a built config;
 * dataset provenance — robot_type_markers, substrings that identify the
   family inside a dataset's free-form meta/info.json robot_type;
-* calibration libraries — leader_library_attr / follower_library_attr
-  name the makermodslab.utils.config path constants for this family's
-  libraries (resolved at CALL time so a relocated or monkeypatched path is
-  honoured), and default_calibration_name is the naming rule for a robot
-  record's empty calibration slot;
+* calibration libraries — the two METHODS leader_calibration_dir() /
+  follower_calibration_dir() are the contract (an extension family answers
+  them from utils.config.lerobot_calibration_dir, the dir lerobot derives
+  from its device class's name); the built-ins answer through their
+  leader_library_attr / follower_library_attr constants, resolved at CALL
+  time so a relocated or monkeypatched path is honoured. The registry
+  refuses a family whose dir methods cannot answer, a follower dir another
+  family already owns, and a shared leader dir without a
+  calibration_name_suffix to keep the names apart. default_calibration_name
+  is the naming rule for a robot record's empty calibration slot;
 * device construction — build_single_configs / build_bimanual_configs
   assemble the lerobot follower/leader config pair for a session. Device
   config classes are imported INSIDE these methods, never at module import:
   the CAN families' configs drag in python-can / motorbridge, and this package
   is imported by utils.config, i.e. by everything.
 
-* calibration procedure — zero_pose_instructions (the pose text the
-  zero-calibration flow shows; only the CAN families have one) and the
-  single-device configs single_follower_config / single_leader_config that
-  calibration and crash recovery connect ONE arm with (no leader/follower
-  pair, no cameras).
+* calibration procedure — calibration_kind names it, one of
+  CALIBRATION_KINDS: "range_sweep" (the SO-101's Feetech sweep managers in
+  calibrate.py / auto_calibrate.py), "steps" (the family runs its own
+  procedure on step_calibrate.py's worker thread: open_for_calibration
+  connects ONE device with torque OFF, calibrate() drives the wizard through
+  a CalibrationUI — step() publishes a step and BLOCKS until the user
+  confirms, message() shows a transient status — and returns the
+  calibration the manager writes; read_positions is the live readout while
+  a step is up), or "panel" (the extension's own page at
+  calibration_panel_url, mounted by the config dialog). calibration_summary
+  is what the dialog shows BEFORE Start per device side (None for a sweep
+  family), and single_follower_config / single_leader_config are the
+  single-device configs calibration and crash recovery connect ONE arm with
+  (no leader/follower pair, no cameras).
 
 * port detection — probe_ports (which ports answer which protocol, no user
   gesture; only the CAN families have one, because their two halves speak
@@ -65,10 +79,15 @@ What the contract covers TODAY (refactor step "4a" of docs/extensions/plan.md):
 * preflight — verify_identity (the read-only EEPROM fingerprint that
   catches a swapped or mis-assigned arm BEFORE a calibration is written into
   it) and prepare_follower_registers (re-seed the session torque limit and
-  clear a leftover speed cap). Both are Feetech register work; the CAN
-  families answer with nothing to do, because a RobStride/Damiao motor
-  keeps its zero internally and takes its drive effort from the MIT gains
-  connect() writes.
+  clear a leftover speed cap) on a bus a flow already holds; and
+  preflight_ports, the port-based twin rollout calls on EVERY family before
+  its subprocess opens the ports (the family opens and releases each port
+  itself). All three are Feetech register work; the CAN families answer
+  with nothing to do, because a RobStride/Damiao motor keeps its zero
+  internally and takes its drive effort from the MIT gains connect() writes.
+
+* presentation — image_url, a served image for the create dialog (None for
+  the built-ins, whose photos the frontend bundles).
 
 * stop path — capture_rest_poses at session start, return_to_rest before
   torque is released, release_torque last. The ORDER is the core's and every
@@ -91,7 +110,8 @@ outside this package compares an arm type to a literal
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 # Attributes a family MUST set. Checked by registry.register (an ABC can
 # only enforce methods, and most of a family is data), so an incomplete family
@@ -106,17 +126,72 @@ REQUIRED_ATTRIBUTES: tuple[str, ...] = (
     "supports_bimanual",
     "uses_feetech_bus",
     "supports_auto_calibration",
-    "uses_zero_calibration",
+    "calibration_kind",
     "supports_dagger",
     "single_robot_type",
     "bimanual_robot_type",
     "robot_type_markers",
-    "leader_library_attr",
-    "follower_library_attr",
     "follower_probe_protocol",
     "motion_identify_energizes_follower",
     "telemetry_kind",
 )
+
+# The calibration procedures the core can run for a family. "range_sweep"
+# is the SO-101's Feetech sweep (calibrate.py / auto_calibrate.py, register
+# work by name, so the registry requires uses_feetech_bus); "steps" is the
+# generic step wizard (step_calibrate.py) driving the family's own
+# calibrate() through a CalibrationUI, so the registry requires that method
+# and open_for_calibration to be overridden; "panel" is an extension's own
+# page at calibration_panel_url, which the registry requires to be set.
+CALIBRATION_KINDS: tuple[str, ...] = ("range_sweep", "steps", "panel")
+
+
+@dataclass(frozen=True)
+class FollowerPreflight:
+    """One follower a flow is about to hand to a subprocess (see
+    ArmFamily.preflight_ports).
+
+    ``port`` is what the subprocess will open; ``calibration_id`` the
+    calibration it loads (``--robot.id``), which is also what identifies the
+    slot by default; ``config_name`` the real LIBRARY stem when the id is a
+    bimanual staging alias ("<base>_left"), so an identity guard compares
+    against the library entry rather than the alias.
+    """
+
+    port: str
+    calibration_id: str
+    config_name: str | None = None
+
+
+class CalibrationAborted(Exception):  # noqa: N818 — the contract and its tests name it; it is an abort, not an error
+    """Raised INSIDE a family's ``calibrate`` by ``CalibrationUI.step`` when
+    the run is stopped or the step times out, so the family can unwind its
+    own state on the way out. The manager decides what the abort means
+    (a stop finishes idle, a timeout finishes error)."""
+
+
+class CalibrationUI(Protocol):
+    """What a ``steps`` family drives its wizard through (step_calibrate.py
+    implements it; the family never touches the manager's status directly).
+
+    ``total_steps`` is unknown up front: the manager reports the current step
+    number as the total while running, and the wizard shows "Step N", never
+    "N of M".
+    """
+
+    def step(self, text: str, *, image_url: str | None = None, live_positions: bool = False) -> None:
+        """Publish a step (status ``awaiting_step``, ``step`` += 1, ``message``
+        = text, plus the image and whether the live-positions readout shows)
+        and BLOCK until the user confirms it (``complete_step``). Raises
+        CalibrationAborted on a stop or on the per-step timeout; every
+        ``step`` fires the ``awaiting_step`` session phase, not only the
+        first."""
+
+    def message(self, text: str) -> None:
+        """Set a transient status message WITHOUT a step: status becomes
+        ``saving`` ("the procedure is working, no input expected"), so the
+        wizard's Next button is not live while, say, the family zeroes the
+        motors. Returns at once."""
 
 
 class ArmFamily(ABC):
@@ -147,8 +222,19 @@ class ArmFamily(ABC):
     # --- capability flags -------------------------------------------------
     uses_feetech_bus: bool
     supports_auto_calibration: bool
-    uses_zero_calibration: bool
     supports_dagger: bool
+
+    # --- calibration procedure ----------------------------------------------
+    # One of CALIBRATION_KINDS; the registry checks the kind's prerequisites.
+    calibration_kind: str
+    # The served page a "panel" family calibrates through
+    # (/api/v1/ext/<name>/static/<entry>); None for every other kind.
+    calibration_panel_url: str | None = None
+
+    # --- presentation ---------------------------------------------------------
+    # A served image for the create dialog, or None when the frontend bundles
+    # a photo for this id (it does for the three built-ins).
+    image_url: str | None = None
 
     # --- lerobot RobotConfig choice-registry keys ---------------------------
     # Registered type STRINGS rather than classes so the family can be read
@@ -164,13 +250,15 @@ class ArmFamily(ABC):
     robot_type_markers: tuple[str, ...]
 
     # --- calibration libraries -----------------------------------------------
-    # Names of makermodslab.utils.config module constants, not paths:
-    # lerobot derives a device's calibration directory from the device CLASS's
-    # name, the constants pin those names, and the test fixtures redirect
-    # them by monkeypatching the constant — a path captured at import would
-    # silently ignore the patch.
-    leader_library_attr: str
-    follower_library_attr: str
+    # The built-ins' way of answering the dir METHODS below: names of
+    # makermodslab.utils.config module constants, not paths. lerobot derives a
+    # device's calibration directory from the device CLASS's name, the
+    # constants pin those names, and the test fixtures redirect them by
+    # monkeypatching the constant — a path captured at import would silently
+    # ignore the patch. Not part of the required contract: a family that
+    # overrides the two methods leaves these unset.
+    leader_library_attr: str | None = None
+    follower_library_attr: str | None = None
 
     # --- port detection ---------------------------------------------------------
     # The protocol the follower probe speaks ("robstride", "damiao"), or None
@@ -200,13 +288,28 @@ class ArmFamily(ABC):
         return self.bimanual_robot_type if bimanual else self.single_robot_type
 
     def leader_calibration_dir(self) -> str:
-        """The calibration library dir holding this family's LEADER configs (resolved now)."""
+        """The calibration library dir holding this family's LEADER configs (resolved now).
+
+        Part of the contract: an extension family overrides this (typically
+        returning utils.config.lerobot_calibration_dir("teleoperators",
+        <its leader class name>)); the base resolves the built-ins'
+        leader_library_attr constant and raises when neither is provided.
+        """
+        if not self.leader_library_attr:
+            raise NotImplementedError("override leader_calibration_dir()/follower_calibration_dir()")
         from ..utils import config
 
         return getattr(config, self.leader_library_attr)
 
     def follower_calibration_dir(self) -> str:
-        """The calibration library dir holding this family's FOLLOWER configs (resolved now)."""
+        """The calibration library dir holding this family's FOLLOWER configs (resolved now).
+
+        Same contract as leader_calibration_dir; unique per family, because
+        two families writing one follower library would load each other's
+        files by name.
+        """
+        if not self.follower_library_attr:
+            raise NotImplementedError("override leader_calibration_dir()/follower_calibration_dir()")
         from ..utils import config
 
         return getattr(config, self.follower_library_attr)
@@ -231,21 +334,70 @@ class ArmFamily(ABC):
 
     # --- calibration procedure -----------------------------------------------
 
-    def zero_pose_instructions(self, device_type: object | None = None) -> str:
-        """The physical pose to ask the user for during a zero-pose calibration.
+    def calibration_summary(self, device_type: object | None = None) -> dict | None:
+        """What the config dialog shows BEFORE Start for one device side.
 
-        Only meaningful when uses_zero_calibration is True; a family calibrated
-        by a range sweep has no zero pose and answers "". ``device_type`` is
-        "teleop" (the leader) or "robot" (the follower): the two poses differ,
-        and on the CAN families they are OPPOSITES on the gripper.
+        ``{"text": str, "image_url": str | None}`` — for a "steps" family the
+        pose (or first instruction) the user is about to be asked for; None
+        (the default) when there is nothing to summarize, which is every
+        "range_sweep" family. ``device_type`` is "teleop" (the leader) or
+        "robot" (the follower): the two answers differ, and on the CAN
+        families they are OPPOSITES on the gripper.
         """
-        return ""
+        return None
+
+    def open_for_calibration(self, device_type: str, port: str, config_id: str) -> Any:
+        """Connect ONE device for a "steps" calibration and return it, torque OFF.
+
+        Build the device through single_follower_config / single_leader_config
+        and lerobot's make_*_from_config (imported lazily — the arms package
+        never imports a device stack at module level) and connect it ready for
+        the user to move by hand: no torque may be left enabled on return,
+        whatever the device's own connect() does. A "steps" family must
+        override this (the registry checks); the base has no device to open.
+        """
+        raise NotImplementedError(f"arm family {self.id!r} does not implement open_for_calibration()")
+
+    def read_positions(self, device: Any) -> dict[str, float]:
+        """Current joint angles of a device open for calibration, by motor name.
+
+        A read on a TORQUE-OFF bus — it cannot move the arm — for the wizard's
+        live readout while a step is up. The default is the heuristic the zero
+        flow always used: a device's private raw reader (the Maker follower
+        and the Star leader, whose lerobot calibrate() logs it before zeroing)
+        wins, the bus's ``sync_read("Present_Position")`` (the Metal follower)
+        is the fallback, and a device with neither reads as empty. A failure
+        is the caller's to skip.
+        """
+        reader = getattr(device, "_read_raw_positions", None)
+        if reader is not None:
+            return {m: float(v) for m, v in reader().items()}
+        bus = getattr(device, "bus", None)
+        sync_read = getattr(bus, "sync_read", None)
+        if sync_read is None:
+            return {}
+        return {m: float(v) for m, v in sync_read("Present_Position").items()}
+
+    def calibrate(self, device: Any, device_type: str, ui: CalibrationUI) -> dict[str, Any]:
+        """Run this family's "steps" procedure and return the calibration to write.
+
+        Runs on the step manager's worker thread against the device
+        open_for_calibration returned. Drive the wizard through ``ui``
+        (``ui.step`` blocks until the user confirms; ``ui.message`` is a
+        transient status) and return ``{motor_name: MotorCalibration}``; the
+        manager writes it (device.calibration, the bus, the file) and
+        releases the device afterwards — the family does neither. A
+        CalibrationAborted raised out of ``ui.step`` should be re-raised after
+        any cleanup of the family's own. A "steps" family must override this
+        (the registry checks).
+        """
+        raise NotImplementedError(f"arm family {self.id!r} does not implement calibrate()")
 
     @abstractmethod
     def single_follower_config(self, port: str, config_id: str):
         """A config for ONE follower arm, alone — no leader, no cameras.
 
-        What the zero-pose calibration and the crash-recovery torque release
+        What a "steps" calibration and the crash-recovery torque release
         connect with: calibration never opens a camera (holding one for a flow
         that is pure motor work would only block it for everyone else), and
         recovery reaches the bus through a throwaway id.
@@ -304,6 +456,25 @@ class ArmFamily(ABC):
         Followers only, never the human-held leader. Returns warnings; a
         failed write degrades rather than aborts. The default is a no-op: a
         CAN follower's drive effort is its MIT gains, set at connect().
+        """
+        return []
+
+    def preflight_ports(
+        self, followers: list[FollowerPreflight], *, skip_identity: bool = False
+    ) -> list[str]:
+        """Preflight followers by PORT before a subprocess (rollout) opens them.
+
+        The subprocess cannot be guarded from inside, so the family opens each
+        port ITSELF, does its checks, and releases the port before returning
+        — each follower in turn, never two at once — and never enables
+        torque. Raises ArmIdentityError on a hard identity mismatch (a
+        swapped or mis-assigned arm); returns warn-but-allow messages
+        otherwise. ``skip_identity`` is the operator's explicit "I know this
+        arm": it skips the fingerprint only, never any register priming.
+
+        Called on EVERY family. The default answers "nothing to check": a
+        family whose motors keep their zero and drive gains internally (the
+        CAN arms) has no register to prime and no fingerprint to compare.
         """
         return []
 

@@ -132,19 +132,23 @@ def supports_auto_calibration(arm_type: object) -> bool:
     constants (``MakerFollowerConfig.joint_limits`` /
     ``MetalFollowerConfig.joint_limits``), measured once against the arms'
     mechanical stops. All their calibration has to establish is where zero
-    is, which is what ``zero_calibrate`` does — with torque OFF, by hand.
+    is, which their families do as a step wizard (``step_calibrate``) — with
+    torque OFF, by hand.
     """
     return _family(arm_type).supports_auto_calibration
 
 
-def uses_zero_calibration(arm_type: object) -> bool:
-    """True when calibrating this arm type means setting a zero pose.
+def calibration_kind(arm_type: object) -> str:
+    """How this arm type is calibrated: one of ``arms.base.CALIBRATION_KINDS``.
 
-    The exact complement of ``supports_auto_calibration`` today, but they are
-    not the same question and need not stay complementary as arm types
-    arrive — keep them separate.
+    ``range_sweep`` — the SO-101's Feetech sweep (``calibrate.py``, manual,
+    and ``auto_calibrate.py``, driven); ``steps`` — the family's own
+    procedure run by the generic step wizard (``step_calibrate.py``: the CAN
+    arms' zero pose); ``panel`` — an extension's own page, mounted by the
+    config dialog. Not a boolean on purpose: it picks the manager in
+    sessions.py, and a third kind fits a name where a flag could not.
     """
-    return _family(arm_type).uses_zero_calibration
+    return _family(arm_type).calibration_kind
 
 
 def supports_dagger(arm_type: object) -> bool:

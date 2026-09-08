@@ -431,62 +431,62 @@ def test_handle_start_replay_refuses_an_unknown_arm_type(monkeypatch: pytest.Mon
 
 
 @pytest.fixture
-def _idle_zero_calibration(monkeypatch: pytest.MonkeyPatch):
+def _idle_step_calibration(monkeypatch: pytest.MonkeyPatch):
     """Stub the worker so a gate-less start (RED) claims and returns instead
     of opening a bus; release whatever it claimed afterwards."""
-    from makermodslab import zero_calibrate
+    from makermodslab import step_calibrate
 
-    manager = zero_calibrate.zero_calibration_manager
+    manager = step_calibrate.step_calibration_manager
     monkeypatch.setattr(manager, "_worker", lambda request: None)
     yield manager
-    if zero_calibrate.zero_calibration_is_active():
+    if step_calibrate.step_calibration_is_active():
         manager.stop()
 
 
-def test_zero_calibration_start_refuses_a_range_sweep_family(
-    tmp_lerobot_home: Path, _idle_zero_calibration
+def test_step_calibration_start_refuses_a_range_sweep_family(
+    tmp_lerobot_home: Path, _idle_step_calibration
 ) -> None:
-    """An SO-101 has no zero pose to set — it is calibrated by a range sweep.
+    """An SO-101 has no steps to run — it is calibrated by a range sweep.
     The old schema Literal rejected it as a 422 with no reason; the handler
-    now refuses with the same coded 400 the sessions surface uses for the
-    mirror case (auto-calibration on a CAN arm)."""
-    from makermodslab.zero_calibrate import ZeroCalibrationRequest, zero_calibration_is_active
+    refuses with the same coded 400 the sessions surface uses for the mirror
+    case (auto-calibration on a CAN arm), naming the family's kind."""
+    from makermodslab.step_calibrate import StepCalibrationRequest, step_calibration_is_active
 
     with pytest.raises(ApiError) as excinfo:
-        _idle_zero_calibration.start(
-            ZeroCalibrationRequest(
+        _idle_step_calibration.start(
+            StepCalibrationRequest(
                 device_type="robot", port="/dev/null-f", config_file="zc", arm_type="so101"
             )
         )
     assert excinfo.value.status_code == 400
     assert excinfo.value.code == ErrorCode.ROBOT_NOT_READY
-    assert "range sweep" in excinfo.value.detail
-    assert zero_calibration_is_active() is False
+    assert "range_sweep" in excinfo.value.detail
+    assert step_calibration_is_active() is False
 
 
-def test_zero_calibration_start_refuses_an_unknown_arm_type(
-    tmp_lerobot_home: Path, _idle_zero_calibration
+def test_step_calibration_start_refuses_an_unknown_arm_type(
+    tmp_lerobot_home: Path, _idle_step_calibration
 ) -> None:
-    from makermodslab.zero_calibrate import ZeroCalibrationRequest, zero_calibration_is_active
+    from makermodslab.step_calibrate import StepCalibrationRequest, step_calibration_is_active
 
     with pytest.raises(ApiError) as excinfo:
-        _idle_zero_calibration.start(
-            ZeroCalibrationRequest(device_type="robot", port="/dev/null-f", config_file="zc", arm_type="nope")
+        _idle_step_calibration.start(
+            StepCalibrationRequest(device_type="robot", port="/dev/null-f", config_file="zc", arm_type="nope")
         )
     _assert_unavailable(excinfo)
-    assert zero_calibration_is_active() is False
+    assert step_calibration_is_active() is False
 
 
-def test_zero_calibration_request_carries_any_arm_type_string() -> None:
-    """The request is typed `str` now: a family an extension registers must
-    be able to ride the same request the built-ins use."""
-    from makermodslab.zero_calibrate import ZeroCalibrationRequest
+def test_step_calibration_request_carries_any_arm_type_string() -> None:
+    """The request is typed `str`: a family an extension registers must be
+    able to ride the same request the built-ins use."""
+    from makermodslab.step_calibrate import StepCalibrationRequest
 
-    request = ZeroCalibrationRequest(
+    request = StepCalibrationRequest(
         device_type="robot", port="/dev/x", config_file="c", arm_type="so101_twin"
     )
     assert request.arm_type == "so101_twin"
-    assert ZeroCalibrationRequest(device_type="robot", port="/dev/x", config_file="c").arm_type == "maker"
+    assert StepCalibrationRequest(device_type="robot", port="/dev/x", config_file="c").arm_type == "maker"
 
 
 def test_can_only_request_models_accept_any_arm_type_string() -> None:
@@ -601,7 +601,8 @@ SO101_ENTRY = {
     "calibration_name_suffix": "",
     "joints_per_arm": 6,
     "supports_bimanual": True,
-    "calibration": {"kind": "range_sweep", "zero_pose": None},
+    "image_url": None,
+    "calibration": {"kind": "range_sweep", "summary": None, "panel_url": None},
     "telemetry_kind": "urdf",
     "capabilities": {
         "uses_feetech_bus": True,
@@ -622,18 +623,26 @@ METAL_ENTRY = {
     "calibration_name_suffix": "_metal",
     "joints_per_arm": 7,
     "supports_bimanual": True,
+    "image_url": None,
     "calibration": {
-        "kind": "zero_pose",
-        "zero_pose": {
-            "leader": (
-                "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, "
-                "gripper closed — then confirm."
-            ),
-            "follower": (
-                "Move the arm by hand to its ZERO POSE — standing upright, all "
-                "joints at 0 degrees, gripper closed — then confirm."
-            ),
+        "kind": "steps",
+        "summary": {
+            "leader": {
+                "text": (
+                    "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, "
+                    "gripper closed — then confirm."
+                ),
+                "image_url": None,
+            },
+            "follower": {
+                "text": (
+                    "Move the arm by hand to its ZERO POSE — standing upright, all "
+                    "joints at 0 degrees, gripper closed — then confirm."
+                ),
+                "image_url": None,
+            },
         },
+        "panel_url": None,
     },
     "telemetry_kind": "degrees",
     "capabilities": {
@@ -658,21 +667,48 @@ def test_manifest_lists_the_built_ins_in_registry_order_with_the_documented_shap
     assert by_id["metal"] == METAL_ENTRY
 
 
-def test_manifest_zero_pose_text_is_the_families_own(client) -> None:
-    """The UI shows this text while the user poses the arm by hand, so it must
-    be the family's text verbatim — and absent (null, not "") for a family
-    with no zero pose."""
+def test_manifest_calibration_summary_is_the_families_own(client) -> None:
+    """The UI shows the summary BEFORE Start, so it must be the family's own
+    per-side answer verbatim — and absent (null, not {}) for a family with
+    nothing to summarize; the panel URL is the family's attribute."""
     arms = {a["id"]: a for a in client.get("/api/v1/arms").json()["arms"]}
     for family in registry.families():
         entry = arms[family.id]["calibration"]
-        if family.uses_zero_calibration:
-            assert entry["kind"] == "zero_pose"
-            assert entry["zero_pose"] == {
-                "leader": family.zero_pose_instructions("teleop"),
-                "follower": family.zero_pose_instructions("robot"),
+        assert entry["kind"] == family.calibration_kind
+        assert entry["panel_url"] == family.calibration_panel_url
+        if family.calibration_kind == "steps":
+            assert entry["summary"] == {
+                "leader": family.calibration_summary("teleop"),
+                "follower": family.calibration_summary("robot"),
             }
         else:
-            assert entry == {"kind": "range_sweep", "zero_pose": None}
+            assert entry == {"kind": "range_sweep", "summary": None, "panel_url": None}
+        assert arms[family.id]["image_url"] == family.image_url is None
+
+
+def test_manifest_models_name_the_three_kinds_and_forget_zero_pose() -> None:
+    """The wire shape TB6a settles on: ``ArmCalibrationInfo.kind`` is one of
+    the three registry kinds (``zero_pose`` is gone with ``ArmZeroPose``),
+    a summary is two optional sides of ``{text, image_url}``, and the family
+    entry carries an optional served image."""
+    from pydantic import ValidationError
+
+    from makermodslab.schemas import system as schemas
+
+    assert not hasattr(schemas, "ArmZeroPose")
+    side = schemas.ArmCalibrationSide(text="Pose it", image_url=None)
+    summary = schemas.ArmCalibrationSummary(leader=side, follower=None)
+    info = schemas.ArmCalibrationInfo(kind="steps", summary=summary, panel_url=None)
+    assert info.model_dump() == {
+        "kind": "steps",
+        "summary": {"leader": {"text": "Pose it", "image_url": None}, "follower": None},
+        "panel_url": None,
+    }
+    for kind in ("range_sweep", "steps", "panel"):
+        schemas.ArmCalibrationInfo(kind=kind, summary=None, panel_url=None)
+    with pytest.raises(ValidationError):
+        schemas.ArmCalibrationInfo(kind="zero_pose", summary=None, panel_url=None)
+    assert "image_url" in schemas.ArmFamilyInfo.model_fields
 
 
 def test_manifest_builder_dicts_are_described_exactly_by_the_response_model() -> None:
@@ -702,9 +738,42 @@ def test_manifest_includes_a_later_registered_family_with_its_provenance(
     assert nine["provided_by"] == "ext"
     assert nine["joints_per_arm"] == 9
     assert nine["calibration_name_suffix"] == "_nine"
-    assert nine["calibration"]["kind"] == "zero_pose"
+    assert nine["calibration"]["kind"] == "steps"
+    assert nine["image_url"] is None
     assert nine["capabilities"]["supports_port_probe"] is False
     assert all(a["provided_by"] == "builtin" for a in arms[:-1])
+
+
+def test_manifest_serves_a_panel_family_with_its_url_and_a_served_image(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two TB6a fields an extension fills that no built-in does: the
+    panel URL the dialog will mount (TB6b) and the image the create dialog
+    shows when it has no bundled photo for the id."""
+    from makermodslab.arms.manifest import describe_family
+    from makermodslab.schemas.system import ArmFamilyInfo
+
+    scratch_registry(monkeypatch)
+    registry.register(
+        make_arm_family(
+            "paneled",
+            calibration_kind="panel",
+            calibration_panel_url="/api/v1/ext/p/static/calibrate.html",
+            image_url="/api/v1/ext/p/static/arm.png",
+        ),
+        provided_by="p",
+    )
+
+    entry = {a["id"]: a for a in client.get("/api/v1/arms").json()["arms"]}["paneled"]
+    assert entry["calibration"] == {
+        "kind": "panel",
+        "summary": None,
+        "panel_url": "/api/v1/ext/p/static/calibrate.html",
+    }
+    assert entry["image_url"] == "/api/v1/ext/p/static/arm.png"
+    assert entry["provided_by"] == "p"
+    built = describe_family(registry.get("paneled"))
+    assert ArmFamilyInfo.model_validate(built).model_dump() == built == entry
 
 
 def test_manifest_order_lets_a_client_scan_markers_with_the_default_last(client) -> None:

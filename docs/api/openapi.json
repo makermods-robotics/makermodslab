@@ -26,20 +26,32 @@
         "type": "object"
       },
       "ArmCalibrationInfo": {
-        "description": "How a family is calibrated: a range sweep (the SO-101's manual or\ndriven flows) or a zero pose set by hand. `zero_pose` is null — not\nabsent — for a range-sweep family, so the route must NOT exclude None.",
+        "description": "How a family is calibrated: a range sweep (the SO-101's manual or\ndriven flows), a step wizard the family drives (the CAN arms' zero pose),\nor an extension's own panel at `panel_url`. `summary` and `panel_url` are\nnull — not absent — when they do not apply, so the route must NOT\nexclude None.",
         "properties": {
           "kind": {
             "enum": [
               "range_sweep",
-              "zero_pose"
+              "steps",
+              "panel"
             ],
             "title": "Kind",
             "type": "string"
           },
-          "zero_pose": {
+          "panel_url": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ArmZeroPose"
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Panel Url"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArmCalibrationSummary"
               },
               {
                 "type": "null"
@@ -49,9 +61,67 @@
         },
         "required": [
           "kind",
-          "zero_pose"
+          "summary",
+          "panel_url"
         ],
         "title": "ArmCalibrationInfo",
+        "type": "object"
+      },
+      "ArmCalibrationSide": {
+        "description": "What the config dialog shows BEFORE Start for one device side (the\nfamily's own calibration_summary, verbatim — the backend is never\nlocalized): the text and an optional served image.",
+        "properties": {
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "image_url"
+        ],
+        "title": "ArmCalibrationSide",
+        "type": "object"
+      },
+      "ArmCalibrationSummary": {
+        "description": "The pre-start summary per side; a side is null when the family has\nnothing to show for it.",
+        "properties": {
+          "follower": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArmCalibrationSide"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "leader": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArmCalibrationSide"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "leader",
+          "follower"
+        ],
+        "title": "ArmCalibrationSummary",
         "type": "object"
       },
       "ArmCapabilities": {
@@ -106,7 +176,7 @@
         "type": "object"
       },
       "ArmFamilyInfo": {
-        "description": "One entry of the arms manifest (arms/manifest.py describe_family).\n\n`robot_types` are the lerobot RobotConfig type strings the family's\nfollowers register under (single, then bimanual); `robot_type_markers`\nthe substrings that identify it in a dataset's free-form robot_type;\n`calibration_name_suffix` what the server appends to a robot record's\nname when it mints a default calibration id (\"\" for the SO-101).",
+        "description": "One entry of the arms manifest (arms/manifest.py describe_family).\n\n`robot_types` are the lerobot RobotConfig type strings the family's\nfollowers register under (single, then bimanual); `robot_type_markers`\nthe substrings that identify it in a dataset's free-form robot_type;\n`calibration_name_suffix` what the server appends to a robot record's\nname when it mints a default calibration id (\"\" for the SO-101);\n`image_url` a served image for the create dialog (null for the built-ins,\nwhose photos the frontend bundles).",
         "properties": {
           "calibration": {
             "$ref": "#/components/schemas/ArmCalibrationInfo"
@@ -121,6 +191,17 @@
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
           },
           "joints_per_arm": {
             "title": "Joints Per Arm",
@@ -172,6 +253,7 @@
           "provided_by",
           "joints_per_arm",
           "supports_bimanual",
+          "image_url",
           "calibration",
           "telemetry_kind",
           "capabilities",
@@ -180,25 +262,6 @@
           "calibration_name_suffix"
         ],
         "title": "ArmFamilyInfo",
-        "type": "object"
-      },
-      "ArmZeroPose": {
-        "description": "The pose text a zero-pose calibration shows, per side (the family's\nown zero_pose_instructions, verbatim — the backend is never localized).",
-        "properties": {
-          "follower": {
-            "title": "Follower",
-            "type": "string"
-          },
-          "leader": {
-            "title": "Leader",
-            "type": "string"
-          }
-        },
-        "required": [
-          "leader",
-          "follower"
-        ],
-        "title": "ArmZeroPose",
         "type": "object"
       },
       "AutoCalibrationBatchArm": {
@@ -601,6 +664,23 @@
           "message"
         ],
         "title": "CoachingCommandResponse",
+        "type": "object"
+      },
+      "CompleteCalibrationStepRequest": {
+        "properties": {
+          "step": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step"
+          }
+        },
+        "title": "CompleteCalibrationStepRequest",
         "type": "object"
       },
       "CurrentSessionResponse": {
@@ -6297,7 +6377,7 @@
     },
     "/api/v1/calibration-status": {
       "get": {
-        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `awaiting_pose` is present only on the zero-pose\nflow and defaults to False for the SO-101 sweep, which is what lets the\nfrontend switch panels on it.",
+        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `image_url` and `live_positions` are the step\nwizard's own fields and default (null / False) for the SO-101 sweep, so\nthe frontend reads one shape whichever manager answers.",
         "operationId": "calibration_status",
         "responses": {
           "200": {
@@ -6546,6 +6626,23 @@
       "post": {
         "description": "Complete the current calibration step (either flow).",
         "operationId": "complete_calibration_step",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CompleteCalibrationStepRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {
@@ -6554,6 +6651,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Complete Calibration Step"
@@ -10617,7 +10724,7 @@
     },
     "/api/v1/stop-calibration": {
       "post": {
-        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the zero-pose flow\nfirst and falling through is unambiguous.",
+        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the step wizard\nfirst and falling through is unambiguous.",
         "operationId": "stop_calibration",
         "responses": {
           "200": {
@@ -11581,7 +11688,7 @@
     },
     "/calibration-status": {
       "get": {
-        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `awaiting_pose` is present only on the zero-pose\nflow and defaults to False for the SO-101 sweep, which is what lets the\nfrontend switch panels on it.",
+        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `image_url` and `live_positions` are the step\nwizard's own fields and default (null / False) for the SO-101 sweep, so\nthe frontend reads one shape whichever manager answers.",
         "operationId": "calibration_status_calibration_status_get",
         "responses": {
           "200": {
@@ -11654,6 +11761,23 @@
       "post": {
         "description": "Complete the current calibration step (either flow).",
         "operationId": "complete_calibration_step_complete_calibration_step_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CompleteCalibrationStepRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {
@@ -11662,6 +11786,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Complete Calibration Step"
@@ -14518,7 +14652,7 @@
     },
     "/stop-calibration": {
       "post": {
-        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the zero-pose flow\nfirst and falling through is unambiguous.",
+        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the step wizard\nfirst and falling through is unambiguous.",
         "operationId": "stop_calibration_stop_calibration_post",
         "responses": {
           "200": {
