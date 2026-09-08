@@ -1810,7 +1810,8 @@ def _may_delete_hub_repo(hub_repo: str) -> bool:
 
     True only when ALL hold:
       * `hub_repo` is `<namespace>/<name>`;
-      * `<namespace>` is the authenticated user's own writable namespace;
+      * `<namespace>` is a namespace the authenticated token can write to
+        (own account or a writable org);
       * the repo carries the MakerModsLab tag (our pushes stamp it).
 
     Any lookup failure — no Hub identity, a 404, a network error — returns
@@ -1902,7 +1903,7 @@ def cleanup_temporary_merges(repo_ids: list[str] | None = None) -> dict[str, Any
                     hub_failed.append(
                         {
                             "repo_id": hub_repo,
-                            "reason": "Not a MakerModsLab-created repo in your namespace.",
+                            "reason": "Not a MakerModsLab-created repo this account can write to.",
                         }
                     )
             except Exception as exc:

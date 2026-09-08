@@ -3728,18 +3728,48 @@ def test_cleanup_hub_delete_skipped_when_guard_refuses(tmp_lerobot_home: Path, m
     _make_temp_merge(tmp_lerobot_home, "ns/mix", temporary=True, hub_repo="someoneelse/mix")
     monkeypatch.setattr(ds, "_dataset_in_use", lambda rid: None)
     monkeypatch.setattr(ds, "_may_delete_hub_repo", lambda repo: False)
+    # Record calls instead of raising: the cleanup block catches Exception, so a
+    # raising fake can't tell a bypass from a swallowed error.
+    calls: list[str] = []
 
     class _Api:
-        def delete_repo(self, *a, **k):
-            raise AssertionError("must not delete a repo the guard refused")
+        def delete_repo(self, repo_id, repo_type, missing_ok=False):
+            calls.append(repo_id)
 
     monkeypatch.setattr(ds, "shared_hf_api", lambda: _Api())
 
     out = ds.cleanup_temporary_merges()
     assert out["deleted"] == ["ns/mix"]
     assert out["hub_deleted"] == []
+    assert calls == []  # guard refused BEFORE any delete_repo
     assert len(out["hub_failed"]) == 1
     assert out["hub_failed"][0]["repo_id"] == "someoneelse/mix"
+    assert "write to" in out["hub_failed"][0]["reason"]
+
+
+def test_cleanup_traversal_guard_refuses_a_dir_outside_the_cache_root(
+    tmp_lerobot_home: Path, monkeypatch
+) -> None:
+    from makermodslab import datasets as ds
+
+    # A sidecar-bearing dataset dir planted OUTSIDE the cache root.
+    outside = tmp_lerobot_home.parent / "outside_ds"
+    _make_temp_merge(outside.parent, "outside_ds", temporary=True, hub_repo="me/mix")
+    assert (outside / "meta" / "info.json").exists()
+
+    monkeypatch.setattr(ds, "_dataset_in_use", lambda rid: None)
+
+    class _Api:
+        def delete_repo(self, *a, **k):
+            raise AssertionError("must not touch the Hub for a rejected path")
+
+    monkeypatch.setattr(ds, "shared_hf_api", lambda: _Api())
+
+    out = ds.cleanup_temporary_merges(["../outside_ds"])
+    assert out["deleted"] == []
+    assert out["hub_deleted"] == []
+    assert out["skipped"] == [{"repo_id": "../outside_ds", "reason": "Invalid dataset path"}]
+    assert (outside / "meta" / "info.json").exists()  # untouched
 
 
 def test_may_delete_hub_repo_false_on_any_error(monkeypatch) -> None:

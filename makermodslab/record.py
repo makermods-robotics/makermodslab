@@ -1328,10 +1328,13 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     invalidate_dataset_listing_cache()
     invalidate_hub_status(repo_id)
 
-    # Best-effort Hub cleanup: only a sidecar-recorded back-ref, only a repo the
-    # guard positively vouches for. A failure here never fails the local delete.
+    # Best-effort Hub cleanup: only a TEMPORARY merge's sidecar-recorded
+    # back-ref, only a repo the guard positively vouches for. "Delete dataset"
+    # is otherwise local-only — the Hub delete exists purely to reap the
+    # throwaway merges this feature creates. A failure here never fails the
+    # local delete.
     hub_deleted = False
-    if pre_manifest is not None and pre_manifest.hub_repo:
+    if pre_manifest is not None and pre_manifest.temporary and pre_manifest.hub_repo:
         try:
             from .datasets import _delete_hub_dataset_repo, _may_delete_hub_repo
 
