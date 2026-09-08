@@ -3,6 +3,11 @@ import type { MergeStatus, MergeStartResult } from "@/lib/replayApi";
 /** The merge-status poll cadence, matched to MergeDatasetsDialog's POLL_MS. */
 const POLL_MS = 1500;
 
+/** Give up after this many status reads fail back-to-back (~30s at POLL_MS).
+ * The poll sits inside an awaited handleStart with no user escape, so it must
+ * not spin forever when the backend has gone away. */
+const MAX_CONSECUTIVE_STATUS_FAILURES = 20;
+
 export interface RunTemporaryMergeDeps {
   /** Kick the merge off (the caller binds baseUrl / sources / weights / the
    * `temporary` flag). */
@@ -38,15 +43,21 @@ export async function runTemporaryMerge(
     throw new Error(res.message || "The merge could not be started.");
   }
 
+  let consecutiveFailures = 0;
   for (;;) {
     await sleep(pollMs);
     let status: MergeStatus;
     try {
       status = await deps.getStatus();
     } catch {
-      // Transient — the merge is still running; retry on the next tick.
+      // Transient — the merge is still running; retry on the next tick, but
+      // give up if the backend stays unreachable.
+      if (++consecutiveFailures >= MAX_CONSECUTIVE_STATUS_FAILURES) {
+        throw new Error("Lost contact with the merge — check the server.");
+      }
       continue;
     }
+    consecutiveFailures = 0;
     deps.onStatus?.(status);
     if (status.state === "done") {
       if (!status.output_repo_id) {

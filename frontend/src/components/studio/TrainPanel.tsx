@@ -36,6 +36,7 @@ import { useModels } from "@/hooks/useModels";
 import { JobRecord, getJob, importModel, jobDisplayName } from "@/lib/jobsApi";
 import { listJobCheckpoints } from "@/lib/checkpointsApi";
 import {
+  DatasetInfo,
   DatasetItem,
   MAX_SOURCE_WEIGHT,
   MergeStatus,
@@ -46,6 +47,11 @@ import {
 } from "@/lib/replayApi";
 import { HUB_REPO_ID_RE } from "@/lib/repoId";
 import { cn } from "@/lib/utils";
+import {
+  ArmType,
+  ARM_TYPE_LABEL,
+  armTypeFromRobotType,
+} from "@/lib/armTypes";
 import TrainingConfigurator, {
   FinetuneSeed,
   ResumeSeed,
@@ -244,10 +250,10 @@ const TrainPanel: React.FC = () => {
   const [combineWeights, setCombineWeights] = useState<Record<string, number>>(
     {},
   );
-  // Episode counts for the selected sources, feeding the mix preview. null = a
-  // lookup that failed (Hub-only / offline).
-  const [combineEpisodes, setCombineEpisodes] = useState<
-    Record<string, number | null>
+  // Info for the selected sources: episode counts feed the mix preview, robot
+  // type feeds the cross-arm advisory. null = a lookup that failed.
+  const [combineInfos, setCombineInfos] = useState<
+    Record<string, DatasetInfo | null>
   >({});
   const [merge, setMerge] = useState<MergeStatus | null>(null);
   const merging = merge?.state === "running";
@@ -261,7 +267,7 @@ const TrainPanel: React.FC = () => {
       setCombine(false);
       setCombineSources([]);
       setCombineWeights({});
-      setCombineEpisodes({});
+      setCombineInfos({});
       setMerge(null);
     }
     // Closing the form is the way out of a resume: resume mode hides the
@@ -562,13 +568,11 @@ const TrainPanel: React.FC = () => {
         : [...prev, repoId],
     );
 
-  // Fetch episode counts for the selected sources (mix preview). Only the
-  // selected ones, so ticking the box is what triggers the lookup.
+  // Fetch info for the selected sources (mix preview + cross-arm advisory).
+  // Only the selected ones, so ticking the box is what triggers the lookup.
   useEffect(() => {
     if (!combine) return;
-    const missing = orderedCombineSources.filter(
-      (id) => !(id in combineEpisodes),
-    );
+    const missing = orderedCombineSources.filter((id) => !(id in combineInfos));
     if (missing.length === 0) return;
     const controller = new AbortController();
     let cancelled = false;
@@ -582,14 +586,14 @@ const TrainPanel: React.FC = () => {
               repoId,
               controller.signal,
             );
-            return [repoId, info.total_episodes] as const;
+            return [repoId, info] as const;
           } catch {
             return [repoId, null] as const;
           }
         }),
       );
       if (!cancelled)
-        setCombineEpisodes((prev) => ({
+        setCombineInfos((prev) => ({
           ...prev,
           ...Object.fromEntries(entries),
         }));
@@ -598,7 +602,23 @@ const TrainPanel: React.FC = () => {
       cancelled = true;
       controller.abort();
     };
-  }, [combine, orderedCombineSources, combineEpisodes, baseUrl, fetchWithHeaders]);
+  }, [combine, orderedCombineSources, combineInfos, baseUrl, fetchWithHeaders]);
+
+  // Advisory (never a block): the selected sources span more than one arm
+  // family. Mirrors MergeDatasetsDialog's armMismatchWarning — the merge still
+  // proceeds (acknowledge_warnings), the point is the operator sees it first.
+  const combineArmMismatch = useMemo<string | null>(() => {
+    const byArm = new Map<ArmType, string[]>();
+    for (const repoId of orderedCombineSources) {
+      const arm = armTypeFromRobotType(combineInfos[repoId]?.robot_type);
+      if (arm) byArm.set(arm, [...(byArm.get(arm) ?? []), repoId]);
+    }
+    if (byArm.size < 2) return null;
+    const groups = [...byArm.entries()]
+      .map(([arm, ids]) => `${ids.join(", ")} (${ARM_TYPE_LABEL[arm]})`)
+      .join("; ");
+    return t("landing.mergeDatasets.armMismatchWarning", { groups });
+  }, [orderedCombineSources, combineInfos, t]);
 
   // Phase one of a combine launch: merge the selected sources into a throwaway
   // dataset and resolve to the repo id the backend minted. Passed to the
@@ -771,7 +791,8 @@ const TrainPanel: React.FC = () => {
                         value={orderedCombineSources.map((id) => ({
                           repo_id: id,
                           weight: combineWeights[id] ?? 1,
-                          baseEpisodes: combineEpisodes[id] ?? null,
+                          baseEpisodes:
+                            combineInfos[id]?.total_episodes ?? null,
                         }))}
                         onChange={(rows) =>
                           setCombineWeights(
@@ -788,6 +809,9 @@ const TrainPanel: React.FC = () => {
                         {t("studio.train.combine.sourcesRequired")}
                       </p>
                     )}
+                    {combineArmMismatch ? (
+                      <p className="text-xs text-warn">{combineArmMismatch}</p>
+                    ) : null}
                     {merge && merge.state !== "idle" ? (
                       <div className="space-y-1.5">
                         {merging ? (

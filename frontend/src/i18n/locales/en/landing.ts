@@ -218,7 +218,6 @@ export default {
     confirmTitle: "Merge datasets recorded on different arms?",
     confirmPrompt: "Merge anyway only if you know the arms are equivalent.",
     confirmProceed: "Merge anyway",
-    weightColumn: "Weight",
     // repoId is a dataset id — data, never translated.
     weightAria: "Weight for {{repoId}}",
     decreaseWeight: "Decrease weight",

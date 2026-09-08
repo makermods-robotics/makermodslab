@@ -8,6 +8,10 @@ import { useHfAuth } from "@/contexts/HfAuthContext";
 import { useStudio } from "@/contexts/StudioContext";
 
 import { TrainingConfig } from "@/components/training/types";
+import {
+  CheckpointUploadKind,
+  configToRequest,
+} from "@/components/training/trainingRequest";
 import ConfigurationTab from "@/components/training/ConfigurationTab";
 import TrainingExtraGate from "@/components/training/TrainingExtraGate";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
@@ -32,7 +36,6 @@ import {
 import { Loader2, Play } from "lucide-react";
 
 import {
-  TrainingRequest,
   listJobs,
   startTrainingJob,
   listRunnerHardware,
@@ -129,12 +132,6 @@ export type FinetuneSeed = {
   checkpointSource?: "local" | "hub";
 };
 
-/** Which local→cloud transfer a launch needs, if any. "resume" moves the whole
- * checkpoint of the run being continued (weights AND optimizer state);
- * "finetune" moves only the base checkpoint's weights, since a fine-tune starts
- * a fresh optimizer and never reads the rest. */
-export type CheckpointUploadKind = "resume" | "finetune" | null;
-
 interface TrainingConfiguratorProps {
   /** Controlled policy type (chosen upstream — the panel policy grid or the
    * home-page/router state). EssentialsCard's dropdown edits it back through
@@ -186,64 +183,6 @@ const POLICY_DEFAULT_USE_AMP: Record<string, boolean> = {
 };
 const defaultUseAmp = (policyType: string): boolean =>
   POLICY_DEFAULT_USE_AMP[policyType] ?? false;
-
-function configToRequest(
-  c: TrainingConfig,
-  checkpointUploadKind: CheckpointUploadKind,
-): TrainingRequest {
-  // The backend's TrainingRequest has more optional fields; the form covers
-  // the user-meaningful subset.
-  return {
-    target: c.target,
-    dataset_repo_id: c.dataset_repo_id,
-    dataset_episodes: c.dataset_episodes,
-    policy_type: c.policy_type,
-    job_name: c.job_name,
-    steps: c.steps,
-    batch_size: c.batch_size,
-    seed: c.seed,
-    num_workers: c.num_workers,
-    log_freq: c.log_freq,
-    save_freq: c.save_freq,
-    save_checkpoint: c.save_checkpoint,
-    resume: c.resume,
-    resume_from_job_id: c.resume_from_job_id,
-    resume_from_step: c.resume_from_step,
-    resume_from_checkpoint_job_id: c.resume_from_checkpoint_job_id,
-    // Consent, not a mode: sent only for the combinations that have to push
-    // bytes to the Hub (a checkpoint only this machine has, needed by a run on
-    // cloud compute), and the backend refuses those without it. Left undefined
-    // otherwise so no other launch carries an upload permission it has no use
-    // for. One field per MODE rather than one shared flag, because they consent
-    // to different disclosures: the whole checkpoint of the run being continued,
-    // versus the base model's weights.
-    upload_resume_checkpoint:
-      checkpointUploadKind === "resume" ? true : undefined,
-    upload_finetune_checkpoint:
-      checkpointUploadKind === "finetune" ? true : undefined,
-    finetune_from_job_id: c.finetune_from_job_id,
-    finetune_from_step: c.finetune_from_step,
-    wandb_enable: c.wandb_enable,
-    wandb_project: c.wandb_project,
-    wandb_entity: c.wandb_entity,
-    wandb_notes: c.wandb_notes,
-    wandb_mode: c.wandb_mode,
-    wandb_disable_artifact: c.wandb_disable_artifact,
-    policy_device: c.policy_device,
-    policy_use_amp: c.policy_use_amp,
-    optimizer_type: c.optimizer_type,
-    optimizer_lr: c.optimizer_lr,
-    optimizer_weight_decay: c.optimizer_weight_decay,
-    optimizer_grad_clip_norm: c.optimizer_grad_clip_norm,
-    use_policy_training_preset: c.use_policy_training_preset,
-    // Cloud-only; the backend validates the format and ignores it for local.
-    // Send only a non-blank value so a stray "" doesn't reach the validator.
-    hf_job_timeout:
-      c.target.runner === "hf_cloud" && c.hf_job_timeout?.trim()
-        ? c.hf_job_timeout.trim()
-        : undefined,
-  };
-}
 
 /**
  * The training configuration form — extracted verbatim from Training.tsx's
@@ -779,24 +718,9 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   });
 
   const handleStart = async () => {
-    // "Combine datasets" mode: phase one is a merge that mints the dataset this
-    // run trains on. Run it first; a null result means it was refused or failed
-    // (the owner has already surfaced why) and nothing is submitted.
-    let datasetOverride: string | undefined;
-    if (prepareDatasetRepoId) {
-      setIsStarting(true);
-      let prepared: string | null = null;
-      try {
-        prepared = await prepareDatasetRepoId();
-      } catch {
-        prepared = null;
-      }
-      if (!prepared) {
-        setIsStarting(false);
-        return;
-      }
-      datasetOverride = prepared;
-    } else if (!datasetRepoId) {
+    // In normal mode a blank dataset is a hard stop; combine mode mints one
+    // later (via prepareDatasetRepoId), so it skips this guard.
+    if (!prepareDatasetRepoId && !datasetRepoId) {
       toast({
         title: t("training.configurator.toast.errorTitle"),
         description: t("training.configurator.toast.datasetRequired"),
@@ -811,6 +735,10 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     // here with a one-click installer instead of a buried ImportError after
     // the job has already started. Cloud jobs run in their own container
     // environment, so neither answer applies — skip the check.
+    //
+    // Runs BEFORE the combine-mode merge below: a missing package must abort
+    // without minting a throwaway dataset, and without `setIsStarting(true)`
+    // (these gates `return` without clearing it, which would wedge Start).
     if (config.target.runner === "local") {
       try {
         const r = await fetchWithHeaders(
@@ -871,6 +799,20 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         // Node unreachable or an older peer without the endpoint — fall
         // through and let the peer's own job validation report the problem.
       }
+    }
+
+    // "Combine datasets" mode: phase one is a merge that mints the dataset this
+    // run trains on. A null result means it was refused or failed (the owner
+    // has already surfaced why) and nothing is submitted.
+    let datasetOverride: string | undefined;
+    if (prepareDatasetRepoId) {
+      setIsStarting(true);
+      const prepared = await prepareDatasetRepoId();
+      if (!prepared) {
+        setIsStarting(false);
+        return;
+      }
+      datasetOverride = prepared;
     }
 
     // Cloud run on a local-only dataset: upload first, then launch on success.

@@ -26,8 +26,13 @@ export const MergeProgress: React.FC<Props> = ({
 }) => {
   const { t } = useTranslation();
   const logBoxRef = useRef<HTMLDivElement>(null);
+  // `logs` is a fresh array on every parent render; only chase the scroll when
+  // a line was actually appended.
+  const seenCountRef = useRef(0);
 
   useEffect(() => {
+    if (logs.length === seenCountRef.current) return;
+    seenCountRef.current = logs.length;
     if (logBoxRef.current)
       logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
   }, [logs]);

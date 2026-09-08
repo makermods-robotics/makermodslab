@@ -176,7 +176,6 @@ export default {
     confirmTitle: "合并在不同机械臂上录制的数据集？",
     confirmPrompt: "只有在你确定这些机械臂等效时才继续合并。",
     confirmProceed: "仍然合并",
-    weightColumn: "权重",
     weightAria: "{{repoId}} 的权重",
     decreaseWeight: "降低权重",
     increaseWeight: "提高权重",

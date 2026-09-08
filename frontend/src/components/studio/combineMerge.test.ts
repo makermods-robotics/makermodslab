@@ -62,6 +62,22 @@ describe("runTemporaryMerge", () => {
     ).rejects.toThrow(/disk full/);
   });
 
+  it("gives up when the status endpoint stays unreachable", async () => {
+    const getStatus = vi.fn<() => Promise<MergeStatus>>(async () => {
+      throw new Error("still down");
+    });
+
+    await expect(
+      runTemporaryMerge({
+        startMerge: async () => ({ started: true, message: "" }),
+        getStatus,
+        sleep: noSleep,
+      }),
+    ).rejects.toThrow(/Lost contact/);
+    // Bounded, not infinite.
+    expect(getStatus.mock.calls.length).toBeLessThanOrEqual(20);
+  });
+
   it("rides out a transient status failure and keeps polling", async () => {
     const getStatus = vi
       .fn<() => Promise<MergeStatus>>()
