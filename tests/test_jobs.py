@@ -8979,3 +8979,76 @@ def test_hub_model_delete_refuses_while_a_queued_run_will_read_it(client, monkey
     finally:
         job_registry._records.clear()
         job_registry._records.update(original)
+
+
+def _write_sidecar(cache, repo_id, *, weights, counts, temporary=True):
+    from makermodslab.merge_manifest import build_merge_manifest, write_merge_manifest
+
+    (cache / repo_id / "meta").mkdir(parents=True, exist_ok=True)
+    write_merge_manifest(
+        cache / repo_id,
+        build_merge_manifest(
+            [f"src/{i}" for i in range(len(weights))],
+            list(weights),
+            list(counts),
+            temporary=temporary,
+            created_at=1.0,
+        ),
+    )
+
+
+def test_resolve_merge_provenance_reads_sidecar(tmp_path) -> None:
+    from makermodslab.jobs import _resolve_merge_provenance
+
+    cache = tmp_path / "cache"
+    _write_sidecar(cache, "ns/mix", weights=[1, 3], counts=[10, 30])
+    prov = _resolve_merge_provenance("ns/mix", cache, None)
+    assert prov is not None
+    assert prov.merged_repo_id == "ns/mix"
+    assert prov.temporary is True and prov.weighted is True
+    assert [(s.repo_id, s.weight) for s in prov.sources] == [("src/0", 1), ("src/1", 3)]
+
+
+def test_resolve_merge_provenance_none_without_sidecar(tmp_path) -> None:
+    from makermodslab.jobs import _resolve_merge_provenance
+
+    assert _resolve_merge_provenance("ns/plain", tmp_path / "cache", None) is None
+
+
+def test_resolve_merge_provenance_inherits_from_parent_when_dataset_gone(tmp_path) -> None:
+    from makermodslab.jobs import (
+        MergeProvenance,
+        MergeProvenanceSource,
+        _resolve_merge_provenance,
+    )
+
+    parent = _record(tmp_path)
+    parent.merge_provenance = MergeProvenance(
+        merged_repo_id="ns/mix",
+        weighted=True,
+        temporary=True,
+        sources=[MergeProvenanceSource(repo_id="src/0", weight=1)],
+    )
+    prov = _resolve_merge_provenance("ns/mix", tmp_path / "empty-cache", parent)
+    assert prov is parent.merge_provenance
+
+
+def test_resolve_merge_provenance_parent_mismatch_is_none(tmp_path) -> None:
+    from makermodslab.jobs import (
+        MergeProvenance,
+        MergeProvenanceSource,
+        _resolve_merge_provenance,
+    )
+
+    parent = _record(tmp_path)
+    parent.merge_provenance = MergeProvenance(
+        merged_repo_id="ns/other",
+        weighted=False,
+        temporary=True,
+        sources=[MergeProvenanceSource(repo_id="src/0", weight=1)],
+    )
+    assert _resolve_merge_provenance("ns/mix", tmp_path / "empty-cache", parent) is None
+
+
+def test_job_record_merge_provenance_defaults_none(tmp_path) -> None:
+    assert _record(tmp_path).merge_provenance is None

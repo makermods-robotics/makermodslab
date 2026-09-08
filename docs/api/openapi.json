@@ -2303,6 +2303,16 @@
             "title": "Job Number",
             "type": "integer"
           },
+          "merge_provenance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "metrics": {
             "$ref": "#/components/schemas/TrainingMetrics",
             "default": {
@@ -2624,6 +2634,67 @@
           "message"
         ],
         "title": "MergeLogEntry",
+        "type": "object"
+      },
+      "MergeProvenance": {
+        "description": "A frozen copy of a merged dataset's recipe, taken when the run was\ncreated. Kept on the record so the policy card shows what a run trained on\neven after a temporary merge has been cleaned up (spec: training-dataset-mix).",
+        "properties": {
+          "merged_repo_id": {
+            "title": "Merged Repo Id",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/MergeProvenanceSource"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "temporary": {
+            "title": "Temporary",
+            "type": "boolean"
+          },
+          "weighted": {
+            "title": "Weighted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "merged_repo_id",
+          "weighted",
+          "temporary",
+          "sources"
+        ],
+        "title": "MergeProvenance",
+        "type": "object"
+      },
+      "MergeProvenanceSource": {
+        "properties": {
+          "episodes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Episodes"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "weight": {
+            "title": "Weight",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "repo_id",
+          "weight"
+        ],
+        "title": "MergeProvenanceSource",
         "type": "object"
       },
       "MergeRequest": {

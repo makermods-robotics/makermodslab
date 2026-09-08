@@ -67,6 +67,24 @@ logger = logging.getLogger(__name__)
 JobState = Literal["queued", "running", "done", "failed", "interrupted"]
 
 
+class MergeProvenanceSource(BaseModel):
+    repo_id: str
+    weight: int
+    episodes: int | None = None
+
+
+class MergeProvenance(BaseModel):
+    """A frozen copy of a merged dataset's recipe, taken when the run was
+    created. Kept on the record so the policy card shows what a run trained on
+    even after a temporary merge has been cleaned up (spec: training-dataset-mix).
+    """
+
+    merged_repo_id: str
+    weighted: bool
+    temporary: bool
+    sources: list[MergeProvenanceSource]
+
+
 class JobTarget(BaseModel):
     """Where a job should run. `local` ⇒ LocalJobRunner. `hf_cloud` requires
     a non-empty `flavor` from HfApi.list_jobs_hardware(). `lan_node` requires
@@ -182,6 +200,10 @@ class JobRecord(BaseModel):
     child_ids: list[str] = []
     ancestor_ids: list[str] = []
 
+    # Frozen at creation from the dataset's meta/makermodslab_merge.json. None
+    # for every run on a non-merged dataset (i.e. almost all of them).
+    merge_provenance: MergeProvenance | None = None
+
     # ---- local training queue (state == "queued") ----
     #
     # Sort key for the queue, ascending. Assigned from a monotonic counter at
@@ -244,6 +266,38 @@ class MetricsHistoryPoint(BaseModel):
     loss: float | None = None
     lr: float | None = None
     grad_norm: float | None = None
+
+
+def _resolve_merge_provenance(
+    dataset_repo_id: str, cache_root: Path, parent: JobRecord | None
+) -> MergeProvenance | None:
+    """The merge recipe for `dataset_repo_id`, frozen for this run.
+
+    From the dataset's own sidecar when it is still on disk. If the dataset is
+    gone (a resume of a run whose temporary merge was cleaned up) but the parent
+    run carried provenance for the same id, inherit that — the recipe is the
+    same bytes either way.
+    """
+    from .merge_manifest import read_merge_manifest
+
+    manifest = read_merge_manifest(cache_root / dataset_repo_id)
+    if manifest is not None:
+        return MergeProvenance(
+            merged_repo_id=dataset_repo_id,
+            weighted=manifest.weighted,
+            temporary=manifest.temporary,
+            sources=[
+                MergeProvenanceSource(repo_id=s.repo_id, weight=s.weight, episodes=s.episodes)
+                for s in manifest.sources
+            ],
+        )
+    if (
+        parent is not None
+        and parent.merge_provenance is not None
+        and parent.merge_provenance.merged_repo_id == dataset_repo_id
+    ):
+        return parent.merge_provenance
+    return None
 
 
 def _pid_alive(pid: int) -> bool:
@@ -3568,6 +3622,21 @@ class JobRegistry:
                 "or drop finetune_from_step to train from scratch."
             )
 
+        # Freeze the merged dataset's recipe onto the record, if it has one.
+        # A cheap local-file read, done here OUTSIDE the registry lock (no file
+        # IO under self._lock — the MT23 rule). The parent lookup for a resume
+        # whose temporary merge is already gone is a bare dict.get, safe without
+        # the lock: a parent that vanishes mid-call just yields None, which is
+        # the right fallback anyway.
+        from .datasets import _lerobot_cache_root
+
+        parent_for_provenance = (
+            self._records.get(config.resume_from_job_id) if config.resume_from_job_id else None
+        )
+        merge_provenance = _resolve_merge_provenance(
+            config.dataset_repo_id, _lerobot_cache_root(), parent_for_provenance
+        )
+
         # Deliberately no local-slot pre-flight: a busy slot does not doom a
         # submit any more, it queues it. Every VALIDATION below still runs
         # synchronously, so a bad request is refused at submit time rather than
@@ -3951,6 +4020,7 @@ class JobRegistry:
                 # "latest checkpoint" request into a concrete step — see
                 # _initial_metrics / _resume_start_step.
                 metrics=_initial_metrics(config),
+                merge_provenance=merge_provenance,
             )
 
             job_dir.mkdir(parents=True, exist_ok=True)
