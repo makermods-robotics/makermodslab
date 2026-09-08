@@ -1119,3 +1119,61 @@ def test_bind_robot_cameras_copies_so_callers_cant_alias_the_record(
 
     assert bound["left"] is not bound["right"]
     assert bound["left"] == bound["right"]
+
+
+# ---------------------------------------------------------------------------
+# TB6a: calibration libraries for a family the core did not ship
+# ---------------------------------------------------------------------------
+
+
+def test_lerobot_calibration_dir_is_the_dir_lerobot_derives_from_a_device_class_name(
+    tmp_lerobot_home: Path,
+) -> None:
+    """lerobot reads a device's calibration from ``<base>/<class name>/``;
+    the helper spells that rule once so an extension family returns it from
+    its dir methods instead of re-deriving the path (under the redirected
+    base here — resolved at call time, like the built-ins' constants)."""
+    import os
+
+    assert cfg.lerobot_calibration_dir("robots", "x_follower") == os.path.join(
+        cfg.CALIBRATION_BASE_PATH_ROBOTS, "x_follower"
+    )
+    assert cfg.lerobot_calibration_dir("teleoperators", "x_leader") == os.path.join(
+        cfg.CALIBRATION_BASE_PATH_TELEOP, "x_leader"
+    )
+    assert cfg.lerobot_calibration_dir("robots", "x_follower").startswith(str(tmp_lerobot_home))
+
+
+def test_an_extension_family_gets_its_own_library_dirs_through_the_config_seams(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fake family whose dir methods answer lerobot_calibration_dir(...)
+    is served its OWN directories by calibration_dir_for_device — never the
+    SO-101's or a CAN family's — and its default slot names carry its suffix
+    through default_slot_config_name, with no edit to the core."""
+    import os
+
+    from makermodslab.arms import registry
+    from tests.mocks import make_arm_family, scratch_registry
+
+    scratch_registry(monkeypatch)
+    registry.register(
+        make_arm_family(
+            "nine",
+            leader_dir=cfg.lerobot_calibration_dir("teleoperators", "nine_leader"),
+            follower_dir=cfg.lerobot_calibration_dir("robots", "nine_follower"),
+        )
+    )
+
+    follower_dir = cfg.calibration_dir_for_device("robot", "nine")
+    leader_dir = cfg.calibration_dir_for_device("teleop", "nine")
+    assert follower_dir == os.path.join(cfg.CALIBRATION_BASE_PATH_ROBOTS, "nine_follower")
+    assert leader_dir == os.path.join(cfg.CALIBRATION_BASE_PATH_TELEOP, "nine_leader")
+    for other in registry.ids()[:-1]:
+        assert follower_dir != cfg.calibration_dir_for_device("robot", other)
+        assert leader_dir != cfg.calibration_dir_for_device("teleop", other)
+    assert cfg.follower_config_path_for("nine") == follower_dir
+    assert cfg.leader_config_path_for("nine") == leader_dir
+
+    assert cfg.default_slot_config_name("bot", "single", "left", "nine") == "bot_nine"
+    assert cfg.default_slot_config_name("bot", "bimanual", "right", "nine") == "bot_nine_right"

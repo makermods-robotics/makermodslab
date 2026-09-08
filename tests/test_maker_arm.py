@@ -20,7 +20,7 @@ from makermodslab.utils import config as cfg
 
 def test_records_written_before_the_maker_arm_read_back_as_so101(tmp_lerobot_home: Path) -> None:
     """A record with no arm_type on disk is an SO-101 by definition."""
-    robots = tmp_lerobot_home / "robots"
+    robots = Path(cfg.ROBOTS_PATH)
     robots.mkdir(exist_ok=True)
     (robots / "legacy.json").write_text('{"name": "legacy", "mode": "single", "leader_port": "/dev/a"}')
 
@@ -31,13 +31,18 @@ def test_records_written_before_the_maker_arm_read_back_as_so101(tmp_lerobot_hom
 
 
 def test_a_corrupted_arm_type_on_disk_falls_back_rather_than_raising(tmp_lerobot_home: Path) -> None:
-    """Same contract as motor_power's clamp: a bad value must never make a
-    robot unopenable."""
-    robots = tmp_lerobot_home / "robots"
+    """A NON-STRING arm_type is a corrupted field, not a family: it reads as
+    the SO-101 default rather than raising, the same contract as
+    motor_power's clamp. An unknown STRING is a different thing — TB5 keeps
+    it verbatim so the record lists as unavailable and refuses to start
+    (tests/test_arms_manifest.py) instead of silently becoming an SO-101."""
+    robots = Path(cfg.ROBOTS_PATH)
     robots.mkdir(exist_ok=True)
-    (robots / "weird.json").write_text('{"name": "weird", "arm_type": "definitely-not-an-arm"}')
+    (robots / "weird.json").write_text('{"name": "weird", "arm_type": 7}')
+    (robots / "nulled.json").write_text('{"name": "nulled", "arm_type": null}')
 
     assert cfg.get_robot_record("weird")["arm_type"] == "so101"
+    assert cfg.get_robot_record("nulled")["arm_type"] == "so101"
 
 
 def test_creating_a_maker_robot_persists_its_arm_type(tmp_lerobot_home: Path) -> None:
@@ -129,7 +134,7 @@ def test_deleting_a_maker_calibration_leaves_same_named_so101_records_alone(
     """The two libraries are separate namespaces: an SO-101 record naming
     "armA" points at a different file from a Maker record naming "armA", so a
     Maker delete must not unassign the SO-101 robot."""
-    robots = tmp_lerobot_home / "robots"
+    robots = Path(cfg.ROBOTS_PATH)
     robots.mkdir(exist_ok=True)
     cfg.save_robot_record("so_bot", {"arm_type": "so101", "follower_config": "armA"}, allow_create=True)
     cfg.save_robot_record("maker_bot", {"arm_type": "maker", "follower_config": "armA"}, allow_create=True)
@@ -772,12 +777,12 @@ def test_maker_urdf_mapping_never_raises_on_a_dead_bus() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_calibrating_a_maker_robot_builds_a_zero_calibration_request(tmp_lerobot_home: Path) -> None:
+def test_calibrating_a_maker_robot_builds_a_step_calibration_request(tmp_lerobot_home: Path) -> None:
     """One session kind, two procedures: _dispatch_start reads the request
-    CLASS to pick the manager."""
+    CLASS to pick the manager (the family's calibration_kind decides)."""
     from makermodslab.schemas.sessions import CalibrationOptions
     from makermodslab.sessions import _build_calibration_request
-    from makermodslab.zero_calibrate import ZeroCalibrationRequest
+    from makermodslab.step_calibrate import StepCalibrationRequest
 
     cfg.save_robot_record(
         "mk2", {"arm_type": "maker", "mode": "single", "follower_port": "/dev/can0"}, allow_create=True
@@ -786,7 +791,7 @@ def test_calibrating_a_maker_robot_builds_a_zero_calibration_request(tmp_lerobot
 
     request = _build_calibration_request(record, CalibrationOptions(device_type="robot", arm="left"))
 
-    assert isinstance(request, ZeroCalibrationRequest)
+    assert isinstance(request, StepCalibrationRequest)
     assert request.port == "/dev/can0"
 
 
@@ -805,74 +810,217 @@ def test_calibrating_an_so101_robot_still_builds_the_sweep_request(tmp_lerobot_h
     assert isinstance(request, CalibrationRequest)
 
 
-def test_a_zero_calibration_is_visible_to_every_other_features_mutex() -> None:
+def test_a_step_calibration_is_visible_to_every_other_features_mutex() -> None:
     """The whole reason this flow reuses the `calibration` session kind: every
     existing reciprocal check calls calibrate.calibration_is_active(), so
-    widening that one function enrolls the Maker flow with no new
+    widening that one function enrolls the step wizard with no new
     robot.busy.* discriminant to register."""
-    from makermodslab import calibrate, zero_calibrate
+    from makermodslab import calibrate, step_calibrate
 
     assert calibrate.calibration_is_active() is False
     try:
-        zero_calibrate.zero_calibration_manager.status.calibration_active = True
-        assert zero_calibrate.zero_calibration_is_active() is True
+        step_calibrate.step_calibration_manager.status.calibration_active = True
+        assert step_calibrate.step_calibration_is_active() is True
         assert calibrate.calibration_is_active() is True
     finally:
-        zero_calibrate.zero_calibration_manager.status.calibration_active = False
+        step_calibrate.step_calibration_manager.status.calibration_active = False
     assert calibrate.calibration_is_active() is False
 
 
-def test_zero_calibration_refuses_while_another_feature_owns_the_bus(
+def test_step_calibration_refuses_while_another_feature_owns_the_bus(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Idle/mutex branch — no hardware touched."""
-    from makermodslab import teleoperate, zero_calibrate
+    from makermodslab import step_calibrate, teleoperate
 
     monkeypatch.setattr(teleoperate, "teleoperation_active", True)
 
-    result = zero_calibrate.zero_calibration_manager.start(
-        zero_calibrate.ZeroCalibrationRequest(device_type="robot", port="/dev/can0", config_file="cal")
+    result = step_calibrate.step_calibration_manager.start(
+        step_calibrate.StepCalibrationRequest(device_type="robot", port="/dev/can0", config_file="cal")
     )
 
     assert result["success"] is False
     assert "Teleoperation" in result["message"]
     # The refusal must not leave a claim behind.
-    assert zero_calibrate.zero_calibration_is_active() is False
+    assert step_calibrate.step_calibration_is_active() is False
 
 
-def test_zero_calibration_refuses_to_silently_overwrite_a_saved_calibration(
+def test_step_calibration_refuses_to_silently_overwrite_a_saved_calibration(
     tmp_lerobot_home: Path,
 ) -> None:
     """Same contract as the SO-101 flow: completing a calibration writes
     "<config_file>.json", so a taken name needs an explicit overwrite."""
-    from makermodslab import zero_calibrate
+    from makermodslab import step_calibrate
 
     library = Path(cfg.calibration_dir_for_device("robot", "maker"))
     library.mkdir(parents=True, exist_ok=True)
     (library / "taken.json").write_text("{}")
 
-    result = zero_calibrate.zero_calibration_manager.start(
-        zero_calibrate.ZeroCalibrationRequest(device_type="robot", port="/dev/can0", config_file="taken")
+    result = step_calibrate.step_calibration_manager.start(
+        step_calibrate.StepCalibrationRequest(device_type="robot", port="/dev/can0", config_file="taken")
     )
 
     assert result["success"] is False
     assert result["code"] == "name_taken"
-    assert zero_calibrate.zero_calibration_is_active() is False
+    assert step_calibrate.step_calibration_is_active() is False
 
 
 def test_completing_a_step_with_no_calibration_running_is_a_clean_refusal() -> None:
-    from makermodslab import zero_calibrate
+    from makermodslab import step_calibrate
 
-    result = zero_calibrate.zero_calibration_manager.complete_step()
+    result = step_calibrate.step_calibration_manager.complete_step()
     assert result["success"] is False
     assert "No calibration active" in result["message"]
 
 
 def test_stopping_with_no_calibration_running_is_a_clean_refusal() -> None:
-    from makermodslab import zero_calibrate
+    from makermodslab import step_calibrate
 
-    result = zero_calibrate.zero_calibration_manager.stop()
+    result = step_calibrate.step_calibration_manager.stop()
     assert result["success"] is False
+
+
+# ---------------------------------------------------------------------------
+# The Maker family's own calibration procedure (fake devices, no bus)
+# ---------------------------------------------------------------------------
+
+MAKER_FOLLOWER_ZERO_POSE = (
+    "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully open — then confirm."
+)
+STAR_LEADER_ZERO_POSE = (
+    "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, "
+    "gripper closed — then confirm."
+)
+
+
+def test_maker_calibration_summary_is_the_zero_pose_text_per_side() -> None:
+    """What the config dialog shows BEFORE Start. The text is the family's
+    verbatim (the frontend overrides it per id from its catalog); no served
+    image — the bundled photos stay."""
+    from makermodslab.arms import registry
+
+    maker = registry.get("maker")
+    assert maker.calibration_summary("robot") == {"text": MAKER_FOLLOWER_ZERO_POSE, "image_url": None}
+    assert maker.calibration_summary("teleop") == {"text": STAR_LEADER_ZERO_POSE, "image_url": None}
+    assert registry.get("so101").calibration_summary("robot") is None
+    assert registry.get("so101").calibration_summary("teleop") is None
+
+
+def test_maker_follower_calibrate_sets_zero_once_after_the_pose_step() -> None:
+    """The procedure, on the manager's worker thread: ONE live-positions step
+    with the follower's zero-pose text, a transient "setting zero" message,
+    one whole-bus set_zero_position AFTER the user confirmed, the multi-turn
+    bookkeeping reset, and a calibration whose ranges are the config's fixed
+    joint_limits with homing_offset 0 (the zero lives inside the motor)."""
+    from lerobot.robots.maker_follower import MakerFollowerConfig
+    from makermodslab.arms import registry
+    from tests.mocks import FakeCalibrationUI, FakeCanFollower
+
+    log: list = []
+    config = MakerFollowerConfig(port="/dev/can0", id="unit")
+    device = FakeCanFollower(config, log)
+    ui = FakeCalibrationUI(log)
+
+    calibration = registry.get("maker").calibrate(device, "robot", ui)
+
+    assert ui.steps == [(MAKER_FOLLOWER_ZERO_POSE, None, True)]
+    assert ui.messages and "zero" in ui.messages[0].lower()
+    assert [e for e in log if e[0] == "bus"] == [("bus", "set_zero_position")]
+    assert log.index(("step", MAKER_FOLLOWER_ZERO_POSE)) < log.index(("bus", "set_zero_position"))
+    assert device._turn_offset == dict.fromkeys(config.motor_can_ids, 0.0)
+    assert device._stale_zero == {} and device._last_positions == {}
+
+    assert set(calibration) == set(config.motor_can_ids)
+    for motor, motor_id in config.motor_can_ids.items():
+        entry = calibration[motor]
+        low, high = config.joint_limits[motor]
+        assert (entry.id, entry.drive_mode, entry.homing_offset) == (motor_id, 0, 0)
+        assert (entry.range_min, entry.range_max) == (int(low), int(high))
+    # The family returns the dict; WRITING it is the manager's job.
+    assert device.calibration is None
+
+
+def test_maker_leader_calibrate_unlocks_and_sets_origin_per_servo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Star leader speaks FashionStar UART: no broadcast, so each servo is
+    unlocked, given the settle time, then origin'd — in joint_ids order —
+    after the leader's own zero-pose step; ranges come from the preset's
+    joint_ranges."""
+    from lerobot.teleoperators.rebot_102_leader.config_rebot_102_leader_maker import (
+        RebotArm102LeaderMakerTeleopConfig,
+    )
+    from makermodslab.arms import registry
+    from tests.mocks import FakeCalibrationUI, FakeStarLeader
+
+    log: list = []
+    monkeypatch.setattr("time.sleep", lambda seconds: log.append(("sleep", seconds)))
+    config = RebotArm102LeaderMakerTeleopConfig(port="/dev/star0", id="unit")
+    device = FakeStarLeader(config, log)
+    ui = FakeCalibrationUI(log)
+
+    calibration = registry.get("maker").calibrate(device, "teleop", ui)
+
+    assert ui.steps == [(STAR_LEADER_ZERO_POSE, None, True)]
+    expected: list = [("step", STAR_LEADER_ZERO_POSE)]
+    for motor_id in config.joint_ids.values():
+        expected += [("bus", "unlock", motor_id), ("sleep", 0.01), ("bus", "set_origin_point", motor_id)]
+    assert [e for e in log if e[0] in ("bus", "sleep", "step")] == expected
+    for motor, motor_id in config.joint_ids.items():
+        low, high = config.joint_ranges[motor]
+        assert calibration[motor].id == motor_id
+        assert (calibration[motor].range_min, calibration[motor].range_max) == (int(low), int(high))
+        assert calibration[motor].homing_offset == 0
+
+
+def test_maker_open_for_calibration_connects_the_follower_bus_then_disables_torque(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NOT device.connect() (its tail enables torque, locking the arm the
+    user must move by hand): open the bus directly, then disable — in that
+    order, the write that frees a Metal arm the Damiao handshake energized."""
+    from makermodslab.arms import registry
+    from tests.mocks import FakeCanFollower
+
+    built: list = []
+
+    def fake_make_robot(config):
+        built.append(config)
+        return FakeCanFollower(config)
+
+    monkeypatch.setattr("lerobot.robots.make_robot_from_config", fake_make_robot, raising=False)
+    monkeypatch.setattr("lerobot.robots.utils.make_robot_from_config", fake_make_robot, raising=False)
+
+    device = registry.get("maker").open_for_calibration("robot", "/dev/can0", "cal")
+
+    assert [c.type for c in built] == ["maker_follower"]
+    assert (built[0].port, built[0].id) == ("/dev/can0", "cal")
+    assert device.log == [("bus", "connect"), ("bus", "disable_torque")]
+
+
+def test_maker_open_for_calibration_connects_the_leader_uncalibrated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The leader's bus is built inside connect(); connect(calibrate=False)
+    leaves it unlocked and back-drivable, and there is no torque to disable —
+    its joints hold encoders and no motors."""
+    from makermodslab.arms import registry
+    from tests.mocks import FakeStarLeader
+
+    built: list = []
+
+    def fake_make_teleop(config):
+        built.append(config)
+        return FakeStarLeader(config)
+
+    monkeypatch.setattr(
+        "lerobot.teleoperators.make_teleoperator_from_config", fake_make_teleop, raising=False
+    )
+    monkeypatch.setattr(
+        "lerobot.teleoperators.utils.make_teleoperator_from_config", fake_make_teleop, raising=False
+    )
+
+    device = registry.get("maker").open_for_calibration("teleop", "/dev/star0", "cal")
+
+    assert [c.type for c in built] == ["rebot_102_leader_maker"]
+    assert (built[0].port, built[0].id) == ("/dev/star0", "cal")
+    assert device.log == [("device", "connect", False)]
 
 
 # ---------------------------------------------------------------------------
@@ -925,3 +1073,89 @@ async def test_identify_rejects_an_unknown_device_type() -> None:
 
     assert result["success"] is False
     assert "device_type" in result["message"]
+
+
+def test_a_failed_torque_disable_after_connect_de_energizes_and_closes_the_bus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Damiao handshake inside bus.connect() energizes the arm; when the
+    disable that frees it raises, nothing holds a device object to release
+    it through. The family must run the recovery de-energize and close the
+    port before the failure propagates — otherwise the arm holds torque
+    with its port open until the process exits."""
+    from makermodslab import torque
+    from makermodslab.arms import registry as arm_registry
+
+    calls: list[str] = []
+
+    class _Bus:
+        def connect(self):
+            calls.append("connect")
+
+        def disable_torque(self):
+            calls.append("disable_torque")
+            raise RuntimeError("no reply from motor 3")
+
+        def disconnect(self, disable_torque=True):
+            calls.append(f"disconnect({disable_torque})")
+
+    class _Device:
+        bus = _Bus()
+
+    def fake_make_robot(config):
+        calls.append(f"make:{type(config).__name__}")
+        return _Device()
+
+    monkeypatch.setattr("lerobot.robots.make_robot_from_config", fake_make_robot)
+    monkeypatch.setattr(
+        torque,
+        "de_energize_can_device",
+        lambda device, label="device": calls.append(f"de_energize:{label}") or [],
+    )
+
+    with pytest.raises(RuntimeError, match="motor 3"):
+        arm_registry.get("metal").open_for_calibration("robot", "/dev/can0", "unit")
+
+    assert calls[1:] == ["connect", "disable_torque", "de_energize:Metal follower arm", "disconnect(False)"]
+
+
+def test_a_handshake_that_raises_partway_is_de_energized_before_the_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Damiao handshake is the per-motor enable, sent motor by motor: one
+    that raises on motor 4 has energized 1–3 while is_connected reads False.
+    The calibration connect must hand the bus to the recovery de-energize
+    (which reopens WITHOUT the handshake) rather than leave those motors
+    holding torque with no device object to release them through."""
+    from makermodslab import torque
+    from makermodslab.arms import registry as arm_registry
+
+    calls: list[str] = []
+
+    class _Bus:
+        is_connected = False
+
+        def connect(self):
+            calls.append("connect")
+            raise RuntimeError("motor 4 did not answer the handshake")
+
+        def disable_torque(self):  # pragma: no cover - must not be reached
+            calls.append("disable_torque")
+
+        def disconnect(self, disable_torque=True):
+            calls.append(f"disconnect({disable_torque})")
+
+    class _Device:
+        bus = _Bus()
+
+    monkeypatch.setattr("lerobot.robots.make_robot_from_config", lambda config: _Device())
+    monkeypatch.setattr(
+        torque,
+        "de_energize_can_device",
+        lambda device, label="device": calls.append(f"de_energize:{label}") or [],
+    )
+
+    with pytest.raises(RuntimeError, match="motor 4"):
+        arm_registry.get("metal").open_for_calibration("robot", "/dev/can0", "unit")
+
+    assert calls == ["connect", "de_energize:Metal follower arm", "disconnect(False)"]

@@ -279,6 +279,9 @@ export default {
         "每个控制步执行一次策略前向推理。机械臂在动作块之间会短暂停顿。",
       rtcHint:
         "Real-Time Chunking 让推理与运动重叠进行，消除动作块之间的停顿。它也改变了动作的生成方式 — 在采信结果之前请先与 Sync 对比。",
+      // 当所选检查点的架构无法运行 RTC（服务端会拒绝）时显示在选择器下方，
+      // 同时该选项也会被禁用。
+      rtcUnavailable: "该检查点的策略不支持 Real-Time Chunking。",
       // 指导模式固定使用 sync，因此显示这句话来代替引擎选择器。
       coachingNote:
         "指导始终使用 Sync 引擎。Real-Time Chunking 会让策略恢复时机械臂朝纠正前的姿态弹回，手就在旁边时这并不安全。",

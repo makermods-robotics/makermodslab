@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { URDF_CONFIGS, urdfConfigFor } from "./urdfConfigs";
 
-// One entry per arm type that ships a URDF (mirrors ships_urdf /
-// armHasUrdf). Each entry has to resolve its own mesh paths — a shared
-// rewrite would send one arm's loader at the other's mesh folder.
+// One entry per arm type that ships a URDF (the families whose
+// telemetry_kind is "urdf"). Each entry has to resolve its own mesh paths — a
+// shared rewrite would send one arm's loader at the other's mesh folder.
 
 describe("URDF_CONFIGS", () => {
   it("ships an SO-101 and a Maker entry, and no Metal entry", () => {

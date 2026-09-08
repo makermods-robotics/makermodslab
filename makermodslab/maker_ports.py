@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -44,7 +44,8 @@ import contextlib
 import logging
 import time
 
-from .utils.config import find_available_ports
+from .arms import registry as arm_registry
+from .utils.config import find_available_ports, normalize_arm_type
 
 logger = logging.getLogger(__name__)
 
@@ -284,14 +285,23 @@ _METAL_OPENERS = {
 }
 
 
-def _openers_for(arm_type: str) -> dict:
-    """The per-device-type (opener, releaser, reader) triples for a family.
+# Keyed by the follower's probe protocol (ArmFamily.follower_probe_protocol),
+# the one fact that picks a table: the leader row is identical in both (every
+# CAN family uses the Star Arm 102), only the follower probe differs —
+# RobStride vs Damiao frames, and the read-only guarantee that goes with
+# them (see _open_metal_follower_bus).
+_OPENERS_BY_PROTOCOL = {
+    "robstride": _OPENERS,
+    "damiao": _METAL_OPENERS,
+}
 
-    The leader row is identical (both CAN families use the Star Arm 102);
-    only the follower probe differs — RobStride vs Damiao frames, and the
-    read-only guarantee that goes with them (see _open_metal_follower_bus).
-    """
-    return _METAL_OPENERS if arm_type == "metal" else _OPENERS
+
+def _openers_for(arm_type: str) -> dict:
+    """The per-device-type (opener, releaser, reader) triples for a family."""
+    protocol = arm_registry.get(normalize_arm_type(arm_type)).follower_probe_protocol
+    if protocol not in _OPENERS_BY_PROTOCOL:
+        raise ValueError(f"arm type {arm_type!r} has no protocol probe")
+    return _OPENERS_BY_PROTOCOL[protocol]
 
 
 def _probe_sync(ports: list[str], arm_type: str = "maker") -> dict:
@@ -474,8 +484,9 @@ async def identify_maker_arm_by_motion(
             "message": "device_type must be 'teleop' or 'robot'",
             "skipped": [],
         }
-    if arm_type == "metal" and device_type == "robot":
-        # Watching a Damiao follower means holding its bus open, and the
+    family = arm_registry.get(normalize_arm_type(arm_type))
+    if family.motion_identify_energizes_follower and device_type == "robot":
+        # Watching this follower means holding its bus open, and (Damiao) the
         # handshake that opens it energizes the motors — the opposite of a
         # hands-on identification gesture. Refuse plainly rather than
         # energize behind the user's back. Single-arm rigs never need the
@@ -484,9 +495,9 @@ async def identify_maker_arm_by_motion(
         return {
             "success": False,
             "message": (
-                "Motion identification is not available for the Metal follower: opening its "
-                "bus would energize the motors mid-gesture. Identify by the leader arms "
-                "instead, or plug in one follower at a time and use the port probe."
+                f"Motion identification is not available for the {family.short_label} follower: "
+                "opening its bus would energize the motors mid-gesture. Identify by the leader "
+                "arms instead, or plug in one follower at a time and use the port probe."
             ),
             "skipped": [],
         }

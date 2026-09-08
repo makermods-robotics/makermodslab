@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -708,6 +708,97 @@ def test_calibration_config_defaults_to_the_robots_slot_name(client, tmp_lerobot
     assert resp.status_code == 201
     assert captured[1].config_file == "bi_right"
     assert captured[1].port == "/dev/rf"
+
+
+def test_calibration_on_a_steps_family_reaches_the_step_manager(
+    client, tmp_lerobot_home, monkeypatch
+) -> None:
+    """TB6a: the calibration kind picks the manager. A family whose kind is
+    ``steps`` (an extension's, here a fake) gets a StepCalibrationRequest
+    carrying its arm type and its minted default slot name, dispatched to
+    the step manager's start — no edit to sessions.py per family."""
+    from makermodslab import step_calibrate
+    from makermodslab.arms import registry
+    from makermodslab.utils import config as cfg
+    from tests.mocks import make_arm_family, scratch_registry
+
+    scratch_registry(monkeypatch)
+    registry.register(make_arm_family("nine"))
+    cfg.save_robot_record("ninebot", {"arm_type": "nine", "mode": "single", "follower_port": "/dev/nine0"})
+    captured: list = []
+    monkeypatch.setattr(
+        step_calibrate.step_calibration_manager, "start", _fake_start("calibration", captured)
+    )
+
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "calibration", "robot": "ninebot", "options": {"device_type": "robot"}},
+    )
+    assert resp.status_code == 201, resp.text
+    req = captured[0]
+    assert isinstance(req, step_calibrate.StepCalibrationRequest)
+    assert (req.arm_type, req.port, req.config_file) == ("nine", "/dev/nine0", "ninebot_nine")
+    assert req.robot_name == "ninebot"
+
+
+def test_calibration_on_a_panel_family_is_refused_pointing_at_the_panel(
+    client, tmp_lerobot_home, monkeypatch
+) -> None:
+    """A ``panel`` family calibrates through its extension's own page (TB6b
+    mounts it in the config dialog); the sessions surface has no procedure to
+    run and says where to go instead, with the readiness code."""
+    from makermodslab import calibrate, step_calibrate
+    from makermodslab.arms import registry
+    from makermodslab.utils import config as cfg
+    from tests.mocks import make_arm_family, scratch_registry
+
+    scratch_registry(monkeypatch)
+    registry.register(
+        make_arm_family("paneled", calibration_kind="panel", calibration_panel_url="/api/v1/ext/p/static/cal")
+    )
+    cfg.save_robot_record("panelbot", {"arm_type": "paneled", "mode": "single", "follower_port": "/dev/p0"})
+    for manager, name in (
+        (step_calibrate.step_calibration_manager, "start"),
+        (calibrate.calibration_manager, "start_calibration"),
+    ):
+        monkeypatch.setattr(manager, name, lambda request, *a, **k: pytest.fail("no manager may start"))
+
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "calibration", "robot": "panelbot", "options": {"device_type": "robot"}},
+    )
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["code"] == ErrorCode.ROBOT_NOT_READY
+    assert body["detail"] == (
+        "This arm is calibrated through its extension's own panel; open it from the robot's config window."
+    )
+
+
+def test_stop_of_a_calibration_reaches_the_live_step_manager(monkeypatch) -> None:
+    """Stopping is never owner-gated and the tracker only knows the KIND;
+    the dispatcher stops whichever manager is live — the step wizard when
+    it holds the bus, the sweep otherwise."""
+    from makermodslab import calibrate, step_calibrate
+
+    monkeypatch.setattr(step_calibrate, "step_calibration_is_active", lambda: True)
+    monkeypatch.setattr(
+        step_calibrate.step_calibration_manager, "stop", lambda: {"success": True, "message": "steps stopped"}
+    )
+    monkeypatch.setattr(
+        calibrate.calibration_manager,
+        "stop_calibration_process",
+        lambda: pytest.fail("the sweep manager is not the live one"),
+    )
+    assert sessions._dispatch_stop("calibration")["message"] == "steps stopped"
+
+    monkeypatch.setattr(step_calibrate, "step_calibration_is_active", lambda: False)
+    monkeypatch.setattr(
+        calibrate.calibration_manager,
+        "stop_calibration_process",
+        lambda: {"success": True, "message": "sweep"},
+    )
+    assert sessions._dispatch_stop("calibration")["message"] == "sweep"
 
 
 def test_calibration_without_a_port_anywhere_400(client, tmp_lerobot_home) -> None:

@@ -25,12 +25,12 @@ const MAX_RECONNECT_DELAY_MS = 30000;
  * Live numeric joint readout — what the Metal arm shows in place of the 3D
  * viewer.
  *
- * The SO-101 and the Maker arm each ship a URDF, so their teleop sessions
- * drive the 3D model. No Metal URDF ships yet (`ships_urdf` / `armHasUrdf`
- * are false for it), so a Metal session sends `joints` empty and puts the
- * real per-joint angles in `joints_deg`, and this renders those. The Maker
- * arm also sends `joints_deg` (its gripper has no URDF joint), but its panel
- * shows the model, not this.
+ * The SO-101 and the Maker arm each ship a URDF (`telemetry_kind === "urdf"`),
+ * so their teleop sessions drive the 3D model. No Metal URDF ships yet
+ * (`telemetry_kind === "degrees"`), so a Metal session sends `joints` empty
+ * and puts the real per-joint angles in `joints_deg`, and this renders those.
+ * The Maker arm also sends `joints_deg` (raw angles by motor name), but its
+ * panel shows the model, not this.
  *
  * A sibling of useRealTimeJoints in shape (same socket, same reconnect
  * backoff) but it drives no 3D scene, so it holds the latest dict in state

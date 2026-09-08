@@ -7,15 +7,14 @@ silently re-enable a guard (or a feature) on hardware that cannot support it.
 
 import pytest
 
+from makermodslab import arm_capabilities
 from makermodslab.arm_capabilities import (
     arm_type_from_robot_type,
     arm_type_of_robot_config,
     joints_per_arm,
-    ships_urdf,
     supports_auto_calibration,
     supports_dagger,
     uses_feetech_bus,
-    uses_zero_calibration,
 )
 
 
@@ -36,16 +35,35 @@ def test_feetech_only_helpers_are_off_for_the_maker_arm() -> None:
     assert uses_feetech_bus("maker") is False
 
 
-def test_auto_calibration_is_so101_only_and_zero_calibration_is_maker_only() -> None:
-    """Each arm type has exactly one calibration procedure, and they differ.
+def test_auto_calibration_is_so101_only_and_the_can_pair_are_step_wizards() -> None:
+    """Each arm type has exactly one calibration procedure, named by its kind.
 
-    The SO-101 sweeps each joint's range under torque; the Maker arm's limits
-    are fixed constants, so all it needs is a zero pose.
+    The SO-101 sweeps each joint's range under torque (``range_sweep``); the
+    CAN arms' limits are fixed constants, so all they need is a zero pose,
+    which the family runs as a step wizard (``steps``). The boolean
+    ``uses_zero_calibration`` is gone: an extension's kind may be ``panel``,
+    which no boolean could name.
     """
+    from makermodslab.arm_capabilities import calibration_kind
+
     assert supports_auto_calibration("so101") is True
     assert supports_auto_calibration("maker") is False
-    assert uses_zero_calibration("maker") is True
-    assert uses_zero_calibration("so101") is False
+    assert calibration_kind("so101") == "range_sweep"
+    assert calibration_kind("maker") == "steps"
+    assert calibration_kind("metal") == "steps"
+    assert not hasattr(arm_capabilities, "uses_zero_calibration")
+
+
+def test_calibration_kind_reads_the_registry_live(monkeypatch) -> None:
+    from makermodslab.arm_capabilities import calibration_kind
+    from makermodslab.arms import registry
+    from tests.mocks import make_arm_family, scratch_registry
+
+    scratch_registry(monkeypatch)
+    registry.register(
+        make_arm_family("paneled", calibration_kind="panel", calibration_panel_url="/api/v1/ext/p/static/cal")
+    )
+    assert calibration_kind("paneled") == "panel"
 
 
 def test_dagger_is_refused_on_the_maker_and_metal_arms() -> None:
@@ -62,31 +80,30 @@ def test_dagger_is_refused_on_the_maker_and_metal_arms() -> None:
     assert supports_dagger("so101") is True
 
 
-def test_urdf_ships_for_the_so101_and_maker_arms_but_not_metal() -> None:
-    """Which arm types have a 3D model that ships in `frontend/public/`.
-
-    Gates the teleop broadcast (URDF joint angles under `joints` vs the raw
-    numeric `joints_deg` readout) and the frontend's viewer-vs-readout choice.
-    The SO-101 and the Maker arm each ship a URDF; the Metal arm does not yet,
-    so it stays on the numeric readout.
-    """
-    assert ships_urdf("so101") is True
-    assert ships_urdf("maker") is True
-    assert ships_urdf("metal") is False
-
-
-@pytest.mark.parametrize("value", [None, "", "SO101", "star", 7, object()])
-def test_unknown_arm_types_fall_back_to_so101(value: object) -> None:
-    """A corrupted or future-dated record must never make a robot unopenable.
-
-    so101 is the safe default: it is what every record written before the
-    Maker arm existed implicitly is.
-    """
+@pytest.mark.parametrize("value", [None, "", 7, object()])
+def test_missing_or_non_string_arm_types_fall_back_to_so101(value: object) -> None:
+    """A record written before the Maker arm existed carries no arm_type and
+    IS an SO-101; a non-string is a corrupted field, not a family. Both read
+    as the default rather than making the robot unopenable."""
     assert uses_feetech_bus(value) is True
     assert joints_per_arm(value) == 6
-    # so101 ships a URDF, so the fallback keeps the 3D viewer rather than
-    # silently dropping to the readout.
-    assert ships_urdf(value) is True
+
+
+@pytest.mark.parametrize("value", ["SO101", "star", "nope"])
+def test_unknown_arm_type_strings_raise_instead_of_masquerading_as_so101(value: str) -> None:
+    """TB5's locked decision: an unknown STRING is a family this install does
+    not have, and answering "SO-101" for it would send a Feetech serial path
+    at whatever the hardware really is. The predicates raise the registry's
+    UnknownArmType (a KeyError); the refusal gates upstream make the raise
+    unreachable from a request."""
+    from makermodslab.arms.registry import UnknownArmType
+
+    with pytest.raises(UnknownArmType):
+        uses_feetech_bus(value)
+    with pytest.raises(UnknownArmType) as excinfo:
+        joints_per_arm(value)
+    assert isinstance(excinfo.value, KeyError)
+    assert value in str(excinfo.value)
 
 
 def test_arm_type_read_back_off_a_built_robot_config() -> None:

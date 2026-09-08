@@ -2,10 +2,10 @@
  * Per-arm-type 3D model wiring for `UrdfViewer`.
  *
  * There is one entry per arm type that ships a URDF (`frontend/public/…`);
- * `armHasUrdf` / the backend's `ships_urdf` decide which arms have one. Each
- * entry owns its own URDF path, `package` attribute, and mesh-URL rewrite,
- * because a shared rewrite would send one arm's mesh loader at the other's
- * folder.
+ * the arm family's `telemetry_kind` (`"urdf"` vs `"degrees"`, from
+ * `GET /api/v1/arms`) decides which arms have one. Each entry owns its own
+ * URDF path, `package` attribute, and mesh-URL rewrite, because a shared
+ * rewrite would send one arm's mesh loader at the other's folder.
  */
 import type { ArmType } from "./armTypes";
 

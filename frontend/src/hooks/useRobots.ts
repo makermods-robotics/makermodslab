@@ -10,13 +10,20 @@ export type RobotMode = "single" | "bimanual";
 // pure and independently testable (this module pulls in the API context on
 // import). Re-exported here because ArmType's importers already use this path.
 import type { ArmType } from "@/lib/armTypes";
-export { armHasUrdf, isCanArmType, jointsPerArm } from "@/lib/armTypes";
 export type { ArmType } from "@/lib/armTypes";
 
 export interface RobotRecord {
   name: string;
   mode: RobotMode;
+  // A manifest id (GET /api/v1/arms). Not a closed union: an extension can
+  // register a family, and a hand-edited record can name one that is not
+  // installed — `arm_available` says which.
   arm_type: ArmType;
+  // False when no installed arm family answers to `arm_type`. The server
+  // refuses to start anything for such a robot; the UI shows it as
+  // unavailable and disables detect/calibrate. Resolve capabilities through
+  // useArms().byId(arm_type), which is undefined in that case.
+  arm_available: boolean;
   // Primary pair (single mode), or the LEFT arm pair (bimanual mode).
   leader_port: string;
   follower_port: string;

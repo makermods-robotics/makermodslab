@@ -49,6 +49,8 @@ import RobotConfigDialog from "@/components/dialogs/RobotConfigDialog";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useRobots, RobotRecord, RobotMode, ArmType } from "@/hooks/useRobots";
+import { useArms } from "@/hooks/useArms";
+import { armLabel } from "@/lib/armTypes";
 import { ApiError } from "@/lib/apiClient";
 import { startSession, formatSessionHeld } from "@/lib/sessionApi";
 import { tabOwnerId } from "@/lib/sessionOwner";
@@ -85,6 +87,7 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
   const { toast } = useToast();
   const { t } = useTranslation();
   const { language } = useLanguage();
+  const { byId: armById } = useArms();
   const {
     records,
     selectedName,
@@ -223,8 +226,17 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
     }
   };
 
+  // An arm type no installed family answers to comes first: the server
+  // refuses to start anything for it (robot.arm_type.unavailable), and the
+  // setup-gap sentence would otherwise describe a robot whose ports and
+  // calibrations may all be present.
   const teleopDisabledReason = !selectedRecord
     ? t("robot.corner.selectFirst")
+    : selectedRecord.arm_available === false
+      ? t("robot.teleop.disabledArmUnavailable", {
+          name: selectedRecord.name,
+          armType: selectedRecord.arm_type,
+        })
     : !selectedRecord.is_clean
       ? t("robot.teleop.disabledReason", {
           name: selectedRecord.name,
@@ -338,7 +350,15 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
                           : "uppercase tracking-wider",
                       )}
                     >
-                      {t(`robot.corner.armType.${rec.arm_type ?? "so101"}`)}
+                      {armLabel(armById(rec.arm_type), rec.arm_type, t)}
+                      {rec.arm_available === false && (
+                        <>
+                          {" "}
+                          <span className="rounded-sm bg-destructive/15 px-1 text-destructive">
+                            {t("robot.corner.armUnavailable")}
+                          </span>
+                        </>
+                      )}
                       {" · "}
                       {rec.mode === "bimanual"
                         ? t("robot.corner.mode.bimanual")

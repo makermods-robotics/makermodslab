@@ -20,12 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
-import {
-  ModelItem,
-  deleteModel,
-  hideModel,
-  removeCustomModel,
-} from "@/lib/modelsApi";
+import { ModelItem, hideModel, removeCustomModel } from "@/lib/modelsApi";
 import { resolveDeleteAction } from "@/lib/deleteSemantics";
 import ModelInfoCard from "@/components/landing/ModelInfoCard";
 
@@ -61,10 +56,19 @@ const PolicyManageDialog: React.FC<PolicyManageDialogProps> = ({
 
   if (!model) return null;
 
+  // Destructive deletes (a local run's files, a "both" row's local copy) are
+  // deliberately no longer offered here — that surface moved out of the
+  // library UI (the backend routes remain for a future management menu). Only
+  // the non-destructive listing management survives: unpinning a pinned custom
+  // hub row and hiding an own-namespace hub row.
+  const modelAction = resolveDeleteAction("model", model).action;
+  const canRemoveFromList = modelAction === "unpin" || modelAction === "hide";
+
   const res = pendingDelete ? resolveDeleteAction("model", pendingDelete) : null;
 
-  // Ported from ModelsPanel.confirmDeleteModel: one confirm path for every
-  // delete entry point; resolveDeleteAction decides the semantics.
+  // Ported from ModelsPanel.confirmDeleteModel, minus the destructive arms:
+  // resolveDeleteAction still decides the semantics, but only rows resolving
+  // to unpin/hide ever reach here (canRemoveFromList gates the button).
   const confirmDelete = async () => {
     const item = pendingDelete;
     if (!item) return;
@@ -84,25 +88,12 @@ const PolicyManageDialog: React.FC<PolicyManageDialogProps> = ({
           title: t("dialogs.policyManage.toast.removedFromList"),
           description: item.name,
         });
-      } else {
-        const r = await deleteModel(baseUrl, fetchWithHeaders, item.id);
-        if (!r.deleted) return;
-        toast({
-          title:
-            resolution.action === "delete-local-copy"
-              ? t("dialogs.policyManage.toast.localCopyRemoved")
-              : t("dialogs.policyManage.toast.modelDeleted"),
-          description: item.name,
-        });
       }
       onChanged();
       onOpenChange(false);
     } catch (e) {
       toast({
-        title:
-          resolution.action === "delete-local"
-            ? t("dialogs.policyManage.toast.deleteFailed")
-            : t("dialogs.policyManage.toast.removeFailed"),
+        title: t("dialogs.policyManage.toast.removeFailed"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -124,9 +115,9 @@ const PolicyManageDialog: React.FC<PolicyManageDialogProps> = ({
             // Upload + local-detail affordances are local-only, mirroring the
             // old ModelsPanel gating.
             isLocal={model.source === "local"}
-            // Every listed row has delete semantics (local delete /
-            // local-copy removal / unpin / hide).
-            canDelete
+            // Only list-management rows (unpin / hide) keep the affordance;
+            // destructive deletes are gone from this surface.
+            canDelete={canRemoveFromList}
             onDelete={() => setPendingDelete(model)}
             onUploaded={onChanged}
             onDownloaded={onChanged}

@@ -24,7 +24,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { ArmType, armTypeFromRobotType, ARM_TYPE_LABEL } from "@/lib/armTypes";
+import { ArmType, armTypeFromRobotType, armLabel } from "@/lib/armTypes";
+import { useArms } from "@/hooks/useArms";
 import {
   Loader2,
   CheckCircle2,
@@ -99,6 +100,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
 }) => {
   const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
+  const { arms, byId } = useArms();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // Per-source repeat count, keyed by repo id. A repo absent from this map (or
   // not selected) weighs 1 — the map only ever holds deliberate overrides.
@@ -352,15 +354,17 @@ const MergeDatasetsDialog: React.FC<Props> = ({
   const armMismatchWarning = useMemo<string | null>(() => {
     const byArm = new Map<ArmType, string[]>();
     for (const repoId of selectedIds) {
-      const arm = armTypeFromRobotType(infos[repoId]?.robot_type);
+      const arm = armTypeFromRobotType(arms, infos[repoId]?.robot_type);
       if (arm) byArm.set(arm, [...(byArm.get(arm) ?? []), repoId]);
     }
     if (byArm.size < 2) return null;
     const groups = [...byArm.entries()]
-      .map(([arm, ids]) => `${ids.join(", ")} (${ARM_TYPE_LABEL[arm]})`)
+      .map(
+        ([arm, ids]) => `${ids.join(", ")} (${armLabel(byId(arm), arm, t)})`,
+      )
       .join("; ");
     return t("landing.mergeDatasets.armMismatchWarning", { groups });
-  }, [selectedIds, infos, t]);
+  }, [selectedIds, infos, arms, byId, t]);
 
   // Resulting mix: episodes each source contributes AFTER its weight, and that
   // as a share of the merged total. Shares are what the user is really tuning —

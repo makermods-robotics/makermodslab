@@ -5,7 +5,9 @@ import UrdfViewer from "@/components/UrdfViewer";
 import JointAngleReadout from "@/components/control/JointAngleReadout";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
-import { useRobots, armHasUrdf } from "@/hooks/useRobots";
+import { useRobots } from "@/hooks/useRobots";
+import { useArms } from "@/hooks/useArms";
+import { telemetryKind } from "@/lib/armTypes";
 import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
 import { useUnloadWarning } from "@/hooks/useUnloadWarning";
 import { stopSession } from "@/lib/sessionApi";
@@ -38,11 +40,14 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({
   // The teleop session is for the currently-selected robot; show two arms when
   // it's bimanual.
   const { selectedRecord } = useRobots();
+  const { byId } = useArms();
   const bimanual = selectedRecord?.mode === "bimanual";
-  // Same rule as the Teleoperation page: an arm type with a shipped URDF drives
-  // the 3D model, the Metal arm shows the numeric readout instead.
+  // Same rule as the Teleoperation page: an arm type whose telemetry is "urdf"
+  // drives the 3D model, a "degrees" family (the Metal arm) shows the numeric
+  // readout instead.
   const armType = selectedRecord?.arm_type ?? "so101";
-  const readoutOnly = !armHasUrdf(selectedRecord?.arm_type);
+  const readoutOnly =
+    telemetryKind(byId(selectedRecord?.arm_type)) === "degrees";
 
   // Stop teleoperation exactly once, however the user leaves, so Done, the
   // dialog close, and the unmount safety net can't double-stop or

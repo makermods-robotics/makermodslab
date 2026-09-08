@@ -5,7 +5,9 @@ import VisualizerPanel from "@/components/control/VisualizerPanel";
 import TeleopCameraPanel from "@/components/control/TeleopCameraPanel";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
-import { useRobots, armHasUrdf } from "@/hooks/useRobots";
+import { useRobots } from "@/hooks/useRobots";
+import { useArms } from "@/hooks/useArms";
+import { telemetryKind } from "@/lib/armTypes";
 
 const TeleoperationPage = () => {
   const navigate = useNavigate();
@@ -15,12 +17,15 @@ const TeleoperationPage = () => {
   // The teleop session is for the currently-selected robot; show two arms when
   // it's bimanual.
   const { selectedRecord } = useRobots();
+  const { byId } = useArms();
   const bimanual = selectedRecord?.mode === "bimanual";
-  // The SO-101 and the Maker arm each ship a URDF, so their sessions drive the
-  // 3D model. The Metal arm has none yet, so it shows the live numeric joint
-  // readout in the viewer's place. See armHasUrdf / JointAngleReadout.
+  // A family whose telemetry is "degrees" ships no URDF (the Metal arm today),
+  // so its sessions show the live numeric joint readout in the viewer's place
+  // rather than animating another arm's model with wrong angles. The SO-101 and
+  // the Maker arm each ship one. See urdfConfigs / JointAngleReadout.
   const armType = selectedRecord?.arm_type ?? "so101";
-  const readoutOnly = !armHasUrdf(selectedRecord?.arm_type);
+  const readoutOnly =
+    telemetryKind(byId(selectedRecord?.arm_type)) === "degrees";
 
   // Stop teleoperation exactly once, however the user leaves, so the back
   // button, an in-app link, and the unmount safety net can't double-stop or

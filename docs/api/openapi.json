@@ -25,6 +25,245 @@
         "title": "AddNodeBody",
         "type": "object"
       },
+      "ArmCalibrationInfo": {
+        "description": "How a family is calibrated: a range sweep (the SO-101's manual or\ndriven flows), a step wizard the family drives (the CAN arms' zero pose),\nor an extension's own panel at `panel_url`. `summary` and `panel_url` are\nnull — not absent — when they do not apply, so the route must NOT\nexclude None.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "range_sweep",
+              "steps",
+              "panel"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "panel_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Panel Url"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArmCalibrationSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "summary",
+          "panel_url"
+        ],
+        "title": "ArmCalibrationInfo",
+        "type": "object"
+      },
+      "ArmCalibrationSide": {
+        "description": "What the config dialog shows BEFORE Start for one device side (the\nfamily's own calibration_summary, verbatim — the backend is never\nlocalized): the text and an optional served image.",
+        "properties": {
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "image_url"
+        ],
+        "title": "ArmCalibrationSide",
+        "type": "object"
+      },
+      "ArmCalibrationSummary": {
+        "description": "The pre-start summary per side; a side is null when the family has\nnothing to show for it.",
+        "properties": {
+          "follower": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArmCalibrationSide"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "leader": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArmCalibrationSide"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "leader",
+          "follower"
+        ],
+        "title": "ArmCalibrationSummary",
+        "type": "object"
+      },
+      "ArmCapabilities": {
+        "description": "The family's capability flags (arms/base.py), plus two derived from\nits port-detection facts: `supports_port_probe` (a protocol probe exists,\nso no gesture is needed) and `motion_identify_energizes_follower` (the\nfollower side of the gesture is refused because opening its bus would\nenergize it).",
+        "properties": {
+          "motion_identify_energizes_follower": {
+            "title": "Motion Identify Energizes Follower",
+            "type": "boolean"
+          },
+          "supports_auto_calibration": {
+            "title": "Supports Auto Calibration",
+            "type": "boolean"
+          },
+          "supports_dagger": {
+            "title": "Supports Dagger",
+            "type": "boolean"
+          },
+          "supports_port_probe": {
+            "title": "Supports Port Probe",
+            "type": "boolean"
+          },
+          "uses_feetech_bus": {
+            "title": "Uses Feetech Bus",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "uses_feetech_bus",
+          "supports_auto_calibration",
+          "supports_dagger",
+          "supports_port_probe",
+          "motion_identify_energizes_follower"
+        ],
+        "title": "ArmCapabilities",
+        "type": "object"
+      },
+      "ArmFamiliesResponse": {
+        "description": "GET /api/v1/arms (server.py list_arm_families) — registry order,\ndefault family first.",
+        "properties": {
+          "arms": {
+            "items": {
+              "$ref": "#/components/schemas/ArmFamilyInfo"
+            },
+            "title": "Arms",
+            "type": "array"
+          }
+        },
+        "required": [
+          "arms"
+        ],
+        "title": "ArmFamiliesResponse",
+        "type": "object"
+      },
+      "ArmFamilyInfo": {
+        "description": "One entry of the arms manifest (arms/manifest.py describe_family).\n\n`robot_types` are the lerobot RobotConfig type strings the family's\nfollowers register under (single, then bimanual); `robot_type_markers`\nthe substrings that identify it in a dataset's free-form robot_type;\n`calibration_name_suffix` what the server appends to a robot record's\nname when it mints a default calibration id (\"\" for the SO-101);\n`image_url` a served image for the create dialog (null for the built-ins,\nwhose photos the frontend bundles).",
+        "properties": {
+          "calibration": {
+            "$ref": "#/components/schemas/ArmCalibrationInfo"
+          },
+          "calibration_name_suffix": {
+            "title": "Calibration Name Suffix",
+            "type": "string"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/ArmCapabilities"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
+          },
+          "joints_per_arm": {
+            "title": "Joints Per Arm",
+            "type": "integer"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "provided_by": {
+            "title": "Provided By",
+            "type": "string"
+          },
+          "robot_type_markers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Robot Type Markers",
+            "type": "array"
+          },
+          "robot_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Robot Types",
+            "type": "array"
+          },
+          "short_label": {
+            "title": "Short Label",
+            "type": "string"
+          },
+          "supports_bimanual": {
+            "title": "Supports Bimanual",
+            "type": "boolean"
+          },
+          "telemetry_kind": {
+            "enum": [
+              "urdf",
+              "degrees"
+            ],
+            "title": "Telemetry Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "short_label",
+          "provided_by",
+          "joints_per_arm",
+          "supports_bimanual",
+          "image_url",
+          "calibration",
+          "telemetry_kind",
+          "capabilities",
+          "robot_types",
+          "robot_type_markers",
+          "calibration_name_suffix"
+        ],
+        "title": "ArmFamilyInfo",
+        "type": "object"
+      },
       "AutoCalibrationBatchArm": {
         "description": "One arm in a concurrent auto-calibration batch. Same fields as the\nsingle-arm request minus robot_name (batch-level, shared by every arm).",
         "properties": {
@@ -327,7 +566,7 @@
         "type": "object"
       },
       "CheckpointPolicyConfigResponse": {
-        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature. trained_on_robot_type is the\nraw lerobot robot_type of the checkpoint's training dataset (recovered via\ntrain_config.json), null when it can't be established — the fine-tune\npanel compares it against the selected dataset's arm.",
+        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature. trained_on_robot_type is the\nraw lerobot robot_type of the checkpoint's training dataset (recovered via\ntrain_config.json), null when it can't be established — the fine-tune\npanel compares it against the selected dataset's arm.\n\nsupports_rtc says whether this architecture can run the Real-Time Chunking\ninference engine; null means the policy type isn't one the server knows\n(a fork newer than jobs.policy_type_supports_rtc's table), which the client\nmust read as \"offer it and let the server decide\", not as \"no\". The route\ndeclares no exclude_none/exclude_unset, so the key is always present.",
         "properties": {
           "action_dim": {
             "anyOf": [
@@ -373,6 +612,17 @@
             ],
             "title": "State Dim"
           },
+          "supports_rtc": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supports Rtc"
+          },
           "trained_on_robot_type": {
             "anyOf": [
               {
@@ -389,6 +639,7 @@
           "policy_type",
           "image_features",
           "requires_task",
+          "supports_rtc",
           "state_dim",
           "action_dim",
           "trained_on_robot_type"
@@ -413,6 +664,23 @@
           "message"
         ],
         "title": "CoachingCommandResponse",
+        "type": "object"
+      },
+      "CompleteCalibrationStepRequest": {
+        "properties": {
+          "step": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step"
+          }
+        },
+        "title": "CompleteCalibrationStepRequest",
         "type": "object"
       },
       "CurrentSessionResponse": {
@@ -2408,10 +2676,6 @@
         "properties": {
           "arm_type": {
             "default": "maker",
-            "enum": [
-              "maker",
-              "metal"
-            ],
             "title": "Arm Type",
             "type": "string"
           },
@@ -2482,10 +2746,6 @@
         "properties": {
           "arm_type": {
             "default": "maker",
-            "enum": [
-              "maker",
-              "metal"
-            ],
             "title": "Arm Type",
             "type": "string"
           },
@@ -2878,6 +3138,21 @@
             ],
             "title": "Last Modified"
           },
+          "local_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run",
+                  "downloaded"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Kind"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -3036,6 +3311,21 @@
             ],
             "title": "Last Modified"
           },
+          "local_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run",
+                  "downloaded"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Kind"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -3150,6 +3440,178 @@
           "source"
         ],
         "title": "ModelListItem",
+        "type": "object"
+      },
+      "ModelPublishBody": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Id"
+          },
+          "steps": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Steps"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ModelPublishBody",
+        "type": "object"
+      },
+      "ModelPublishStartResponse": {
+        "description": "POST /api/v1/models/publish (models.py ModelUploadManager.start) — the\nqueue was accepted and runs in the background; poll publish-status.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "model_id": {
+            "title": "Model Id",
+            "type": "string"
+          },
+          "started": {
+            "title": "Started",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "started",
+          "model_id",
+          "message"
+        ],
+        "title": "ModelPublishStartResponse",
+        "type": "object"
+      },
+      "ModelPublishStatusResponse": {
+        "description": "GET /api/v1/models/publish-status (models.py ModelUploadManager.get_status).\n`done_steps` stays meaningful on `error` — a queue that fails part-way keeps\neverything it published before it died.",
+        "properties": {
+          "current_step": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Step"
+          },
+          "done": {
+            "title": "Done",
+            "type": "integer"
+          },
+          "done_steps": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Done Steps",
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id"
+          },
+          "repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Id"
+          },
+          "state": {
+            "enum": [
+              "idle",
+              "running",
+              "done",
+              "error"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "state",
+          "model_id",
+          "repo_id",
+          "url",
+          "message",
+          "error",
+          "total",
+          "done",
+          "current_step",
+          "done_steps"
+        ],
+        "title": "ModelPublishStatusResponse",
         "type": "object"
       },
       "ModelUploadBody": {
@@ -3642,10 +4104,6 @@
       "ReleaseCanTorqueRequest": {
         "properties": {
           "arm_type": {
-            "enum": [
-              "maker",
-              "metal"
-            ],
             "title": "Arm Type",
             "type": "string"
           },
@@ -3809,6 +4267,79 @@
           "default_port"
         ],
         "title": "RobotPortResponse",
+        "type": "object"
+      },
+      "RunCheckpointItem": {
+        "description": "One saved checkpoint of a local run (models.py list_run_checkpoints).",
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "published": {
+            "title": "Published",
+            "type": "boolean"
+          },
+          "step": {
+            "title": "Step",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "step",
+          "path",
+          "published"
+        ],
+        "title": "RunCheckpointItem",
+        "type": "object"
+      },
+      "RunCheckpointsResponse": {
+        "description": "GET /api/v1/models/checkpoints (models.py list_run_checkpoints) — what the\npublish picker needs for one run: its checkpoints, which are already on the\nHub, and the repo a publish would target. `hub_readable` is False when the\nHub could not be asked, in which case every `published` means \"unknown\".",
+        "properties": {
+          "checkpoints": {
+            "items": {
+              "$ref": "#/components/schemas/RunCheckpointItem"
+            },
+            "title": "Checkpoints",
+            "type": "array"
+          },
+          "default_repo_id": {
+            "title": "Default Repo Id",
+            "type": "string"
+          },
+          "hf_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hf Repo Id"
+          },
+          "hub_readable": {
+            "title": "Hub Readable",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "legacy_root_checkpoint": {
+            "title": "Legacy Root Checkpoint",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "default_repo_id",
+          "hf_repo_id",
+          "legacy_root_checkpoint",
+          "hub_readable",
+          "checkpoints"
+        ],
+        "title": "RunCheckpointsResponse",
         "type": "object"
       },
       "RunnerFlavor": {
@@ -4283,6 +4814,21 @@
               }
             ],
             "title": "Last Modified"
+          },
+          "local_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run",
+                  "downloaded"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Kind"
           },
           "name": {
             "title": "Name",
@@ -5396,6 +5942,28 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/arms": {
+      "get": {
+        "description": "The arms manifest: every registered arm family and what it can do.\n\nThe one document the UI reads arm capabilities from, so a family an\nextension registers renders with no frontend change. Registry order,\ndefault family FIRST — a client scanning `robot_type_markers` checks the\ndefault family LAST (its markers are the loosest), exactly as\narm_capabilities.arm_type_from_robot_type does. See arms/manifest.py.",
+        "operationId": "list_arm_families",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArmFamiliesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Arm Families",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/api/v1/arms/release-torque": {
       "post": {
         "description": "De-energize a CAN follower after a crash left it holding torque.\n\nA SIGKILL or power loss leaves Damiao motors rigid at their last command\nwith no session and no device object to clean up through. This reopens\nthe named bus WITHOUT the energizing handshake, broadcasts the disable,\nand closes. Refused (409 session.held) while any live session holds the\nhardware; not a session itself — no lease, no session events (see\ncan_recovery.py).",
@@ -5809,7 +6377,7 @@
     },
     "/api/v1/calibration-status": {
       "get": {
-        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `awaiting_pose` is present only on the zero-pose\nflow and defaults to False for the SO-101 sweep, which is what lets the\nfrontend switch panels on it.",
+        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `image_url` and `live_positions` are the step\nwizard's own fields and default (null / False) for the SO-101 sweep, so\nthe frontend reads one shape whichever manager answers.",
         "operationId": "calibration_status",
         "responses": {
           "200": {
@@ -6058,6 +6626,23 @@
       "post": {
         "description": "Complete the current calibration step (either flow).",
         "operationId": "complete_calibration_step",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CompleteCalibrationStepRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {
@@ -6066,6 +6651,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Complete Calibration Step"
@@ -7932,7 +8527,7 @@
     },
     "/api/v1/maker/identify-arm": {
       "post": {
-        "description": "Tell one Maker arm from its twin by watching for a hand gesture.\n\nOnly needed for a BIMANUAL Maker robot: both arms ship with identical CAN\nand servo ids, so probing alone cannot say which is left and which is\nright. The user swings one arm's base and we report the port that saw it.\nRead-only — no motor writes.",
+        "description": "Tell one Maker arm from its twin by watching for a hand gesture.\n\nOnly needed for a BIMANUAL Maker robot: both arms ship with identical CAN\nand servo ids, so probing alone cannot say which is left and which is\nright. The user swings one arm's base and we report the port that saw it.\nRead-only — no motor writes. Any registered family (each implements the\ngesture); an unknown id is a 400.",
         "operationId": "identify_maker_arm",
         "requestBody": {
           "content": {
@@ -7974,7 +8569,7 @@
     },
     "/api/v1/maker/probe-ports": {
       "post": {
-        "description": "Find which ports carry a Maker follower and which carry its Star 102 leader.\n\nA CAN rig's two halves speak different protocols on different adapters\n(RobStride/Damiao over CAN vs FashionStar over UART), so unlike the SO-101\nthis needs NO gesture from the user — asking each port which protocol\nanswers is enough. The maker probe is strictly read-only; the METAL\nfollower probe briefly enables the gravity-neutral base joint and disables\nit again (the Damiao handshake is the enable command — see\nmaker_ports._open_metal_follower_bus).",
+        "description": "Find which ports carry a Maker follower and which carry its Star 102 leader.\n\nA CAN rig's two halves speak different protocols on different adapters\n(RobStride/Damiao over CAN vs FashionStar over UART), so unlike the SO-101\nthis needs NO gesture from the user — asking each port which protocol\nanswers is enough. The maker probe is strictly read-only; the METAL\nfollower probe briefly enables the gravity-neutral base joint and disables\nit again (the Damiao handshake is the enable command — see\nmaker_ports._open_metal_follower_bus).\n\nRefused by the family's flag, never by id: a family whose two halves\nshare one protocol (the SO-101) has nothing to ask a port and is told to\nidentify by the gesture instead.",
         "operationId": "probe_maker_arm_ports",
         "requestBody": {
           "content": {
@@ -8035,6 +8630,49 @@
           }
         },
         "summary": "Models List",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/checkpoints": {
+      "get": {
+        "description": "The publish picker's source of truth for one local run: every checkpoint\nit saved, which steps are already on the Hub, and the repo a publish would\ntarget. `id` is a run id (query param for symmetry with /models/info).\n404 when the run has no uploadable checkpoint.",
+        "operationId": "models_checkpoints",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunCheckpointsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Checkpoints",
         "tags": [
           "models"
         ]
@@ -8395,9 +9033,73 @@
         ]
       }
     },
+    "/api/v1/models/publish": {
+      "post": {
+        "description": "START publishing a local run's checkpoints to the Hub as ONE PUBLIC,\nMakerModsLab-tagged model repo. MUTATES the Hub (creates/updates the repo).\n\nReturns immediately with {started, model_id, message} — the queue runs\nsequentially in a background thread (a run's worth of checkpoints is\ngigabytes, far past what an inline request should hold open) and\nGET /api/v1/models/publish-status reports progress. 409 when a publish is\nalready running; the per-step failures (400 offline, 403 permission, 404\nunknown step, 502 Hub) surface through that status, not this call.",
+        "operationId": "models_publish",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelPublishBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelPublishStartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Publish",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/publish-status": {
+      "get": {
+        "description": "Poll the single background publish: state (idle/running/done/error),\ntarget repo + url, `done`/`total`/`current_step` for the queue position, and\n`done_steps` — the steps already on the Hub, which stay meaningful after an\nerror because a failed queue keeps everything it published before it died.",
+        "operationId": "models_publish_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelPublishStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Models Publish Status",
+        "tags": [
+          "models"
+        ]
+      }
+    },
     "/api/v1/models/upload": {
       "post": {
-        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.",
+        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.\n\nThe single-checkpoint synchronous push, frozen for SDK clients — including\nits ON-HUB SHAPE: files land at the repo root, loadable by a plain\nfrom_pretrained(repo_id) (root_layout=True). The training view's\nmulti-checkpoint picker uses POST /api/v1/models/publish instead, which\nstep-addresses under checkpoints/<step>/.",
         "operationId": "models_upload",
         "requestBody": {
           "content": {
@@ -9110,7 +9812,7 @@
     },
     "/api/v1/open-calibration-folder": {
       "post": {
-        "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type is rejected with 400.",
+        "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type or arm_type is rejected with 400.",
         "operationId": "open_calibration_folder",
         "requestBody": {
           "content": {
@@ -10022,7 +10724,7 @@
     },
     "/api/v1/stop-calibration": {
       "post": {
-        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the zero-pose flow\nfirst and falling through is unambiguous.",
+        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the step wizard\nfirst and falling through is unambiguous.",
         "operationId": "stop_calibration",
         "responses": {
           "200": {
@@ -10986,7 +11688,7 @@
     },
     "/calibration-status": {
       "get": {
-        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `awaiting_pose` is present only on the zero-pose\nflow and defaults to False for the SO-101 sweep, which is what lets the\nfrontend switch panels on it.",
+        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `image_url` and `live_positions` are the step\nwizard's own fields and default (null / False) for the SO-101 sweep, so\nthe frontend reads one shape whichever manager answers.",
         "operationId": "calibration_status_calibration_status_get",
         "responses": {
           "200": {
@@ -11059,6 +11761,23 @@
       "post": {
         "description": "Complete the current calibration step (either flow).",
         "operationId": "complete_calibration_step_complete_calibration_step_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CompleteCalibrationStepRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {
@@ -11067,6 +11786,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Complete Calibration Step"
@@ -13167,7 +13896,7 @@
     },
     "/models/upload": {
       "post": {
-        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.",
+        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.\n\nThe single-checkpoint synchronous push, frozen for SDK clients — including\nits ON-HUB SHAPE: files land at the repo root, loadable by a plain\nfrom_pretrained(repo_id) (root_layout=True). The training view's\nmulti-checkpoint picker uses POST /api/v1/models/publish instead, which\nstep-addresses under checkpoints/<step>/.",
         "operationId": "models_upload_models_upload_post",
         "requestBody": {
           "content": {
@@ -13246,7 +13975,7 @@
     },
     "/open-calibration-folder": {
       "post": {
-        "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type is rejected with 400.",
+        "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type or arm_type is rejected with 400.",
         "operationId": "open_calibration_folder_open_calibration_folder_post",
         "requestBody": {
           "content": {
@@ -13923,7 +14652,7 @@
     },
     "/stop-calibration": {
       "post": {
-        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the zero-pose flow\nfirst and falling through is unambiguous.",
+        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the step wizard\nfirst and falling through is unambiguous.",
         "operationId": "stop_calibration_stop_calibration_post",
         "responses": {
           "200": {

@@ -19,6 +19,13 @@ export default {
     title: "Robot settings — {{name}}",
     srDescription:
       "Configure ports, calibration, cameras, and motor power for {{name}}.",
+    // Shown once at the top when no installed arm family answers to the
+    // record's arm_type. {{armType}} is the raw id — data, rendered verbatim.
+    armUnavailable:
+      "This robot's arm type \"{{armType}}\" is not installed. Install the extension that provides it, or delete this robot and create it again with an installed arm type — port detection and calibration are disabled until then.",
+    // The manifest (GET /api/v1/arms) has not answered; ArmsProvider retries.
+    armsNotLoaded:
+      "Arm types have not loaded from the server yet — retrying. Port detection and calibration are held until they do.",
     unsaved: "Unsaved changes",
     // {{gap}} is the setup-gap predicate rendered from the `robot.setupGap.*`
     // keys, so this line reads as one sentence in both languages.
@@ -112,20 +119,29 @@ export default {
       "Identify by hand — swing the arm's base wide to the left AND the right (10–15° past where it started, each way); the port that moves is assigned. Small wiggles won't register.",
     detectLive:
       "Swing the base wide, past where it started, both ways. Small or one-sided motion is ignored.",
-    // The Maker variants: its follower and leader answer different protocols
-    // (CAN vs UART), so detection asks each port what it is instead of asking
-    // the user to move something. Only a bimanual rig — two identical arms per
-    // side — still needs the gesture to tell left from right.
+    // The probe families' twin of detectLive: their follower and leader
+    // answer different protocols (CAN vs UART), so detection asks each port
+    // what it is instead of asking the user to move something. Only a
+    // bimanual rig — two identical arms per side — still needs the gesture
+    // to tell left from right.
     detectHelpMaker:
       "Detected automatically — the Maker arm's follower and leader answer different protocols, so no gesture is needed. On a bimanual rig, swing one arm's base left AND right to say which side it is.",
-    detectLiveMaker:
-      "Checking each port. If two arms answer, swing the base of the one you are assigning, both ways.",
-    // The Metal arm's twin of the two keys above — same probe-first flow
-    // (Damiao CAN follower vs UART leader), only the family name differs.
     detectHelpMetal:
       "Detected automatically — the Metal arm's follower and leader answer different protocols, so no gesture is needed. On a bimanual rig, swing one arm's base left AND right to say which side it is.",
-    detectLiveMetal:
+    // Generic live text for ANY family whose follower answers a protocol
+    // probe (supports_port_probe in the arms manifest); detectLive above is
+    // the generic gesture text. The per-id entries in detectLiveFor override
+    // either for a family that wants its own wording.
+    detectLiveProbe:
       "Checking each port. If two arms answer, swing the base of the one you are assigning, both ways.",
+    // Keyed by manifest id — the VALUES are data. An id without an entry
+    // falls back to detectLiveProbe / detectLive by its detection mechanism.
+    detectLiveFor: {
+      maker:
+        "Checking each port. If two arms answer, swing the base of the one you are assigning, both ways.",
+      metal:
+        "Checking each port. If two arms answer, swing the base of the one you are assigning, both ways.",
+    },
     wiggle: "Wiggle",
     wiggling: "Wiggling…",
     wiggleTitle: "Move the gripper on this port to see which arm it is",
@@ -238,19 +254,31 @@ export default {
       stopping: "Stopping",
       unknown: "Unknown",
     },
-    // The CAN arms' zero-pose calibration. It has no range sweep — the arm's
-    // joint limits are fixed constants — so the whole flow is: torque off,
-    // pose the arm by hand, confirm. Follower poses are family-specific and
-    // opposite on the gripper (Maker: fully open; Metal: closed). The shared
-    // Star Arm 102 leader has one folded, closed-gripper pose on both rigs.
-    // Wording mirrors the server's zero_pose_instructions().
+    // The zero-pose calibration. It has no range sweep — the arm's joint
+    // limits are fixed constants — so the whole flow is: torque off, pose the
+    // arm by hand, confirm. Follower poses are family-specific and opposite
+    // on the gripper (Maker: fully open; Metal: closed). The shared Star Arm
+    // 102 leader has one folded, closed-gripper pose on both rigs.
     zeroPose: {
-      instructions:
-        "Move the arm by hand to match the pose above: folded against the base, gripper fully open. Torque is off, so the arm moves freely.",
-      instructionsLeader:
-        "Move the Star Arm 102 leader by hand to match the pose above: folded against the base, gripper closed. Its joints are unpowered, so the arm moves freely.",
-      instructionsMetal:
-        "Move the arm by hand to match the pose above: standing upright, all joints at 0°, gripper closed. Torque is off, so the arm moves freely.",
+      // Keyed by manifest id, then side — the VALUES are data. These are
+      // per-id overrides of the manifest's own calibration.summary text
+      // (which the server's calibration_summary() writes, and which a family
+      // without an entry here renders as-is, in English) and of the first
+      // step's text while the wizard runs. Wording mirrors it.
+      instructionsFor: {
+        maker: {
+          leader:
+            "Move the Star Arm 102 leader by hand to match the pose above: folded against the base, gripper closed. Its joints are unpowered, so the arm moves freely.",
+          follower:
+            "Move the arm by hand to match the pose above: folded against the base, gripper fully open. Torque is off, so the arm moves freely.",
+        },
+        metal: {
+          leader:
+            "Move the Star Arm 102 leader by hand to match the pose above: folded against the base, gripper closed. Its joints are unpowered, so the arm moves freely.",
+          follower:
+            "Move the arm by hand to match the pose above: standing upright, all joints at 0°, gripper closed. Torque is off, so the arm moves freely.",
+        },
+      },
       liveAngles: "Live joint angles",
       start: "Set zero pose",
       confirm: "Set zero and save",
@@ -298,6 +326,13 @@ export default {
       "Each arm moves on its own to find its joint limits. Keep the area clear.",
     zeroNote:
       "Put the arm in the position shown above, then set zero. Torque stays off, so it moves freely.",
+    // A family that calibrates through its extension's own served page
+    // (manifest calibration.kind "panel"). Shown in place of the calibrate
+    // controls until the panel is mounted here.
+    panel: {
+      notice:
+        "This arm is calibrated through its extension's own panel. It will appear here once the extension provides it.",
+    },
     videoAuto: "Auto-calibration demo",
     poseMiddle: "Start pose: middle position",
     poseAutoStart: "Start pose for auto-calibration",

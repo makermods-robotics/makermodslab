@@ -23,7 +23,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { AlertTriangle, CheckCircle, Loader2, Play, VideoOff } from "lucide-react";
-import { RobotRecord, jointsPerArm } from "@/hooks/useRobots";
+import { RobotRecord } from "@/hooks/useRobots";
+import { useArms } from "@/hooks/useArms";
+import { jointsPerArm } from "@/lib/armTypes";
 import { formatRobotSetupGap } from "@/lib/robotSetupGap";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
@@ -173,6 +175,7 @@ const InferenceModal: React.FC<Props> = ({
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { openInferenceSession } = useInferenceSession();
+  const { byId: armById } = useArms();
 
   const [checkpoints, setCheckpoints] = useState<JobCheckpoint[]>([]);
   const [selectedStep, setSelectedStep] = useState<number | null>(initialStep);
@@ -312,6 +315,22 @@ const InferenceModal: React.FC<Props> = ({
     };
   }, [open, baseUrl, fetchWithHeaders, jobId, selectedStep, isBimanual]);
 
+  // Real-Time Chunking is an ARCHITECTURE capability, not a per-run taste: the
+  // server refuses `inference_engine: "rtc"` with a 400 for a checkpoint whose
+  // policy type can't run guided chunk prediction (ACT, diffusion, pi0_fast,
+  // tdmpc, vqbet…), before any slot or hardware is held. `supports_rtc: null`
+  // means the server doesn't KNOW the type — a policy newer than its table — so
+  // it stays on offer and the subprocess decides, same fail-open discipline.
+  const rtcAvailable = policyConfig?.supports_rtc !== false;
+
+  // Picking a checkpoint that can't run RTC drops a stale "rtc" selection back
+  // to the server default. Runs on the config that just landed (the fetch above
+  // swaps policyConfig in one setState), so the reset is a single render behind
+  // the step change and the launch below can't carry "rtc" for it.
+  useEffect(() => {
+    if (!rtcAvailable) setInferenceEngine("sync");
+  }, [rtcAvailable]);
+
   // If the selected robot has cameras whose names match a policy-expected
   // camera, auto-bind them. Match against the DISPLAY name (the bare name the
   // user chose at record time — that's what the robot record stores), not the
@@ -371,9 +390,10 @@ const InferenceModal: React.FC<Props> = ({
   // 6-DOF and a CAN arm (Maker, Metal) 7 (six joints plus its permanent
   // gripper). Measured against 6, a 7-dim CAN checkpoint is not a clean
   // multiple, so checkpointArms would resolve to null and this guard would
-  // silently go quiet on exactly the mismatch it exists to catch. Mirrors the
-  // server's `_ARM_STATE_DIMS` in rollout.py — change both together.
-  const armDof = jointsPerArm(robot?.arm_type);
+  // silently go quiet on exactly the mismatch it exists to catch. Read from
+  // the arms manifest (joints_per_arm), the same source the server's
+  // `_arm_count_mismatch` reads live.
+  const armDof = jointsPerArm(armById(robot?.arm_type));
   const checkpointDim = policyConfig?.state_dim ?? policyConfig?.action_dim ?? null;
   const checkpointArms =
     checkpointDim != null && checkpointDim % armDof === 0
@@ -674,7 +694,9 @@ const InferenceModal: React.FC<Props> = ({
                   <SelectItem value="sync">
                     {t("landing.inference.engineSync")}
                   </SelectItem>
-                  <SelectItem value="rtc">
+                  {/* Disabled rather than hidden: a checkpoint that can't run
+                      RTC should say so, not silently offer one engine. */}
+                  <SelectItem value="rtc" disabled={!rtcAvailable}>
                     {t("landing.inference.engineRtc")}
                   </SelectItem>
                 </SelectContent>
@@ -684,6 +706,11 @@ const InferenceModal: React.FC<Props> = ({
                   ? t("landing.inference.engineRtcHint")
                   : t("landing.inference.engineSyncHint")}
               </p>
+              {rtcAvailable ? null : (
+                <p className="text-xs text-muted-foreground">
+                  {t("landing.inference.engineRtcUnavailable")}
+                </p>
+              )}
             </div>
           </div>
 

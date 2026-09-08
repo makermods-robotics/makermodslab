@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -49,6 +49,11 @@ class ErrorCode(StrEnum):
     # (arm still energized, driving back to rest) — retry shortly.
     ROBOT_NOT_FOUND = "robot.not_found"
     ROBOT_NOT_READY = "robot.not_ready"
+    # The record's arm_type names a family this install has not registered
+    # (an extension that is not installed, or a hand-edited record). Never
+    # normalized to the SO-101: a silent fallback would open a Feetech serial
+    # path at whatever the hardware really is. 400 wherever it is raised.
+    ROBOT_ARM_TYPE_UNAVAILABLE = "robot.arm_type.unavailable"
     ROBOT_BUSY_RECORDING = "robot.busy.recording"
     ROBOT_BUSY_TELEOPERATION = "robot.busy.teleoperation"
     ROBOT_BUSY_INFERENCE = "robot.busy.inference"
@@ -101,6 +106,11 @@ class ErrorCode(StrEnum):
     # stop/cancel it where it lives (the jobs surface), not to retry the
     # delete.
     JOB_NOT_TERMINAL = "job.not_terminal"
+    # `publish_in_progress`: a delete was aimed at a run whose checkpoints the
+    # background Hub publish (models.model_upload_manager) is uploading RIGHT
+    # NOW — the rmtree would pull the files out from under upload_folder
+    # mid-read. The remedy is to wait for the publish to finish (or fail).
+    JOB_PUBLISH_IN_PROGRESS = "job.publish_in_progress"
 
     # Library resources.
     DATASET_NOT_FOUND = "dataset.not_found"
