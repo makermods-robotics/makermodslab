@@ -284,7 +284,9 @@ const RemoteSessionBody: React.FC<{
             t("remoteInference.phase.stopped")
     : running
       ? t("inference.pill.running")
-      : t("inference.pill.settingUp");
+      : phase === "easing"
+        ? t("remoteInference.phase.easing")
+        : t("inference.pill.settingUp");
 
   // 0 / null is the backend's own unbounded contract for a remote run.
   const bounded = status.duration_s != null && status.duration_s > 0;

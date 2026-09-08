@@ -23,6 +23,7 @@ import {
   FLOW_STEPS,
   GPU_TYPES,
   MODEL_DTYPES,
+  SYNC_SLACK_OPTIONS,
   type GpuKnobSupport,
   type GpuType,
   type UseGpuKnobs,
@@ -115,7 +116,7 @@ const GpuLaunchSection: React.FC<{
   extraImageRoles,
 }) => {
   const { t } = useTranslation();
-  const { status, pending, error, start, stop, launched } = launcher;
+  const { status, pending, restarting, error, start, stop, restart, launched } = launcher;
   const {
     targets: listing,
     profile,
@@ -141,6 +142,7 @@ const GpuLaunchSection: React.FC<{
     fps: config.fps,
     video_codec: config.videoCodec,
     s_min: config.sMin,
+    slack: knobs.slack,
     // Whatever is selected, always — the backend's "empty means the CLI
     // decides" is for API clients; the panel is explicit about who pays.
     profile,
@@ -191,6 +193,7 @@ const GpuLaunchSection: React.FC<{
           fps: status.fps,
           video_codec: status.video_codec,
           s_min: status.s_min,
+          slack: status.slack ?? null,
           // Undefined on a server too old to echo them; "" is a real value
           // (the checkpoint's dtype, the wrapper's pin) and must not be
           // confused with it — see the two comparisons below.
@@ -214,6 +217,7 @@ const GpuLaunchSection: React.FC<{
     fps: number;
     video_codec: string;
     s_min: number | null;
+    slack: number | null;
     model_dtype: string | null;
     gpu: string | null;
     flow_steps: number | null;
@@ -228,6 +232,8 @@ const GpuLaunchSection: React.FC<{
     if (reference.horizon !== startBody.horizon) drifted.push("horizon");
     if (reference.fps !== startBody.fps) drifted.push("fps");
     if (reference.video_codec !== startBody.video_codec) drifted.push("codec");
+    if (reference.slack != null && reference.slack !== startBody.slack)
+      drifted.push("slack");
     // s_min only exists on the wire for rtc; sync ignores it on both sides.
     // Null (an older server that echoes no tuple) is "unknown", not "differs".
     if (
@@ -269,10 +275,6 @@ const GpuLaunchSection: React.FC<{
     )
       drifted.push("extra_image_roles");
   }
-  const restart = async () => {
-    await stop();
-    await start(startBody);
-  };
 
   // The workspace behind the profile a RUNNING GPU was launched with. The
   // status echoes the profile name only, so the workspace is looked up in the
@@ -288,7 +290,12 @@ const GpuLaunchSection: React.FC<{
           <Cpu className="h-3.5 w-3.5" />
           {t("remoteInference.gpu.title")}
         </p>
-        {state === "idle" || state === "failed" ? (
+        {restarting ? (
+          <Button type="button" size="sm" disabled className="h-7 gap-1.5 px-2 text-xs">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            {t("remoteInference.gpu.restarting")}
+          </Button>
+        ) : state === "idle" || state === "failed" ? (
           <Button
             type="button"
             size="sm"
@@ -321,6 +328,12 @@ const GpuLaunchSection: React.FC<{
           </Button>
         )}
       </div>
+
+      {restarting ? (
+        <p role="status" className="text-xs text-muted-foreground">
+          {t("remoteInference.gpu.restartingBody")}
+        </p>
+      ) : null}
 
       {/* WHO PAYS. Above the button because it is a property of the launch,
           and disabled while one is in flight or a GPU is up — the selection
@@ -512,6 +525,38 @@ const GpuLaunchSection: React.FC<{
         </div>
       </div>
 
+      <div className="space-y-1">
+        <Label htmlFor="remote-sync-slack" className="text-xs">
+          {t("remoteInference.form.slackLabel")}
+        </Label>
+        <Select
+          value={String(knobs.slack)}
+          disabled={busy || running}
+          onValueChange={(value) => knobs.setSlack(Number(value))}
+        >
+          <SelectTrigger
+            id="remote-sync-slack"
+            className="h-8 text-xs"
+            aria-describedby="remote-sync-slack-hint"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {SYNC_SLACK_OPTIONS.map((slack) => (
+              <SelectItem key={slack} value={String(slack)} className="text-xs">
+                {slack}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p
+          id="remote-sync-slack-hint"
+          className="text-xs leading-relaxed text-muted-foreground"
+        >
+          {t("remoteInference.form.slackHint")}
+        </p>
+      </div>
+
       {listing?.error ? (
         // The backend's own text, verbatim. NOT a blocker: Start GPU stays
         // live above, because with no selection the CLI resolves the target
@@ -638,6 +683,7 @@ const GpuLaunchSection: React.FC<{
                 {reference.gpu ? ` · ${reference.gpu}` : ""}
                 {reference.model_dtype ? ` · ${reference.model_dtype}` : ""}
                 {reference.flow_steps ? ` · ${reference.flow_steps} steps` : ""}
+                {reference.slack != null ? ` · slack ${reference.slack}` : ""}
               </span>
             </span>
           </p>
@@ -645,8 +691,8 @@ const GpuLaunchSection: React.FC<{
             type="button"
             variant="outline"
             size="sm"
-            onClick={() => void restart()}
-            disabled={busy}
+            onClick={() => void restart(startBody)}
+            disabled={busy || !hubId || taskMissing}
             className="h-7 gap-1.5 px-2 text-xs"
           >
             <RefreshCw className="h-3 w-3" />

@@ -486,17 +486,22 @@ def _watch_sfu(proc: subprocess.Popen, server: uvicorn.Server) -> None:
         time.sleep(1)
 
 
-def _open_browser_when_ready():
-    """Background-thread helper: poll the port, open the browser when up."""
+def _open_browser_when_ready(host: str = "127.0.0.1"):
+    """Poll the address actually served, then open that address locally."""
+    connect_host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+    url_host = "localhost" if connect_host == "127.0.0.1" else connect_host
+    if ":" in url_host:
+        url_host = f"[{url_host}]"
+    url = f"http://{url_host}:{BACKEND_PORT}/"
     for _ in range(60):
         try:
-            with socket.create_connection(("127.0.0.1", BACKEND_PORT), timeout=0.5):
+            with socket.create_connection((connect_host, BACKEND_PORT), timeout=0.5):
                 pass
         except OSError:
             time.sleep(0.5)
             continue
-        logger.info("🌐 Opening browser...")
-        webbrowser.open(f"http://localhost:{BACKEND_PORT}/")
+        logger.info("🌐 Opening browser at %s", url)
+        webbrowser.open(url)
         return
 
 
@@ -513,8 +518,10 @@ def _run_prod(
     network; it also skips the open-a-local-browser step (there is no local
     browser worth opening in that deployment). `host` is an already-resolved
     --bind address and takes precedence over the --lan/default choice (main()
-    logs when both were given). `no_ui` skips serving (and requiring) the
-    built frontend entirely — a pure API node. `sfu_bin` (--sfu) runs a
+    logs when both were given). A desktop --bind launch opens that address in
+    the browser; --lan and --no-ui suppress browser opening. `no_ui` skips
+    serving (and requiring) the built frontend entirely — a pure API node.
+    `sfu_bin` (--sfu) runs a
     LiveKit SFU alongside, bound to the same host, for the process lifetime.
     """
     if not no_ui and not FRONTEND_DIST.exists():
@@ -528,17 +535,16 @@ def _run_prod(
     sfu_proc = _start_sfu(sfu_bin, host, sfu_external_ip) if sfu_bin else None
     if host == "127.0.0.1":
         logger.info("🚀 Starting MakerMods Lab on http://localhost:%d ...", BACKEND_PORT)
-        if not no_ui:
-            threading.Thread(target=_open_browser_when_ready, daemon=True).start()
     else:
-        # A non-loopback bind (LAN or --bind) serves other machines: log the
-        # real bind and don't open a browser at an address we may not answer.
+        # Log the real bind. Explicit --bind can also be a desktop launch.
         logger.info(
             "🚀 Starting MakerMods Lab on http://%s:%d%s ...",
             host,
             BACKEND_PORT,
             " (LAN)" if host == "0.0.0.0" else "",  # noqa: S104  # nosec B104 — log-label comparison, not a bind; the bind above carries its own justification
         )
+    if not no_ui and not lan:
+        threading.Thread(target=_open_browser_when_ready, args=(host,), daemon=True).start()
 
     # Run uvicorn in the main thread so its native SIGINT handler works,
     # and bound graceful shutdown so a stuck WebSocket can't hang Ctrl+C.

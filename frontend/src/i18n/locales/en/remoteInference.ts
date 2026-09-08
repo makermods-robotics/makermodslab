@@ -58,6 +58,9 @@ export default {
       "This checkpoint has no precision setting to override — it is loaded the way it was saved.",
     // The flow-steps knob (S3.8f).
     flowStepsLabel: "Flow steps",
+    slackLabel: "Sync slack (ticks)",
+    slackHint:
+      "Lower values reduce buffering; higher values handle uneven delivery. Default: 5. Restart the GPU to apply changes.",
     // Prose, like the precision's first option: it stands for passing no flag.
     // The second form carries the number this checkpoint will actually run at,
     // which is data — the server works it out, never this file.
@@ -163,6 +166,8 @@ export default {
     driftBody:
       "You changed {{fields}} since the GPU was started. A running server keeps the values it was started with, and a mismatch is a run that receives nothing — not an error. It is running:",
     restart: "Restart GPU with these settings",
+    restarting: "Restarting GPU…",
+    restartingBody: "Stopping the current GPU, then requesting a replacement with the selected settings.",
     // Shown in the idle state while Start GPU is disabled for an empty task.
     taskRequired:
       "Describe the task first — this policy is language-conditioned, and the GPU's policy server refuses to start without one.",

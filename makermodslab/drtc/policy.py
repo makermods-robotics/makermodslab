@@ -61,6 +61,7 @@ from ..utils.system import (
     policy_requires_task,
 )
 from ._common import fmt_us, load_env, mint_token, required_env
+from ._policy_loading import load_pretrained_policy, preprocessor_asset_overrides
 from ._policy_views import EXTRA_IMAGE_ROLES_HELP, add_extra_image_roles, parse_extra_image_roles
 from ._schema import CHUNK_NAME, IMAGE_PREFIX, policy_wire_schema
 
@@ -145,8 +146,8 @@ def load_policy(
       one.** ``utils.system.molmoact2_inference_action_mode`` decides, again so
       the Lab and the GPU answer identically.
 
-    ``config=`` is handed to ``from_pretrained`` only when something actually
-    changed, so a run that passes neither flag loads exactly as it did before.
+    Complete MolmoAct2 checkpoints use the single-pass loader. Other policies
+    receive ``config=`` only when an override actually changed their config.
     """
     policy_cfg = PreTrainedConfig.from_pretrained(policy_path)
     policy_type = getattr(policy_cfg, "type", "")
@@ -225,13 +226,10 @@ def load_policy(
         overridden = True
 
     policy_cls = get_policy_class(policy_cfg.type)
-    policy = (
-        policy_cls.from_pretrained(policy_path, config=policy_cfg)
-        if overridden
-        else policy_cls.from_pretrained(policy_path)
-    )
+    policy = load_pretrained_policy(policy_cls, policy_path, policy_cfg, device, overridden=overridden)
     policy.to(device)
     policy.eval()
+    view_overrides = preprocessor_asset_overrides(policy, view_overrides)
 
     # `pretrained_path` means these pipelines are LOADED from the checkpoint's
     # own saved processor config, not rebuilt from `policy.config` — so an added

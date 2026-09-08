@@ -1260,6 +1260,13 @@ class GpuStartBody(BaseModel):
     fps: int = 30
     video_codec: Literal["H264", "MJPEG"] = "H264"
     s_min: int = 4
+    slack: int = Field(
+        default=modal_launcher.DEFAULT_SLACK,
+        ge=modal_launcher.SLACK_MIN,
+        le=modal_launcher.SLACK_MAX,
+        strict=True,
+        description="Policy-side synchronization buffering in ticks; applied on GPU launch.",
+    )
     # WHICH WORKSPACE PAYS. Both optional, and empty means exactly what S3.8
     # did: the `modal` CLI resolves the profile and the environment itself
     # (MODAL_ENVIRONMENT, then the active local profile, then the workspace
@@ -1392,6 +1399,7 @@ def start_remote_inference_gpu(body: GpuStartBody):
         fps=body.fps,
         video_codec=body.video_codec,
         s_min=body.s_min,
+        slack=body.slack,
         profile=body.profile,
         environment=body.environment,
         model_dtype=body.model_dtype,

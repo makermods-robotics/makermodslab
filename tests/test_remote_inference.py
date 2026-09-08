@@ -93,6 +93,7 @@ def _reset_globals(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(ri, "_remote_proc", None)
     monkeypatch.setattr(ri, "_remote_started_at", None)
     monkeypatch.setattr(ri, "_remote_running_started_at", None)
+    monkeypatch.setattr(ri, "_remote_running_stopped_at", None)
     monkeypatch.setattr(ri, "_remote_meta", {})
     monkeypatch.setattr(ri, "_last_result", None)
     monkeypatch.setattr(ri, "_remote_cancel", None)
@@ -729,9 +730,63 @@ def test_the_pump_walks_the_phase_vocabulary() -> None:
     ri._handle_line(format_event("EASING") + "\n")
     assert ri._remote_meta["phase"] == ri.PHASE_EASING
 
+    ri._handle_line(format_event("RUNNING") + "\n")
     ri._handle_line(format_event("STATS", format_stats({"chunks": 3})) + "\n")
     assert ri._remote_meta["phase"] == ri.PHASE_RUNNING
     ri._go_idle_locked()
+
+
+def test_early_chunks_do_not_start_the_clock_before_easing(monkeypatch) -> None:
+    now = [100.0]
+    monkeypatch.setattr(ri, "_clock", lambda: now[0])
+    _live_session(phase=ri.PHASE_WARMING_UP)
+    ri._on_stats({"chunks": 1})
+    assert ri._remote_meta["phase"] == ri.PHASE_WARMING_UP
+    assert ri._remote_running_started_at is None
+    now[0] = 200.0
+    ri._handle_line(format_event("EASING"))
+    ri._on_stats({"chunks": 3})
+    assert ri._remote_meta["phase"] == ri.PHASE_EASING
+    assert ri._payload_locked(shutting_down=False)["elapsed_s"] == 0
+    now[0] = 205.0
+    ri._handle_line(format_event("RUNNING"))
+    assert ri._remote_meta["phase"] == ri.PHASE_RUNNING
+    now[0] = 215.0
+    ri._handle_line(format_event("RUNNING"))  # duplicate must not reset it
+    assert ri._payload_locked(shutting_down=False)["elapsed_s"] == 10
+
+
+@pytest.mark.parametrize("event", ["STOPPING", "RETURNING", "ERROR"])
+def test_execution_time_excludes_teardown(monkeypatch, event) -> None:
+    now = [100.0]
+    monkeypatch.setattr(ri, "_clock", lambda: now[0])
+    _live_session()
+    ri._handle_line(format_event("RUNNING"))
+    now[0] = 140.0
+    ri._handle_line(format_event(event, "failure" if event == "ERROR" else ""))
+    now[0] = 155.0
+    payload = ri._terminal_payload_locked(exit_code=0, outcome="ok", error=None, phase=ri.PHASE_STOPPED)
+    assert payload["elapsed_s"] == 40
+
+
+@pytest.mark.parametrize("phase", [ri.PHASE_WARMING_UP, ri.PHASE_EASING])
+def test_setup_only_exit_has_zero_running_time(phase) -> None:
+    _live_session(phase=phase)
+    ri._remote_started_at = time.time() - 180
+    payload = ri._terminal_payload_locked(
+        exit_code=1, outcome="failed", error="setup stopped", phase=ri.PHASE_ERROR
+    )
+    assert payload["elapsed_s"] == 0
+
+
+@pytest.mark.parametrize("phase", [ri.PHASE_STOPPING, ri.PHASE_ERROR])
+def test_late_easing_and_chunks_preserve_stop_or_error(phase) -> None:
+    _live_session(phase=phase)
+    ri._handle_line(format_event("EASING"))
+    ri._on_stats({"chunks": 2})
+    ri._handle_line(format_event("RUNNING"))
+    assert ri._remote_meta["phase"] == phase
+    assert ri._remote_running_started_at is None
 
 
 def test_ready_with_a_different_transport_fails_the_run_before_the_room_is_joined() -> None:
@@ -1208,17 +1263,10 @@ def test_the_terminal_status_carries_every_key_and_is_idempotent() -> None:
 
 
 def test_the_terminal_status_freezes_the_elapsed_time_instead_of_zeroing_it() -> None:
-    """S3.4 overrode `elapsed_s` with 0.0 on the terminal payload, so a run that
-    had just failed 40 seconds in reported "0s / 60" — reading as a run that
-    never started, and losing the one number that says whether it died at once
-    or ran most of its course first.
-
-    The freeze needs no new clock: `_terminal_payload_locked` runs ONCE, at the
-    exit, and builds on `_payload_locked`, whose `time.time() - started_at` is
-    therefore measured to that moment and then stored verbatim in
-    `_last_result`."""
+    """A failed run retains its execution time, excluding its earlier setup."""
     _live_session(phase=ri.PHASE_RUNNING)
-    ri._remote_started_at = time.time() - 40.0
+    ri._remote_started_at = time.time() - 140.0
+    ri._remote_running_started_at = ri._clock() - 40.0
 
     payload = ri._terminal_payload_locked(
         exit_code=1, outcome="failed", error="the room went empty", phase=ri.PHASE_ERROR
@@ -1232,7 +1280,8 @@ def test_the_frozen_elapsed_time_does_not_keep_growing_after_the_exit() -> None:
     a later poll must report the run's length rather than "time since it
     started" ticking on forever."""
     _live_session(phase=ri.PHASE_RUNNING)
-    ri._remote_started_at = time.time() - 12.0
+    ri._remote_started_at = time.time() - 112.0
+    ri._remote_running_started_at = ri._clock() - 12.0
     proc = FakeProc()
     proc.returncode = 0
     ri._remote_proc = proc

@@ -28,7 +28,7 @@ import type { TransportSource } from "@/hooks/useRemoteInferenceTransport";
  * half-populated one the UI would render as real. The nulls below are
  * MEANINGFUL: no chunk yet, no operator yet, no correlated round trip yet. */
 export interface RemoteInferenceStats {
-  /** Seconds since the child started its loop. */
+  /** Policy execution seconds, excluding setup/easing. */
   t: number;
   chunks: number;
   reqs: number;
@@ -77,8 +77,8 @@ export interface RemoteInferenceStatus {
    * identifiers, matched on; null only before any run since boot. */
   engine: string | null;
   started_at: number | null;
-  /** Seconds since `started_at`. FROZEN at the exit on a terminal payload, so a
-   * finished run reports its real length rather than 0. */
+  /** Policy execution seconds, excluding setup/easing and teardown.
+   * Frozen when execution stops; started_at remains the session launch ID. */
   elapsed_s: number;
   duration_s: number | null;
   log_path: string | null;

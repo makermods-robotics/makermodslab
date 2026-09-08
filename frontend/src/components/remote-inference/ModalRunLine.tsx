@@ -93,6 +93,7 @@ const ModalRunLine: React.FC<{
     fps: config.fps,
     videoCodec: config.videoCodec,
     sMin: config.sMin,
+    slack: knobs.slack,
     room: transport?.room ?? "",
     // The url a CONTAINER dials, which is not the one this machine's child
     // dials. Empty when tailscale reported no address — the line then omits

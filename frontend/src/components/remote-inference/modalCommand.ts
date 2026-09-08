@@ -48,6 +48,8 @@ export interface ModalRunLineInput {
    * checkpoint's config has no such field, so a remembered pick for another
    * policy never appears in a line the operator is about to paste. */
   flowSteps: number | null;
+  /** Policy-side synchronization buffering; omitted keeps the wrapper's 5 ticks. */
+  slack?: number;
   /** EXTRA camera views to declare on the checkpoint before the weights load
    * (S3.8g). Empty ⇒ NO flag, i.e. the views the checkpoint was published with.
    * Comma-joined into ONE flag because that is what both wrappers'
@@ -174,6 +176,7 @@ export function buildModalRunLine(input: ModalRunLineInput): string {
     // RTC only. The sync wrapper has no --s-min flag at all, so emitting it
     // there would make the line fail to parse rather than run with a default.
     ...(input.engine === "rtc" ? [`--s-min ${input.sMin}`] : []),
+    ...((input.slack ?? 5) !== 5 ? [`--slack ${input.slack}`] : []),
     `--video-codec ${input.videoCodec}`,
   ];
   // The room is what makes the two sides meet. The GPU side otherwise takes it

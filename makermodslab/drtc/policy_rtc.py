@@ -121,6 +121,8 @@ from ..utils.system import (
     policy_requires_task,
 )
 from ._common import load_env, mint_token, required_env
+from ._diagnostics import parameter_summary, startup_stage
+from ._policy_loading import load_pretrained_policy, preprocessor_asset_overrides
 from ._policy_views import EXTRA_IMAGE_ROLES_HELP, add_extra_image_roles, parse_extra_image_roles
 from ._schema_rtc import (
     CHUNK_NAME,
@@ -299,8 +301,8 @@ def load_policy(
       one.** ``utils.system.molmoact2_inference_action_mode`` decides, again so
       the Lab and the GPU answer identically.
 
-    ``config=`` is handed to ``from_pretrained`` only when something actually
-    changed, so a run that passes neither flag loads exactly as it did before.
+    Complete MolmoAct2 checkpoints use the single-pass loader. Other policies
+    receive ``config=`` only when an override actually changed their config.
     """
     policy_cfg = PreTrainedConfig.from_pretrained(policy_path)
     policy_type = getattr(policy_cfg, "type", "")
@@ -379,25 +381,28 @@ def load_policy(
         overridden = True
 
     policy_cls = get_policy_class(policy_cfg.type)
-    policy = (
-        policy_cls.from_pretrained(policy_path, config=policy_cfg)
-        if overridden
-        else policy_cls.from_pretrained(policy_path)
-    )
-    policy.to(device)
+    with startup_stage("policy.from_pretrained (weight bar is only part of this stage)"):
+        policy = load_pretrained_policy(policy_cls, policy_path, policy_cfg, device, overridden=overridden)
+    with startup_stage(f"policy.to({device})"):
+        policy.to(device)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
     policy.eval()
+    print(f"[policy] loaded parameter elements: {parameter_summary(policy)}", flush=True)
+    view_overrides = preprocessor_asset_overrides(policy, view_overrides)
 
     # `pretrained_path` means these pipelines are LOADED from the checkpoint's
     # own saved processor config, not rebuilt from `policy.config` — so an added
     # image feature has to be declared here too or the pack step keeps the two
     # views it saved. `view_overrides` is empty unless --extra-image-roles was
     # passed, which keeps every other run byte-identical.
-    preprocessor, postprocessor = make_pre_post_processors(
-        policy.config,
-        pretrained_path=policy_path,
-        preprocessor_overrides={"device_processor": {"device": str(device)}, **view_overrides},
-        postprocessor_overrides={"device_processor": {"device": str(device)}},
-    )
+    with startup_stage("input/output processors"):
+        preprocessor, postprocessor = make_pre_post_processors(
+            policy.config,
+            pretrained_path=policy_path,
+            preprocessor_overrides={"device_processor": {"device": str(device)}, **view_overrides},
+            postprocessor_overrides={"device_processor": {"device": str(device)}},
+        )
     return policy, preprocessor, postprocessor
 
 
@@ -437,6 +442,7 @@ class RTCInference:
         # obs_ts (µs) -> RAW (pre-postprocess) chunk tensor, shape (horizon, A).
         self.raw_cache: OrderedDict[int, torch.Tensor] = OrderedDict()
         self.raw_cache_size = max(1, raw_cache_size)
+        self.last_timing = "unavailable"
 
     # -- cache -------------------------------------------------------------
     def _cache_put(self, obs_ts: int, raw_chunk: torch.Tensor) -> None:
@@ -539,13 +545,21 @@ class RTCInference:
         the post-processed (executable) chunk. Caches BEFORE postprocess so the
         robot's future prefix references the raw (model-space) actions — exactly
         the tensor RTC guidance compares against."""
+        started = time.perf_counter()
         batch = self._build_batch(obs)
+        built = time.perf_counter()
         rtc_kwargs = self._rtc_kwargs(obs)
         # NOT torch.inference_mode(): RTC guidance temporarily re-enables grad
         # for the in-painting correction term, which inference_mode forbids.
         with torch.no_grad():
             batch = self.pre(batch)
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            prepared = time.perf_counter()
             chunk = self.policy.predict_action_chunk(batch, **rtc_kwargs)  # (B, H, A) normalized
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            predicted = time.perf_counter()
             if chunk.ndim == 2:
                 chunk = chunk.unsqueeze(0)
             chunk = chunk[:, : self.horizon, :]
@@ -556,7 +570,16 @@ class RTCInference:
             # Post-process per timestep (post expects (B, A)); unnormalize.
             steps = [self.post(chunk[:, t, :]) for t in range(chunk.shape[1])]
             processed = torch.stack(steps, dim=1).squeeze(0)  # (H, A_out)
-        return processed.detach().cpu().numpy().astype(np.float32)
+        result = processed.detach().cpu().numpy().astype(np.float32)
+        finished = time.perf_counter()
+        self.last_timing = (
+            f"build_ms={(built - started) * 1000:.1f} "
+            f"pre_ms={(prepared - built) * 1000:.1f} "
+            f"infer_ms={(predicted - prepared) * 1000:.1f} "
+            f"post_ms={(finished - predicted) * 1000:.1f} "
+            f"total_ms={(finished - started) * 1000:.1f} rtc_used={bool(rtc_kwargs)}"
+        )
+        return result
 
 
 async def main() -> None:
@@ -727,12 +750,12 @@ async def main() -> None:
     except Exception as exc:  # noqa: BLE001 — warmup is optional
         print(f"[policy] warmup skipped ({type(exc).__name__}: {exc})")
 
-    obs_queue: deque[Observation] = deque(maxlen=2)
+    obs_queue: deque[tuple[Observation, float]] = deque(maxlen=2)
     obs_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
     def on_observation(obs: Observation) -> None:
-        obs_queue.append(obs)
+        obs_queue.append((obs, time.monotonic()))
         loop.call_soon_threadsafe(obs_event.set)
 
     op.on_observation(on_observation)
@@ -800,11 +823,18 @@ async def main() -> None:
             if not obs_queue:
                 continue
 
-            obs = obs_queue[-1]  # always run on the freshest observation
+            obs, received_at = obs_queue[-1]  # always run on the freshest observation
+            selected_at = time.monotonic()
             had_prefix = int(round(obs.state.get(RTC_PREFIX_LEN, 0.0))) > 0 and rtc_on
             # Inference is blocking (GPU/CPU-bound); keep it off the event loop.
             chunk = await asyncio.to_thread(engine.run, obs)
             op.send_action_chunk(CHUNK_NAME, chunk, in_reply_to_ts_us=obs.timestamp_us)
+            published_at = time.monotonic()
+            print(
+                f"[policy-timing] obs_ts={obs.timestamp_us} "
+                f"queue_ms={(selected_at - received_at) * 1000:.1f} "
+                f"service_ms={(published_at - selected_at) * 1000:.1f} {engine.last_timing}"
+            )
             chunks_sent += 1
             if had_prefix:
                 rtc_applied += 1
@@ -815,7 +845,10 @@ async def main() -> None:
                 print(
                     f"[policy] t={int(now - start):>3}s chunks_sent={chunks_sent} "
                     f"rtc_applied={rtc_applied} obs_seen={m.sync.observations_emitted} "
-                    f"cache={len(engine.raw_cache)}"
+                    f"cache={len(engine.raw_cache)} {engine.last_timing} "
+                    f"match_delta_us={m.sync.match_delta_us_p50}/{m.sync.match_delta_us_p95} "
+                    f"blocker={m.sync.last_blocker_track or '-'} "
+                    f"vbuf={m.buffers.video_fill} fjitter_us={m.transport.frame_jitter_us}"
                 )
                 last_log = now
     finally:

@@ -57,6 +57,8 @@ export interface GpuStatus {
   fps: number | null;
   video_codec: string | null;
   s_min: number | null;
+  /** Synchronization buffering as launched; absent on older servers. */
+  slack?: number | null;
   /** WHAT IT RUNS AS and WHAT IT RUNS ON, as launched; null only while idle.
    * The empty string is a REAL value for both — the dtype the checkpoint was
    * saved with, and the wrapper's own pinned GPU — which is why they are
@@ -123,6 +125,7 @@ export interface GpuStartRequest {
   fps: number;
   video_codec: "H264" | "MJPEG";
   s_min: number;
+  slack: number;
   /** WHICH WORKSPACE PAYS. Empty means the `modal` CLI resolves it itself,
    * which is what an API client that never sends them gets. The UI is
    * deliberately explicit instead: it sends whatever is selected, always. */
@@ -181,10 +184,12 @@ export const DEFAULT_GPU: GpuType = "A100";
  * (`modal_launcher.FLOW_STEPS_MIN/MAX`, where an off-band value is refused).
  *
  * A short list rather than a number field: this knob is pulled to SPEND LESS
- * time per chunk, the published defaults are 8 (MolmoAct2's own
- * `num_flow_timesteps`) and 10 (everything else's), and the interesting
- * answers are all below them. Numbers — data, shown verbatim. */
+ * time per chunk. Actual inference defaults come from the checkpoint/backbone;
+ * MolmoAct2's `num_flow_timesteps` is a training setting, not this count.
+ * Numbers are data, shown verbatim. */
 export const FLOW_STEPS = [2, 3, 4, 6, 8, 10] as const;
+export const SYNC_SLACK_OPTIONS = [2, 3, 4, 5] as const;
+export const DEFAULT_SLACK = 5;
 
 /** One row of `modal profile list --json`. All three are DATA — a profile name
  * and a workspace name are identifiers, never prose. */
@@ -265,12 +270,13 @@ export async function getGpuTargets(
 export async function stopGpu(
   baseUrl: string,
   fetcher: Fetcher,
+  signal?: AbortSignal,
 ): Promise<GpuStatus> {
   return apiRequest<GpuStatus>(
     baseUrl,
     fetcher,
     "/api/v1/remote-inference/gpu/stop",
-    { method: "POST", action: "Stop the GPU" },
+    { method: "POST", signal, action: "Stop the GPU" },
   );
 }
 
@@ -279,16 +285,21 @@ export async function stopGpu(
 export const GPU_ACTIVE_POLL_MS = 2000;
 /** Everything else. A ready GPU changes only when the idle auto-stop fires. */
 export const GPU_IDLE_POLL_MS = 10000;
+/** Covers bounded client shutdown, Modal cleanup, and final log drain. */
+export const GPU_RESTART_STOP_TIMEOUT_MS = 45000;
 
 export interface UseGpuLauncher {
   status: GpuStatus | null;
   /** True while a start/stop request is in flight (distinct from the backend's
    * own `starting`/`stopping`, which outlive the request). */
   pending: boolean;
+  /** Includes waiting for the old app to stop and requesting its replacement. */
+  restarting: boolean;
   /** The thrown error's own text, or null. Backend prose — shown as raised. */
   error: string | null;
   start: (body: GpuStartRequest) => Promise<void>;
   stop: () => Promise<void>;
+  restart: (body: GpuStartRequest) => Promise<void>;
   refresh: () => void;
   /** The request THIS tab last launched the GPU with, kept while that GPU is
    * up so the panel can warn when the form drifts away from it — the
@@ -309,6 +320,9 @@ export function useGpuLauncher(enabled: boolean): UseGpuLauncher {
   const { baseUrl, fetchWithHeaders } = useApi();
   const [status, setStatus] = useState<GpuStatus | null>(null);
   const [pending, setPending] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  // Synchronous gate: two clicks can arrive before React renders pending.
+  const operation = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [launched, setLaunched] = useState<GpuStartRequest | null>(null);
   const [nonce, setNonce] = useState(0);
@@ -325,7 +339,7 @@ export function useGpuLauncher(enabled: boolean): UseGpuLauncher {
   const quiet = state === "failed" || (state === "idle" && settled.current);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || pending) return;
     let cancelled = false;
     const tick = async () => {
       try {
@@ -354,10 +368,12 @@ export function useGpuLauncher(enabled: boolean): UseGpuLauncher {
       cancelled = true;
       clearInterval(id);
     };
-  }, [enabled, baseUrl, fetchWithHeaders, state, quiet, nonce]);
+  }, [enabled, pending, baseUrl, fetchWithHeaders, state, quiet, nonce]);
 
   const start = useCallback(
     async (body: GpuStartRequest) => {
+      if (operation.current) return;
+      operation.current = true;
       setPending(true);
       setError(null);
       settled.current = false;
@@ -370,6 +386,7 @@ export function useGpuLauncher(enabled: boolean): UseGpuLauncher {
         // install line, gpu.launch_failed names the field or the tailnet).
         setError(e instanceof Error ? e.message : String(e));
       } finally {
+        operation.current = false;
         setPending(false);
         refresh();
       }
@@ -378,6 +395,8 @@ export function useGpuLauncher(enabled: boolean): UseGpuLauncher {
   );
 
   const stop = useCallback(async () => {
+    if (operation.current) return;
+    operation.current = true;
     setPending(true);
     setError(null);
     settled.current = false;
@@ -387,12 +406,60 @@ export function useGpuLauncher(enabled: boolean): UseGpuLauncher {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      operation.current = false;
       setPending(false);
       refresh();
     }
   }, [baseUrl, fetchWithHeaders, refresh]);
 
-  return { status, pending, error, start, stop, refresh, launched };
+  const restart = useCallback(async (body: GpuStartRequest) => {
+    if (operation.current) return;
+    operation.current = true;
+    // Form edits while shutdown is pending must not alter this request.
+    const replacement = { ...body, extra_image_roles: [...body.extra_image_roles] };
+    setPending(true);
+    setRestarting(true);
+    setError(null);
+    settled.current = false;
+    let stopped = false;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), GPU_RESTART_STOP_TIMEOUT_MS);
+    try {
+      let next = await stopGpu(baseUrl, fetchWithHeaders, controller.signal);
+      setStatus(next);
+      while (next.state === "stopping") {
+        await new Promise((resolve) => setTimeout(resolve, GPU_ACTIVE_POLL_MS));
+        if (controller.signal.aborted) throw new Error("Timed out waiting for the GPU to stop.");
+        next = await getGpuStatus(baseUrl, fetchWithHeaders, controller.signal);
+        setStatus(next);
+      }
+      if (next.state !== "idle") {
+        throw new Error([next.message, next.hint].filter(Boolean).join(" ") || "The old GPU did not confirm shutdown.");
+      }
+      clearTimeout(timeout);
+      stopped = true;
+      setLaunched(null);
+      const result = await startGpu(baseUrl, fetchWithHeaders, replacement);
+      setStatus(result.gpu);
+      if (!result.started) throw new Error(result.message || "The replacement request was not accepted.");
+      setLaunched(replacement);
+    } catch (e) {
+      const detail = controller.signal.aborted
+        ? "Timed out waiting for the GPU to stop."
+        : e instanceof Error ? e.message : String(e);
+      setError(stopped
+        ? `The old GPU stopped, but its replacement could not start. ${detail} Check the settings and use Start GPU to retry.`
+        : `GPU restart stopped: ${detail} No replacement was requested. Check the GPU status and log before retrying.`);
+    } finally {
+      clearTimeout(timeout);
+      operation.current = false;
+      setRestarting(false);
+      setPending(false);
+      refresh();
+    }
+  }, [baseUrl, fetchWithHeaders, refresh]);
+
+  return { status, pending, restarting, error, start, stop, restart, refresh, launched };
 }
 
 /* -------------------------------------------------------------------------
@@ -538,6 +605,7 @@ export function useGpuTargets(enabled: boolean): UseGpuTargets {
 const MODEL_DTYPE_KEY = "makermodslab.gpuModelDtype";
 const GPU_KEY = "makermodslab.gpuType";
 const FLOW_STEPS_KEY = "makermodslab.gpuFlowSteps";
+const SLACK_KEY = "makermodslab.gpuSyncSlack";
 
 export interface UseGpuKnobs {
   /** Empty means "as the checkpoint saved it" — no flag is sent. */
@@ -548,9 +616,11 @@ export interface UseGpuKnobs {
   gpu: GpuType;
   /** Null means "as the checkpoint samples it" — no flag is sent. */
   flowSteps: number | null;
+  slack: number;
   setModelDtype: (value: ModelDtype) => void;
   setGpu: (value: GpuType) => void;
   setFlowSteps: (value: number | null) => void;
+  setSlack: (value: number) => void;
 }
 
 /**
@@ -676,5 +746,19 @@ export function useGpuKnobs(): UseGpuKnobs {
     setFlowStepsState(value);
   }, []);
 
-  return { modelDtype, gpu, flowSteps, setModelDtype, setGpu, setFlowSteps };
+  const [slack, setSlackState] = useState(() => {
+    const stored = Number(read(SLACK_KEY));
+    return (SYNC_SLACK_OPTIONS as readonly number[]).includes(stored)
+      ? stored
+      : DEFAULT_SLACK;
+  });
+  const setSlack = useCallback((value: number) => {
+    write(SLACK_KEY, String(value));
+    setSlackState(value);
+  }, []);
+
+  return {
+    modelDtype, gpu, flowSteps, slack,
+    setModelDtype, setGpu, setFlowSteps, setSlack,
+  };
 }

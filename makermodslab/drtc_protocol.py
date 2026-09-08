@@ -47,6 +47,8 @@ stderr is merged into the same pipe):
     MAKERMODSLAB-DRTC EASING
     MAKERMODSLAB-DRTC CONNECTED
     MAKERMODSLAB-DRTC ACTIVE operator=policy
+    MAKERMODSLAB-DRTC RUNNING
+    MAKERMODSLAB-DRTC STOPPING
     MAKERMODSLAB-DRTC STATS {"t":1,"chunks":3,...}
     MAKERMODSLAB-DRTC RETURNING
     MAKERMODSLAB-DRTC ERROR <message, whitespace collapsed to one line>
@@ -57,6 +59,10 @@ flags and `_env`, not the ones the parent believes it passed. The parent
 compares and errors on a mismatch, which is what catches "the SFU script was
 restarted between preflight and spawn" and "the parent verified room X, the
 child's `.env.local` said room Y".
+
+`RUNNING` starts the duration clock after first-action easing, immediately before
+the first normal policy command. `STOPPING` freezes it before teardown. Receiving
+chunks alone does not mean execution has begun.
 
 `STATS` is emitted once a second alongside the human `[robot]` log line (which
 stays: it is the artifact that made the first live runs diagnosable). Every key
@@ -86,6 +92,8 @@ EVENT_READY = "READY"
 EVENT_EASING = "EASING"
 EVENT_CONNECTED = "CONNECTED"
 EVENT_ACTIVE = "ACTIVE"
+EVENT_RUNNING = "RUNNING"
+EVENT_STOPPING = "STOPPING"
 EVENT_STATS = "STATS"
 EVENT_RETURNING = "RETURNING"
 EVENT_ERROR = "ERROR"
@@ -96,7 +104,7 @@ EVENT_BYE = "BYE"
 # consume this set verbatim; adding a key is an API change, so change it here
 # and nowhere else.
 STATS_KEYS: tuple[str, ...] = (
-    "t",  # int   — whole seconds since the control loop started
+    "t",  # int   — whole seconds of policy execution (setup excluded)
     "chunks",  # int   — action chunks received
     "reqs",  # int   — observations emitted (one per chunk request)
     "sched",  # int   — runway: steps still queued in the playing chunk

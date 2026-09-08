@@ -388,6 +388,7 @@ def test_an_unchosen_knob_is_echoed_as_launched_not_as_a_non_choice(spawned, fak
     assert "DRTC_GPU" not in env
 
     ml.stop()
+    ml._drain_deadline = ml._clock() + ml._STOP_DRAIN_TIMEOUT_S  # remote cleanup succeeded
     ml._handle_exit(spawned["proc"], -2)
     assert ml.status()["gpu"] is None
 
@@ -612,6 +613,7 @@ def test_the_device_line_is_parsed_out_of_the_container_stdout(spawned, fake_clo
     assert status["device_name"] == "NVIDIA A100-SXM4-40GB (39.6 GiB)"
 
     ml.stop()
+    ml._drain_deadline = ml._clock() + ml._STOP_DRAIN_TIMEOUT_S  # remote cleanup succeeded
     ml._handle_exit(spawned["proc"], -2)
     assert ml.status()["device_name"] is None
 
@@ -975,6 +977,7 @@ def test_the_happy_path_walks_idle_starting_ready_stopping_idle(spawned, fake_cl
     assert stopped["state"] == "stopping"
     assert spawned["terminated"] == [spawned["proc"]]
 
+    ml._drain_deadline = ml._clock() + ml._STOP_DRAIN_TIMEOUT_S  # remote cleanup succeeded
     ml._handle_exit(spawned["proc"], -15)
     assert ml.status()["state"] == "idle"
     # The log path survives the idle transition — after a run it is the most
@@ -1002,6 +1005,7 @@ def test_the_status_dict_always_carries_every_key(spawned, fake_clock):
         "fps",
         "video_codec",
         "s_min",
+        "slack",
         "model_dtype",
         "gpu",
         "model_dtype_applied",
@@ -1032,6 +1036,43 @@ def test_a_second_start_is_refused(spawned, fake_clock):
         ml.start(engine="sync", policy_hub_id="someone/p")
     assert excinfo.value.code == ErrorCode.GPU_ALREADY_RUNNING
     assert excinfo.value.status_code == 409
+
+
+@pytest.mark.parametrize("engine", ["rtc", "sync"])
+def test_slack_from_api_body_reaches_modal_and_status(spawned, fake_clock, engine):
+    from makermodslab.server import GpuStartBody, start_remote_inference_gpu
+
+    body = GpuStartBody(engine=engine, policy_hub_id="someone/p", slack=2)
+    result = start_remote_inference_gpu(body)
+    argv = spawned["popen"][0][0]
+    assert argv[argv.index("--slack") + 1] == "2"
+    assert result["gpu"]["slack"] == 2
+    ml.stop()
+    ml._drain_deadline = ml._clock() + ml._STOP_DRAIN_TIMEOUT_S  # remote cleanup succeeded
+    ml._handle_exit(spawned["proc"], 0)
+    assert ml.status()["slack"] is None
+
+
+def test_slack_defaults_to_existing_five_ticks(spawned, fake_clock):
+    from makermodslab.server import GpuStartBody
+
+    assert GpuStartBody(engine="rtc", policy_hub_id="someone/p").slack == 5
+    ml.start(engine="rtc", policy_hub_id="someone/p")
+    assert ml.status()["slack"] == 5
+    assert "--slack" not in spawned["popen"][0][0]
+
+
+@pytest.mark.parametrize("slack", [0, 1, 31, 2.5, True, "2", None])
+def test_bad_slack_is_refused_by_api_and_launcher_before_spawn(spawned, slack):
+    from pydantic import ValidationError
+
+    from makermodslab.server import GpuStartBody
+
+    with pytest.raises(ValidationError):
+        GpuStartBody(engine="rtc", policy_hub_id="someone/p", slack=slack)
+    with pytest.raises(ApiError):
+        ml.start(engine="rtc", policy_hub_id="someone/p", slack=slack)
+    assert not spawned["popen"]
 
 
 def test_a_stop_with_nothing_running_is_refused(spawned):
@@ -1101,6 +1142,7 @@ def test_the_cold_start_bound_fires_at_exactly_its_timeout(spawned, fake_clock):
 
     # And it lands in FAILED, not idle: we implement the overrun by killing the
     # group, but it is a failure and must keep its diagnosis on screen.
+    ml._drain_deadline = ml._clock() + ml._STOP_DRAIN_TIMEOUT_S  # remote cleanup succeeded
     ml._handle_exit(spawned["proc"], -15)
     status = ml.status()
     assert status["state"] == "failed"
@@ -1126,6 +1168,7 @@ def test_a_ready_gpu_is_stopped_after_the_idle_window(spawned, fake_clock):
 
     # An automatic stop is still a clean stop — idle, with the reason kept so
     # the panel can say why the GPU is no longer there.
+    ml._drain_deadline = ml._clock() + ml._STOP_DRAIN_TIMEOUT_S  # remote cleanup succeeded
     ml._handle_exit(spawned["proc"], -15)
     assert ml.status()["state"] == "idle"
     assert "billing" in ml.status()["message"]
@@ -1401,7 +1444,7 @@ def test_a_wedged_pump_cannot_write_into_the_next_launch(spawned, fake_clock):
 def test_the_drain_is_armed_only_after_the_kill_returns(monkeypatch, spawned, fake_clock):
     """The bound is on the DRAIN, not on the kill — `_terminate_tree` has a
     ceiling of its own and arming at the stop request would count it twice."""
-    monkeypatch.setattr(ml, "_terminate_tree", lambda proc, timeout=None: None)
+    monkeypatch.setattr(ml, "_graceful_terminate", lambda proc: True)
     ml.start(engine="sync", policy_hub_id="someone/p")
     ml._handle_line(spawned["proc"], "[policy] connected as 'policy'\n")
     ml.stop()
@@ -1794,6 +1837,7 @@ def test_the_status_echoes_the_transport_tuple_it_launched_with(spawned, fake_cl
     assert status["s_min"] == 6
 
     ml.stop()
+    ml._drain_deadline = ml._clock() + ml._STOP_DRAIN_TIMEOUT_S  # remote cleanup succeeded
     ml._handle_exit(spawned["proc"], -2)
     assert ml.status()["horizon"] is None
 
@@ -1870,3 +1914,78 @@ control: RegisterReq: got response; nodeKeyExpired=true, machineAuthorized=false
     _code, message, hint = ml.classify_failure(tail, 1)
     assert "couldn't join the tailnet" in message
     assert hint is not None and "TS_AUTHKEY" in hint
+
+
+# --- restarting must wait for remote cleanup, not just local EOF -------------
+
+
+def test_client_eof_cannot_release_the_slot_while_remote_stop_is_pending(spawned, monkeypatch):
+    ml.start(engine="rtc", policy_hub_id="someone/p")
+    ml._handle_line(spawned["proc"], "https://modal.com/apps/lab/main/ap-old")
+    ml.stop()
+
+    def terminate(proc):
+        ml._handle_exit(proc, -15)
+        assert ml.status()["state"] == "stopping"
+        assert ml._drain_deadline is None
+        return False
+
+    def remote_stop(app_id, profile):
+        assert app_id == "ap-old"
+        assert ml.status()["state"] == "stopping"
+        with pytest.raises(ApiError):
+            ml.start(engine="rtc", policy_hub_id="someone/new")
+        return True, "stopped"
+
+    monkeypatch.setattr(ml, "_graceful_terminate", terminate)
+    monkeypatch.setattr(ml, "stop_app", remote_stop)
+    ml._terminate_and_watch(spawned["proc"])
+    assert ml.status()["state"] == "idle"
+    assert ml.read_app_record() is None
+    ml.start(engine="rtc", policy_hub_id="someone/new")
+    assert len(spawned["popen"]) == 2
+
+
+@pytest.mark.parametrize("app_id", ["ap-old", None])
+def test_unconfirmed_remote_stop_is_failed_even_after_client_eof(spawned, monkeypatch, app_id):
+    ml.start(engine="rtc", policy_hub_id="someone/p")
+    if app_id:
+        ml._handle_line(spawned["proc"], f"https://modal.com/apps/lab/main/{app_id}")
+    ml.stop()
+    ml._handle_exit(spawned["proc"], -9)
+    monkeypatch.setattr(ml, "_graceful_terminate", lambda proc: False)
+    monkeypatch.setattr(ml, "stop_app", lambda *args: (False, "Modal API timed out"))
+    ml._terminate_and_watch(spawned["proc"])
+    status = ml.status()
+    assert status["state"] == "failed"
+    assert "shutdown could not be confirmed" in status["message"]
+    assert "before starting another" in status["hint"]
+    assert ml._drain_deadline is None
+    if app_id:
+        assert status["app_id"] == app_id
+        assert ml.read_app_record()["app_id"] == app_id
+    assert len(spawned["popen"]) == 1
+
+
+def test_repeated_stop_does_not_start_overlapping_cleanup(spawned):
+    ml.start(engine="sync", policy_hub_id="someone/p")
+    assert ml.stop()["state"] == "stopping"
+    assert ml.stop()["state"] == "stopping"
+    assert spawned["terminated"] == [spawned["proc"]]
+
+
+def test_clean_client_disconnect_finalizes_an_early_eof_without_api_fallback(spawned, monkeypatch):
+    ml.start(engine="sync", policy_hub_id="someone/p")
+    ml._handle_line(spawned["proc"], "https://modal.com/apps/lab/main/ap-clean")
+    ml.stop()
+
+    def terminate(proc):
+        ml._handle_exit(proc, 0)
+        assert ml.status()["state"] == "stopping"
+        return True
+
+    monkeypatch.setattr(ml, "_graceful_terminate", terminate)
+    monkeypatch.setattr(ml, "stop_app", lambda *args: pytest.fail("client disconnected cleanly"))
+    ml._terminate_and_watch(spawned["proc"])
+    assert ml.status()["state"] == "idle"
+    assert ml.read_app_record() is None

@@ -123,14 +123,18 @@ from ..drtc_protocol import (
     EVENT_ERROR,
     EVENT_READY,
     EVENT_RETURNING,
+    EVENT_RUNNING,
+    EVENT_STOPPING,
     format_ready,
 )
 from ..motor_power import FOLLOWER, reset_torque_limit
 from ._common import fmt_us, load_env, mint_token, required_env
+from ._diagnostics import CameraTimingMonitor
 from ._filter import ButterworthLowpass
 from ._latency import JKLatencyEstimator
 from ._pose import feetech_buses
 from ._rtc import ActionSchedule
+from ._run_timer import RunTimer
 from ._schema_rtc import (
     CHUNK_NAME,
     RTC_D,
@@ -335,7 +339,9 @@ async def run(cfg: RobotSideRTCConfig) -> None:
     start_poses = capture_start_poses_or_warn(robot, cfg.return_to_rest)
 
     portal = None
+    camera_timing = CameraTimingMonitor(getattr(robot, "cameras", {}))
     try:
+        camera_timing.start()
         codec = getattr(VideoCodec, cfg.video_codec.upper())
 
         portal_cfg = PortalRobotConfig(room)
@@ -376,6 +382,7 @@ async def run(cfg: RobotSideRTCConfig) -> None:
         # sent on, so a returned chunk (carrying in_reply_to_ts_us) can be placed on
         # the absolute step axis. Bounded FIFO.
         sent_obs: OrderedDict[int, int] = OrderedDict()
+        sent_at: dict[int, float] = {}
         obs_ttl = 4 * cfg.horizon
 
         # Touched by both the control loop and the on_chunk callback (a Portal
@@ -390,7 +397,8 @@ async def run(cfg: RobotSideRTCConfig) -> None:
         # ~330ms of e2e hide?). ret splits e2e into its two legs:
         #   e2e = forward(stamp -> operator observation emit) + inference + ret
         # ret  : server publish -> on_chunk here. Cross-host wall clock, so it is
-        #        only meaningful with NTP-synced peers (Modal is; treat ±5ms).
+        #        only meaningful after verifying peer clock agreement. Saved
+        #        runs have negative values, so do not assume a ±5 ms error bound.
         # emit : obs state timestamp (tick top) -> last wire emission this tick.
         #        Bounds the robot-side capture/serialize cost charged to e2e.
         # late : ticks whose work overran `interval`, so `sleep_for <= 0`, the loop
@@ -404,12 +412,14 @@ async def run(cfg: RobotSideRTCConfig) -> None:
             nonlocal chunks_received, uncorrelated_chunks, last_merge_l2, last_chunk_at
             nonlocal last_ret_ms
             now_us = int(time.time() * 1_000_000)
+            received_at = time.monotonic()
             reply_ts = chunk.in_reply_to_ts_us  # obs timestamp (µs) the policy answered
             with lock:
                 chunks_received += 1
                 last_chunk_at = time.monotonic()
                 last_ret_ms = (now_us - chunk.timestamp_us) / 1000.0
                 t_src = sent_obs.get(reply_ts) if reply_ts is not None else None
+                emitted_at = sent_at.get(reply_ts)
                 if t_src is None:
                     # No matching observation (evicted / uncorrelated / no reply ts):
                     # treat as "fresh now" so we still use the chunk. Use now_us as
@@ -431,6 +441,8 @@ async def run(cfg: RobotSideRTCConfig) -> None:
                     chunk_start_step=t_src + cfg.action_delay,
                 )
                 last_merge_l2 = stats.mean_l2
+            if emitted_at is not None:
+                print(f"[robot-timing] obs_ts={reply_ts} rtt_ms={(received_at - emitted_at) * 1000:.1f}")
 
         portal.on_action_chunk(CHUNK_NAME, on_chunk)
 
@@ -443,6 +455,7 @@ async def run(cfg: RobotSideRTCConfig) -> None:
         )
 
         interval = 1.0 / cfg.fps
+        timer = RunTimer(cfg.duration_s)
         start = time.monotonic()
         next_tick = start
         last_log = start
@@ -493,7 +506,7 @@ async def run(cfg: RobotSideRTCConfig) -> None:
         eased = False
         active_seen = False
 
-        while cfg.duration_s <= 0 or (time.monotonic() - start) < cfg.duration_s:
+        while not timer.expired:
             if control.stop_event.is_set():
                 # STOP / QUIT / Ctrl-C. Leave the loop; the finally below owns
                 # the return-to-rest and the release.
@@ -534,7 +547,6 @@ async def run(cfg: RobotSideRTCConfig) -> None:
                     # samples. Same exposure robot_sync has, and self-healing.
                     if cfg.ease_in:
                         eased_for, stopped = ease_into_first_action(robot, last_action, control)
-                        start += eased_for
                         last_log += eased_for
                         next_tick = time.monotonic()
                         if stopped:
@@ -555,6 +567,8 @@ async def run(cfg: RobotSideRTCConfig) -> None:
                     if d_sent[j] > dmax_sent:
                         dmax_sent, dmax_sent_joint = float(d_sent[j]), joint_names[j]
                 prev_raw, prev_sent = raw, sent
+                if timer.start():
+                    emit(EVENT_RUNNING)
                 robot.send_action(dict(zip(action_keys, sent.tolist(), strict=True)))
 
             # 2. Decide whether to request a fresh inference this tick. Never emit
@@ -630,8 +644,10 @@ async def run(cfg: RobotSideRTCConfig) -> None:
                     last_emit_ms = (time.monotonic() - tick_t0) * 1000.0
                     with lock:
                         sent_obs[ts_us] = control_step
+                        sent_at[ts_us] = tick_t0
                         while len(sent_obs) > obs_ttl:
-                            sent_obs.popitem(last=False)
+                            expired_ts, _ = sent_obs.popitem(last=False)
+                            sent_at.pop(expired_ts, None)
                         last_prefix_len = prefix_len
                     observations_emitted += 1
                     obs_cooldown = estimator.estimate_steps + cfg.epsilon
@@ -641,6 +657,7 @@ async def run(cfg: RobotSideRTCConfig) -> None:
             now = time.monotonic()
             if now - last_log >= 1.0:
                 m = portal.metrics()
+                print(f"[camera-timing] {camera_timing.summary()}")
                 with lock:
                     runway = schedule.remaining()
                     merge_l2 = last_merge_l2
@@ -651,7 +668,7 @@ async def run(cfg: RobotSideRTCConfig) -> None:
                     age = None if last_chunk_at is None else (now - last_chunk_at) * 1000.0
                 s = max(cfg.s_min, estimator.estimate_steps)
                 age_str = "-" if age is None else f"{age:.0f}ms"
-                elapsed = int(now - start)
+                elapsed = int(timer.elapsed_s)
                 operator = portal.active_operator()
                 # The human line stays: it is the artifact that made the first
                 # live runs diagnosable, and it carries the RTC-only numbers
@@ -728,6 +745,8 @@ async def run(cfg: RobotSideRTCConfig) -> None:
         emit(EVENT_ERROR, str(exc))
         raise
     finally:
+        shielded("the STOPPING event", emit, EVENT_STOPPING, attempts=1)
+        camera_timing.stop()
         # Order is load-bearing: the return needs torque, and it is
         # robot.disconnect() that releases it. QUIT is the one path that skips
         # the return — it means "stop now", and the caller has accepted that

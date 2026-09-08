@@ -284,6 +284,9 @@ ENV_GPU = "DRTC_GPU"
 # operator who genuinely wants more can run the wrapper by hand.
 FLOW_STEPS_MIN = 1
 FLOW_STEPS_MAX = 20
+DEFAULT_SLACK = 5
+SLACK_MIN = 2
+SLACK_MAX = 30
 
 # --- timings -----------------------------------------------------------------
 
@@ -310,7 +313,7 @@ _TERMINATE_TIMEOUT_S = 5.0
 _SIGINT_GRACE_S = 5.0
 # The bound on the `modal app stop --yes <app id>` fallback. It is one API call
 # with no log stream behind it; anything slower is a Modal outage, and the
-# right answer there is a logged line, not a stop that never returns.
+# right answer there is a visible failure, not a stop that never returns.
 _APP_STOP_TIMEOUT_S = 15.0
 # The two listings behind the profile / environment pickers. They sit inside a
 # GET the panel calls on open, so the bound is short: an unreachable Modal must
@@ -321,7 +324,8 @@ _TARGETS_TIMEOUT_S = 8.0
 # enough to name the cause, short enough that a CLI that ever decides to dump
 # something long cannot turn a status line into a wall.
 _TARGETS_DETAIL_CHARS = 240
-# And how long we then wait for the PUMP to notice. `_terminate_tree` already
+# After remote cleanup succeeds, how long we wait for the PUMP to notice.
+# `_terminate_tree` already
 # escalated to SIGKILL, so the process is gone; what can still hang is the
 # stdout pipe, whose write end an un-reaped grandchild may hold open — leaving
 # `readline` blocked forever and the launcher stuck in `stopping` with no way
@@ -656,6 +660,8 @@ def check_knobs(
     gpu: str,
     flow_steps: int = 0,
     extra_image_roles: Sequence[str] = (),
+    *,
+    slack: int = DEFAULT_SLACK,
 ) -> None:
     """Refuse a precision, a GPU type, a step count or a camera role this
     launcher won't send.
@@ -696,6 +702,12 @@ def check_knobs(
             400,
             f"`{want_gpu}` isn't a GPU type this launcher can ask Modal for. Use one of: "
             f"{allowed} — or leave it empty to run on the wrapper's own pinned GPU.",
+            code=ErrorCode.GPU_LAUNCH_FAILED,
+        )
+    if type(slack) is not int or not SLACK_MIN <= slack <= SLACK_MAX:
+        raise ApiError(
+            400,
+            f"Sync slack must be a whole number from {SLACK_MIN} to {SLACK_MAX} ticks.",
             code=ErrorCode.GPU_LAUNCH_FAILED,
         )
     if flow_steps and not (FLOW_STEPS_MIN <= flow_steps <= FLOW_STEPS_MAX):
@@ -940,6 +952,7 @@ def build_argv(
     model_dtype: str = "",
     flow_steps: int = 0,
     extra_image_roles: Sequence[str] = (),
+    slack: int = DEFAULT_SLACK,
 ) -> list[str]:
     """The `modal run` command, as a LIST — never a string, never a shell.
 
@@ -1006,6 +1019,7 @@ def build_argv(
         "--fps",
         str(fps),
         *(["--s-min", str(s_min)] if engine == "rtc" else []),
+        *(["--slack", str(slack)] if slack != DEFAULT_SLACK else []),
         "--video-codec",
         video_codec,
         # The room is what makes the two sides meet. Without it the GPU takes
@@ -1369,6 +1383,7 @@ _horizon: int | None = None
 _fps: int | None = None
 _video_codec: str | None = None
 _s_min: int | None = None
+_slack: int | None = None
 # The two S3.8e knobs AS LAUNCHED, echoed for the same reason as the tuple
 # above — the panel's drift warning compares the form against the SERVER's
 # record. Both are strings whose EMPTY value is meaningful and is not a
@@ -1418,9 +1433,11 @@ _idle_since: float | None = None
 # stop. Read only inside `_handle_exit`.
 _stop_outcome: str = STATE_IDLE
 # Monotonic instant past which a `stopping` gives up on its pump. Set by the
-# terminate thread once the kill has actually returned, cleared on every
+# terminate thread once client and remote-app cleanup succeed, cleared on every
 # transition out of `stopping`. None means "not waiting on a drain".
 _drain_deadline: float | None = None
+# EOF can arrive before the remote stop API returns. Keep the slot reserved.
+_stop_client_exited = False
 _tail: collections.deque[str] = collections.deque(maxlen=_TAIL_LINES)
 
 # Injected clock, exactly as `remote_inference._clock` is: the cold-start bound
@@ -1444,9 +1461,9 @@ def _go_idle_locked() -> None:
     the next start replaces it.
     """
     global _state, _proc, _phase, _engine, _policy_hub_id, _room
-    global _started_at, _started_mono, _idle_since, _last_line, _drain_deadline
+    global _started_at, _started_mono, _idle_since, _last_line, _drain_deadline, _stop_client_exited
     global _profile, _environment, _app_id
-    global _task, _horizon, _fps, _video_codec, _s_min, _model_dtype, _gpu
+    global _task, _horizon, _fps, _video_codec, _s_min, _slack, _model_dtype, _gpu
     global _model_dtype_applied, _flow_steps, _flow_steps_applied, _device_name
     global _extra_image_roles, _extra_image_roles_applied
     _state = STATE_IDLE
@@ -1463,6 +1480,7 @@ def _go_idle_locked() -> None:
     _fps = None
     _video_codec = None
     _s_min = None
+    _slack = None
     _model_dtype = None
     _gpu = None
     _model_dtype_applied = False
@@ -1476,6 +1494,7 @@ def _go_idle_locked() -> None:
     _idle_since = None
     _last_line = None
     _drain_deadline = None
+    _stop_client_exited = False
 
 
 def _open_log() -> tuple[IO[str], Path]:
@@ -1603,7 +1622,8 @@ def _handle_line(proc: subprocess.Popen, line: str) -> None:
 def _handle_exit(proc: subprocess.Popen, rc: int | None) -> None:
     """Finalize on the pump's EOF path.
 
-    A stop we asked for lands as `idle` (keeping the idle timer's explanation,
+    After remote cleanup succeeds, a stop we asked for lands as `idle`
+    (keeping the idle timer's explanation,
     if that is what asked); a cold-start overrun lands as `failed` with its
     diagnosis intact; anything else is a `failed` the panel keeps until the
     next start. **It never stops a remote-inference session** — the session's
@@ -1620,7 +1640,7 @@ def _handle_exit(proc: subprocess.Popen, rc: int | None) -> None:
     `_settle_app` owns that record, and clearing it from both places would
     race the API stop that may still need it.
     """
-    global _state, _message, _hint, _code, _proc
+    global _state, _message, _hint, _code, _proc, _stop_client_exited
     clear_record: str | None = None
     with _state_lock:
         if _proc is not proc:
@@ -1628,6 +1648,11 @@ def _handle_exit(proc: subprocess.Popen, rc: int | None) -> None:
             # drain bound. Either way its verdict is stale — drop it.
             return
         if _state == STATE_STOPPING:
+            _stop_client_exited = True
+            if _drain_deadline is None:
+                # Client EOF is not remote termination: the stop worker may
+                # still be in `modal app stop`, or that call may fail.
+                return
             if _stop_outcome == STATE_FAILED:
                 # The deadline already wrote the message and the hint, and the
                 # phase it died at is part of the diagnosis — keep both.
@@ -1711,69 +1736,69 @@ def _graceful_terminate(proc: subprocess.Popen) -> bool:
     return False
 
 
-def _settle_app(app_id: str | None, profile: str | None, *, client_exited_cleanly: bool) -> None:
-    """Make sure the Modal APP is stopped, not just the local client.
+def _settle_app(app_id: str | None, profile: str | None, *, client_exited_cleanly: bool) -> tuple[bool, str]:
+    """Confirm the client's clean disconnect or stop its Modal app explicitly.
 
-    The clean case is nothing at all: the client's own disconnect is the
-    authority, and a second `modal app stop` would only add a subprocess to
-    the stop path. Every other case runs it, because the alternative is an
-    A100 billing for the 5-7 minutes Modal's heartbeat timeout takes to notice
-    nobody is attached.
-
-    Never raises, and never blocks a state transition: the caller has already
-    armed the drain deadline by the time this runs.
+    An unknown app after forced termination is not confirmed stopped. Keep
+    the persisted record on failure so a later cleanup can still find it.
     """
-    if not app_id:
-        if not client_exited_cleanly:
-            logger.warning(
-                "The GPU client was killed before it named its Modal app, so the app could not "
-                "be stopped from here — check `modal app list` if a run is still billing."
-            )
-        return
     if client_exited_cleanly:
-        _clear_app_record(app_id)
-        return
+        if app_id:
+            _clear_app_record(app_id)
+        return True, ""
+    if not app_id:
+        detail = (
+            "The GPU client was killed before it named its Modal app; remote shutdown could not be confirmed."
+        )
+        logger.warning(detail)
+        return False, detail
     stopped, detail = stop_app(app_id, profile or "")
     if stopped:
         logger.info("Stopped Modal app %s over the API (its client never got to)", app_id)
         _clear_app_record(app_id)
     else:
-        logger.error(
-            "Could not stop Modal app %s: %s. It may still be billing — run "
-            "`modal app stop %s` in a terminal.",
-            app_id,
-            detail,
-            app_id,
-        )
+        logger.error("Could not stop Modal app %s: %s", app_id, detail)
+    return stopped, detail
 
 
 def _terminate_and_watch(proc: subprocess.Popen) -> None:
-    """Stop the client, start the clock on the pump's EOF, then settle the app.
+    """Stop the client and app before allowing the slot to be reused.
 
-    `_graceful_terminate` returns only once the process is gone (SIGINT, then
-    SIGTERM, then SIGKILL). What can STILL hang after that is the stdout pipe —
-    an un-reaped grandchild holding its write end leaves `readline` blocked
-    forever — so the pump may never run its finalizer and `stopping` would be
-    permanent. Arming the drain deadline here rather than at the stop REQUEST
-    is deliberate: the bound is on the drain, not on the kill, which has a
-    ceiling of its own.
-
-    `_settle_app` comes AFTER the arming, deliberately: its subprocess must not
-    lengthen the window in which the launcher reports `stopping`.
+    The pump can reach EOF during graceful termination or the remote API
+    call. It records that fact without leaving `stopping`; this worker then
+    finalizes it after cleanup succeeds. Only a successfully stopped app may
+    use the bounded log-drain fallback to become idle.
     """
-    global _drain_deadline
+    global _drain_deadline, _state, _message, _hint, _code, _proc
     with _state_lock:
+        if _proc is not proc or _state != STATE_STOPPING:
+            return
         app_id, profile = _app_id, _profile
-    clean = False
     try:
         clean = _graceful_terminate(proc)
-    finally:
-        with _state_lock:
-            # Only if this stop is still the live one: a pump that finalized
-            # while we were killing has already moved the state on.
-            if _proc is proc and _state == STATE_STOPPING:
-                _drain_deadline = _clock() + _STOP_DRAIN_TIMEOUT_S
-    _settle_app(app_id, profile, client_exited_cleanly=clean)
+        stopped, detail = _settle_app(app_id, profile, client_exited_cleanly=clean)
+    except Exception as exc:
+        logger.exception("GPU shutdown could not be confirmed")
+        stopped, detail = False, str(exc)
+    with _state_lock:
+        if _proc is not proc or _state != STATE_STOPPING:
+            return
+        if not stopped:
+            _state = STATE_FAILED
+            _proc = None
+            _drain_deadline = None
+            _code = str(ErrorCode.GPU_LAUNCH_FAILED)
+            _message = f"GPU shutdown could not be confirmed: {detail}"
+            _hint = (
+                f"Check Modal app {app_id} in the {profile or 'active'} profile and stop it before starting another GPU."
+                if app_id
+                else "Check running apps in the Modal dashboard and stop the old GPU before starting another."
+            )
+            return
+        _drain_deadline = _clock() + _STOP_DRAIN_TIMEOUT_S
+        exited = _stop_client_exited
+    if exited:
+        _handle_exit(proc, None)
 
 
 def _terminate_async(proc: subprocess.Popen) -> None:
@@ -1865,6 +1890,7 @@ def start(
     fps: int = 30,
     video_codec: str = "H264",
     s_min: int = 4,
+    slack: int = DEFAULT_SLACK,
     profile: str = "",
     environment: str = "",
     model_dtype: str = "",
@@ -1910,8 +1936,8 @@ def start(
     """
     global _state, _proc, _phase, _engine, _policy_hub_id, _room
     global _started_at, _started_mono, _log_path, _message, _hint, _last_line, _idle_since
-    global _stop_outcome, _code, _drain_deadline, _profile, _environment, _app_id
-    global _task, _horizon, _fps, _video_codec, _s_min, _model_dtype, _gpu
+    global _stop_outcome, _code, _drain_deadline, _profile, _environment, _app_id, _stop_client_exited
+    global _task, _horizon, _fps, _video_codec, _s_min, _slack, _model_dtype, _gpu
     global _model_dtype_applied, _flow_steps, _flow_steps_applied, _device_name
     global _extra_image_roles, _extra_image_roles_applied
 
@@ -1939,7 +1965,7 @@ def start(
     want_gpu = gpu.strip()
     want_steps = flow_steps or 0
     want_roles = [r.strip() for r in (extra_image_roles or []) if r.strip()]
-    check_knobs(want_dtype, want_gpu, want_steps, want_roles)
+    check_knobs(want_dtype, want_gpu, want_steps, want_roles, slack=slack)
 
     # And then the checks that need the CHECKPOINT rather than the request: a
     # knob the config has no field for is dropped here instead of failing the
@@ -1994,6 +2020,7 @@ def start(
         fps=fps,
         video_codec=video_codec,
         s_min=s_min,
+        slack=slack,
         modal_bin=modal_bin,
         environment=want_environment,
         # What SURVIVED the per-checkpoint drop, not what was asked for. The
@@ -2039,6 +2066,7 @@ def start(
         _fps = fps
         _video_codec = video_codec
         _s_min = s_min
+        _slack = slack
         # Raw, not `or None`: "" is a real answer here ("as the checkpoint
         # saved it", "on the wrapper's pin") rather than an absent choice.
         #
@@ -2065,6 +2093,7 @@ def start(
         _idle_since = None
         _stop_outcome = STATE_IDLE
         _drain_deadline = None
+        _stop_client_exited = False
         _message = None
         _hint = None
         _code = None
@@ -2096,8 +2125,8 @@ def start(
 def stop() -> dict[str, Any]:
     """Stop the GPU policy server. Returns the status after the request.
 
-    Returns while the process group is still going down (`stopping`); the
-    pump's EOF path is what lands it in `idle`. A `failed` launcher has nothing
+    Returns while cleanup is still underway (`stopping`); client EOF and
+    successful remote cleanup together land it in `idle`. A `failed` launcher has nothing
     left to stop — its process is already gone — so it answers `gpu.not_running`
     like an idle one and is cleared by the next start.
     """
@@ -2109,10 +2138,12 @@ def stop() -> dict[str, Any]:
                 "No GPU policy server is running.",
                 code=ErrorCode.GPU_NOT_RUNNING,
             )
+        if _state == STATE_STOPPING:
+            return _status_locked()
         doomed = _proc
         _stop_outcome = STATE_IDLE
-        # Armed by the terminate thread once the kill returns, not here: the
-        # bound is on the pump's drain, not on the kill.
+        # Armed after both client and remote cleanup succeed: a log-drain
+        # timeout must not hide an unfinished or failed remote stop.
         _drain_deadline = None
         _state = STATE_STOPPING
         # Nothing to say afterwards: the operator asked, and a stale
@@ -2280,6 +2311,7 @@ def _status_locked() -> dict[str, Any]:
         # value is what a switch to rtc WOULD have used — the panel compares it
         # only when the engine is rtc, for the same reason.
         "s_min": _s_min,
+        "slack": _slack,
         # What it runs AS and what it runs ON (S3.8e), as launched; null only
         # while idle. Empty string is a real answer — "the dtype the checkpoint
         # saved" and "the wrapper's own pinned GPU" — so it is echoed as sent

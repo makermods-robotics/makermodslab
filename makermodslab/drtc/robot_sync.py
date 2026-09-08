@@ -153,12 +153,15 @@ from ..drtc_protocol import (
     EVENT_ERROR,
     EVENT_READY,
     EVENT_RETURNING,
+    EVENT_RUNNING,
+    EVENT_STOPPING,
     format_ready,
 )
 from ..motor_power import FOLLOWER, reset_torque_limit
 from ._common import fmt_us, load_env, mint_token, required_env
 from ._latency import JKLatencyEstimator
 from ._pose import feetech_buses
+from ._run_timer import RunTimer
 from ._schema import CHUNK_NAME, robot_wire_schema
 from ._session_glue import (
     LoopControl,
@@ -435,6 +438,7 @@ async def run(cfg: RobotSideConfig) -> None:
         )
 
         interval = 1.0 / cfg.fps
+        timer = RunTimer(cfg.duration_s)
         start = time.monotonic()
         next_tick = start
         last_log = start
@@ -444,7 +448,7 @@ async def run(cfg: RobotSideConfig) -> None:
         eased = False
         active_seen = False
 
-        while cfg.duration_s <= 0 or (time.monotonic() - start) < cfg.duration_s:
+        while not timer.expired:
             if control.stop_event.is_set():
                 # STOP / QUIT / Ctrl-C. Leave the loop; the finally below owns
                 # the return-to-rest and the release.
@@ -479,13 +483,14 @@ async def run(cfg: RobotSideConfig) -> None:
                     # rather than letting the pacing loop burst to catch up.
                     if cfg.ease_in:
                         eased_for, stopped = ease_into_first_action(robot, action, control)
-                        start += eased_for
                         last_log += eased_for
                         next_tick = time.monotonic()
                         if stopped:
                             # A stop landed during the ease; it came back
                             # cut-short. Skip execution entirely.
                             break
+                if timer.start():
+                    emit(EVENT_RUNNING)
                 robot.send_action(action)
                 last_action = action
             elif last_action is not None:
@@ -525,7 +530,7 @@ async def run(cfg: RobotSideConfig) -> None:
                     holds = player.holds
                 age_str = "-" if age is None else f"{age:.0f}ms"
                 operator = portal.active_operator()
-                elapsed = int(now - start)
+                elapsed = int(timer.elapsed_s)
                 # The human line stays: it is the artifact that made the first
                 # live runs diagnosable, and it tees into the parent's log file
                 # exactly the way rollout.py's _pump_stdout tees lerobot's.
@@ -578,6 +583,7 @@ async def run(cfg: RobotSideConfig) -> None:
         emit(EVENT_ERROR, str(exc))
         raise
     finally:
+        shielded("the STOPPING event", emit, EVENT_STOPPING, attempts=1)
         # Order is load-bearing: the return needs torque, and it is
         # robot.disconnect() that releases it. QUIT is the one path that skips
         # the return — it means "stop now", and the caller has accepted that

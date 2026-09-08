@@ -53,6 +53,10 @@ const rtcCloud: ModalRunLineInput = {
 };
 
 describe("the generated modal run line", () => {
+  it.each([cloud, rtcCloud])("passes a selected slack to either wrapper", (input) => {
+    expect(buildModalRunLine({ ...input, slack: 2 })).toContain("--slack 2");
+    expect(buildModalRunLine({ ...input, slack: 5 })).not.toContain("--slack");
+  });
   it("carries the transport triple and the room for a Cloud transport", () => {
     expect(buildModalRunLine(cloud)).toBe(
       "modal run makermodslab/drtc/modal_policy.py " +

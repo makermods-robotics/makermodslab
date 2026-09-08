@@ -491,11 +491,8 @@ class RemoteInferenceStatusResponse(BaseModel):
     # payload always carries it.
     engine: str | None
     started_at: float | None
-    # Seconds from `started_at`. FROZEN at the exit for a terminal payload
-    # (built once, from the globals, before they are cleared) rather than reset
-    # to 0 — a finished run that reports "0s" reads as a run that never
-    # happened, which is precisely the opposite of what a failed one needs to
-    # say.
+    # Execution seconds, excluding setup/easing and teardown; frozen at stop.
+    # started_at remains the launch time identifying this session.
     elapsed_s: float
     duration_s: int | None
     log_path: str | None
@@ -666,6 +663,8 @@ class GpuStatusResponse(BaseModel):
     # container (`utils.system.policy_flow_steps_field`): `num_steps` for
     # smolvla, `num_inference_steps` for pi0/pi05/MolmoAct2.
     flow_steps: int | None
+    # Operator-side buffering as launched; changing it requires a GPU restart.
+    slack: int | None = None
     flow_steps_applied: bool
     # The EXTRA camera views this launch asked to declare on the checkpoint
     # (S3.8g) — role names, e.g. ["cam2"]. Null while idle; [] is a real answer

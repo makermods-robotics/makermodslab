@@ -227,6 +227,7 @@ def _tailscale_up(timeout: float = 90.0) -> None:
         (it restores `--state=mem:` and always-`--auth-key`, byte-for-byte the
         old behaviour).
     """
+    started = time.monotonic()
     authkey = os.environ.get("TS_AUTHKEY")
     ephemeral = _ephemeral_node()
     if ephemeral:
@@ -265,8 +266,11 @@ def _tailscale_up(timeout: float = 90.0) -> None:
                 raise RuntimeError("tailscaled never opened its SOCKS5 port") from None
             time.sleep(0.25)
 
+    print(f"[tailscale] local SOCKS listener ready after {time.monotonic() - started:.1f}s")
+
     # 2) join the tailnet. `tailscale up` blocks until the backend is Running, so
     #    this returning IS the "tailnet reachable" barrier the relay needs.
+    login_started = time.monotonic()
     up = None
     if resume:
         print(f"[tailscale] tailscale up --hostname={_TS_HOSTNAME} (resuming the saved node key)")
@@ -287,6 +291,8 @@ def _tailscale_up(timeout: float = 90.0) -> None:
             f"`tailscale up` failed (rc={up.returncode}): {up.stdout.strip()}{up.stderr.strip()}"
         )
 
+    print(f"[tailscale] login completed in {time.monotonic() - login_started:.1f}s")
+
     # Backend is Running, so tailscaled has written the node key. Commit it now
     # rather than at function exit: a killed container never reaches an exit.
     if not ephemeral:
@@ -304,6 +310,7 @@ def _tailscale_up(timeout: float = 90.0) -> None:
         text=True,
     ).stdout.strip()
     print(f"[tailscale] joined tailnet as {_TS_HOSTNAME} ({ip or 'no v4 address?'})")
+    print(f"[tailscale] startup total {time.monotonic() - started:.1f}s; policy initialization follows")
 
 
 async def _socks5_connect(host: str, port: int):
@@ -372,12 +379,15 @@ def _start_signaling_relay(host: str, port: int, timeout: float = 15.0) -> None:
     failure: list[BaseException] = []
 
     async def _handle(client_reader, client_writer) -> None:
+        dial_started = time.monotonic()
+        print(f"[tailscale-relay] dialing station {host}:{port}")
         try:
             up_reader, up_writer = await _socks5_connect(host, port)
         except Exception as exc:  # one bad dial must not kill the listener
             print(f"[tailscale-relay] upstream dial failed: {exc}")
             client_writer.close()
             return
+        print(f"[tailscale-relay] station TCP connected in {time.monotonic() - dial_started:.3f}s")
         await asyncio.gather(_pipe(client_reader, up_writer), _pipe(up_reader, client_writer))
 
     def _run() -> None:
@@ -402,6 +412,7 @@ def _start_signaling_relay(host: str, port: int, timeout: float = 15.0) -> None:
     if failure:
         raise RuntimeError(f"tailscale signaling relay failed to listen: {failure[0]}")
     print(f"[tailscale] relay 127.0.0.1:{_TS_RELAY_PORT} -> socks5 -> {host}:{port}")
+    print("[tailscale-relay] local listener ready; station is dialed when the policy connects")
 
 
 def _tailscale_signaling_url(livekit_url: str) -> str:

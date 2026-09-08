@@ -79,9 +79,9 @@ really always carries them):
     phase                   : str | None      (the vocabulary below)
     policy_ref              : str | None
     engine                  : str | None      ("sync" / "rtc"; null before any run)
-    started_at              : float | None    (unix seconds)
-    elapsed_s               : float           (FROZEN at the exit on a terminal
-                                               payload, not reset to 0)
+    started_at              : float | None    (launch time, unix seconds)
+    elapsed_s               : float           (execution only; setup/easing and
+                                               teardown excluded, frozen at stop)
     duration_s              : int | None
     log_path                : str | None
     returning_to_rest       : bool
@@ -102,7 +102,7 @@ Phases (opaque strings, broadcast as `session_changed` hints):
     connecting       READY   — the child resolved its transport and is dialing
     warming_up       CONNECTED — in the room, no correlated chunk yet
     easing           EASING  — ramping into the first chunk's step-0 pose
-    running          the first chunk has been counted
+    running          RUNNING — setup/easing finished, executing policy actions
     stopping         a stop is in flight (INCLUDING the return to rest —
                      `returning_to_rest` says which half; a new phase name here
                      would fall outside sessions._WINDING_DOWN_PHASES and let an
@@ -143,7 +143,9 @@ from .drtc_protocol import (
     EVENT_ERROR,
     EVENT_READY,
     EVENT_RETURNING,
+    EVENT_RUNNING,
     EVENT_STATS,
+    EVENT_STOPPING,
     parse_event,
     parse_kv,
     parse_stats,
@@ -275,10 +277,10 @@ remote_inference_active: bool = False
 _state_lock = threading.Lock()
 _remote_proc: subprocess.Popen | None = None
 _remote_started_at: float | None = None
-# Wall-clock of the first counted chunk — the analogue of rollout's
-# `_inference_rollout_started_at`, and what `_classify_outcome` reads as
-# "did the run actually get going before it failed?".
+# Monotonic execution boundaries, excluding setup/easing and teardown.
+# The start also tells `_classify_outcome` whether the run actually got going.
 _remote_running_started_at: float | None = None
+_remote_running_stopped_at: float | None = None
 _remote_meta: dict[str, Any] = {}
 # The finished payload of the most recent run, kept until the NEXT start claims
 # the slot. Terminal outcomes are idempotent, not consume-once: several
@@ -303,7 +305,7 @@ _chunks: int = 0
 # its start pose with torque still on. Exposed so the UI can say so during the
 # `stopping` phase rather than inventing a phase name for it.
 _returning_to_rest: bool = False
-# Injected clock — the watchdogs' only time source, so tests drive them with
+# Injected clock for execution durations and watchdogs; tests drive it with
 # tests/test_session_lease.py's FakeClock instead of sleeping.
 _clock = time.monotonic
 
@@ -1021,12 +1023,13 @@ def _go_idle_locked() -> None:
     Does NOT touch `_last_result` — whether a teardown leaves a terminal
     payload behind is the caller's decision."""
     global remote_inference_active, _remote_proc, _remote_started_at
-    global _remote_running_started_at, _remote_meta, _remote_cancel
+    global _remote_running_started_at, _remote_running_stopped_at, _remote_meta, _remote_cancel
     global _transport, _stats, _connected_at, _active_at, _chunks, _returning_to_rest
     remote_inference_active = False
     _remote_proc = None
     _remote_started_at = None
     _remote_running_started_at = None
+    _remote_running_stopped_at = None
     _remote_meta = {}
     _remote_cancel = None
     _transport = None
@@ -1050,7 +1053,10 @@ def _payload_locked(*, shutting_down: bool) -> dict[str, Any]:
     The single builder for both the live payload and the terminal one (which is
     this, overridden with the exit fields) — see the module docstring's key
     list, which S3.3's response model must match exactly."""
-    elapsed = (time.time() - _remote_started_at) if _remote_started_at else 0.0
+    elapsed = 0.0
+    if _remote_running_started_at is not None:
+        end = _remote_running_stopped_at if _remote_running_stopped_at is not None else _clock()
+        elapsed = max(0.0, end - _remote_running_started_at)
     return {
         "remote_inference_active": remote_inference_active,
         "exited": False,
@@ -1082,15 +1088,9 @@ def _terminal_payload_locked(
 ) -> dict[str, Any]:
     """The finished payload: the live shape with the exit fields filled in.
 
-    Built BEFORE `_go_idle_locked` clears the globals it reads — which is also
-    what FREEZES `elapsed_s` at the run's true length: this function runs once,
-    at the exit (or at a pre-spawn failure), so `_payload_locked`'s
-    `time.time() - _remote_started_at` is measured from `started_at` to that
-    moment and then stored verbatim in `_last_result`. It is deliberately NOT
-    zeroed. S3.4 zeroed it, and a finished run reporting "0s / 60" read as a run
-    that never started — exactly the wrong thing to tell someone whose 40-second
-    run just failed, and the one number that says whether it failed at once or
-    ran most of its course first."""
+    Built before idle clears the execution boundaries. Setup-only failures
+    report zero; a finished run retains its execution time on every later poll.
+    """
     payload = _payload_locked(shutting_down=False)
     payload.update(
         {
@@ -1201,6 +1201,7 @@ def _check_watchdogs() -> str | None:
             return None
         _remote_meta["error"] = failure
         _remote_meta["hint"] = friendly_hint(failure)
+        _freeze_running_locked()
         _remote_meta["phase"] = PHASE_STOPPING
         proc = _remote_proc
     logger.warning("Remote inference watchdog: %s", failure)
@@ -1336,7 +1337,11 @@ def _handle_line(line: str) -> None:
     elif event == EVENT_CONNECTED:
         _on_connected()
     elif event == EVENT_EASING:
-        _set_phase(PHASE_EASING)
+        _on_easing()
+    elif event == EVENT_RUNNING:
+        _on_running()
+    elif event == EVENT_STOPPING:
+        _on_stopping()
     elif event == EVENT_ACTIVE:
         _on_active(parse_kv(payload))
     elif event == EVENT_STATS:
@@ -1401,12 +1406,49 @@ def _on_active(fields: dict[str, str]) -> None:
     logger.info("Remote inference operator active: %s", fields.get("operator"))
 
 
-def _on_stats(sample: dict[str, Any] | None) -> None:
-    """One 1 Hz telemetry sample; the first counted chunk means `running`.
+def _on_easing() -> None:
+    """The first-action ramp may begin AFTER the first positive chunk sample."""
+    with _state_lock:
+        if not remote_inference_active or _remote_meta.get("phase") in (PHASE_STOPPING, PHASE_ERROR):
+            return
+        _remote_meta["phase"] = PHASE_EASING
+    notify_session_changed(KIND, True, phase=PHASE_EASING)
 
-    A malformed or truncated payload parses to None and is dropped — "no sample
-    this second", never a half-populated status the UI would render as real."""
-    global _stats, _chunks, _remote_running_started_at
+
+def _on_running() -> None:
+    """The child finished setup/easing and is about to execute policy actions."""
+    global _remote_running_started_at
+    with _state_lock:
+        if not remote_inference_active or _remote_meta.get("phase") in (PHASE_STOPPING, PHASE_ERROR):
+            return
+        if _remote_running_started_at is not None:
+            return
+        _remote_running_started_at = _clock()
+        _remote_meta["phase"] = PHASE_RUNNING
+    notify_session_changed(KIND, True, phase=PHASE_RUNNING)
+
+
+def _freeze_running_locked() -> None:
+    """Freeze once, including when Stop arrives before the child acknowledges."""
+    global _remote_running_stopped_at
+    if _remote_running_started_at is not None and _remote_running_stopped_at is None:
+        _remote_running_stopped_at = _clock()
+
+
+def _on_stopping() -> None:
+    with _state_lock:
+        if not remote_inference_active:
+            return
+        _freeze_running_locked()
+        if _remote_meta.get("phase") != PHASE_ERROR:
+            _remote_meta["phase"] = PHASE_STOPPING
+        phase = _remote_meta.get("phase")
+    notify_session_changed(KIND, True, phase=phase)
+
+
+def _on_stats(sample: dict[str, Any] | None) -> None:
+    """Record telemetry; chunk receipt may precede easing and is not run start."""
+    global _stats, _chunks
     if sample is None:
         return
     with _state_lock:
@@ -1415,12 +1457,6 @@ def _on_stats(sample: dict[str, Any] | None) -> None:
         _stats = sample
         chunks = sample.get("chunks")
         _chunks = chunks if isinstance(chunks, int) else _chunks
-        started = _chunks > 0 and _remote_running_started_at is None
-        if started:
-            _remote_running_started_at = time.time()
-        stopping = _remote_meta.get("phase") in (PHASE_STOPPING, PHASE_ERROR)
-    if started and not stopping:
-        _set_phase(PHASE_RUNNING)
 
 
 def _on_returning() -> None:
@@ -1435,6 +1471,7 @@ def _on_returning() -> None:
         if not remote_inference_active:
             return
         _returning_to_rest = True
+        _freeze_running_locked()
         _remote_meta["phase"] = PHASE_STOPPING
     notify_session_changed(KIND, True, phase=PHASE_STOPPING)
 
@@ -1444,6 +1481,7 @@ def _on_child_error(message: str) -> None:
     with _state_lock:
         if not remote_inference_active:
             return
+        _freeze_running_locked()
         _remote_meta.setdefault("error", message)
         _remote_meta.setdefault("hint", friendly_hint(message))
     logger.error("robot_sync error: %s", message)
@@ -1459,6 +1497,7 @@ def _trigger_failure(message: str) -> None:
             return
         _remote_meta["error"] = message
         _remote_meta["hint"] = friendly_hint(message)
+        _freeze_running_locked()
         _remote_meta["phase"] = PHASE_STOPPING
         proc = _remote_proc
     logger.error("Remote inference failing: %s", message)
@@ -1855,6 +1894,7 @@ def handle_stop_remote_inference() -> dict[str, Any]:
         proc = _remote_proc
         second_press = _remote_meta.get("phase") == PHASE_STOPPING
         if _remote_meta:
+            _freeze_running_locked()
             _remote_meta["phase"] = PHASE_STOPPING
         if proc is None:
             # Stopped before the child spawned: nothing has been energized by

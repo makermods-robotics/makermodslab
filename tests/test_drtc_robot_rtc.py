@@ -132,6 +132,7 @@ def test_both_engines_tear_down_the_same_way() -> None:
 
     assert labels(ROBOT_RTC) == labels(ROBOT_SYNC)
     assert labels(ROBOT_RTC) == [
+        "the STOPPING event",
         "the RETURNING event",
         "the return to the start pose",
         "closing the transport",
