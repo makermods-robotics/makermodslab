@@ -2620,6 +2620,11 @@
               }
             ],
             "title": "Source Weights"
+          },
+          "temporary": {
+            "default": false,
+            "title": "Temporary",
+            "type": "boolean"
           }
         },
         "required": [
