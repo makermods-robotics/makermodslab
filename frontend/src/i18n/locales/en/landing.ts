@@ -190,6 +190,23 @@ export default {
     // for it: the local copy is the only one.
     notBackedUp:
       "Upload didn't finish — the Hub repo is empty, so this local copy is the only one. Re-upload before clearing.",
+    temporaryMergesTitle: "Temporary merges",
+    temporaryMergesHint:
+      "Throwaway datasets minted for a single combine-and-train launch. Cleaning up removes each one's local copy and any Hub copy MakerMods made for it.",
+    weightedChip: "weighted",
+    // `{{n}}` sizes a label, not a plural form.
+    sourceCount: "{{n}} sources",
+    cleanUp: "Clean up",
+    cleaningUp: "Cleaning up…",
+    cleanUpConfirmTitle: "Clean up temporary merges?",
+    cleanUpConfirmBody:
+      "This removes each temporary merge's local copy and any Hub copy MakerMods made for it. A merge a training run is currently using is kept.",
+    cleanedUp_one: "{{count}} merge removed",
+    cleanedUp_other: "{{count}} merges removed",
+    cleanupSkipped_one: "{{count}} kept — still in use",
+    cleanupSkipped_other: "{{count}} kept — still in use by a run",
+    cleanupHubFailed_one: "{{count}} Hub copy could not be removed",
+    cleanupHubFailed_other: "{{count}} Hub copies could not be removed",
   },
   mergeDatasets: {
     title: "Merge datasets",

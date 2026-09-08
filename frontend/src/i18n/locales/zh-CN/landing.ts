@@ -154,6 +154,19 @@ export default {
     clearFailed: "无法清理 {{repoId}} 的缓存。",
     notBackedUp:
       "上传未完成——Hub 仓库是空的，本地副本是唯一副本。请先重新上传再清理。",
+    temporaryMergesTitle: "临时合并",
+    temporaryMergesHint:
+      "为一次“合并并训练”而生成的一次性数据集。清理会删除每个的本地副本，以及 MakerMods 为其创建的任何 Hub 副本。",
+    weightedChip: "加权",
+    sourceCount: "{{n}} 个来源",
+    cleanUp: "清理",
+    cleaningUp: "正在清理…",
+    cleanUpConfirmTitle: "清理临时合并？",
+    cleanUpConfirmBody:
+      "这会删除每个临时合并的本地副本，以及 MakerMods 为其创建的任何 Hub 副本。正在被训练任务使用的合并会被保留。",
+    cleanedUp_other: "已删除 {{count}} 个合并",
+    cleanupSkipped_other: "{{count}} 个仍在使用，已保留",
+    cleanupHubFailed_other: "{{count}} 个 Hub 副本无法删除",
   },
   mergeDatasets: {
     title: "合并数据集",

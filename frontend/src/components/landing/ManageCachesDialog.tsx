@@ -8,10 +8,23 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Loader2, Trash2, HardDrive, AlertTriangle } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Loader2, Trash2, HardDrive, AlertTriangle, GitMerge } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
+import { useToast } from "@/hooks/use-toast";
 import {
   DatasetItem,
+  MergeCleanupResult,
+  cleanupTemporaryMerges,
   deleteDataset,
   getDatasetHubStatus,
   getDatasetInfo,
@@ -42,9 +55,17 @@ const ManageCachesDialog: React.FC<Props> = ({
 }) => {
   const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
+  const { toast } = useToast();
 
   // Datasets whose local cache can be cleared = cached AND on the Hub.
   const cached = datasets.filter((d) => d.source === "both");
+
+  // Throwaway merges minted for a combine-and-train launch. Filtered
+  // independently of `cached`: a temp merge that was never pushed to the Hub is
+  // `source: "local"`, so it would miss the "both" list entirely.
+  const tempMerges = datasets.filter((d) => d.merge?.temporary);
+  const [cleanupConfirm, setCleanupConfirm] = useState(false);
+  const [cleaningUp, setCleaningUp] = useState(false);
 
   // Per-row on-disk size, fetched lazily from the info endpoint. A row with no
   // entry (fetch pending or failed) simply omits its size.
@@ -158,6 +179,42 @@ const ManageCachesDialog: React.FC<Props> = ({
     }
   };
 
+  const runCleanup = async () => {
+    setCleaningUp(true);
+    setError(null);
+    try {
+      const res: MergeCleanupResult = await cleanupTemporaryMerges(
+        baseUrl,
+        fetchWithHeaders,
+        tempMerges.map((d) => d.repo_id),
+      );
+      const parts: string[] = [
+        t("landing.manageCaches.cleanedUp", { count: res.deleted.length }),
+      ];
+      if (res.skipped.length > 0)
+        parts.push(
+          t("landing.manageCaches.cleanupSkipped", { count: res.skipped.length }),
+        );
+      if (res.hub_failed.length > 0)
+        parts.push(
+          t("landing.manageCaches.cleanupHubFailed", {
+            count: res.hub_failed.length,
+          }),
+        );
+      toast({
+        title: t("landing.manageCaches.temporaryMergesTitle"),
+        description: parts.join(" · "),
+      });
+      // Refresh the parent list so the removed merges drop out.
+      onCleared();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCleaningUp(false);
+      setCleanupConfirm(false);
+    }
+  };
+
   const busy = clearing.size > 0;
 
   return (
@@ -248,6 +305,61 @@ const ManageCachesDialog: React.FC<Props> = ({
             </div>
           )}
 
+          {tempMerges.length > 0 && (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <GitMerge className="h-4 w-4 shrink-0" />
+                <h3 className="text-sm font-medium">
+                  {t("landing.manageCaches.temporaryMergesTitle")}
+                </h3>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {t("landing.manageCaches.temporaryMergesHint")}
+              </p>
+              <div className="max-h-48 overflow-auto rounded-md border border-border divide-y divide-border">
+                {tempMerges.map((d) => (
+                  <div
+                    key={d.repo_id}
+                    className="flex items-center gap-2 p-2 text-sm"
+                  >
+                    <span className="min-w-0 flex-1 break-all">{d.repo_id}</span>
+                    {d.merge?.weighted && (
+                      <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
+                        {t("landing.manageCaches.weightedChip")}
+                      </span>
+                    )}
+                    {d.merge && d.merge.source_count > 0 && (
+                      <span className="shrink-0 text-xs text-muted-foreground">
+                        {t("landing.manageCaches.sourceCount", {
+                          n: d.merge.source_count,
+                        })}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={cleaningUp}
+                onClick={() => setCleanupConfirm(true)}
+                className="h-7"
+              >
+                {cleaningUp ? (
+                  <>
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    {t("landing.manageCaches.cleaningUp")}
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                    {t("landing.manageCaches.cleanUp")}
+                  </>
+                )}
+              </Button>
+            </div>
+          )}
+
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
           <div className="flex items-center justify-between">
@@ -281,6 +393,35 @@ const ManageCachesDialog: React.FC<Props> = ({
           </div>
         </div>
       </DialogContent>
+
+      <AlertDialog open={cleanupConfirm} onOpenChange={setCleanupConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("landing.manageCaches.cleanUpConfirmTitle")}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("landing.manageCaches.cleanUpConfirmBody")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={cleaningUp}>
+              {t("common.cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={cleaningUp}
+              onClick={(e) => {
+                // Keep the dialog mounted until runCleanup resolves; it clears
+                // cleanupConfirm itself in its finally block.
+                e.preventDefault();
+                void runCleanup();
+              }}
+            >
+              {t("landing.manageCaches.cleanUp")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 };

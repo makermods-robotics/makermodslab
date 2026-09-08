@@ -556,3 +556,36 @@ export async function getDatasetMergeStatus(
     action: "Merge status",
   });
 }
+
+/** Outcome of a temporary-merge cleanup. `deleted` is the repo ids whose local
+ * copy was removed; `skipped` names the ones kept (a training run is using
+ * them) with a reason. `hub_deleted` / `hub_failed` mirror that for the
+ * MakerMods-created Hub copy. */
+export interface MergeCleanupResult {
+  deleted: string[];
+  skipped: { repo_id: string; reason: string }[];
+  hub_deleted: string[];
+  hub_failed: { repo_id: string; reason: string }[];
+}
+
+/** Delete throwaway merges minted for a combine-and-train launch: the local
+ * directory plus any Hub copy MakerMods created for them. Pass `repoIds` to
+ * target specific ones; omit it to clean every temporary merge. A merge a
+ * training run is currently using is left alone and reported in `skipped`.
+ * POST /api/v1/datasets/merge/cleanup. */
+export async function cleanupTemporaryMerges(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoIds?: string[],
+): Promise<MergeCleanupResult> {
+  return apiRequest<MergeCleanupResult>(
+    baseUrl,
+    fetcher,
+    "/api/v1/datasets/merge/cleanup",
+    {
+      method: "POST",
+      body: repoIds ? { repo_ids: repoIds } : {},
+      action: "Clean up temporary merges",
+    },
+  );
+}
