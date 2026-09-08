@@ -140,7 +140,8 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
     const viewer = createUrdfViewer(
       containerRef.current,
       variant === "dark",
-      urdfConfig.up
+      urdfConfig.up,
+      urdfConfig.ignoreLimits ?? false
     );
     viewerRef.current = viewer; // Store reference to the viewer
 

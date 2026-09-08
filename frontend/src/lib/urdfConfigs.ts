@@ -21,6 +21,15 @@ export interface UrdfConfig {
    */
   up: string;
   /**
+   * Let the model ignore the URDF's own joint limits (`ignore-limits` on the
+   * viewer element). Set for the Maker arm: its shipped URDF carries the
+   * designer's unverified limits, and the teleop broadcast feeds raw motor
+   * angles with a still-unvalidated sign/offset — clamping to a too-narrow
+   * limit would freeze a joint short of the real one. The gripper value is
+   * range-clamped in the broadcast instead.
+   */
+  ignoreLimits?: boolean;
+  /**
    * Rewrites a mesh URL the urdf-loader asks for into a real public path.
    * Called for every `<mesh>` in the URDF.
    */
@@ -64,8 +73,10 @@ const SO101: UrdfConfig = {
 const MAKER: UrdfConfig = {
   urdfPath: "/maker-urdf/robot.urdf",
   packagePath: "/maker-urdf",
-  // The CAD export builds the arm up the +Y axis (base plate in the XZ plane).
+  // The SDK keeps the CAD's Y-up geometry and does not encode a display
+  // rotation, so mount it Y-up (base plate in the XZ plane).
   up: "+Y",
+  ignoreLimits: true,
   rewriteMeshUrl: (url) => {
     // The CAD export writes relative `meshes/part_XXX.stl`; urdf-loader
     // already resolves those against the URDF's own directory. Pin any mesh

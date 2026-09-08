@@ -40,7 +40,9 @@ export function createUrdfViewer(
   isDarkMode: boolean,
   /** Which model axis points up. The SO-101 URDF is Z-up; the Maker export
    * is Y-up, and mounting it in a Z-up scene lays it on its side. */
-  up: string = "Z"
+  up: string = "Z",
+  /** Let the model ignore the URDF's own joint limits — see UrdfConfig. */
+  ignoreLimits: boolean = false
 ): URDFViewerElement {
   // Clear any existing content
   container.innerHTML = "";
@@ -54,6 +56,7 @@ export function createUrdfViewer(
 
   // Set initial viewer properties
   viewer.setAttribute("up", up);
+  if (ignoreLimits) viewer.setAttribute("ignore-limits", "");
   setViewerColor(viewer, isDarkMode ? "#2c2b3a" : "#eff4ff");
   viewer.setAttribute("highlight-color", isDarkMode ? "#df6dd4" : "#b05ffe");
   viewer.setAttribute("auto-redraw", "true");

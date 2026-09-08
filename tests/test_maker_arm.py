@@ -698,16 +698,31 @@ def test_maker_urdf_mapping_converts_motor_degrees_to_urdf_radians() -> None:
     assert joints["link_003_joint"] == pytest.approx(0.0)
 
 
-def test_maker_urdf_mapping_has_no_gripper_joint() -> None:
-    """The shipped Maker URDF is 6 revolute joints; the gripper geometry is
-    rigid on the last link. Its angle still travels in `joints_deg` for the
-    numeric value, just not into the model."""
-    from makermodslab.teleoperate import get_maker_joint_positions_from_robot
+def test_maker_urdf_mapping_drives_the_gripper_joint() -> None:
+    """The shipped Maker URDF has a symmetric sliding gripper: the mapping
+    feeds `gripper_left_joint` (prismatic, metres) and the URDF's mimic moves
+    the other jaw. The value is clamped to the jaw's real 0..TRAVEL range."""
+    from makermodslab.teleoperate import (
+        _MAKER_GRIPPER_JAW_TRAVEL_M,
+        _MAKER_URDF_GRIPPER_JOINT,
+        get_maker_joint_positions_from_robot,
+    )
 
     joints = get_maker_joint_positions_from_robot(_MakerObsArm(_MAKER_MOTORS_ZEROED))
 
-    assert len(joints) == 6
-    assert not any("gripper" in name or "jaw" in name.lower() for name in joints)
+    assert len(joints) == 7
+    assert _MAKER_URDF_GRIPPER_JOINT in joints
+    assert 0.0 <= joints[_MAKER_URDF_GRIPPER_JOINT] <= _MAKER_GRIPPER_JAW_TRAVEL_M
+
+    # Closed at the SDK's closed-encoder angle, fully open past the open one.
+    closed = get_maker_joint_positions_from_robot(
+        _MakerObsArm({**_MAKER_MOTORS_ZEROED, "gripper": math.degrees(0.0067132066834521)})
+    )
+    wide = get_maker_joint_positions_from_robot(
+        _MakerObsArm({**_MAKER_MOTORS_ZEROED, "gripper": math.degrees(-2.5)})
+    )
+    assert closed[_MAKER_URDF_GRIPPER_JOINT] == pytest.approx(0.0, abs=1e-6)
+    assert wide[_MAKER_URDF_GRIPPER_JOINT] == pytest.approx(_MAKER_GRIPPER_JAW_TRAVEL_M)
 
 
 def test_maker_urdf_mapping_applies_per_joint_sign_and_offset(
@@ -760,7 +775,11 @@ def test_maker_urdf_mapping_pulls_one_side_of_a_bimanual_rig() -> None:
 def test_maker_urdf_mapping_never_raises_on_a_dead_bus() -> None:
     """Runs inside the broadcast tick; an exception here would kill the
     teleop loop's telemetry. Return zeros, same contract as the SO-101 path."""
-    from makermodslab.teleoperate import _MAKER_URDF_JOINTS, get_maker_joint_positions_from_robot
+    from makermodslab.teleoperate import (
+        _MAKER_URDF_GRIPPER_JOINT,
+        _MAKER_URDF_JOINTS,
+        get_maker_joint_positions_from_robot,
+    )
 
     class _DeadArm:
         def get_observation(self):
@@ -768,7 +787,8 @@ def test_maker_urdf_mapping_never_raises_on_a_dead_bus() -> None:
 
     joints = get_maker_joint_positions_from_robot(_DeadArm())
 
-    assert set(joints) == {urdf for urdf, _, _ in _MAKER_URDF_JOINTS.values()}
+    expected = {urdf for urdf, _, _ in _MAKER_URDF_JOINTS.values()} | {_MAKER_URDF_GRIPPER_JOINT}
+    assert set(joints) == expected
     assert all(v == 0.0 for v in joints.values())
 
 

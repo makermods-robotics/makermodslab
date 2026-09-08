@@ -23,6 +23,11 @@ describe("URDF_CONFIGS", () => {
     expect(URDF_CONFIGS.so101?.up).toBe("Z");
     expect(URDF_CONFIGS.maker?.up).toBe("+Y");
   });
+
+  it("ignores joint limits for the Maker model but not the SO-101", () => {
+    expect(URDF_CONFIGS.maker?.ignoreLimits).toBe(true);
+    expect(URDF_CONFIGS.so101?.ignoreLimits).toBeFalsy();
+  });
 });
 
 describe("urdfConfigFor", () => {
