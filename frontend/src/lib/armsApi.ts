@@ -34,6 +34,8 @@ export interface ArmCapabilities {
   uses_feetech_bus: boolean;
   supports_auto_calibration: boolean;
   supports_dagger: boolean;
+  /** Absent on older servers; the client falls back to the built-in SO-101. */
+  supports_remote_inference?: boolean;
   supports_port_probe: boolean;
   motion_identify_energizes_follower: boolean;
   /** The family can jog ONE port's gripper so the user sees which arm it is

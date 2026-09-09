@@ -10,10 +10,13 @@ export default {
       teleoperation: "遥操作",
       recording: "录制会话",
       inference: "推理运行",
+      remote_inference: "远程推理运行",
       replay: "回合回放",
       calibration: "标定",
       auto_calibration: "自动标定",
       wiggle: "夹爪摆动",
+      hosting: "远程遥操作托管",
+      remote_teleoperation: "远程遥操作",
     },
   },
   update: {

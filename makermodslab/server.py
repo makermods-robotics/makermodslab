@@ -38,7 +38,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub.errors import HfHubHTTPError
-from pydantic import BaseModel, Field, StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
@@ -51,10 +51,22 @@ from lerobot.policies.factory import make_policy_config
 # lookup at call time, not a bound name frozen at import).
 from . import (
     datasets as dataset_browser,
+    # The GPU half of a remote-inference run, as a LAB-LEVEL resource (S3.8):
+    # it shells out to the `modal` CLI, imports nothing from `drtc/`, and is
+    # deliberately not a session — see its module docstring.
+    modal_launcher,
     models as model_browser,
     record as record_state,
+    remote_host,
+    # The ROBOT half of the same run. Imported as a module (beside the two
+    # handlers pulled in below) because `shutdown_event` calls
+    # `stop_for_shutdown` on it — the child holds an energized arm and does not
+    # die with this process.
+    remote_inference,
+    remote_teleoperate,
     rollout as rollout_state,
     session_events,
+    sfu,
 )
 
 # Import our custom calibration functionality
@@ -146,6 +158,15 @@ from .record import (
     stop_and_wait as stop_recording_and_wait,
 )
 from .recording_preview import recording_preview
+
+# Remote inference (DRTC). The module guards its own optional-extra imports
+# (aiohttp / dotenv / livekit.api / drtc._env are one try/except that degrades
+# to `_extra_missing()`), so importing it at server module scope cannot break a
+# no-extra install — and nothing under `makermodslab.drtc` is reached at boot.
+from .remote_inference import (
+    handle_remote_inference_status,
+    handle_remote_inference_transport,
+)
 from .replay import (
     ReplayRequest,
     handle_replay_status,
@@ -163,8 +184,6 @@ from .rollout import (
     handle_stop_episode,
     handle_stop_inference,
 )
-
-# Response models for the typed /api/v1 surface (see makermodslab/schemas/).
 from .schemas.datasets import (
     DatasetHubSettingsResponse,
     DatasetHubStatusResponse,
@@ -215,9 +234,23 @@ from .schemas.nodes import (
     NodeListResponse,
     NodeRemoveResponse,
 )
+from .schemas.remote import (
+    HostingStatusResponse,
+    RemoteCommandResponse,
+    RemoteTeleoperationStatusResponse,
+    StationStatusResponse,
+)
+
+# Response models for the typed /api/v1 surface (see makermodslab/schemas/).
+from .schemas.remote_network import GpuNetworkOptions
 from .schemas.sessions import (
     CoachingCommandResponse,
     CurrentSessionResponse,
+    GpuLaunchResponse,
+    GpuStatusResponse,
+    GpuTargetsResponse,
+    RemoteInferenceStatusResponse,
+    RemoteInferenceTransportStatusResponse,
     SessionCoachingBody,
     SessionCoachingResponse,
     SessionHeartbeatBody,
@@ -226,6 +259,7 @@ from .schemas.sessions import (
     SessionStartResponse,
     SessionStopResponse,
 )
+from .schemas.sfu import SfuTokenResponse
 from .schemas.system import (
     ArmFamiliesResponse,
     AvailableCamerasResponse,
@@ -314,10 +348,13 @@ from .utils.hf_auth import (
 )
 from .utils.system import (
     handle_get_policy_extra,
+    handle_get_remote_extra,
     handle_get_training_extra,
     handle_get_wandb_extra,
     handle_install_policy_extra,
     handle_install_policy_extra_status,
+    handle_install_remote_extra,
+    handle_install_remote_extra_status,
     handle_install_training_extra,
     handle_install_training_extra_status,
     handle_install_wandb_extra,
@@ -1052,9 +1089,9 @@ def start_session(body: SessionStartBody):
     fields and cameras resolve server-side from the saved robot record, and
     `options` carries only the kind-specific fields (see schemas/sessions.py).
 
-    Startable kinds: teleoperation, recording, inference, replay,
-    calibration, auto_calibration. Only wiggle still starts through its
-    legacy flow endpoint (seconds of open-loop motion, no stop handler) —
+    Startable kinds: teleoperation, recording, inference, remote_inference,
+    replay, calibration, auto_calibration. Only wiggle still starts through
+    its legacy flow endpoint (seconds of open-loop motion, no stop handler) —
     the identity tracker observes it all the same. Calibration's mid-session
     wizard controls (complete-calibration-step, the status polls) stay on
     their existing endpoints, like recording's pause/rerecord.
@@ -1139,8 +1176,304 @@ def coaching_command(session_id: str, body: SessionCoachingBody):
     return handle_coaching_command_for_session(session_id, body.command)
 
 
+# --- Remote inference (DRTC): status + transport (v1-only surface) ---
+#
+# No start/stop verbs live here: a remote-inference session starts through
+# POST /api/v1/sessions with kind "remote_inference" and stops through
+# /sessions/{id}/stop, like every other robot-driving kind. What is left is two
+# reads. The third route this group used to carry — clear-local-override —
+# retired with the shell SFU scripts in S3.6: the Lab hosts the SFU itself now
+# (--sfu), so there is no dotenv file outliving a script to delete.
+
+
+@v1_router.get(
+    "/remote-inference-status",
+    response_model=RemoteInferenceStatusResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_status():
+    """Live telemetry of the remote-inference session: phase, elapsed/duration,
+    the child's 1 Hz STATS sample, and the transport it actually resolved.
+
+    Poll at 1 Hz — the rate the child emits at. Metrics are deliberately NOT
+    pushed on the websocket: `holds` climbing and `degrade` mean the run is
+    losing quality and the operator's response is "stop it", which is not a
+    millisecond decision; and a droppable hint channel drops under queue
+    pressure, which is exactly when a run is in trouble. Only real transitions
+    ride `session_changed`.
+
+    `stats` is null until the first sample lands (and stays null for a run that
+    never connected); every key WITHIN a sample is always present, null where
+    unknown — a dropped or malformed line degrades to "no sample this second",
+    never to a half-populated one the UI would render as real. No exclusion
+    mode: those nulls are meaningful (see RemoteInferenceStats).
+
+    Pollable unconditionally: when idle it answers
+    `remote_inference_active=false` with null stats/transport, mirroring
+    /inference-status.
+    """
+    return handle_remote_inference_status()
+
+
+@v1_router.get(
+    "/remote-inference/transport",
+    response_model=RemoteInferenceTransportStatusResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_transport():
+    """What transport a remote-inference child would resolve RIGHT NOW, and
+    whether anything is answering on it. Read-only; touches no hardware and
+    starts nothing.
+
+    Two transports, one shape. When this process runs the Lab's own SFU
+    (`makermodslab --sfu`) the url, room and credentials come from sfu.py
+    in-process and livekit.env is never read; the `sfu_*` block then carries
+    what the panel needs for the GPU side's command line — including the key
+    NAME and the file the secret lives in, never the secret. Otherwise the
+    LiveKit Cloud credentials are resolved through `drtc._env.read_env()`,
+    never `load_env()`: load_env writes os.environ, and a server that has
+    stamped a url into its own environment can never re-resolve it.
+
+    `endpoint_reachable` / `operator_present` come from one `list_participants`
+    call behind remote_inference._probe_room, bounded at 3s, and are null when
+    that probe did not run at all. A missing [remote] extra is REPORTED here
+    rather than raised: the panel's job is to tell the user what to install,
+    and the install command must name the PRIMARY CHECKOUT — an editable
+    install run from a worktree silently re-points every other session's
+    makermodslab.
+
+    Deliberately NOT refused while a session is live. Unlike
+    /arms/release-torque this reads dotenv files and asks the SFU who is in a
+    room; it touches nothing the running child owns, and a live child already
+    pinned its transport at spawn (READY echoes the effective values).
+    """
+    return handle_remote_inference_transport()
+
+
+# --- Remote inference: the GPU half (modal_launcher.py, v1-only surface) ---
+#
+# A LAB-LEVEL RESOURCE, not a session, and that is the whole design decision of
+# S3.8 (docs/drtc/SLICE3.md "S3.8 as built"). The GPU holds no hardware, so:
+# these are their own verbs rather than a `launch_gpu` field on
+# `RemoteInferenceOptions` — that would hold `robot.busy.remote_inference` for
+# the 1-3 minute cold start while the arm sat completely free; stopping a
+# session does NOT stop the GPU (a lease expiry is a safety stop whose one job
+# is de-energizing an arm, and it must not grow a network call); and the GPU
+# reaching `ready` does NOT gate the arm — `_probe_room` still does, because it
+# observes the room rather than a log line.
+
+
+class GpuStartBody(GpuNetworkOptions):
+    """The GPU side of the remote-run form. Field-for-field the subset of
+    `RemoteInferenceOptions` the container needs, with the same defaults: the
+    two halves are launched from one object precisely so horizon / fps / codec
+    / s_min cannot disagree (Portal fingerprints the wire schema and drops a
+    mismatched stream in silence).
+
+    `extra="forbid"` like every options model — a typo'd knob is a loud 422,
+    never a silently ignored one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    engine: Literal["sync", "rtc"] = "sync"
+    # Required in practice: `--policy-path` has no default in either wrapper,
+    # so an empty one is refused (gpu.launch_failed) BEFORE the spawn rather
+    # than arriving as a Click usage error 90s into a cold-start log.
+    policy_hub_id: str = ""
+    task: str = ""
+    horizon: int = 16
+    fps: int = 30
+    video_codec: Literal["H264", "MJPEG"] = "H264"
+    s_min: int = 4
+    slack: int = Field(
+        default=modal_launcher.DEFAULT_SLACK,
+        ge=modal_launcher.SLACK_MIN,
+        le=modal_launcher.SLACK_MAX,
+        strict=True,
+        description="Policy-side synchronization buffering in ticks; applied on GPU launch.",
+    )
+    # WHICH WORKSPACE PAYS. Both optional, and empty means exactly what S3.8
+    # did: the `modal` CLI resolves the profile and the environment itself
+    # (MODAL_ENVIRONMENT, then the active local profile, then the workspace
+    # default). A client that never sends them sees no change.
+    #
+    # Free-form strings rather than a Literal because the valid set is THIS
+    # MACHINE's, read from the CLI at request time — see
+    # GET /remote-inference/gpu/targets. Unknown values are refused there and
+    # again in `modal_launcher.check_target`, before anything is spawned.
+    profile: str = ""
+    environment: str = ""
+    # WHAT IT RUNS AS and WHAT IT RUNS ON (S3.8e). Both empty is S3.8's
+    # behaviour byte for byte — the checkpoint's own saved dtype, and the
+    # wrapper's own pinned GPU — so a client that never sends them sees no
+    # change.
+    #
+    # Literals here, unlike `profile` / `environment` above, because these two
+    # sets are STATIC rather than this machine's: they are annotated with the
+    # launcher's own types so the allowlist is written down once
+    # (`modal_launcher.GpuChoice` / `.ModelDtypeChoice`). `modal_launcher`
+    # checks them AGAIN before spawning, because `start()` is a plain function
+    # and a pydantic field cannot guard the callers that skip this model.
+    #
+    # A precision that is not the saved one replaces the config's `model_dtype`
+    # before the weights load; the GPU type cannot ride argv at all (the
+    # wrapper's `@app.function(gpu=…)` is evaluated at import) and travels as
+    # DRTC_GPU in the child env.
+    model_dtype: modal_launcher.ModelDtypeChoice = ""
+    gpu: modal_launcher.GpuChoice = ""
+    # HOW HARD IT WORKS PER CHUNK (S3.8f): the flow-matching / denoising steps
+    # the sampler takes for one action chunk. Null (the default) is the
+    # checkpoint's own count and passes no flag at all — an int has no empty
+    # string, so null is what "" is for the two above.
+    #
+    # A RANGE rather than a Literal, unlike those two, because every integer in
+    # it is meaningful — the sampler simply integrates that many times. The
+    # bounds are the launcher's (`modal_launcher.FLOW_STEPS_MIN/MAX`) and it
+    # checks them again before spawning, because `start()` is a plain function
+    # and a pydantic field cannot guard the callers that skip this model.
+    #
+    # Which config field it writes is per family and is resolved in the
+    # container; if the target checkpoint's config carries no such field at
+    # all, the launcher DROPS the knob before spawning rather than paying for a
+    # cold start that ends in the container's refusal (`flow_steps_applied` in
+    # the GPU status says so).
+    flow_steps: int | None = Field(
+        default=None,
+        ge=modal_launcher.FLOW_STEPS_MIN,
+        le=modal_launcher.FLOW_STEPS_MAX,
+    )
+    # EXTRA CAMERA VIEWS to declare on the checkpoint before the weights load
+    # (S3.8g), by role name — `["cam2"]` on a checkpoint published with
+    # `cam0`/`cam1`. Empty (the default) is the checkpoint's own views and
+    # passes no flag, so a client that never sends it sees no change.
+    #
+    # The only knob here that changes the WIRE rather than the GPU's own work:
+    # each role becomes an `observation.images.<role>` input feature, so the
+    # policy expects one more video track and the robot side must publish one
+    # (bind it in the same `camera_bindings` the checkpoint's own roles use).
+    #
+    # A LIST rather than a comma-joined string, because that is what it is;
+    # `modal_launcher.build_argv` does the joining, the wrappers' Click
+    # parameter being a str. `max_length` and the per-item pattern are the
+    # launcher's own (`MAX_EXTRA_IMAGE_ROLES`, `is_valid_image_role`) and it
+    # checks them AGAIN before spawning, because `start()` is a plain function
+    # and a pydantic field cannot guard the callers that skip this model.
+    #
+    # Dropped before the spawn for a checkpoint whose view count is fixed by
+    # its architecture, on `flow_steps`' rule (`extra_image_roles_applied` in
+    # the GPU status says so) — a role remembered from a MolmoAct2 run must not
+    # cost a cold start after the operator switches checkpoint.
+    extra_image_roles: list[str] = Field(
+        default_factory=list,
+        max_length=modal_launcher.MAX_EXTRA_IMAGE_ROLES,
+    )
+
+
+@v1_router.get(
+    "/remote-inference/gpu/targets",
+    response_model=GpuTargetsResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_gpu_targets(profile: str = ""):
+    """This machine's Modal profiles, and one profile's environments.
+
+    What the two pickers above Start GPU are built from, so a launch can be
+    billed to a chosen workspace WITHOUT `modal profile activate` — that
+    rewrites ~/.modal.toml, which every other terminal on this machine shares,
+    and a web request has no business doing that. The profile rides the child's
+    MODAL_PROFILE instead, and the environment rides `modal run --env`.
+
+    `profile` picks whose environments to list (empty: the active one), because
+    `modal environment list` only ever describes one profile's workspace.
+
+    Read-only and never 500: two bounded `modal … list --json` subprocesses, no
+    mutating subcommand, and ~/.modal.toml — which holds every profile's
+    token_id and token_secret — is never opened. A missing CLI, an expired
+    token or a listing this build cannot parse come back as a coded `error` in
+    the body, because a failed listing is not a failed launch: with no selection
+    the CLI still resolves the target on its own."""
+    return modal_launcher.list_targets(profile)
+
+
+@v1_router.post(
+    "/remote-inference/gpu/start",
+    response_model=GpuLaunchResponse,
+    tags=["sessions"],
+)
+def start_remote_inference_gpu(body: GpuStartBody):
+    """Launch the policy server on Modal, attached, from this machine.
+
+    Attached on purpose (no `--detach`): the local `modal run` process is the
+    app's lifeline, so stopping it stops the app — which is the cost-safety
+    property, and it means the GPU dies with the Lab. Detached would buy
+    "survives a restart" in exchange for orphaned A100s nobody knows about.
+
+    The API secret is NEVER in the command line: both wrappers' `main()` falls
+    back to LIVEKIT_API_KEY / LIVEKIT_API_SECRET from the environment, and the
+    launcher passes them there instead of in argv, which is world-readable in
+    `ps` on this machine.
+
+    Deliberately NOT refused while a local training run holds this machine: a
+    Modal A100 is not this machine's GPU.
+    """
+    return modal_launcher.start(
+        engine=body.engine,
+        policy_hub_id=body.policy_hub_id,
+        task=body.task,
+        horizon=body.horizon,
+        fps=body.fps,
+        video_codec=body.video_codec,
+        s_min=body.s_min,
+        slack=body.slack,
+        region=body.region,
+        tolerance=body.tolerance,
+        profile=body.profile,
+        environment=body.environment,
+        model_dtype=body.model_dtype,
+        gpu=body.gpu,
+        flow_steps=body.flow_steps,
+        extra_image_roles=body.extra_image_roles,
+    )
+
+
+@v1_router.post(
+    "/remote-inference/gpu/stop",
+    response_model=GpuStatusResponse,
+    tags=["sessions"],
+)
+def stop_remote_inference_gpu():
+    """Stop the GPU policy server (SIGTERM→SIGKILL over its process group).
+
+    Returns while the group is still going down, in state `stopping`; the
+    launcher's own stdout pump lands it in `idle`. 409 `gpu.not_running` when
+    there is nothing to stop. Never touches the arm — a live remote-inference
+    session keeps running and its watchdogs report the empty room, which is a
+    better diagnosis than a stop the user did not ask for."""
+    return modal_launcher.stop()
+
+
+@v1_router.get(
+    "/remote-inference/gpu",
+    response_model=GpuStatusResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_gpu():
+    """The GPU launcher's state: idle | starting | ready | failed | stopping,
+    plus the container's own phase, the room it was pinned to, the log path and
+    the idle auto-stop countdown.
+
+    Pollable unconditionally, and a poll is also one of the two things (with
+    the log pump) that can notice a cold start that overran or a ready GPU
+    nobody is using — neither deadline needs a thread of its own.
+
+    `state == "ready"` is a HINT derived from the container's stdout, never the
+    authority: the gate on energizing the arm stays the session's own room
+    probe."""
+    return modal_launcher.status()
+
+
 @router.get("/health", response_model=HealthResponse, tags=["system"])
-def health_check():
+def health_check(request: Request):
     """Node identity + capability document.
 
     Doubles as the node-registry verify handshake: a discovered peer is
@@ -1159,8 +1492,186 @@ def health_check():
             # Present only when the torch probe sees an accelerator — an
             # absent key means none/unknown, never guess (see HealthResponse).
             **({"gpu": gpu} if (gpu := probe_gpu()) else {}),
+            # Present only when this process runs (or fronts) a LiveKit SFU
+            # (--sfu): the signalling URL as reachable from the caller's
+            # side. Absent = no SFU here; a peer wanting one asks another
+            # node. Same absent-means-unknown rule as gpu.
+            **(
+                {"sfu": {"url": sfu.sfu_url(request.url.hostname or "localhost")}}
+                if sfu.sfu_enabled()
+                else {}
+            ),
+            # Present only while a hosting session is live — the robot this
+            # station offers for remote teleoperation. A laptop's station
+            # picker filters on it. Same absent-means-none rule.
+            **_hosting_capability(),
         },
     }
+
+
+def _hosting_capability() -> dict:
+    descriptor = remote_host.current_descriptor
+    if not remote_host.hosting_active or not descriptor:
+        return {}
+    return {
+        "hosting": {
+            "robot": descriptor["robot"],
+            "arm_type": descriptor["arm_type"],
+            "phase": remote_host.phase,
+            "active_operator": remote_host.seat_holder(),
+        }
+    }
+
+
+# --- SFU token broker (v1-only surface; see v1_router note above) ---
+
+
+class SfuTokenBody(BaseModel):
+    """Request for a LiveKit room token (sfu.py). Every field is optional:
+    the server picks a unique identity and the station's default room, and
+    `operator` is the role a laptop or a policy worker wants. `robot` is for
+    the one participant that publishes cameras/state (normally this station
+    itself, in a later phase); `viewer` subscribes only."""
+
+    identity: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")] | None = None
+    room: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")] | None = None
+    role: Literal["robot", "operator", "viewer"] = "operator"
+    ttl_seconds: int = Field(sfu.DEFAULT_TTL_SECONDS, ge=sfu.MIN_TTL_SECONDS, le=sfu.MAX_TTL_SECONDS)
+
+
+@v1_router.post("/sfu/token", response_model=SfuTokenResponse, tags=["sfu"])
+def issue_sfu_token(body: SfuTokenBody, request: Request):
+    """Sign a short-lived, role-scoped LiveKit room token.
+
+    The station is the only party holding the SFU secret, so participants
+    (a laptop's makermodslab, a Modal worker, a browser) get their JWT here
+    instead of carrying the secret. The URL is built from the host the
+    caller reached THIS API on — the one address known to be routable from
+    where they sit. 409 sfu.disabled when the launcher wasn't started with
+    --sfu: the remedy is a restart with the flag, not a retry."""
+    if not sfu.sfu_enabled():
+        raise ApiError(
+            409,
+            "No LiveKit SFU is configured on this node. Start it with `makermodslab --sfu`.",
+            code=ErrorCode.SFU_DISABLED,
+        )
+    api_key, api_secret = sfu.api_keys()
+    identity = body.identity or sfu.default_identity(body.role)
+    # Single seat: while a hosting session's seat is held, only its holder
+    # (a reconnect) gets another operator token. The room cap is the SFU's
+    # half of the same rule.
+    if body.role == "operator":
+        holder = remote_host.seat_holder()
+        if holder is not None and holder != identity:
+            raise ApiError(
+                409,
+                f"This station's operator seat is held by {holder!r}. Only one operator drives at a time.",
+                code=ErrorCode.SFU_SEAT_TAKEN,
+                details={"holder": holder},
+            )
+    room = body.room or sfu.default_room(get_instance_id())
+    token, expires_at = sfu.mint_token(
+        api_key=api_key,
+        api_secret=api_secret,
+        identity=identity,
+        room=room,
+        role=body.role,
+        ttl_seconds=body.ttl_seconds,
+    )
+    return {
+        "url": sfu.sfu_url(request.url.hostname or "localhost"),
+        "token": token,
+        "room": room,
+        "identity": identity,
+        "role": body.role,
+        "expires_at": expires_at,
+    }
+
+
+# --- Remote teleoperation (v1-only surface; see v1_router note above) ---
+
+
+@v1_router.get("/hosting", response_model=HostingStatusResponse, tags=["remote"])
+def get_hosting_status(request: Request):
+    """The station's hosting descriptor + status (remote_host.py). An
+    operator node reads this (through its registry) to learn the room, the
+    codec/fps, and the motor/camera schema before joining; the URL is
+    derived from the host the caller reached this API on."""
+    return remote_host.handle_hosting_status(request.url.hostname or "localhost")
+
+
+@v1_router.get("/remote-teleoperation", response_model=RemoteTeleoperationStatusResponse, tags=["remote"])
+def get_remote_teleoperation_status():
+    """The operator side's status (remote_teleoperate.py): which station,
+    which room, the remote cameras being re-streamed, Portal RTT metrics."""
+    return remote_teleoperate.handle_remote_teleoperation_status()
+
+
+@v1_router.get("/remote-teleoperation/camera/{name}", tags=["remote"])
+def get_remote_teleoperation_camera(name: str):
+    """MJPEG re-stream of one remote camera during a remote teleoperation
+    session, from the frames Portal delivers — the existing camera tiles
+    consume it unchanged. 404 when no session (or no such camera)."""
+    if not remote_teleoperate.remote_teleoperation_active or name not in remote_teleoperate.current_cameras:
+        raise ApiError(404, f"No remote camera named {name!r} is streaming.", code=ErrorCode.ROBOT_NOT_FOUND)
+    return StreamingResponse(
+        remote_teleoperate.camera_stream(name), media_type="multipart/x-mixed-replace; boundary=frame"
+    )
+
+
+class StationRobotBody(BaseModel):
+    """PUT /api/v1/station/robot — the robot this station hosts; null clears
+    the choice (hosting stops once idle and waits for a new pick)."""
+
+    robot: str | None = None
+
+
+@v1_router.get("/station", response_model=StationStatusResponse, tags=["remote"])
+def get_station_status():
+    """Station mode posture (remote_host.py): whether this machine was started
+    with --host, which robot it hosts, which saved robots it could host."""
+    return remote_host.handle_station_status()
+
+
+@v1_router.put("/station/robot", response_model=StationStatusResponse, tags=["remote"])
+def set_station_robot(body: StationRobotBody):
+    """Choose (or clear) the hosted robot. Remembered across restarts; a
+    parked, unseated hosting session of another robot yields and the
+    supervisor re-hosts the new choice within seconds; an engaged one is
+    refused with session.held."""
+    return remote_host.set_station_robot(body.robot)
+
+
+@v1_router.post("/remote-teleoperation/home", response_model=RemoteCommandResponse, tags=["remote"])
+def remote_teleoperation_home():
+    """Park the station's arm (return to rest, torque off) and hold it there
+    until Engage. Forwarded to the station as a Portal RPC; the station
+    honours it only from the seated operator."""
+    return remote_teleoperate.handle_remote_home()
+
+
+@v1_router.post("/remote-teleoperation/engage", response_model=RemoteCommandResponse, tags=["remote"])
+def remote_teleoperation_engage():
+    """Re-energize the station's arm after a Home, with a soft start."""
+    return remote_teleoperate.handle_remote_engage()
+
+
+@v1_router.get("/system/remote-extra", response_model=ExtraStatus, tags=["system"])
+def get_remote_extra():
+    """Whether the `remote` extra (LiveKit Portal's lerobot plugins) is importable."""
+    return handle_get_remote_extra()
+
+
+@v1_router.post("/system/remote-extra/install", response_model=InstallStartResponse, tags=["system"])
+def install_remote_extra():
+    """Spawn the Portal plugins' pip install as a background subprocess. No-op if already running."""
+    return handle_install_remote_extra()
+
+
+@v1_router.get("/system/remote-extra/install-status", response_model=InstallStatusResponse, tags=["system"])
+def install_remote_extra_status():
+    """Current install state plus any pending log lines (drained on read)."""
+    return handle_install_remote_extra_status()
 
 
 # --- Node registry (v1-only surface; see v1_router note above) ---
@@ -1172,7 +1683,7 @@ class AddNodeBody(BaseModel):
 
 
 @v1_router.get("/nodes", response_model=NodeListResponse, tags=["nodes"])
-def list_nodes(force: bool = False):
+def list_nodes(request: Request, force: bool = False):
     """All known nodes: this server first (is_self=true, built from the same
     health fields the handshake reads, so clients render one uniform list),
     then every registered peer. Peers whose last probe is older than the TTL
@@ -1183,7 +1694,7 @@ def list_nodes(force: bool = False):
     pass bypasses the TTL — discovery runs now and every known entry is
     probed now — so a refresh button answers with the world as it is, not as
     it was up to TTL seconds ago."""
-    health = health_check()
+    health = health_check(request)
     self_entry = {
         "url": None,  # a server doesn't know its own external address
         "instance_id": health["instance_id"],
@@ -3070,9 +3581,11 @@ def get_checkpoint_policy_config(job_id: str, step: int):
     """Return the UX-relevant slice of a checkpoint's pretrained_model config:
     policy_type, image_features (per-camera height/width), requires_task, the
     flat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference
-    modal uses to flag a single-arm/bimanual mismatch, and trained_on_robot_type
-    (the arm the checkpoint was trained on, for the fine-tune panel's cross-arm
-    warning; null when it can't be established)."""
+    modal uses to flag a single-arm/bimanual mismatch, the n_action_steps /
+    chunk_size geometry (n_action_steps is the ceiling on a remote-inference
+    horizon), and trained_on_robot_type (the arm the checkpoint was trained on,
+    for the fine-tune panel's cross-arm warning; null when it can't be
+    established)."""
     try:
         return job_registry.get_policy_config_summary(job_id, step)
     except JobNotFoundError as exc:
@@ -4447,6 +4960,11 @@ def camera_preview_stream(index: int, unique_id: str | None = None):
             status_code=409,
             detail="Inference is active — the cameras are in use. Stop the run to preview them.",
         )
+    if remote_host.hosting_active or remote_host.releasing:
+        raise HTTPException(
+            status_code=409,
+            detail="Hosting is active — the cameras are in use. Stop hosting to preview them.",
+        )
     identified = identify_cv2_index(unique_id, index)
     if identified is None:
         raise HTTPException(
@@ -4491,16 +5009,18 @@ def _record_with_clean(record: dict) -> dict:
 
     `is_clean` folds every arm of the mode (gates teleop/record, which drive
     leaders AND followers); `follower_ready` scopes to the follower side so
-    follower-only activities (inference, replay) aren't blocked by a leader arm
-    they never touch). `arm_available` says whether the record's arm type is a
-    family this install has registered: a hand-edited or extension-provided
-    id nobody installed lists (never hidden, never rewritten) as unavailable,
-    is never clean, and cannot start anything."""
+    follower-only activities (inference, replay, hosting) aren't blocked by a
+    leader arm they never touch; `leader_ready` is the mirror for remote
+    teleoperation, which drives a STATION's follower with this node's leader.
+    The record's `arms` layout says which of these the UI should even show.
+    `arm_available` says whether the record's arm type is a family this install
+    has registered; unknown ids remain visible but cannot start hardware."""
     return {
         **record,
         "arm_available": is_known_arm_type(record.get("arm_type")),
         "is_clean": is_robot_record_clean(record),
         "follower_ready": is_robot_record_clean(record, arms="follower"),
+        "leader_ready": is_robot_record_clean(record, arms="leader"),
     }
 
 
@@ -4696,6 +5216,24 @@ def migrate_state_home():
 def startup_event():
     """One-time startup diagnostics surfaced in the server terminal."""
     warn_if_cuda_mismatch()
+    # A Modal app OUTLIVES the `modal run` client that started it (the client
+    # only tells Modal to stop on SIGINT), so a Lab that was hard-killed —
+    # SIGKILL, a crash, a power cut — can leave an A100 billing with nobody
+    # attached. If the last run left an app id on disk and nothing is running
+    # here, stop it. On a background thread, best-effort, and it never blocks
+    # or refuses a launch; what it did shows up as the idle status's message.
+    modal_launcher.reap_orphan_app_async()
+
+
+@app.on_event("startup")
+def start_station_mode():
+    """`makermodslab --host <robot>`: keep that robot hosted for remote
+    teleoperation (remote_host.start_station_mode) — parked from startup,
+    re-armed after any local session, no browser required."""
+    if os.environ.get(remote_host.STATION_ENV) == "1":
+        remote_host.start_station_mode(
+            os.environ.get(remote_host.STATION_ROBOT_ENV, "").strip() or None, manager
+        )
 
 
 # Strong reference so the loop's task set can't drop the pump mid-flight.
@@ -4734,6 +5272,35 @@ async def shutdown_event():
     # reload that this same process survives.
     job_registry.shutdown()
 
+    # Same for the station supervisor (`--host`): it re-arms hosting every few
+    # seconds whenever nothing holds the hardware, and the stops below are
+    # exactly "nothing holds the hardware" from its point of view.
+    remote_host.stop_station_mode()
+
+    # THEN the GPU, before anything else here spends its (bounded but real)
+    # time, because this is the one child that is BILLED BY THE MINUTE and the
+    # one whose death has to be a specific signal. `modal run` tears its app
+    # down from `except KeyboardInterrupt` and nowhere else, so the client has
+    # to receive a SIGINT and be given a moment to make that call; if this
+    # process leaves first — a uvicorn --reload restart on any save under
+    # makermodslab/, a Ctrl-C on the dev launcher, a `makermodslab --stop` —
+    # the client is orphaned or killed and a Modal A100 keeps running for the
+    # 5-7 minutes Modal's own heartbeat timeout takes to notice.
+    #
+    # Synchronous (in a thread) rather than fire-and-forget, for the same
+    # reason: a stop that outlives the process it runs in is not a stop. It
+    # costs ~2s when a GPU is up and returns immediately when none is.
+    #
+    # Ahead of the arm stops below on purpose. A remote run whose policy
+    # vanishes for the second or two this takes is a robot side that stops
+    # receiving actions and holds — and it is being stopped moments later
+    # anyway, by the same handler, with its own return-to-rest.
+    try:
+        if await asyncio.to_thread(modal_launcher.stop_for_shutdown):
+            logger.info("Stopped the GPU policy server on shutdown")
+    except Exception:
+        logger.exception("Failed to stop the GPU policy server during shutdown")
+
     # Stop the AVFoundation pump first so its next tick can't interleave with
     # shutdown (and so --reload restarts don't log a destroyed-pending-task).
     if _avf_pump_task is not None:
@@ -4756,6 +5323,18 @@ async def shutdown_event():
     # ever has real work — gathered concurrently anyway, both because it's
     # cheap and as a defensive measure if that invariant is ever violated,
     # rather than paying each stop's worst case one after another.
+    #
+    # REMOTE INFERENCE belongs here rather than beside the GPU stop above, and
+    # it is the sharpest case on the list: its child is spawned with
+    # `start_new_session=True`, so the SIGTERM/SIGINT that ends this worker
+    # never reaches it, and it ignores stdin EOF by design — `STOP` on that
+    # stdin is the ONLY thing that makes it return the arm before releasing
+    # torque. It is deliberately AFTER the GPU stop (which has already
+    # completed above, awaited, so the two never overlap): the child losing its
+    # policy for a second is a robot side that stops receiving actions and
+    # holds, which is exactly the state a return-to-rest wants to start from,
+    # whereas stopping the arm first would leave a GPU billing while we waited
+    # out its return.
     results = await asyncio.gather(
         asyncio.to_thread(stop_teleoperation_and_wait),
         asyncio.to_thread(stop_recording_and_wait),
@@ -4763,6 +5342,14 @@ async def shutdown_event():
         asyncio.to_thread(auto_calibration_batch_manager.stop_and_wait),
         asyncio.to_thread(handle_stop_inference),
         asyncio.to_thread(stop_replay_and_wait),
+        asyncio.to_thread(remote_inference.stop_for_shutdown),
+        # Hosting drives the follower from an in-process thread like teleop
+        # does — an engaged arm returns to rest, then torque is released.
+        # Remote teleoperation only holds the leader, but it must leave the
+        # room so the station parks the follower now rather than after its
+        # silent-loss grace.
+        asyncio.to_thread(remote_host.stop_hosting_for_shutdown),
+        asyncio.to_thread(remote_teleoperate.stop_for_shutdown),
         return_exceptions=True,
     )
     labels = (
@@ -4772,6 +5359,9 @@ async def shutdown_event():
         "auto-calibration batch",
         "inference",
         "replay",
+        "remote inference",
+        "hosting",
+        "remote teleoperation",
     )
     for label, result in zip(labels, results, strict=True):
         if isinstance(result, Exception):

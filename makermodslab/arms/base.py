@@ -297,6 +297,10 @@ class ArmFamily(ABC):
     uses_feetech_bus: bool
     supports_auto_calibration: bool
     supports_dagger: bool
+    # The current DRTC robot entrypoints can safely drive this family. False
+    # by default so an extension opts in only after wiring its robot config,
+    # first-action ease and return-to-rest path.
+    supports_remote_inference: bool = False
 
     # --- calibration procedure ----------------------------------------------
     # One of CALIBRATION_KINDS; the registry checks the kind's prerequisites.

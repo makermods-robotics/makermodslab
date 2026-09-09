@@ -10,6 +10,7 @@ export type RobotMode = "single" | "bimanual";
 // pure and independently testable (this module pulls in the API context on
 // import). Re-exported here because ArmType's importers already use this path.
 import type { ArmType } from "@/lib/armTypes";
+import type { RobotArms } from "@/lib/robotSetupGap";
 export type { ArmType } from "@/lib/armTypes";
 
 export interface RobotRecord {
@@ -31,6 +32,13 @@ export interface RobotRecord {
   // leader ports and calibrations server-side (different hardware, separate
   // calibration library).
   leader_kind: string;
+  // The arm LAYOUT on this machine: a leader+follower pair ("both" — what
+  // every record written before remote teleoperation reads back as), a
+  // follower-only robot station, or a leader-only controller for a remote
+  // robot. `mode` composes with it (two followers, two leaders, or both
+  // pairs). Hidden arms keep their port/config fields — switching back
+  // restores them.
+  arms: RobotArms;
   // Primary pair (single mode), or the LEFT arm pair (bimanual mode).
   leader_port: string;
   follower_port: string;
@@ -52,6 +60,10 @@ export interface RobotRecord {
   // is_clean so a missing LEADER setup — which they never touch — can't block
   // them. Mirrors the backend's is_robot_record_clean(record, arms="follower").
   follower_ready: boolean;
+  // Leader-side readiness — the twin of follower_ready for the activity that
+  // drives with the leader alone (remote teleoperation). Mirrors the
+  // backend's is_robot_record_clean(record, arms="leader").
+  leader_ready: boolean;
 }
 
 // The setup-gap diagnosis moved to lib/robotSetupGap.ts so it stays a pure,
@@ -62,8 +74,15 @@ export {
   robotSetupGap,
   robotSetupGaps,
   formatRobotSetupGap,
+  robotLayoutReady,
+  setupScopeForArms,
 } from "@/lib/robotSetupGap";
-export type { ArmKey, RobotSetupGaps } from "@/lib/robotSetupGap";
+export type {
+  ArmKey,
+  RobotArms,
+  RobotSetupGaps,
+  SetupScope,
+} from "@/lib/robotSetupGap";
 
 const SELECTED_KEY = "makermodslab.selectedRobot";
 

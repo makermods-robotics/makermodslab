@@ -70,6 +70,14 @@ export function supportsDagger(info: ArmFamilyInfo | undefined): boolean {
   return info ? info.capabilities.supports_dagger : true;
 }
 
+export function supportsRemoteInference(
+  info: ArmFamilyInfo | undefined,
+): boolean {
+  return info
+    ? (info.capabilities.supports_remote_inference ?? info.id === "so101")
+    : true;
+}
+
 export function supportsGripperWiggle(
   info: ArmFamilyInfo | undefined,
 ): boolean {

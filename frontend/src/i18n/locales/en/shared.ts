@@ -15,10 +15,13 @@ export default {
       teleoperation: "teleoperation",
       recording: "a recording session",
       inference: "an inference run",
+      remote_inference: "a remote inference run",
       replay: "an episode replay",
       calibration: "a calibration",
       auto_calibration: "an auto-calibration",
       wiggle: "a gripper wiggle",
+      hosting: "remote-teleop hosting",
+      remote_teleoperation: "remote teleoperation",
     },
   },
   update: {

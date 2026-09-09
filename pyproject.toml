@@ -19,6 +19,12 @@ dependencies = [
     "websockets>=15.0.1",
     "uvicorn>=0.24.0",
     "psutil>=5.9.0",
+    # Signs LiveKit room tokens for the bundled SFU (sfu.py, `--sfu`). Pure
+    # Python (pyjwt + protobuf stubs); the server binary itself is NOT a
+    # Python dependency — it is resolved from PATH at launch. CORE, not an
+    # extra: the token route is part of the base surface, and remote
+    # inference's own preflight (the room probe) signs with it too.
+    "livekit-api>=1.0",
     # Pinned to makermods-robotics/lerobot @ arm/makermods-combined (eaab69339), the
     # two-parent merge of robot/makermods-maker-arm (af9072a8c — the previous pin,
     # via the Maker-Mods org) and arm/makermods-metal (85a3000d4). Upstream v0.6.2
@@ -48,6 +54,32 @@ dev = [
     "makermodslab[test]",
     "ruff>=0.6",
     "pre-commit>=3.0",
+]
+# Remote teleoperation / inference over LiveKit Portal: the Portal FFI package
+# itself (the remote-inference child imports it; `makermodslab.drtc`) and its
+# two lerobot plugins (remote_host.py / remote_teleoperate.py). Every import
+# is lazy and refuses with system.extra_missing when absent, so a normal
+# install never pulls these. Opt-in because livekit-portal's PyPI wheels are
+# tagged cp312 + Linux x86_64/aarch64 + Apple Silicon only — a packaging
+# artifact (the lib is a ctypes cdylib), to be fixed in our fork.
+#
+# All three are pinned EXACTLY, to one version: the robot and the GPU side
+# must run the identical wire implementation — Portal fingerprints the schema
+# and silently drops packets whose fingerprint differs, which surfaces as a
+# healthy-looking session with 0 chunks and 0 observations rather than an
+# error. The GPU side's pin lives in the two `drtc/modal_policy*.py` wrappers
+# and the in-app installer's in utils/system.REMOTE_INSTALL_TARGET; bump them
+# together or not at all. The plugins ship in lockstep with Portal, so they
+# take the same version.
+#
+# `livekit-api` is NOT here: since the bundled SFU landed it is a CORE
+# dependency (the token route signs with it), so listing it again would only
+# invite the two bounds to drift.
+remote = [
+    "livekit-portal==0.2.4",
+    "lerobot-teleoperator-livekit==0.2.4",
+    "lerobot-robot-livekit==0.2.4",
+    "python-dotenv>=1",
 ]
 test = [
     "pytest>=7.0",

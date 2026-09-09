@@ -492,6 +492,18 @@ class NodeRegistry:
         """
         return httpx.Client(transport=self._transport, timeout=self._probe_timeout, trust_env=False)
 
+    def fetch_peer_hosting(self, instance_id: str) -> Any:
+        """The peer's own GET /api/v1/hosting body (remote_host's descriptor),
+        for the operator side of remote teleoperation."""
+        return self._fetch_peer_path(instance_id, "/api/v1/hosting")
+
+    def request_peer_sfu_token(self, instance_id: str, body: dict) -> Any:
+        """POST the peer's /api/v1/sfu/token — the station is the only signer
+        for its room. Refusals (409 sfu.disabled) pass through as
+        PeerJobRefusalError with the peer's status and body, like every other
+        mutating peer call."""
+        return self._send_peer_request(instance_id, "POST", "/api/v1/sfu/token", json=body)
+
     def _fetch_peer_path(self, instance_id: str, path: str) -> Any:
         """One read of a peer, passed through verbatim.
 
@@ -513,7 +525,14 @@ class NodeRegistry:
         except (httpx.HTTPError, ValueError) as exc:
             raise NodeUnreachableError(f"could not fetch {peer.url}{path}: {exc}") from exc
 
-    def _send_peer_request(self, instance_id: str, method: str, path: str, params: dict | None = None) -> Any:
+    def _send_peer_request(
+        self,
+        instance_id: str,
+        method: str,
+        path: str,
+        params: dict | None = None,
+        json: dict | None = None,
+    ) -> Any:
         """One MUTATING call to a peer (POST/DELETE), refusals passed through.
 
         Same pre-flight (resolve) and client discipline as _fetch_peer_path,
@@ -529,7 +548,7 @@ class NodeRegistry:
         peer = self.resolve(instance_id)
         try:
             with self._peer_client() as client:
-                response = client.request(method, peer.url + path, params=params)
+                response = client.request(method, peer.url + path, params=params, json=json)
         except httpx.HTTPError as exc:
             raise NodeUnreachableError(f"could not reach {peer.url}{path}: {exc}") from exc
         if response.is_error:

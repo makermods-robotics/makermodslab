@@ -135,6 +135,7 @@ class SO101Family(ArmFamily):
     # The Feetech sweep managers (calibrate.py / auto_calibrate.py).
     calibration_kind = "range_sweep"
     supports_dagger = True
+    supports_remote_inference = True
 
     single_robot_type = "so101_follower"
     bimanual_robot_type = "bi_so_follower"

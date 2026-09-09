@@ -88,6 +88,7 @@ def describe_family(family: ArmFamily) -> dict:
             "uses_feetech_bus": family.uses_feetech_bus,
             "supports_auto_calibration": family.supports_auto_calibration,
             "supports_dagger": family.supports_dagger,
+            "supports_remote_inference": family.supports_remote_inference,
             "supports_port_probe": family.follower_probe_protocol is not None,
             "motion_identify_energizes_follower": family.motion_identify_energizes_follower,
             "supports_gripper_wiggle": family.supports_gripper_wiggle,

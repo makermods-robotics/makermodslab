@@ -11,6 +11,7 @@ import library from "./library";
 import dialogs from "./dialogs";
 import robotConfig from "./robotConfig";
 import inference from "./inference";
+import remoteInference from "./remoteInference";
 import training from "./training";
 import pages from "./pages";
 import shared from "./shared";
@@ -37,6 +38,7 @@ export default {
   dialogs,
   robotConfig,
   inference,
+  remoteInference,
   training,
   pages,
   shared,

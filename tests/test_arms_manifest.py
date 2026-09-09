@@ -286,6 +286,9 @@ _VALID_OPTIONS: dict[str, dict] = {
     "replay": {"repo_id": "u/d", "episode_index": 0},
     "calibration": {"device_type": "robot", "arm": "left"},
     "auto_calibration": {"arms": [{"device_type": "robot", "arm": "left"}]},
+    "hosting": {},
+    "remote_inference": {"policy_ref": "user/repo@checkpoints/000050"},
+    "remote_teleoperation": {"station": "station-id"},
 }
 
 
@@ -611,6 +614,7 @@ SO101_ENTRY = {
         "uses_feetech_bus": True,
         "supports_auto_calibration": True,
         "supports_dagger": True,
+        "supports_remote_inference": True,
         "supports_port_probe": False,
         "motion_identify_energizes_follower": False,
         "supports_gripper_wiggle": False,
@@ -664,6 +668,7 @@ METAL_ENTRY = {
         "uses_feetech_bus": False,
         "supports_auto_calibration": False,
         "supports_dagger": False,
+        "supports_remote_inference": False,
         "supports_port_probe": True,
         "motion_identify_energizes_follower": True,
         "supports_gripper_wiggle": True,

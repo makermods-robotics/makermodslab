@@ -55,7 +55,6 @@ export function useSpotlightTarget(selector: string): SpotlightRect | null {
   useLayoutEffect(() => {
     let frame: number | null = null;
     let observedElement: Element | null = null;
-    let resizeObserver: ResizeObserver;
 
     const measureNow = () => {
       const el = document.querySelector(selector);
@@ -88,7 +87,9 @@ export function useSpotlightTarget(selector: string): SpotlightRect | null {
       });
     };
 
-    resizeObserver = new ResizeObserver(scheduleMeasure);
+    // Declared after the closures above that use it; they only run once
+    // measureNow() is called below, so the binding is initialized by then.
+    const resizeObserver = new ResizeObserver(scheduleMeasure);
 
     measureNow();
 

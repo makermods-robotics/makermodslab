@@ -6,6 +6,7 @@ import React, {
   useState,
 } from "react";
 import InferenceSessionDialog from "@/components/inference/InferenceSessionDialog";
+import RemoteSessionDialog from "@/components/inference/RemoteSessionDialog";
 
 /**
  * Hosts the live-inference session dialog above the router — /inference is no
@@ -42,13 +43,26 @@ export interface CoachingLineage {
   trainingDatasetRepoId?: string;
 }
 
+/**
+ * Which session the dialog is holding. `inference` is a LOCAL rollout (plain,
+ * scored or coached); `remote_inference` is a DRTC run — the same robot and the
+ * same checkpoint with the policy on a remote GPU.
+ *
+ * It picks WHICH dialog renders, because the two read different status
+ * endpoints and hold their leases off different flags. They share the frame,
+ * not the machinery — see `components/inference/RemoteSessionDialog`.
+ */
+export type InferenceSessionKind = "inference" | "remote_inference";
+
 interface InferenceSessionContextValue {
   /** `sessionId` is the identity POST /api/v1/sessions returned — the dialog
    * heartbeats its lease and stops it by id. `lineage` is coaching-only: what
-   * the summary needs to offer the merge and the fine-tune. */
+   * the summary needs to offer the merge and the fine-tune. `kind` defaults to
+   * a local run, so every existing caller is unchanged. */
   openInferenceSession: (
     sessionId: string,
     lineage?: CoachingLineage | null,
+    kind?: InferenceSessionKind,
   ) => void;
   sessionOpen: boolean;
 }
@@ -62,11 +76,17 @@ export const InferenceSessionProvider: React.FC<{
   const [sessionOpen, setSessionOpen] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [lineage, setLineage] = useState<CoachingLineage | null>(null);
+  const [kind, setKind] = useState<InferenceSessionKind>("inference");
 
   const openInferenceSession = useCallback(
-    (id: string, next?: CoachingLineage | null) => {
+    (
+      id: string,
+      next?: CoachingLineage | null,
+      nextKind: InferenceSessionKind = "inference",
+    ) => {
       setSessionId(id);
       setLineage(next ?? null);
+      setKind(nextKind);
       setSessionOpen(true);
     },
     [],
@@ -85,11 +105,15 @@ export const InferenceSessionProvider: React.FC<{
     <InferenceSessionContext.Provider value={value}>
       {children}
       {sessionOpen ? (
-        <InferenceSessionDialog
-          sessionId={sessionId}
-          onExit={handleExit}
-          coachingLineage={lineage}
-        />
+        kind === "remote_inference" ? (
+          <RemoteSessionDialog sessionId={sessionId} onExit={handleExit} />
+        ) : (
+          <InferenceSessionDialog
+            sessionId={sessionId}
+            onExit={handleExit}
+            coachingLineage={lineage}
+          />
+        )
       ) : null}
     </InferenceSessionContext.Provider>
   );

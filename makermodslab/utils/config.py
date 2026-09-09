@@ -18,6 +18,7 @@ import logging
 import os
 import platform
 import re
+import secrets
 import shutil
 import uuid
 from collections.abc import Mapping
@@ -238,6 +239,38 @@ FOLLOWER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "follower_port.txt")
 # Robot config records (per-robot JSON metadata)
 ROBOTS_PATH = os.path.join(MAKERMODSLAB_HOME, "robots")
 
+# BENCH-ONLY LiveKit credentials for running the drtc entrypoints by hand
+# (`python -m makermodslab.drtc.robot_sync` / `.policy` against some LiveKit
+# server): a dotenv file holding LIVEKIT_URL / LIVEKIT_ROOM and either a
+# LIVEKIT_TOKEN or an API key/secret to mint one from (drtc/_env.py).
+#
+# THE SERVER NEVER READS IT. Remote inference has one transport, the bundled
+# SFU (`makermodslab --sfu`, sfu.py): the session mints the url, the room and
+# every participant's token in-process from LIVEKIT_KEY_FILE, and the GPU
+# launcher hands the container a token the same way. It lives beside the rest
+# of our state so a wheel install and a source checkout read the same file.
+DRTC_ENV_PATH = os.path.join(MAKERMODSLAB_HOME, "livekit.env")
+
+# Remote-inference session logs, one file per run (remote_inference._LOG_DIR
+# appends "sessions/"). The directory predates the bundled SFU, when the
+# retired tools/drtc scripts also logged livekit-server and cloudflared here.
+DRTC_LOG_DIR = os.path.expanduser("~/.cache/huggingface/lerobot/logs/drtc")
+
+# The Modal app the GPU launcher last started: {app_id, profile, started_at}.
+#
+# It exists because a Modal app OUTLIVES the local `modal run` client that
+# started it: the client tears the app down only on SIGINT (it disconnects from
+# its `except KeyboardInterrupt`), so a client that dies to SIGTERM/SIGKILL — a
+# uvicorn --reload restart, a Ctrl-C on the dev launcher, a hard kill — leaves
+# an A100 billing until Modal's own heartbeat timeout reaps it minutes later.
+# Recording the app id on disk is what lets a LATER process (this one after a
+# restart) run `modal app stop` for a client nobody can reach any more.
+#
+# Deliberately tiny and disposable: it names no credential, and losing it costs
+# at most one orphan reap. Written when the launcher first sees the app id in
+# the child's output, cleared once the app is confirmed stopped.
+DRTC_GPU_APP_FILE = os.path.join(MAKERMODSLAB_HOME, "drtc_gpu_app.json")
+
 # Staging root for bimanual (BiSO) sessions. lerobot's BiSO devices take ONE
 # calibration_dir + ONE base id and load each sub-arm as "<base>_left.json" /
 # "<base>_right.json" — there is no way to point left/right at differently named
@@ -296,6 +329,25 @@ INSTANCE_ID_FILE = os.path.join(MAKERMODSLAB_HOME, "instance_id.txt")
 # deliberately NOT: a peer is re-verified against its live /api/v1/health on
 # load/probe, so stale identity can never be served from disk.
 NODES_FILE = os.path.join(MAKERMODSLAB_HOME, "nodes.json")
+
+# The bundled LiveKit SFU's API key/secret (sfu.py, `makermodslab --sfu`):
+# one pair per install, minted on the first --sfu run, in the `key: secret`
+# YAML shape livekit-server's --key-file reads. Mode 0600 — the secret signs
+# every room token, so it never rides in a command line or an env var; both
+# the SFU child and the token route read this file. Deleting it rotates the
+# pair (tokens minted before the restart stop validating, nothing else).
+LIVEKIT_KEY_FILE = os.path.join(MAKERMODSLAB_HOME, "livekit_keys.yaml")
+
+# The livekit-server config the launcher renders per run (sfu.render_config).
+# Regenerated on every --sfu start; its path is also the identity signal
+# `makermodslab --stop` uses to recognise the SFU child as ours.
+LIVEKIT_CONFIG_FILE = os.path.join(MAKERMODSLAB_HOME, "livekit_config.yaml")
+
+# Station mode's remembered choice: {"robot": name} — which saved robot this
+# machine hosts for remote teleoperation. Written by `--host <robot>` and by
+# the station UI's picker; read by a bare `--host`. Absent/blank = no choice
+# yet (a lone hostable robot is picked automatically, else the UI chooses).
+STATION_FILE = os.path.join(MAKERMODSLAB_HOME, "station.json")
 
 # Tag stamped on every dataset pushed to the Hub from MakerMods Lab, so we can later
 # query the Hub for MakerMods Lab-produced datasets and compute usage metrics.
@@ -513,6 +565,64 @@ def get_instance_id() -> str:
     return stored
 
 
+def load_station_robot(path: str | None = None) -> str | None:
+    """The remembered hosted-robot name, or None (missing/corrupt/blank)."""
+    try:
+        with open(path or STATION_FILE) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    robot = data.get("robot") if isinstance(data, dict) else None
+    return robot if isinstance(robot, str) and is_valid_robot_name(robot) else None
+
+
+def save_station_robot(robot: str | None, path: str | None = None) -> None:
+    """Persist (or clear, with None) the station's hosted-robot choice."""
+    _atomic_write_text(path or STATION_FILE, json.dumps({"robot": robot}, indent=2) + "\n")
+
+
+def parse_livekit_keys(text: str) -> dict[str, str]:
+    """`key: secret` lines (livekit-server's key-file format) -> {key: secret}.
+
+    Blank lines and `#` comments are skipped; a line without a colon or with
+    an empty side is ignored rather than raised on, so a hand-edited file
+    degrades to "no keys" (and a fresh pair gets minted) instead of crashing
+    the launcher.
+    """
+    keys: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, _, secret = line.partition(":")
+        key, secret = key.strip(), secret.strip()
+        if key and secret:
+            keys[key] = secret
+    return keys
+
+
+def load_or_create_livekit_keys(path: str = LIVEKIT_KEY_FILE) -> tuple[str, str]:
+    """This install's SFU API key/secret pair, minted on first use.
+
+    Returns the first pair in the file (livekit-server accepts several; we
+    only ever write one). A missing, unreadable, or keyless file gets a fresh
+    pair written atomically with mode 0600.
+    """
+    try:
+        with open(path) as f:
+            existing = parse_livekit_keys(f.read())
+    except OSError:
+        existing = {}
+    if existing:
+        key, secret = next(iter(existing.items()))
+        return key, secret
+    key = f"mml_{secrets.token_hex(8)}"
+    secret = secrets.token_urlsafe(48)
+    _atomic_write_text(path, f"{key}: {secret}\n")
+    os.chmod(path, 0o600)
+    return key, secret
+
+
 def _port_file_for(robot_type: RobotSide) -> str:
     if robot_type == "leader":
         return LEADER_PORT_FILE
@@ -598,6 +708,22 @@ def setup_calibration_files(
         logger.info(f"Follower calibration already exists at {follower_target_path}")
 
     return leader_config_name, follower_config_name
+
+
+def setup_leader_calibration_file(leader_config: str, arm_type: object = DEFAULT_ARM_TYPE) -> str:
+    """Leader twin of setup_follower_calibration_file (remote teleoperation
+    opens ONLY the leader). Validates the assigned config exists in the arm
+    type's leader library and returns its stem — lerobot's `id`."""
+    _require_assigned_config(leader_config, "leader")
+    leader_config_name = os.path.splitext(leader_config)[0]
+    leader_library = leader_config_path_for(arm_type)
+    target = os.path.join(leader_library, f"{leader_config_name}.json")
+    if not os.path.exists(target):
+        raise FileNotFoundError(
+            f"Leader calibration file not found: {target}. Calibrate the leader arm "
+            "(or assign an existing calibration) before starting."
+        )
+    return leader_config_name
 
 
 def setup_follower_calibration_file(follower_config: str, arm_type: object = DEFAULT_ARM_TYPE):
@@ -696,6 +822,17 @@ _BIMANUAL_CONFIG_FIELDS = (
     "right_follower_config",
 )
 _ROBOT_STRING_FIELDS = _SINGLE_CONFIG_FIELDS + _BIMANUAL_CONFIG_FIELDS
+
+# Which arm SIDES this machine has plugged in — the record's layout, which is
+# a UI-and-readiness hint, not a hardware fact the sessions branch on (each
+# session kind gates on the arm scope it actually drives, see
+# is_robot_record_clean). "both" is a local leader/follower pair (every record
+# written before the remote kinds existed reads back as this); "follower" is a
+# station that only hosts / runs policies / replays; "leader" is a controller
+# that only drives a REMOTE follower. Bimanual composes with it (two leaders,
+# two followers, or both pairs).
+ROBOT_ARMS = ("both", "follower", "leader")
+_DEFAULT_ARMS = "both"
 _ROBOT_LIST_FIELDS = ("cameras",)
 # The leader half of the slots — what a leader-kind switch invalidates.
 _LEADER_SLOT_FIELDS = ("leader_port", "leader_config", "right_leader_port", "right_leader_config")
@@ -772,6 +909,7 @@ def _empty_record(name: str) -> dict:
     record: dict = {
         "name": name,
         "mode": _DEFAULT_MODE,
+        "arms": _DEFAULT_ARMS,
         "arm_type": DEFAULT_ARM_TYPE,
         # "" = the family's default leader (normalized on read); a record
         # written before leader kinds existed reads back as that default.
@@ -810,6 +948,10 @@ def get_robot_record(name: str) -> dict | None:
     # Guard against an unknown mode on disk.
     if record.get("mode") not in _VALID_MODES:
         record["mode"] = _DEFAULT_MODE
+    # Records written before the remote kinds existed carry no layout; they
+    # are local pairs by definition.
+    if record.get("arms") not in ROBOT_ARMS:
+        record["arms"] = _DEFAULT_ARMS
     # Records written before the Maker arm existed carry no arm_type; they are
     # SO-101s by definition, which is exactly what normalize_arm_type returns.
     # A hand-edited UNKNOWN string is kept as is: the record lists as
@@ -897,6 +1039,9 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
     if data.get("mode") in _VALID_MODES:
         record["mode"] = data["mode"]
     record.setdefault("mode", _DEFAULT_MODE)
+    if data.get("arms") in ROBOT_ARMS:
+        record["arms"] = data["arms"]
+    record.setdefault("arms", _DEFAULT_ARMS)
     # Switching arm type invalidates every hardware-bound field on the record.
     # The ports name physically different adapters (a Feetech USB-serial bridge
     # vs a CANable + a FashionStar UART bridge) and the calibration names point
@@ -1156,10 +1301,14 @@ def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
     - "follower" — follower side only (inference, replay never open the leader
       bus, so an unassigned leader port / missing leader calibration must not
       block them; bimanual = both followers, still no leaders).
+    - "leader"   — leader side only (remote teleoperation drives a STATION's
+      follower with this node's leader; a laptop record with no follower at
+      all is exactly the expected shape).
     """
     if not record:
         return False
     follower_only = arms == "follower"
+    leader_only = arms == "leader"
 
     # Config fields are stems; the file on disk is "<stem>.json". Tolerate a
     # stored value that still carries the extension (defensive).
@@ -1171,6 +1320,8 @@ def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
     required_fields = _SINGLE_CONFIG_FIELDS + (_BIMANUAL_CONFIG_FIELDS if bimanual else ())
     if follower_only:
         required_fields = tuple(f for f in required_fields if "follower" in f)
+    elif leader_only:
+        required_fields = tuple(f for f in required_fields if "leader" in f)
     for field in required_fields:
         value = record.get(field, "")
         if not isinstance(value, str) or not value.strip():
@@ -1205,13 +1356,14 @@ def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
             return False
         leader_library = leader_config_path_for(record.get("arm_type"), record.get("leader_kind"))
 
-    config_files = [
-        _file_for(follower_library, record["follower_config"]),
-    ]
+    config_files = []
+    if not leader_only:
+        config_files.append(_file_for(follower_library, record["follower_config"]))
     if not follower_only:
         config_files.append(_file_for(leader_library, record["leader_config"]))
     if bimanual:
-        config_files.append(_file_for(follower_library, record["right_follower_config"]))
+        if not leader_only:
+            config_files.append(_file_for(follower_library, record["right_follower_config"]))
         if not follower_only:
             config_files.append(_file_for(leader_library, record["right_leader_config"]))
     return all(os.path.exists(p) for p in config_files)
@@ -1340,6 +1492,21 @@ def stage_bimanual_calibrations(
         "follower",
     )
     return leader_staging, follower_staging, base
+
+
+def stage_bimanual_leader_calibrations(
+    base: str,
+    leader_left: str,
+    leader_right: str,
+    arm_type: object = DEFAULT_ARM_TYPE,
+) -> tuple[str, str]:
+    """Leader twin of stage_bimanual_follower_calibrations (remote
+    teleoperation opens only the leaders). Returns (leader_staging_dir, base)."""
+    leader_staging = _bimanual_leader_staging_dir(base)
+    _stage_one_side(
+        leader_config_path_for(arm_type), leader_staging, base, leader_left, leader_right, "leader"
+    )
+    return leader_staging, base
 
 
 def stage_bimanual_follower_calibrations(

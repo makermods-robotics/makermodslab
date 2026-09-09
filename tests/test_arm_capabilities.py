@@ -14,6 +14,7 @@ from makermodslab.arm_capabilities import (
     joints_per_arm,
     supports_auto_calibration,
     supports_dagger,
+    supports_remote_inference,
     uses_feetech_bus,
 )
 
@@ -80,11 +81,33 @@ def test_dagger_is_refused_on_the_maker_and_metal_arms() -> None:
     assert supports_dagger("so101") is True
 
 
+def test_remote_inference_is_single_arm_so101_only() -> None:
+    """Unlike supports_dagger, both halves of this are WIRING limits.
+
+    A CAN follower is not registered with draccus in
+    `makermodslab/drtc/robot_sync.py`, so `--robot.type=maker_follower` would
+    fail at CLI-parse time INSIDE the child — after the session had claimed and
+    preflighted the arm — and that entrypoint's return-to-rest is Feetech-only
+    besides. A bimanual SO-101 would run, but its first-action ease-in refuses
+    (a BiSO robot's action keys are left_/right_ prefixed while each sub-arm's
+    bus.motors are bare), so its FIRST move would be a full-speed snap to the
+    policy's pose. Both are removable with work, which is why this is a
+    capability to read rather than a literal at the refusal site.
+
+    See test_remote_inference.py::test_preflight_refuses_can_arms_and_bimanual_
+    and_releases_the_slot for the enforcement.
+    """
+    assert supports_remote_inference("so101") is True
+    assert supports_remote_inference("so101", "single") is True
+    assert supports_remote_inference("so101", "bimanual") is False
+    assert supports_remote_inference("maker") is False
+    assert supports_remote_inference("metal") is False
+    assert supports_remote_inference("maker", "bimanual") is False
+
+
 @pytest.mark.parametrize("value", [None, "", 7, object()])
 def test_missing_or_non_string_arm_types_fall_back_to_so101(value: object) -> None:
-    """A record written before the Maker arm existed carries no arm_type and
-    IS an SO-101; a non-string is a corrupted field, not a family. Both read
-    as the default rather than making the robot unopenable."""
+    """A missing or malformed pre-manifest arm type reads as SO-101."""
     assert uses_feetech_bus(value) is True
     assert joints_per_arm(value) == 6
 

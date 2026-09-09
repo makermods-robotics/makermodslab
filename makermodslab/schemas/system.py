@@ -75,7 +75,11 @@ class HealthCapabilities(BaseModel):
     The health doc grows additively as the node registry needs more
     (gpu, hardware inventory, …) — extra="allow" keeps keys the handler adds
     before this model learns about them, instead of silently filtering them
-    out of the handshake.
+    out of the handshake. Absent-or-present keys (`gpu`, and `sfu` — the
+    bundled LiveKit server's signalling URL, `{"url": "ws://host:7880"}`,
+    only when started with --sfu) are deliberately NOT declared here: a
+    declared optional would materialize as null on nodes without one, and
+    the contract is "absent means none/unknown".
     """
 
     model_config = ConfigDict(extra="allow")
@@ -290,6 +294,7 @@ class ArmCapabilities(BaseModel):
     uses_feetech_bus: bool
     supports_auto_calibration: bool
     supports_dagger: bool
+    supports_remote_inference: bool
     supports_port_probe: bool
     motion_identify_energizes_follower: bool
     # The family can jog ONE port's gripper so the user sees which arm it is

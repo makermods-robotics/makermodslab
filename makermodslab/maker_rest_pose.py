@@ -45,6 +45,7 @@ healthy stop. Once the worst joint stops improving, being within
 
 import contextlib
 import logging
+import math
 import threading
 import time
 
@@ -78,10 +79,6 @@ MAKER_RETURN_SETTLE_DEG = 6.0
 # polls, means the arm has gone as far as its gains will take it.
 MAKER_RETURN_STALL_PROGRESS_DEG = 0.25
 MAKER_RETURN_STALL_POLLS = 15
-
-# Share of the ceiling the interpolation ramp may use, leaving the rest for the
-# settle check. See return_maker_to_pose.
-_RAMP_CEILING_FRACTION = 0.6
 
 
 # MIT gains the energized-leader return drives with: the fork's own
@@ -260,13 +257,10 @@ def return_maker_to_pose(
     # Distance sets duration, so the RATE is what stays bounded. A fixed
     # duration (lerobot's 3s) would make a long return fast and a short one
     # slow; capping the rate instead means every return feels the same.
-    # Capped at a FRACTION of the ceiling, not the whole of it: the ramp only
-    # commands the setpoints, and the settle check afterwards is what decides
-    # whether the arm actually landed. A ramp allowed to consume the entire
-    # budget would leave nothing for that check, so a blocked joint would
-    # report a bare "timed out" instead of naming itself.
-    duration_s = min(max_delta / max(speed_deg_s, 1e-6), ceiling_s * _RAMP_CEILING_FRACTION)
-    steps = max(int(duration_s * MAKER_RETURN_FPS), 1)
+    # A distant pose must not speed up to fit the stop deadline. The deadline
+    # can cut the return short; it cannot authorize faster MIT setpoints.
+    duration_s = max_delta / max(speed_deg_s, 1e-6)
+    steps = max(math.ceil(duration_s * MAKER_RETURN_FPS), 1)
     period = 1.0 / MAKER_RETURN_FPS
     deadline = time.monotonic() + ceiling_s
 
@@ -320,6 +314,14 @@ def return_maker_to_pose(
             logger.warning("The %s stopped short of its start pose: %s", label, described)
             return False, described
 
+        if not described:
+            # A long ramp can exhaust the deadline before the settle loop.
+            # Report the remaining joint error without sending another goal.
+            current = _read_pose(device)
+            deltas = {m: abs(current[m] - v) for m, v in targets.items() if m in current}
+            if deltas:
+                motor, delta = max(deltas.items(), key=lambda kv: kv[1])
+                described = f"{motor} still {delta:.1f} deg away"
         return False, described or "timed out"
     except Exception as e:
         # Documented never-raises: the caller is about to cut torque and must
