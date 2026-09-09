@@ -1784,8 +1784,21 @@ _HUB_ROOT_REF_RE = re.compile(r"^(?P<repo>[^@]+)@root$")
 _HUB_CKPT_SUBDIR = "pretrained_model"
 
 
+class DownloadCancelled(Exception):  # noqa: N818 — a cooperative cancel signal, not an error condition
+    """Raised from the snapshot-download progress hook when its `should_cancel`
+    predicate goes true, to abort a `snapshot_download` in flight.
+
+    huggingface_hub streams every chunk through `tqdm_class.update()`; raising
+    there unwinds `hf_hub_download` -> `snapshot_download` immediately (it isn't
+    one of the transient network errors the chunk loop retries). Partially
+    fetched files are left as `*.incomplete` blobs in the cache, so the next
+    attempt resumes rather than restarts. Callers catch this and treat it as a
+    clean stop, never a failure."""
+
+
 def make_snapshot_progress_tqdm(
     report: Callable[[int, int | None], None],
+    should_cancel: Callable[[], bool] | None = None,
 ) -> type[_base_tqdm]:
     """A ``tqdm_class`` for ``snapshot_download`` that reports byte progress.
 
@@ -1804,6 +1817,13 @@ def make_snapshot_progress_tqdm(
     (growing) total changed. The total keeps growing while file metadata is
     discovered, so percent can legitimately drop — honest, since the real total
     isn't known upfront.
+
+    When `should_cancel` is given it is polled on every progress callback (per
+    chunk on the bytes bar); the first time it returns True the hook raises
+    `DownloadCancelled`, which aborts the `snapshot_download` in flight rather
+    than letting it run to completion in the background. It is called from
+    huggingface_hub's download worker threads, so it must be cheap and
+    thread-safe — `threading.Event.is_set` or a lock-guarded flag read.
 
     `report` is called from huggingface_hub's download worker threads, so an
     implementation that touches shared state must do its own locking.
@@ -1827,7 +1847,12 @@ def make_snapshot_progress_tqdm(
             total = getattr(self, "total", None)
             report(self._bytes_done, int(total) if total else None)
 
+        def _abort_if_cancelled(self) -> None:
+            if should_cancel is not None and should_cancel():
+                raise DownloadCancelled
+
         def update(self, n: float | None = 1) -> bool | None:
+            self._abort_if_cancelled()
             if self._is_bytes_bar:
                 if n:
                     self._bytes_done += int(n)
@@ -1835,6 +1860,7 @@ def make_snapshot_progress_tqdm(
             return super().update(n)
 
         def refresh(self, *args: Any, **kwargs: Any) -> bool | None:
+            self._abort_if_cancelled()
             if self._is_bytes_bar:
                 self._report()
             return super().refresh(*args, **kwargs)
@@ -2147,13 +2173,16 @@ def localize_pretrained_path(pretrained_path: str, *, tqdm_class=None) -> str:
     raw Hub exception with nothing actionable in it. On the local start path the
     download no longer runs inside the request (see JobRegistry.start), so that
     message is now written onto the job record's `error_message` instead of
-    becoming an HTTP 400 — same words, later delivery.
+    becoming an HTTP 400 — same words, later delivery. A `DownloadCancelled`
+    (the caller asked to stop) is not a failure and passes through untouched.
 
     `tqdm_class` is forwarded to the download for byte-progress reporting."""
     if not needs_local_materialization(pretrained_path):
         return pretrained_path
     try:
         return download_hub_checkpoint_ref(pretrained_path, tqdm_class=tqdm_class)
+    except DownloadCancelled:
+        raise
     except Exception as exc:
         raise ValueError(
             f"Could not download the base checkpoint {pretrained_path!r} to fine-tune from: {exc}"
@@ -4239,18 +4268,25 @@ class JobRegistry:
         No synthetic exit code is invented for any of them: there was no
         process, so `exit_code` stays None.
 
-        On the cancel check: a huggingface_hub download cannot be interrupted
-        mid-flight, so a Stop pressed while bytes are moving takes effect HERE —
-        after the download returns and before the trainer is spawned. The bytes
-        are already on disk (and cached for the next attempt); what the user
-        gets is a run that never starts training, which is what they asked for.
-        The spawn + runner handoff happen inside the registry lock, so a stop can
-        neither be missed (spawning a trainer nobody will signal) nor land on a
-        runner that has already been replaced.
+        On the cancel check: a Stop pressed while bytes are moving is fed to the
+        download's progress hook, which aborts it within a chunk and raises
+        DownloadCancelled; a Stop that lands after the transfer returns is caught
+        by `_start_after_prepare` instead. Either way the bytes so far are cached
+        for the next attempt and no trainer is spawned — a run that never starts
+        training, which is what the user asked for. The spawn + runner handoff
+        happen inside the registry lock, so a stop can neither be missed
+        (spawning a trainer nobody will signal) nor land on a runner that has
+        already been replaced.
         """
         reporter = _DownloadProgressLogger(prep.emit, hub_ref_step_label(ref))
         try:
-            local_path = localize_pretrained_path(ref, tqdm_class=make_snapshot_progress_tqdm(reporter))
+            local_path = localize_pretrained_path(
+                ref, tqdm_class=make_snapshot_progress_tqdm(reporter, should_cancel=prep.cancelled)
+            )
+        except DownloadCancelled:
+            prep.emit("Stopped before the trainer started.")
+            self._finalize_prepare(job_id, "interrupted", _PREPARE_STOPPED_MESSAGE)
+            return
         except Exception as exc:
             logger.exception("Base-checkpoint download failed for job %s", job_id)
             self._fail_prepare(job_id, prep, str(exc))
@@ -4290,8 +4326,12 @@ class JobRegistry:
         reporter = _DownloadProgressLogger(prep.emit, hub_ref_step_label(ref))
         try:
             config_path = download_hub_resume_checkpoint(
-                ref, tqdm_class=make_snapshot_progress_tqdm(reporter)
+                ref, tqdm_class=make_snapshot_progress_tqdm(reporter, should_cancel=prep.cancelled)
             )
+        except DownloadCancelled:
+            prep.emit("Stopped before the trainer started.")
+            self._finalize_prepare(job_id, "interrupted", _PREPARE_STOPPED_MESSAGE)
+            return
         except Exception as exc:
             logger.exception("Resume-checkpoint download failed for job %s", job_id)
             self._fail_prepare(
