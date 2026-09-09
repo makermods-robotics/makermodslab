@@ -192,10 +192,11 @@ async def test_identify_by_motion_routes_to_the_family_detector(monkeypatch: pyt
 
 
 def test_telemetry_kind_is_one_of_the_two_the_frontend_renders() -> None:
-    """`joints` (URDF fractions) drives the 3D viewer; `joints_deg` feeds the
-    numeric readout in its slot. A family with a URDF says "urdf"."""
+    """`joints` (URDF joint values) drives the 3D viewer; `joints_deg` feeds the
+    numeric readout in its slot. A family with a URDF says "urdf" — the SO-101
+    Maker, and Metal arms each ship one."""
     assert all(f.telemetry_kind in ("urdf", "degrees") for f in registry.families())
-    assert [f.telemetry_kind for f in registry.families()] == ["urdf", "degrees", "degrees"]
+    assert [f.telemetry_kind for f in registry.families()] == ["urdf", "urdf", "urdf"]
 
 
 def test_only_the_damiao_follower_refuses_the_motion_gesture() -> None:

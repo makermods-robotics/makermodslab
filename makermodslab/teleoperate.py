@@ -377,26 +377,8 @@ def get_joint_positions_from_robot(robot, prefix: str = "", calibration=None) ->
         return {urdf[0]: 0.0 for urdf in _SO101_URDF_JOINTS.values()}
 
 
-def get_maker_joint_degrees(robot, prefix: str = "") -> dict[str, float]:
-    """Live joint angles (degrees) of a Maker follower, keyed by motor name.
-
-    The URDF path above cannot serve a Maker arm: `_SO101_URDF_JOINTS` maps six
-    SO-101 motors onto the one URDF that ships with MakerMods Lab
-    (`frontend/public/so-101-urdf`), and there is no Maker URDF yet. The Maker
-    arm also has a seventh joint (`wrist_yaw`) with no counterpart in that
-    model, so feeding its angles to the SO-101 viewer would animate the wrong
-    arm with silently wrong values — worse than showing nothing.
-
-    So Maker sessions broadcast this instead: the raw per-joint angles the
-    frontend renders as a numeric readout while the 3D viewer stays hidden.
-    Values are already in degrees (the Maker follower's native unit) and keyed
-    by motor name, with the bimanual `left_`/`right_` prefix stripped.
-    """
-    try:
-        observation = robot.get_observation()
-    except Exception as e:
-        logger.error(f"Error reading Maker joint positions: {e}")
-        return {}
+def _can_joint_degrees(observation: dict, prefix: str = "") -> dict[str, float]:
+    """Extract one arm's finite motor angles from a shared observation."""
     out: dict[str, float] = {}
     for key, value in observation.items():
         if not key.endswith(".pos"):
@@ -408,9 +390,34 @@ def get_maker_joint_degrees(robot, prefix: str = "") -> dict[str, float]:
             motor = motor[len(prefix) :]
         elif motor.startswith(("left_", "right_")):
             continue
-        if isinstance(value, (int, float)):
+        if isinstance(value, (int, float)) and math.isfinite(value):
             out[motor] = float(value)
     return out
+
+
+def get_maker_joint_degrees(robot, prefix: str = "") -> dict[str, float]:
+    """Live CAN follower angles in degrees, keyed by unprefixed motor name."""
+    try:
+        return _can_joint_degrees(robot.get_observation(), prefix)
+    except Exception as e:
+        logger.error(f"Error reading CAN joint positions: {e}")
+        return {}
+
+
+def get_can_joint_data(robot, family, is_bimanual: bool, timestamp: float) -> dict:
+    """Read once for both viewers and numeric telemetry; a failed read holds pose."""
+    try:
+        observation = robot.get_observation()
+    except Exception as e:
+        logger.error(f"Error reading CAN joint positions: {e}")
+        observation = {}
+    data = {"type": "joint_update", "timestamp": timestamp}
+    sides = (("left_", ""), ("right_", "_right")) if is_bimanual else (("", ""),)
+    for prefix, suffix in sides:
+        degrees = _can_joint_degrees(observation, prefix)
+        data[f"joints_deg{suffix}"] = degrees
+        data[f"joints{suffix}"] = family.urdf_joint_positions(degrees)
+    return data
 
 
 def _device_ports(device) -> str:
@@ -973,23 +980,8 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                                 for bus, prefix in telemetry_targets:
                                     telemetry.sample(bus, prefix)
                                 last_current_sample_time = current_time
-                            if family.telemetry_kind == "degrees":
-                                # No URDF ships for this family, so `joints`
-                                # stays empty (the viewer has nothing to drive)
-                                # and the angles travel under `joints_deg` for
-                                # the numeric readout. See get_maker_joint_degrees.
-                                joint_data = {
-                                    "type": "joint_update",
-                                    "joints": {},
-                                    "joints_deg": get_maker_joint_degrees(
-                                        robot, prefix="left_" if is_bimanual else ""
-                                    ),
-                                    "timestamp": current_time,
-                                }
-                                if is_bimanual:
-                                    joint_data["joints_deg_right"] = get_maker_joint_degrees(
-                                        robot, prefix="right_"
-                                    )
+                            if not family.uses_feetech_bus:
+                                joint_data = get_can_joint_data(robot, family, is_bimanual, current_time)
                             else:
                                 if is_bimanual:
                                     joint_positions = get_joint_positions_from_robot(

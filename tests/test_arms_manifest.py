@@ -659,7 +659,7 @@ METAL_ENTRY = {
         },
         "panel_url": None,
     },
-    "telemetry_kind": "degrees",
+    "telemetry_kind": "urdf",
     "capabilities": {
         "uses_feetech_bus": False,
         "supports_auto_calibration": False,

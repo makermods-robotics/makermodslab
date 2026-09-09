@@ -63,16 +63,17 @@ export default {
     done: "Done",
     leftArm: "Left arm",
     rightArm: "Right arm",
-    // Shown in the 3D viewer's place on a Maker arm, which has no URDF yet.
+    // Shown in the 3D viewer's place on the Metal arm, which has no URDF yet
+    // (the SO-101 and Maker arm both drive the model).
     jointAngles: "Live joint angles",
     waitingForJoints: "Waiting for joint data…",
-    // Family-neutral on purpose: the readout serves every CAN arm (Maker,
-    // Metal), and none of them ships a URDF yet.
+    // Kept arm-neutral: only the Metal arm falls back to the readout today,
+    // but a future arm type without a URDF would land here too.
     noModel: "No 3D model is available for this arm yet.",
   },
   urdf: {
     switchedDefaultTitle: "Switched to default model",
-    switchedDefaultDescription: "The default ARM100 robot model is now displayed.",
+    switchedDefaultDescription: "The default SO-101 robot model is now displayed.",
     loadingTitle: "Loading Urdf model...",
     loadingDescription: "Preparing 3D visualization",
     loadedTitle: "Urdf model loaded successfully",

@@ -22,6 +22,7 @@ fork registers a dedicated bimanual leader type (bi_rebot_102_leader_maker).
 from __future__ import annotations
 
 from .can_common import CanArmFamily, CanDeviceClasses
+from .urdf import maker_joint_positions
 
 
 class MakerFamily(CanArmFamily):
@@ -39,6 +40,12 @@ class MakerFamily(CanArmFamily):
     robot_type_markers = ("maker",)
 
     follower_library_attr = "MAKER_FOLLOWER_CONFIG_PATH"
+
+    # Bundled model plus the family's motor-degrees to URDF mapping.
+    telemetry_kind = "urdf"
+
+    def urdf_joint_positions(self, degrees: dict[str, float]) -> dict[str, float]:
+        return maker_joint_positions(degrees)
 
     # RobStride frames; the probe is strictly read-only, so the gesture that
     # tells a bimanual rig's two followers apart is safe to watch.

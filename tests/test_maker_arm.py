@@ -6,6 +6,7 @@ zero-calibration worker, the port probe's bus I/O) are deliberately NOT
 exercised here; they are verified against real hardware instead.
 """
 
+import math
 from pathlib import Path
 
 import pytest
@@ -650,6 +651,77 @@ def test_auto_calibration_refuses_a_maker_robot(tmp_lerobot_home: Path) -> None:
 
     assert excinfo.value.status_code == 400
     assert "zero-pose" in excinfo.value.detail
+
+
+# ---------------------------------------------------------------------------
+# URDF joint mapping for the 3D teleop viewer
+# ---------------------------------------------------------------------------
+
+
+_MAKER_MOTORS_ZEROED = {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": 0.0,
+    "elbow_flex": 0.0,
+    "wrist_flex": 0.0,
+    "wrist_yaw": 0.0,
+    "wrist_roll": 0.0,
+    "gripper": -60.0,
+}
+
+
+def test_maker_urdf_mapping_converts_motor_degrees_to_urdf_radians() -> None:
+    """The Maker follower reports true joint angles in degrees about its
+    calibration zero, so the viewer mapping is a direct degrees->radians (the
+    SO-101's affine range->range remap is only needed because Feetech norm
+    values are not physical angles)."""
+    from makermodslab.arms.urdf import maker_joint_positions
+
+    arm = {**_MAKER_MOTORS_ZEROED, "shoulder_pan": 90.0, "elbow_flex": -45.0}
+    joints = maker_joint_positions(arm)
+
+    assert joints["link_002_joint"] == pytest.approx(math.pi / 2)
+    assert joints["link_004_joint"] == pytest.approx(-math.pi / 4)
+    assert joints["link_003_joint"] == pytest.approx(0.0)
+
+
+def test_maker_urdf_mapping_drives_the_gripper_joint() -> None:
+    """The shipped Maker URDF has a symmetric sliding gripper: the mapping
+    feeds `gripper_left_joint` (prismatic, metres) and the URDF's mimic moves
+    the other jaw. The value is clamped to the jaw's real 0..TRAVEL range."""
+    from makermodslab.arms.urdf import (
+        _MAKER_GRIPPER_JAW_TRAVEL_M,
+        _MAKER_URDF_GRIPPER_JOINT,
+        maker_joint_positions,
+    )
+
+    joints = maker_joint_positions(dict(_MAKER_MOTORS_ZEROED))
+
+    assert len(joints) == 7
+    assert _MAKER_URDF_GRIPPER_JOINT in joints
+    assert 0.0 <= joints[_MAKER_URDF_GRIPPER_JOINT] <= _MAKER_GRIPPER_JAW_TRAVEL_M
+
+    # Closed at the SDK's closed-encoder angle, fully open past the open one.
+    closed = maker_joint_positions({**_MAKER_MOTORS_ZEROED, "gripper": math.degrees(0.0067132066834521)})
+    wide = maker_joint_positions({**_MAKER_MOTORS_ZEROED, "gripper": math.degrees(-2.5)})
+    assert closed[_MAKER_URDF_GRIPPER_JOINT] == pytest.approx(0.0, abs=1e-6)
+    assert wide[_MAKER_URDF_GRIPPER_JOINT] == pytest.approx(_MAKER_GRIPPER_JAW_TRAVEL_M)
+
+
+def test_maker_urdf_mapping_applies_per_joint_sign_and_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`sign` (motor-increasing vs URDF-increasing) and `offset` (URDF zero vs
+    the arm's folded calibration zero) are the two per-joint facts that can
+    only be confirmed against real hardware, so the mapping must honour them."""
+    from makermodslab.arms import urdf
+
+    monkeypatch.setitem(urdf._MAKER_URDF_JOINTS, "wrist_roll", ("link_007_joint", -1, math.pi / 2))
+    arm = {**_MAKER_MOTORS_ZEROED, "wrist_roll": 90.0}
+
+    joints = urdf.maker_joint_positions(arm)
+
+    # -radians(90) + pi/2 == 0
+    assert joints["link_007_joint"] == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------

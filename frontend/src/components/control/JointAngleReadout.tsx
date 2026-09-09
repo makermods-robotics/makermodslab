@@ -23,16 +23,9 @@ const INITIAL_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 30000;
 
 /**
- * Live numeric joint readout — what a CAN arm (Maker, Metal) shows in place
- * of the 3D viewer.
- *
- * The viewer cannot serve those arms: the only URDF that ships is the
- * SO-101's (`frontend/public/so-101-urdf`), and the CAN arms are a different
- * 7-DOF geometry with a joint (`wrist_yaw`) the SO-101 model has no bone for.
- * Driving that model with their angles would animate the wrong arm with
- * silently wrong values, which is worse than showing no model — so the
- * backend sends `joints` empty for a CAN-arm session and puts the real angles
- * in `joints_deg`, and this renders those.
+ * Live numeric joint readout for families without a shipped URDF.
+ * The built-in SO-101, Maker, and Metal arms show their 3D models; CAN
+ * telemetry also includes raw motor angles under `joints_deg`.
  *
  * A sibling of useRealTimeJoints in shape (same socket, same reconnect
  * backoff) but it drives no 3D scene, so it holds the latest dict in state

@@ -61,7 +61,7 @@ export default {
   },
   urdf: {
     switchedDefaultTitle: "已切换到默认模型",
-    switchedDefaultDescription: "现已显示默认的 ARM100 机器人模型。",
+    switchedDefaultDescription: "现已显示默认的 SO-101 机器人模型。",
     loadingTitle: "正在加载 URDF 模型…",
     loadingDescription: "正在准备 3D 可视化",
     loadedTitle: "URDF 模型加载成功",

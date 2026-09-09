@@ -44,6 +44,7 @@ import importlib.util
 
 from .base import LeaderOption
 from .can_common import STAR_LEADER_KIND, CanArmFamily, CanDeviceClasses
+from .urdf import metal_joint_positions
 
 # The leader kind a robot record stores to be driven by a second Metal arm.
 METAL_LEADER_KIND = "metal"
@@ -86,6 +87,12 @@ class MetalFamily(CanArmFamily):
     robot_type_markers = ("metal",)
 
     follower_library_attr = "METAL_FOLLOWER_CONFIG_PATH"
+
+    # Bundled model plus the family's motor-degrees to URDF mapping.
+    telemetry_kind = "urdf"
+
+    def urdf_joint_positions(self, degrees: dict[str, float]) -> dict[str, float]:
+        return metal_joint_positions(degrees)
 
     # Damiao frames — and the handshake that opens the bus IS the enable
     # command, so watching this follower's joints would energize it

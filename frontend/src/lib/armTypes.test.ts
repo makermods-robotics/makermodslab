@@ -89,7 +89,7 @@ const MAKER: ArmFamilyInfo = {
     },
     panel_url: null,
   },
-  telemetry_kind: "degrees",
+  telemetry_kind: "urdf",
   capabilities: {
     uses_feetech_bus: false,
     supports_auto_calibration: false,
@@ -136,7 +136,7 @@ const METAL: ArmFamilyInfo = {
     },
     panel_url: null,
   },
-  telemetry_kind: "degrees",
+  telemetry_kind: "urdf",
   capabilities: {
     uses_feetech_bus: false,
     supports_auto_calibration: false,
@@ -366,8 +366,8 @@ describe("telemetryKind", () => {
   it("is urdf for the families that ship a model and degrees for the readout-only ones", () => {
     expect(telemetryKind(SO101)).toBe("urdf");
     expect(telemetryKind(SO101_TWIN)).toBe("urdf");
-    expect(telemetryKind(MAKER)).toBe("degrees");
-    expect(telemetryKind(METAL)).toBe("degrees");
+    expect(telemetryKind(MAKER)).toBe("urdf");
+    expect(telemetryKind(METAL)).toBe("urdf");
     expect(telemetryKind(NINE)).toBe("degrees");
     expect(telemetryKind(PANELED)).toBe("degrees");
   });
