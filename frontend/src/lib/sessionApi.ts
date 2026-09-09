@@ -158,6 +158,12 @@ export interface RemoteInferenceSessionOptions {
    * side's `--s-min` (the robot computes `overlap_end = H - max(s_min, d)` and
    * the server trusts that field). Ignored by the sync engine. */
   s_min?: number;
+  lpf_hz?: number;
+  lpf_order?: number;
+  video_quality?: number;
+  video_bitrate_kbps?: number;
+  camera_send_hz?: number;
+  latency_k?: number;
   skip_identity_check?: boolean;
 }
 

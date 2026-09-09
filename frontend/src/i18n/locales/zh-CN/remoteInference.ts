@@ -1,5 +1,36 @@
 export default {
+  network: {
+    autoRegionHint: "由 Modal 选择区域。网络延迟可能不同。",
+    "title": "网络",
+    "region": "GPU 区域",
+    "regionHint": "选择附近区域。重启 GPU 后生效。",
+    "advanced": "高级",
+    "videoQuality": "MJPEG 画质",
+    "videoQualityHint": "降低可减少带宽占用。",
+    "videoBitrateKbps": "H264 码率 (kbps)",
+    "videoBitrateKbpsHint": "每路相机。降低可减少带宽占用。",
+    "cameraSendHz": "相机发送频率 (Hz)",
+    "cameraSendHzHint": "0 = 自动。限制相机和状态更新，不改变机械臂控制频率。",
+    "latencyK": "抖动余量",
+    "latencyKHint": "越高，可容纳的延迟波动越大。",
+    "tolerance": "帧匹配容差",
+    "toleranceHint": "单位为控制周期。越高，允许的帧时间差越大。重启 GPU 后生效。",
+    "budget": "RTC 时间预算",
+    "delay": "预计延迟 {{delay}} / {{budget}} ms",
+    "within": "预算内",
+    "near": "接近上限",
+    "over": "超出预算",
+    "budgetHint": "包含推理时间和抖动余量。队列仍可能出现停顿。"
+},
   form: {
+    autoAssignment: "自动（减少等待）",
+    autoShort: "自动",
+    autoGpuHint: "A10G、L4 或更大显存的 GPU。价格可能不同。",
+
+    motionTuning: "运动与网络",
+    gpuTuning: "GPU 调整",
+    humanUnavailable: "远程运行不支持人工接管。",
+
     hubIdLabel: "Hub 策略 id",
     // 引擎的标签位于 `studio.deploy.engine` —— 它现在是本地与远程共用的一个
     // 字段。这里只保留两条说明文案，因为它们讲的是两种引擎各自做什么，
@@ -16,7 +47,7 @@ export default {
     // 也拼在这里，现在它们移到了 Modal 卡片上，这一行只描述传输。
     advancedSummary: "传输：horizon {{horizon}} · {{fps}} fps · {{codec}}",
     advancedSummaryRtc:
-      "传输：horizon {{horizon}} · {{fps}} fps · {{codec}} · 最小预留 {{sMin}}",
+      "{{fps}} Hz · 平滑 {{lpfHz}} Hz",
     horizonLabel: "Horizon",
     fpsLabel: "帧率",
     codecLabel: "视频编码",
@@ -25,6 +56,8 @@ export default {
       "该检查点每个动作块返回 {{steps}} 步，因此 horizon 以此为起点，且不能超过它。",
     horizonOverCeiling:
       "horizon 超过了该检查点返回的 {{steps}} 步。这样两侧对动作块形状的理解就不一致，所有数据包都会被静默丢弃 — 运行看上去已连接，却收不到任何东西。",
+    filterLabel: "动作平滑（Hz）",
+    filterHint: "0 表示关闭滤波。较低的值可减缓突变，但会增加响应延迟。",
     sMinLabel: "最小预留",
     // "--s-min" 是命令行标志名，与本面板中其他标识符一样保留拉丁文写法。
     sMinHint:
@@ -95,6 +128,14 @@ export default {
   // GPU 侧，自 S3.8 起由 MakerMods Lab 自己启动。它不会作为远程按钮的前置条件 —
   // 那仍由传输探测中的 operator 检查决定。
   gpu: {
+    setup: {
+      install: "请先安装 Modal，再启动 GPU。",
+      signIn: "请先登录 Modal，再启动 GPU。",
+      where: "请在运行 MakerMods Lab 的电脑上执行以下命令。",
+      checkAgain: "重新检查",
+      failed: "GPU 启动失败。详情",
+    },
+
     title: "Modal 上的策略服务",
     start: "启动 GPU",
     retry: "重试",
@@ -103,12 +144,12 @@ export default {
     // {{wrapper}} 是包装脚本的路径，{{gpu}} 是 Modal 的 GPU 规格，都属于数据，
     // 原样显示。GPU 改为插值而不是写死在句子里，因为它现在是可选的（S3.8e）。
     idleHint:
-      "从本机在 Modal {{gpu}} 上运行 {{wrapper}}。冷启动通常需要 1-3 分钟；房间和凭据会自动填好。",
+      "Modal {{gpu}}。首次启动可能需要 1–3 分钟。",
     // {{seconds}} 是普通整数，刻意不使用 i18next 的 count 机制。
     elapsed: "{{seconds}} 秒",
     // 后端阶段取值。用于匹配，不直接展示 — 原值只作为新版服务端引入新阶段时的兜底。
     phase: {
-      pending: "正在启动容器",
+      pending: "等待 GPU",
       tailscale_up: "正在加入 tailnet",
       loading: "正在加载检查点",
       warmup: "正在预热模型",
@@ -144,6 +185,7 @@ export default {
     logLabel: "日志",
   },
   transport: {
+    details: "详情",
     // 传输区块已经撤掉，这里剩下的是：手动命令旁边那份需要人用眼睛读、再手动
     // 抄到别处的小抄；会话对话框策略行要用的来源标签；以及“开始”下面那句结论。
     // 这些标签背后的每个取值都是数据，一律原样显示。
@@ -183,8 +225,10 @@ export default {
       notProbed: "无法从本机检查该房间。",
       // {{room}} 是房间名，属于数据。
       ready: "已有 GPU 在 {{room}} 中，随时可以驱动机械臂。",
+      gpuStarting: "GPU 正在启动…",
+      gpuWaiting: "正在等待 GPU…",
       operatorAbsent:
-        "{{room}} 中还没有 GPU — 请在上方启动一个，或自行运行该命令。",
+        "请先启动 GPU。",
     },
   },
   phase: {

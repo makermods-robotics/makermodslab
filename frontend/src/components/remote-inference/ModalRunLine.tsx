@@ -91,6 +91,8 @@ const ModalRunLine: React.FC<{
     gpu: effective.gpu,
     horizon: config.horizon,
     fps: config.fps,
+    region: config.region,
+    tolerance: config.tolerance,
     videoCodec: config.videoCodec,
     sMin: config.sMin,
     slack: knobs.slack,

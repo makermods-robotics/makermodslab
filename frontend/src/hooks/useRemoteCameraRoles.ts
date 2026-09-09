@@ -97,11 +97,12 @@ const EMPTY_ENTRY: StoredEntry = { roles: {}, extra: [] };
 function readEntry(
   checkpointKey: string | null,
   robotName: string | null,
+  fallback: StoredEntry = EMPTY_ENTRY,
 ): StoredEntry {
-  if (!checkpointKey || !robotName) return EMPTY_ENTRY;
+  if (!checkpointKey || !robotName) return fallback;
   const forCheckpoint = readAll()[checkpointKey];
   const stored = isPlainObject(forCheckpoint) ? forCheckpoint[robotName] : null;
-  if (!isPlainObject(stored)) return EMPTY_ENTRY;
+  if (!isPlainObject(stored)) return fallback;
   // Two shapes live here. The S3.8g one nests the picks under `roles`; before
   // it, the entry WAS the map. Discriminated on the value's type rather than on
   // key presence, because "roles" is itself a legal role name — in the old
@@ -129,6 +130,7 @@ function writeEntry(
   checkpointKey: string,
   robotName: string,
   entry: StoredEntry,
+  keepEmpty = false,
 ): void {
   try {
     const all = readAll();
@@ -139,7 +141,7 @@ function writeEntry(
     // the store the size it was before the operator ever opened the panel.
     const empty =
       Object.keys(entry.roles).length === 0 && entry.extra.length === 0;
-    if (!empty) forCheckpoint[robotName] = entry;
+    if (!empty || keepEmpty) forCheckpoint[robotName] = entry;
     else delete forCheckpoint[robotName];
     if (Object.keys(forCheckpoint).length > 0)
       all[checkpointKey] = forCheckpoint;
@@ -193,16 +195,19 @@ export function useRemoteCameraRoles(
   checkpointKey: string | null,
   robotName: string | null,
   cameraNames: string[],
+  defaults: StoredEntry = EMPTY_ENTRY,
 ): UseRemoteCameraRoles {
+  const defaultsKey = JSON.stringify(defaults);
+  const fallback = useMemo(() => JSON.parse(defaultsKey) as StoredEntry, [defaultsKey]);
   const [stored, setStored] = useState<StoredEntry>(() =>
-    readEntry(checkpointKey, robotName),
+    readEntry(checkpointKey, robotName, fallback),
   );
 
   // Re-read on every change of either half of the key: this is the moment a
   // different checkpoint's (or robot's) answers become the right ones.
   useEffect(() => {
-    setStored(readEntry(checkpointKey, robotName));
-  }, [checkpointKey, robotName]);
+    setStored(readEntry(checkpointKey, robotName, fallback));
+  }, [checkpointKey, robotName, fallback]);
 
   // Serialised rather than the array itself: `robot.cameras` is a fresh array
   // on every render of its parent, and a dependency on it would rebuild the set
@@ -225,9 +230,10 @@ export function useRemoteCameraRoles(
     (next: StoredEntry) => {
       setStored(next);
       if (checkpointKey && robotName)
-        writeEntry(checkpointKey, robotName, next);
+        writeEntry(checkpointKey, robotName, next,
+          Object.keys(fallback.roles).length > 0 || fallback.extra.length > 0);
     },
-    [checkpointKey, robotName],
+    [checkpointKey, robotName, fallback],
   );
 
   const setRole = useCallback(

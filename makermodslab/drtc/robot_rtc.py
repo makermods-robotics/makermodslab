@@ -132,6 +132,7 @@ from ._common import fmt_us, load_env, mint_token, required_env
 from ._diagnostics import CameraTimingMonitor
 from ._filter import ButterworthLowpass
 from ._latency import JKLatencyEstimator
+from ._observation_rate import ObservationRateLimiter
 from ._pose import feetech_buses
 from ._rtc import ActionSchedule
 from ._run_timer import RunTimer
@@ -215,6 +216,10 @@ class RobotSideRTCConfig:
     video_codec: str = field(
         default="H264",
         metadata={"help": "Portal video codec: H264 (low-latency, default) or MJPEG/PNG/RAW (frame-exact)"},
+    )
+    camera_send_hz: float = field(
+        default=0,
+        metadata={"help": "Paired camera/state send cap in Hz; 0 = automatic. Does not change control FPS."},
     )
     video_quality: int = field(default=90, metadata={"help": "MJPEG quality 1..100"})
     video_bitrate_kbps: int = field(
@@ -462,6 +467,7 @@ async def run(cfg: RobotSideRTCConfig) -> None:
         control_step = 0
         observations_emitted = 0
         stale_obs = 0
+        send_limiter = ObservationRateLimiter(cfg.camera_send_hz)
         obs_cooldown = cfg.s_min + cfg.epsilon
         last_action: dict[str, float] | None = None
         # Optional Butterworth low-pass over the commanded action stream. Ticks
@@ -596,6 +602,8 @@ async def run(cfg: RobotSideRTCConfig) -> None:
             else:
                 should_request = True
 
+            should_request = should_request and send_limiter.ready(tick_t0)
+
             # 3. Emit an observation only when requesting. Attach the RTC
             #    in-painting request (d, overlap_end, single-source prefix
             #    descriptor). Record ts -> tick so the chunk can be aligned; arm
@@ -649,6 +657,7 @@ async def run(cfg: RobotSideRTCConfig) -> None:
                             expired_ts, _ = sent_obs.popitem(last=False)
                             sent_at.pop(expired_ts, None)
                         last_prefix_len = prefix_len
+                    send_limiter.sent(tick_t0)
                     observations_emitted += 1
                     obs_cooldown = estimator.estimate_steps + cfg.epsilon
             else:

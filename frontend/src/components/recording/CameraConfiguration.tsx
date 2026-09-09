@@ -763,6 +763,8 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
 interface SessionCameraListProps {
   /** The selected robot record's cameras, exactly as stored. */
   cameras: CameraConfig[];
+  hint?: string;
+  cameraNotes?: Record<string, string>;
   /** Filled with a function that drops every preview stream, so the caller can
    * hand the devices to cv2 before a session starts (same contract as
    * CameraConfiguration's prop of the same name). */
@@ -797,6 +799,8 @@ interface SessionCameraListProps {
  */
 export const SessionCameraList: React.FC<SessionCameraListProps> = ({
   cameras,
+  hint,
+  cameraNotes,
   releaseStreamsRef,
   emptyLabel,
   paused,
@@ -827,7 +831,7 @@ export const SessionCameraList: React.FC<SessionCameraListProps> = ({
           eyebrow heading — matching the editable component. */}
       <h3 className={eyebrow}>{t("recording.cameras.heading")}</h3>
       <p className="text-xs text-muted-foreground">
-        {t("recording.cameras.sessionHint")}
+        {hint ?? t("recording.cameras.sessionHint")}
       </p>
 
       {cameras.length === 0 ? (
@@ -855,6 +859,9 @@ export const SessionCameraList: React.FC<SessionCameraListProps> = ({
                   emptyLabel={t("recording.cameras.disconnectedSettings")}
                 />
                 <div className="space-y-0.5 p-3">
+                  {cameraNotes?.[camera.name] ? (
+                    <p className="text-xs text-muted-foreground">{cameraNotes[camera.name]}</p>
+                  ) : null}
                   <h5 className="truncate font-medium text-foreground">
                     {camera.name}
                   </h5>

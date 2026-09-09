@@ -69,12 +69,10 @@ import {
   useGpuLauncher,
   useGpuTargets,
 } from "@/hooks/useGpuLauncher";
-import CameraRoleBindings, {
-  type CameraRoleOption,
-  type CameraRoleSlot,
-} from "@/components/remote-inference/CameraRoleBindings";
+import { policyCameraBindings } from "@/lib/policyCameraBindings";
 import GpuLaunchSection from "@/components/remote-inference/GpuLaunchSection";
 import RemoteManualSection from "@/components/remote-inference/RemoteManualSection";
+import RemoteNetworkSection from "@/components/remote-inference/RemoteNetworkSection";
 import RemoteAdvancedSection from "@/components/remote-inference/RemoteAdvancedSection";
 import {
   SFU_OFF_SUMMARY_KEY,
@@ -84,17 +82,14 @@ import { POLICY_PATH_PLACEHOLDER } from "@/components/remote-inference/modalComm
 import {
   horizonForEngine,
   defaultEngineForPolicy,
+  remoteDefaultsForPolicy,
   policySupportsRtc,
   armSupportsRemoteInference,
   DEFAULT_REMOTE_RUN_CONFIG,
   type RemoteEngine,
   type RemoteRunConfig,
 } from "@/components/remote-inference/remoteRunConfig";
-import {
-  MAX_EXTRA_CAMERA_ROLES,
-  remoteCameraRoleKey,
-  useRemoteCameraRoles,
-} from "@/hooks/useRemoteCameraRoles";
+
 import DisplayName from "@/components/library/DisplayName";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import ModelsLibrary from "@/components/jobs/ModelsLibrary";
@@ -137,7 +132,7 @@ import { useOnceFlag } from "@/lib/onboarding/storage";
  *
  * Cameras are the one place this panel deliberately left the modal behind: the
  * ported per-feature binding dropdowns are gone, replaced by Collect's
- * read-only SessionCameraList plus name-based binding (see `cameraBindings`).
+ * read-only SessionCameraList plus name-based binding (see `boundCameraBindings`).
  */
 
 // Mirrors rollout.MAX_EVAL_EPISODES — the server clamps to the same bound, this
@@ -473,7 +468,7 @@ const DeployPanel: React.FC = () => {
   // target above, and owned here for the same reason: the picker lives under
   // Advanced, the launch reads it from the GPU card, and the generated `modal
   // run` line has to say the same thing as both.
-  const gpuKnobs = useGpuKnobs();
+  const gpuKnobs = useGpuKnobs(policyConfig?.policy_type);
 
   // Human in the loop is not startable on a remote run: the GPU child has no
   // takeover protocol, so there is no way to hand the arm to the leader
@@ -577,10 +572,12 @@ const DeployPanel: React.FC = () => {
     if (seededEngineFor.current === seedKey) return;
     seededEngineFor.current = seedKey;
     const engine = defaultEngineForPolicy(policyConfig);
+    setDurationS(policyType.toLowerCase() === "molmoact2" ? 30 : 60);
     setRemoteConfig((prev) => ({
       ...prev,
       engine,
       horizon: horizonForEngine(engine, policyConfig?.n_action_steps),
+      ...remoteDefaultsForPolicy(policyConfig),
     }));
   }, [policyConfig, remoteActive]);
 
@@ -623,207 +620,53 @@ const DeployPanel: React.FC = () => {
     [robot],
   );
 
-  // Per-role camera picks for a REMOTE run, remembered per (checkpoint, robot).
-  // The checkpoint half is the pair that addresses its policy config — the
-  // owning job id and the checkpoint ref — because that is what "this
-  // checkpoint" means everywhere else in this panel. A remembered pick naming a
-  // camera the record no longer holds is dropped on read, inside the hook.
-  const robotCameraNames = useMemo(
-    () => robotCameras.map((c) => c.name),
-    [robotCameras],
+  // The preview cards are the only camera setup surface. Both launch paths
+  // derive their wire inputs from this same robot-record order.
+  const { roles: automaticCameraRoles, extra: extraCameraRoles } = useMemo(
+    () => policyCameraBindings(
+      cameraMap,
+      robotCameras.map((camera) => camera.name),
+      remote && knobSupport.extraImageRoles,
+    ),
+    [cameraMap, robotCameras, remote, knobSupport.extraImageRoles],
   );
-  const {
-    roles: remoteCameraRoles,
-    setRole: setRemoteCameraRole,
-    extraRoles: storedExtraRoles,
-    addExtraRole,
-    removeExtraRole,
-  } = useRemoteCameraRoles(
-    remoteCameraRoleKey(policyConfigJobId, selectedRef),
-    robot?.name ?? null,
-    robotCameraNames,
-  );
-
-  /**
-   * EXTRA camera views — roles the CHECKPOINT does not declare, which the GPU
-   * side is asked to add before the weights load (S3.8g).
-   *
-   * Gated on two things, both of which have to hold for the roles to be USED
-   * rather than merely remembered:
-   *
-   *  - `knobSupport.extraImageRoles`, the server's answer for THIS checkpoint's
-   *    policy family. Fail-closed (see `gpuKnobSupport`): adding a view to a
-   *    policy whose vision tower is fixed is a shape error inside a container
-   *    after a paid cold start.
-   *  - `remote`. A local rollout loads the checkpoint on this machine with no
-   *    flag that could declare the extra view, so an extra binding there would
-   *    open a camera the policy never looks at. The roles stay REMEMBERED
-   *    across a switch to a local run; they simply stop applying.
-   */
-  const canAddCameraRoles = remote && knobSupport.extraImageRoles;
-  const extraCameraRoles = useMemo(
-    () => (canAddCameraRoles ? storedExtraRoles : []),
-    [canAddCameraRoles, storedExtraRoles],
-  );
-
-  /**
-   * The camera bindings, DERIVED BY NAME rather than chosen: each camera the
-   * checkpoint was trained with takes the robot camera of the same name.
-   *
-   * There is no picker any more — the panel shows the robot's cameras exactly
-   * as Collect does (SessionCameraList), and a mismatch is reported rather than
-   * repaired here, because a camera's name is a property of the robot and
-   * Robot settings is the one place it is edited. Name matching is
-   * case-insensitive, but the PAYLOAD carries the robot record's own spelling.
-   *
-   * `display` is the bare name in bimanual mode (cameraMappings strips BiSO's
-   * `left_`/`right_` prefix), which is exactly what the robot record stores, so
-   * the round-trip still works: the rollout re-prefixes it back into the
-   * checkpoint's `left_<name>` feature.
-   */
-  /**
-   * The checkpoint's own camera mappings plus the operator-added ones.
-   *
-   * Appended rather than merged, so the checkpoint's roles keep their order and
-   * an added one is always last — which is the order `--extra-image-roles`
-   * sends them in and the order the GPU appends the features in. An added role
-   * carries NO `dims`: there is nothing in the checkpoint to read them from,
-   * and the remote path resizes every frame GPU-side anyway.
-   */
   const allCameraMappings = useMemo(
     () => [
       ...cameraMap,
       ...extraCameraRoles.map((role) => ({
-        feature: `observation.images.${role}`,
-        display: role,
-        requestKey: role,
+        feature: role, display: role, requestKey: role,
       })),
     ],
     [cameraMap, extraCameraRoles],
   );
-
-  const cameraBindings = useMemo(
-    () =>
-      allCameraMappings.map((mapping) => {
-        const camera =
-          robotCameras.find(
-            (c) => c.name.toLowerCase() === mapping.display.toLowerCase(),
-          ) ?? null;
-        const dims = policyConfig?.image_features[mapping.feature];
-        return {
-          mapping,
-          camera,
-          dims,
-          // A stored camera_index goes stale on replug, so presence is judged
-          // by unique_id against the live enumeration — the same check the
-          // preview cards use.
-          connected:
-            camera != null && isCameraConnected(camera, availableCameras),
-          resolutionDiffers:
-            camera != null &&
-            dims != null &&
-            (camera.width !== dims.width || camera.height !== dims.height),
-        };
-      }),
-    [allCameraMappings, robotCameras, policyConfig, availableCameras],
-  );
-
-  /**
-   * The same bindings, with the operator's per-role picks filled in where
-   * nothing matched by name.
-   *
-   * A checkpoint's camera name is a ROLE, not a claim about this robot —
-   * `lerobot/MolmoAct2-SO100_101-LeRobot` names `cam0` / `cam1`, which no robot
-   * record has ever been called — and a role nothing matches is a question the
-   * operator has to answer, not a defect in the record. A robot camera's name
-   * stays its identity: nothing here renames anything, and the pick is
-   * remembered per (checkpoint, robot) rather than written to the record.
-   *
-   * Layered over the name-derived list rather than replacing it, so a name
-   * match ALWAYS wins. A pick is re-checked against the record on every render
-   * (a camera deleted in Robot settings simply stops resolving) and its
-   * connectedness is judged the same way a name match's is — a pick of an
-   * unplugged camera is a pick, not a binding, and still blocks Start.
-   *
-   * Every mode reads this since S3.9. The picker was remote-only when it landed
-   * (S3.7b) purely because the remote run was the first thing anyone pointed at
-   * a checkpoint whose cameras are called `cam0`/`cam1` — but the question it
-   * answers ("which camera plays this role?") is nothing to do with where the
-   * policy runs, and a local run had no answer to it at all.
-   */
   const boundCameraBindings = useMemo(
-    () =>
-      cameraBindings.map((b) => {
-        if (b.camera != null) return b;
-        const picked = remoteCameraRoles[b.mapping.requestKey];
-        const camera = picked
-          ? (robotCameras.find((c) => c.name === picked) ?? null)
-          : null;
-        if (camera == null) return b;
-        return {
-          ...b,
-          camera,
-          connected: isCameraConnected(camera, availableCameras),
-          resolutionDiffers:
-            b.dims != null &&
-            (camera.width !== b.dims.width || camera.height !== b.dims.height),
-        };
-      }),
-    [cameraBindings, remoteCameraRoles, robotCameras, availableCameras],
+    () => allCameraMappings.map((mapping) => {
+      const name = automaticCameraRoles[mapping.requestKey];
+      const camera = robotCameras.find((candidate) => candidate.name === name) ?? null;
+      const dims = policyConfig?.image_features[mapping.feature];
+      return {
+        mapping, camera, dims,
+        connected: camera != null && isCameraConnected(camera, availableCameras),
+        // Remote frames are resized on the GPU. A capture-size difference is
+        // normal there, while a local rollout still needs the size notice.
+        resolutionDiffers: !remote && camera != null && dims != null &&
+          (camera.width !== dims.width || camera.height !== dims.height),
+      };
+    }),
+    [allCameraMappings, automaticCameraRoles, robotCameras, policyConfig, availableCameras, remote],
   );
-
-  /** Cameras the policy needs that this robot has nothing named for AND nothing
-   * picked for. Start is blocked on these: the rollout cannot invent the feed. */
-  const unmatchedCameras = boundCameraBindings.filter((b) => b.camera == null);
-  /** Bound, but not enumerated right now (unplugged since the record was
-   * saved). Also blocks Start — the same strictness the picker had. */
+  const unmatchedCameras = boundCameraBindings.filter((binding) => binding.camera == null);
   const disconnectedCameras = boundCameraBindings.filter(
-    (b) => b.camera != null && !b.connected,
+    (binding) => binding.camera != null && !binding.connected,
   );
-  /** Bound and present, but the robot captures at a different size than the
-   * policy trained on. A warning only: the rollout forwards the checkpoint's
-   * dims as `camera_dims` and the camera is opened at those. */
-  const mismatchedCameras = boundCameraBindings.filter(
-    (b) => b.resolutionDiffers,
-  );
-
-  /** The picker's slots: the roles with NO name match, in checkpoint order.
-   * A matched role gets no control — there is no decision to make. */
-  const cameraRoleSlots: CameraRoleSlot[] = useMemo(() => {
-    const added = new Set(extraCameraRoles);
-    return cameraBindings
-      .filter((b) => b.camera == null)
-      .map((b) => ({
-        requestKey: b.mapping.requestKey,
-        display: b.mapping.display,
-        dims: b.dims,
-        selected: remoteCameraRoles[b.mapping.requestKey] ?? null,
-        // An added role gets a remove control and says it is untested; a
-        // checkpoint role that merely matched nothing by name does not.
-        extra: added.has(b.mapping.requestKey),
-      }));
-  }, [cameraBindings, remoteCameraRoles, extraCameraRoles]);
-
-  /** Mints `cam<N>` for the lowest free N, counting the CHECKPOINT's own roles
-   * as taken — a role named after one the checkpoint already declares would be
-   * refused by the GPU as "this checkpoint already declares it". */
-  const addCameraRole = useCallback(
-    () => addExtraRole(cameraMap.map((m) => m.requestKey)),
-    [addExtraRole, cameraMap],
-  );
-
-  /** The robot's cameras as options. Names are the record's own spelling —
-   * the value the start request carries. */
-  const cameraRoleOptions: CameraRoleOption[] = useMemo(
-    () =>
-      robotCameras.map((c) => ({
-        name: c.name,
-        width: c.width,
-        height: c.height,
-        connected: isCameraConnected(c, availableCameras),
-      })),
-    [robotCameras, availableCameras],
-  );
+  const mismatchedCameras = boundCameraBindings.filter((binding) => binding.resolutionDiffers);
+  const cameraNotes = useMemo(() => {
+    if (!policyConfig) return {};
+    const used = new Set(Object.values(automaticCameraRoles));
+    return Object.fromEntries(robotCameras
+      .filter((camera) => !used.has(camera.name))
+      .map((camera) => [camera.name, t("studio.deploy.cameras.unused")]));
+  }, [policyConfig, automaticCameraRoles, robotCameras, t]);
 
   // Opening the studio is a freshness gesture, so it still re-pulls — but it is
   // no longer the ONLY thing that does, which is what made a run completing
@@ -1045,7 +888,7 @@ const DeployPanel: React.FC = () => {
     // layout is not an input to it any more.
   }, [open, baseUrl, fetchWithHeaders, policyConfigJobId, selectedStep]);
 
-  // (No binding effects: the pairing is derived by name in `cameraBindings`
+  // (No binding effects: the pairing is derived by name in `boundCameraBindings`
   // above, so there is no stored selection to seed, prune, or keep in step
   // with the robot record.)
 
@@ -1459,6 +1302,12 @@ const DeployPanel: React.FC = () => {
             // half a contract with the GPU side and is only read for rtc.
             engine: remoteConfig.engine,
             s_min: remoteConfig.sMin,
+            lpf_hz: remoteConfig.engine === "rtc" ? remoteConfig.lpfHz : 0,
+            video_quality: remoteConfig.videoQuality,
+            video_bitrate_kbps: remoteConfig.videoBitrateKbps,
+            camera_send_hz: remoteConfig.engine === "rtc" ? remoteConfig.cameraSendHz : 0,
+            latency_k: remoteConfig.latencyK,
+            lpf_order: 2,
           },
         });
         // The run now surfaces in the SAME session dialog a local run opens —
@@ -1574,7 +1423,7 @@ const DeployPanel: React.FC = () => {
   };
 
   // No `onCameraBindingChange`: the pairing is derived by name in
-  // `cameraBindings` above, so there is no stored selection left to write.
+  // `boundCameraBindings` above, so there is no stored selection left to write.
   //
   // No `handleStop` either, and that one is a decision worth recording,
   // because the two branches this file was merged from argued it opposite ways.
@@ -1610,6 +1459,7 @@ const DeployPanel: React.FC = () => {
     remoteTransport.transport,
     remoteTransport.loading,
     remoteTransport.error,
+    gpu.restarting ? "starting" : gpu.status?.state,
   );
   const transportTone = {
     ok: "text-ok",
@@ -1623,7 +1473,7 @@ const DeployPanel: React.FC = () => {
     remote && remoteTransport.transport?.error_code
       ? `${remoteTransport.transport.error_code}${
           remoteTransport.transport.message
-            ? ` — ${remoteTransport.transport.message}`
+            ? `: ${remoteTransport.transport.message}`
             : ""
         }`
       : null;
@@ -1898,6 +1748,45 @@ const DeployPanel: React.FC = () => {
               </div>
             ) : null}
 
+            {/* Runs on — WHERE the policy runs. Directly above the operator
+                strip because the two are read together, and a segmented
+                control rather than a second tab strip in spirit: it selects a
+                value, it does not reveal a pane of its own. (It wears the same
+                clothes, which is what makes the pair read as one question in
+                two halves.) -------------------------------------------- */}
+            <div className="space-y-2">
+              <Label id="deploy-runs-on-label">
+                {t("studio.deploy.runsOn.label")}
+              </Label>
+              <div
+                role="radiogroup"
+                aria-labelledby="deploy-runs-on-label"
+                className="grid grid-cols-2 gap-1 rounded-md bg-muted p-1 text-muted-foreground"
+              >
+                {(["local", "remote"] as RunsOn[]).map((where) => (
+                  <button
+                    key={where}
+                    type="button"
+                    role="radio"
+                    aria-checked={runsOn === where}
+                    disabled={controlsLocked && runsOn !== where}
+                    onClick={() => setRunsOn(where)}
+                    className={cn(
+                      "inline-flex items-center justify-center rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50",
+                      runsOn === where && "bg-background text-foreground shadow-sm",
+                    )}
+                  >
+                    {t(`studio.deploy.runsOn.${where}` as never)}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {remote
+                  ? t("studio.deploy.runsOn.remoteHint")
+                  : t("studio.deploy.runsOn.localHint")}
+              </p>
+            </div>
+
             {/* ACT is not language-conditioned: no task to describe. */}
             {!isAct ? (
             /* Run parameters — flat, each with its own <Label>; the old "Run
@@ -2121,92 +2010,6 @@ const DeployPanel: React.FC = () => {
               </p>
             </div>
 
-            {/* Runs on — WHERE the policy runs. Directly above the operator
-                strip because the two are read together, and a segmented
-                control rather than a second tab strip in spirit: it selects a
-                value, it does not reveal a pane of its own. (It wears the same
-                clothes, which is what makes the pair read as one question in
-                two halves.) -------------------------------------------- */}
-            <div className="space-y-2">
-              <Label id="deploy-runs-on-label">
-                {t("studio.deploy.runsOn.label")}
-              </Label>
-              <div
-                role="radiogroup"
-                aria-labelledby="deploy-runs-on-label"
-                className="grid grid-cols-2 gap-1 rounded-md bg-muted p-1 text-muted-foreground"
-              >
-                {(["local", "remote"] as RunsOn[]).map((where) => (
-                  <button
-                    key={where}
-                    type="button"
-                    role="radio"
-                    aria-checked={runsOn === where}
-                    disabled={controlsLocked && runsOn !== where}
-                    onClick={() => setRunsOn(where)}
-                    className={cn(
-                      "inline-flex items-center justify-center rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50",
-                      runsOn === where && "bg-background text-foreground shadow-sm",
-                    )}
-                  >
-                    {t(`studio.deploy.runsOn.${where}` as never)}
-                  </button>
-                ))}
-              </div>
-              <p className="text-xs leading-relaxed text-muted-foreground">
-                {remote
-                  ? t("studio.deploy.runsOn.remoteHint")
-                  : t("studio.deploy.runsOn.localHint")}
-              </p>
-            </div>
-
-            {/* Everything that only exists because the policy is somewhere
-                else: the GPU the Lab launches, the command for launching it by
-                hand, and the wire parameters the two sides must agree on. --- */}
-            {remote ? (
-              <>
-                <GpuLaunchSection
-                  launcher={gpu}
-                  targets={gpuTargets}
-                  knobs={gpuKnobs}
-                  knobSupport={knobSupport}
-                  config={remoteConfig}
-                  hubIdDefault={hubIdDefault}
-                  // The SAME string the start request sends, so the GPU side
-                  // and the robot side steer the policy identically.
-                  task={effectiveTask}
-                  // The GPU launch has no server-side twin of deployGuards'
-                  // task check (the launcher knows a Hub id, not a policy
-                  // type), so the panel gates Start GPU on the same fact.
-                  taskRequired={!!policyConfig?.requires_task}
-                  // The extra views the ROBOT side is about to publish tracks
-                  // for. Both halves are launched from this one list so their
-                  // wire schemas cannot disagree.
-                  extraImageRoles={extraCameraRoles}
-                />
-                <RemoteManualSection
-                  config={remoteConfig}
-                  transport={remoteTransport.transport}
-                  hubIdDefault={hubIdDefault}
-                  task={effectiveTask}
-                  // So the pasted line bills the same workspace Start GPU would.
-                  profile={gpuTargets.profile}
-                  environment={gpuTargets.environment}
-                  knobs={gpuKnobs}
-                  knobSupport={knobSupport}
-                  extraImageRoles={extraCameraRoles}
-                />
-                <RemoteAdvancedSection
-                  config={remoteConfig}
-                  onChange={setRemoteConfig}
-                  checkpointHorizon={checkpointHorizon}
-                  open={transportAdvancedOpen}
-                  onOpenChange={setTransportAdvancedOpen}
-                  disabled={controlsLocked}
-                />
-              </>
-            ) : null}
-
             {/* What the OPERATOR does. Two tabs, not three: where the policy
                 runs is the control above, and folding it in here made every
                 field that belongs to both questions live inside one tab and
@@ -2216,7 +2019,7 @@ const DeployPanel: React.FC = () => {
               onValueChange={(v) => setOperatorMode(v as OperatorMode)}
               className="space-y-4"
             >
-              <TabsList
+              {!remote ? <TabsList
                 aria-label={t("studio.deploy.tabs.groupLabel")}
                 className="grid h-auto w-full grid-cols-2"
               >
@@ -2238,13 +2041,17 @@ const DeployPanel: React.FC = () => {
                     {t(`studio.deploy.runMode.${m.stem}.title` as never)}
                   </TabsTrigger>
                 ))}
-              </TabsList>
+              </TabsList> : (
+                <p className="text-xs text-muted-foreground">
+                  {t("remoteInference.form.humanUnavailable")}
+                </p>
+              )}
               {/* What the selected tab does and what it asks of the operator,
                   read before Start rather than discovered at the arm. The
                   hands-on commitment is weighted as well as coloured: weight
                   survives greyscale and peripheral vision, colour alone does
                   not. */}
-              <p className="text-xs leading-relaxed text-muted-foreground">
+              {!remote ? <p className="text-xs leading-relaxed text-muted-foreground">
                 {t(`studio.deploy.runMode.${activeTabDef.stem}.what` as never)}{" "}
                 <span
                   className={
@@ -2255,7 +2062,7 @@ const DeployPanel: React.FC = () => {
                     `studio.deploy.runMode.${activeTabDef.stem}.commitment` as never,
                   )}
                 </span>
-              </p>
+              </p> : null}
 
               {/* Run — hands off. The scored-evaluation count is the only
                   thing this tab adds, and only when a prefill asked for one:
@@ -2398,56 +2205,18 @@ const DeployPanel: React.FC = () => {
 
             </Tabs>
 
-            {/* Cameras — literally Collect's list: the same component, the same
-                heading and sentence, the same cards, fed from the same place
-                (the selected robot's record). At the FOOT of the form, because
-                whichever way the run is set up it sees the same robot cameras,
-                and this is the last thing to check before pressing Start —
-                literally the thing an operator looks at while reaching for the
-                button. Nothing is picked here: each camera the checkpoint was
-                trained with takes the robot camera of the SAME NAME (see
-                cameraBindings), a role that matches nothing is answered by the
-                picker right under the list, and the two remaining ways it can
-                go wrong are reported once, below. -------------------- */}
+            {/* Camera cards are the setup and preview for policy inputs. */}
             <div className="space-y-4">
               <SessionCameraList
                 cameras={robotCameras}
+                hint={t("studio.deploy.cameras.automaticHint")}
+                cameraNotes={cameraNotes}
                 paused={submitting || runActive}
                 emptyLabel={
                   robot
                     ? t("studio.deploy.cameras.robotHasNone")
                     : t("studio.deploy.cameras.noRobot")
                 }
-              />
-
-              {/* Camera roles — for EVERY combination, and only when there is
-                  a decision to make. A checkpoint's camera name is a role, not
-                  a claim about this robot (`lerobot/MolmoAct2-SO100_101-LeRobot`
-                  names cam0/cam1, which no robot record has ever been called),
-                  and a role nothing matches is a question only the operator can
-                  answer. Renders nothing at all when every role matched by
-                  name, which is the ordinary case.
-
-                  Directly under the list rather than up beside the task: the
-                  question it asks is "which of THESE cameras plays that role",
-                  and the answer is easier to give while looking at them. The
-                  unmatched-camera alert below points back up at it. ------- */}
-              <CameraRoleBindings
-                slots={cameraRoleSlots}
-                cameras={cameraRoleOptions}
-                nameMatchedCount={
-                  cameraBindings.length - cameraRoleSlots.length
-                }
-                onChange={setRemoteCameraRole}
-                // S3.8g — the offer to add a view the checkpoint never
-                // declared. Only for a remote run against a policy family whose
-                // view count lives in its lerobot wrapper; see
-                // `canAddCameraRoles`.
-                canAddRoles={canAddCameraRoles}
-                onAddRole={addCameraRole}
-                onRemoveRole={removeExtraRole}
-                addRolesFull={extraCameraRoles.length >= MAX_EXTRA_CAMERA_ROLES}
-                disabled={controlsLocked}
               />
 
               {/* One alert for both failure modes, and only when there is one:
@@ -2474,10 +2243,8 @@ const DeployPanel: React.FC = () => {
                             own key), so it rides in as a value and <0> only
                             makes it bold.
 
-                            Remote runs keep their own sentence: renaming a
-                            robot camera is the WRONG remedy there — the name on
-                            the record is that camera's identity, and the role
-                            picker just above this notice is the answer. */}
+                            Missing named inputs are fixed in Robot settings.
+                            Anonymous inputs already follow the camera cards. */}
                         <Trans
                           i18nKey={
                             remote
@@ -2512,6 +2279,55 @@ const DeployPanel: React.FC = () => {
                 </Alert>
               ) : null}
             </div>
+
+            {/* Everything that only exists because the policy is somewhere
+                else: the GPU the Lab launches, the command for launching it by
+                hand, and the wire parameters the two sides must agree on. --- */}
+            {remote ? (
+              <>
+                <RemoteAdvancedSection
+                  config={remoteConfig}
+                  onChange={setRemoteConfig}
+                  checkpointHorizon={checkpointHorizon}
+                  open={transportAdvancedOpen}
+                  onOpenChange={setTransportAdvancedOpen}
+                  disabled={controlsLocked}
+                />
+                <RemoteNetworkSection config={remoteConfig} onChange={setRemoteConfig} disabled={controlsLocked} />
+                <GpuLaunchSection
+                  launcher={gpu}
+                  targets={gpuTargets}
+                  knobs={gpuKnobs}
+                  knobSupport={knobSupport}
+                  config={remoteConfig}
+                  hubIdDefault={hubIdDefault}
+                  // The SAME string the start request sends, so the GPU side
+                  // and the robot side steer the policy identically.
+                  task={effectiveTask}
+                  // The GPU launch has no server-side twin of deployGuards'
+                  // task check (the launcher knows a Hub id, not a policy
+                  // type), so the panel gates Start GPU on the same fact.
+                  taskRequired={!!policyConfig?.requires_task}
+                  // The extra views the ROBOT side is about to publish tracks
+                  // for. Both halves are launched from this one list so their
+                  // wire schemas cannot disagree.
+                  extraImageRoles={extraCameraRoles}
+                />
+                <RemoteManualSection
+                  config={remoteConfig}
+                  transport={remoteTransport.transport}
+                  hubIdDefault={hubIdDefault}
+                  task={effectiveTask}
+                  // So the pasted line bills the same workspace Start GPU would.
+                  profile={gpuTargets.profile}
+                  environment={gpuTargets.environment}
+                  knobs={gpuKnobs}
+                  knobSupport={knobSupport}
+                  extraImageRoles={extraCameraRoles}
+                />
+              </>
+            ) : null}
+
 
           </div>
         </CollapsibleContent>
@@ -2597,10 +2413,14 @@ const DeployPanel: React.FC = () => {
               </>
             ) : null}
             {transportDetail ? (
-              // The backend's code and message — data, verbatim.
-              <p className="font-mono text-xs leading-relaxed break-all text-destructive">
-                {transportDetail}
-              </p>
+              <details className="text-xs text-muted-foreground">
+                <summary className="cursor-pointer">
+                  {t("remoteInference.transport.details")}
+                </summary>
+                <p className="mt-2 break-words font-mono leading-relaxed">
+                  {transportDetail}
+                </p>
+              </details>
             ) : null}
           </>
         ) : startBlockedKey ? (

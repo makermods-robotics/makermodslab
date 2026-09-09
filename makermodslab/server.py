@@ -178,8 +178,6 @@ from .rollout import (
     handle_stop_episode,
     handle_stop_inference,
 )
-
-# Response models for the typed /api/v1 surface (see makermodslab/schemas/).
 from .schemas.datasets import (
     DatasetHubSettingsResponse,
     DatasetHubStatusResponse,
@@ -227,6 +225,9 @@ from .schemas.nodes import (
     NodeListResponse,
     NodeRemoveResponse,
 )
+
+# Response models for the typed /api/v1 surface (see makermodslab/schemas/).
+from .schemas.remote_network import GpuNetworkOptions
 from .schemas.sessions import (
     CoachingCommandResponse,
     CurrentSessionResponse,
@@ -1238,7 +1239,7 @@ def get_remote_inference_transport():
 # observes the room rather than a log line.
 
 
-class GpuStartBody(BaseModel):
+class GpuStartBody(GpuNetworkOptions):
     """The GPU side of the remote-run form. Field-for-field the subset of
     `RemoteInferenceOptions` the container needs, with the same defaults: the
     two halves are launched from one object precisely so horizon / fps / codec
@@ -1400,6 +1401,8 @@ def start_remote_inference_gpu(body: GpuStartBody):
         video_codec=body.video_codec,
         s_min=body.s_min,
         slack=body.slack,
+        region=body.region,
+        tolerance=body.tolerance,
         profile=body.profile,
         environment=body.environment,
         model_dtype=body.model_dtype,

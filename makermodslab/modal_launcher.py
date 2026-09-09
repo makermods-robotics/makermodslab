@@ -199,10 +199,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Literal, get_args
 
+from pydantic import ValidationError
+
 from . import remote_inference
 from .api_errors import ApiError, ErrorCode
 from .jobs import read_pretrained_config
 from .rollout import _signal_group, _terminate_tree
+from .schemas.remote_network import GpuNetworkOptions
 from .utils.config import DRTC_GPU_APP_FILE, DRTC_LOG_DIR, _atomic_write_text
 from .utils.system import (
     MAX_EXTRA_IMAGE_ROLES,
@@ -254,7 +257,7 @@ WRAPPERS: dict[str, Path] = {
 # hour billed on hardware nobody chose. `""` is a member because it is a valid
 # thing to ask for — "whatever the wrapper pins" — and ordering runs small to
 # large, which is also the money order the picker shows them in.
-GpuChoice = Literal["", "A10G", "L4", "A100", "A100-80GB", "H100", "H200"]
+GpuChoice = Literal["", "auto", "A10G", "L4", "A100", "A100-80GB", "H100", "H200"]
 # The same set without the "leave it alone" member: what a refusal lists.
 GPU_TYPES: tuple[str, ...] = tuple(g for g in get_args(GpuChoice) if g)
 
@@ -953,6 +956,7 @@ def build_argv(
     flow_steps: int = 0,
     extra_image_roles: Sequence[str] = (),
     slack: int = DEFAULT_SLACK,
+    tolerance: float = 1.5,
 ) -> list[str]:
     """The `modal run` command, as a LIST — never a string, never a shell.
 
@@ -1020,6 +1024,7 @@ def build_argv(
         str(fps),
         *(["--s-min", str(s_min)] if engine == "rtc" else []),
         *(["--slack", str(slack)] if slack != DEFAULT_SLACK else []),
+        *(["--tolerance", str(tolerance)] if tolerance != 1.5 else []),
         "--video-codec",
         video_codec,
         # The room is what makes the two sides meet. Without it the GPU takes
@@ -1038,6 +1043,7 @@ def child_env(
     *,
     profile: str = "",
     gpu: str = "",
+    region: str = "us-west",
 ) -> dict[str, str]:
     """The environment the `modal run` child inherits.
 
@@ -1065,6 +1071,7 @@ def child_env(
         base["MODAL_PROFILE"] = profile
     if gpu:
         base[ENV_GPU] = gpu
+    base["DRTC_REGION"] = region
     return base
 
 
@@ -1384,6 +1391,8 @@ _fps: int | None = None
 _video_codec: str | None = None
 _s_min: int | None = None
 _slack: int | None = None
+_region: str | None = None
+_tolerance: float | None = None
 # The two S3.8e knobs AS LAUNCHED, echoed for the same reason as the tuple
 # above — the panel's drift warning compares the form against the SERVER's
 # record. Both are strings whose EMPTY value is meaningful and is not a
@@ -1463,7 +1472,7 @@ def _go_idle_locked() -> None:
     global _state, _proc, _phase, _engine, _policy_hub_id, _room
     global _started_at, _started_mono, _idle_since, _last_line, _drain_deadline, _stop_client_exited
     global _profile, _environment, _app_id
-    global _task, _horizon, _fps, _video_codec, _s_min, _slack, _model_dtype, _gpu
+    global _task, _horizon, _fps, _video_codec, _s_min, _slack, _model_dtype, _gpu, _region, _tolerance
     global _model_dtype_applied, _flow_steps, _flow_steps_applied, _device_name
     global _extra_image_roles, _extra_image_roles_applied
     _state = STATE_IDLE
@@ -1481,6 +1490,8 @@ def _go_idle_locked() -> None:
     _video_codec = None
     _s_min = None
     _slack = None
+    _region = None
+    _tolerance = None
     _model_dtype = None
     _gpu = None
     _model_dtype_applied = False
@@ -1891,6 +1902,8 @@ def start(
     video_codec: str = "H264",
     s_min: int = 4,
     slack: int = DEFAULT_SLACK,
+    region: str = "us-west",
+    tolerance: float = 1.5,
     profile: str = "",
     environment: str = "",
     model_dtype: str = "",
@@ -1937,7 +1950,7 @@ def start(
     global _state, _proc, _phase, _engine, _policy_hub_id, _room
     global _started_at, _started_mono, _log_path, _message, _hint, _last_line, _idle_since
     global _stop_outcome, _code, _drain_deadline, _profile, _environment, _app_id, _stop_client_exited
-    global _task, _horizon, _fps, _video_codec, _s_min, _slack, _model_dtype, _gpu
+    global _task, _horizon, _fps, _video_codec, _s_min, _slack, _model_dtype, _gpu, _region, _tolerance
     global _model_dtype_applied, _flow_steps, _flow_steps_applied, _device_name
     global _extra_image_roles, _extra_image_roles_applied
 
@@ -1961,6 +1974,10 @@ def start(
     # Pure input, so it is refused before the PATH lookup, the listing and the
     # transport: neither of these two fails anywhere an operator would see it
     # in time (see `check_knobs`).
+    try:
+        network = GpuNetworkOptions(region=region, tolerance=tolerance)
+    except ValidationError as exc:
+        raise ApiError(400, str(exc), code=ErrorCode.GPU_LAUNCH_FAILED) from exc
     want_dtype = model_dtype.strip()
     want_gpu = gpu.strip()
     want_steps = flow_steps or 0
@@ -2021,6 +2038,7 @@ def start(
         video_codec=video_codec,
         s_min=s_min,
         slack=slack,
+        tolerance=network.tolerance,
         modal_bin=modal_bin,
         environment=want_environment,
         # What SURVIVED the per-checkpoint drop, not what was asked for. The
@@ -2031,7 +2049,7 @@ def start(
     )
     log_handle, path = _open_log()
     try:
-        proc = _popen(argv, child_env(plan, profile=want_profile, gpu=want_gpu))
+        proc = _popen(argv, child_env(plan, profile=want_profile, gpu=want_gpu, region=network.region))
     except Exception as exc:
         with contextlib.suppress(Exception):
             log_handle.close()
@@ -2067,6 +2085,8 @@ def start(
         _video_codec = video_codec
         _s_min = s_min
         _slack = slack
+        _region = network.region
+        _tolerance = network.tolerance
         # Raw, not `or None`: "" is a real answer here ("as the checkpoint
         # saved it", "on the wrapper's pin") rather than an absent choice.
         #
@@ -2312,6 +2332,8 @@ def _status_locked() -> dict[str, Any]:
         # only when the engine is rtc, for the same reason.
         "s_min": _s_min,
         "slack": _slack,
+        "region": _region,
+        "tolerance": _tolerance,
         # What it runs AS and what it runs ON (S3.8e), as launched; null only
         # while idle. Empty string is a real answer — "the dtype the checkpoint
         # saved" and "the wrapper's own pinned GPU" — so it is echoed as sent

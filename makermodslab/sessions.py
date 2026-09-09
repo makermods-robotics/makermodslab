@@ -635,6 +635,12 @@ def _build_remote_inference_request(record: dict, opts: RemoteInferenceOptions):
         # InferenceOptions had to grow `inference_engine`.
         engine=opts.engine,
         s_min=opts.s_min,
+        lpf_hz=opts.lpf_hz,
+        lpf_order=opts.lpf_order,
+        video_quality=opts.video_quality,
+        video_bitrate_kbps=opts.video_bitrate_kbps,
+        camera_send_hz=opts.camera_send_hz,
+        latency_k=opts.latency_k,
         skip_identity_check=opts.skip_identity_check,
     )
 

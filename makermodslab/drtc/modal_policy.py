@@ -583,13 +583,16 @@ app = modal.App("lerobot-drtc-policy")
 # GPU/region/timeout knobs stay in ONE place.
 _FN_KWARGS = {
     "image": image,
-    # A10G suffices for small policies (ACT); large VLAs (pi0 / SmolVLA) need
-    # A100 VRAM — so "A100" is the pin, and it is what a hand-typed `modal run`
-    # gets. DRTC_GPU is how the Lab's launcher overrides it per launch: this
+    # Default to A10G for every policy. DRTC_GPU selects a larger GPU when
+    # the checkpoint needs more memory. The Lab sets it per launch: this
     # dict is evaluated when `modal run` IMPORTS this file on the operator's own
     # machine, before Click parses a flag, so an env var is the only channel a
     # caller has to the decorator (see makermodslab/modal_launcher.py).
-    "gpu": os.environ.get("DRTC_GPU") or "A100",
+    "gpu": (
+        ["A10G", "L4", "A100", "A100-80GB", "H100", "H200"]
+        if os.environ.get("DRTC_GPU") == "auto"
+        else os.environ.get("DRTC_GPU") or "A10G"
+    ),
     "timeout": 60 * 60 * 2,  # hard session cap; PORTAL_DURATION_SECONDS can end sooner
     # /cache: persistent HF cache (see hf_cache / HF_HOME). /tailscale: the
     # tailnet node key, on its OWN Volume so a 4 KB state commit never drags the
@@ -605,7 +608,7 @@ _FN_KWARGS = {
     # no mainland-China presence), but co-locating in Asia cuts the ~440ms
     # trans-Pacific RTT to roughly robot<->Singapore (~60-150ms).
     # "region": "ap-southeast",
-    "region": "us-west",
+    "region": None if os.environ.get("DRTC_REGION") == "auto" else os.environ.get("DRTC_REGION") or "us-west",
     # "min_containers": 1,  # pre-warm to avoid a cold start when the robot connects
     #                       # (keeps an idle GPU billed — opt in for latency-critical runs)
 }

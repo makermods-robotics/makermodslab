@@ -81,6 +81,7 @@ export interface RemoteInferenceStatus {
    * Frozen when execution stops; started_at remains the session launch ID. */
   elapsed_s: number;
   duration_s: number | null;
+  fps?: number | null;
   log_path: string | null;
   exited: boolean;
   exit_code: number | null;

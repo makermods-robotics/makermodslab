@@ -550,7 +550,11 @@ _FN_KWARGS = {
     # `modal run` IMPORTS this file on the operator's own machine, before Click
     # parses a flag, so an env var is the only channel a caller has to the
     # decorator (see makermodslab/modal_launcher.py).
-    "gpu": os.environ.get("DRTC_GPU") or "A100",
+    "gpu": (
+        ["A10G", "L4", "A100", "A100-80GB", "H100", "H200"]
+        if os.environ.get("DRTC_GPU") == "auto"
+        else os.environ.get("DRTC_GPU") or "A10G"
+    ),
     "timeout": 60 * 60 * 2,
     # /cache: persistent HF cache (see hf_cache / HF_HOME). /tailscale: the
     # tailnet node key, on its OWN Volume so a 4 KB state commit never drags the
@@ -558,7 +562,7 @@ _FN_KWARGS = {
     # `serve` never writes it, and identical kwargs keep the two declarations
     # from drifting.
     "volumes": {"/cache": hf_cache, _TS_STATE_DIR: ts_state},
-    "region": "us-west",
+    "region": None if os.environ.get("DRTC_REGION") == "auto" else os.environ.get("DRTC_REGION") or "us-west",
     # "min_containers": 1,  # pre-warm to avoid a cold start when the robot connects
 }
 

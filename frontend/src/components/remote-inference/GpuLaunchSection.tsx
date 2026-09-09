@@ -31,7 +31,7 @@ import {
   type UseGpuTargets,
   type ModelDtype,
 } from "@/hooks/useGpuLauncher";
-import { MODAL_WRAPPERS } from "./modalCommand";
+import { MODAL_WRAPPERS, shellQuote } from "./modalCommand";
 import type { RemoteRunConfig } from "./remoteRunConfig";
 
 /** Sentinel for "as the checkpoint saved it" — sends no flag. Never on the
@@ -123,6 +123,7 @@ const GpuLaunchSection: React.FC<{
     environment,
     setProfile,
     setEnvironment,
+    refresh: refreshTargets,
   } = targets;
 
   const state = status?.state ?? "idle";
@@ -132,6 +133,14 @@ const GpuLaunchSection: React.FC<{
   // is what happened before these pickers existed.
   const canPick = listing != null && listing.error == null;
   const running = state !== "idle" && state !== "failed";
+  const setupCode = listing?.error?.code ?? (listing == null ? status?.code : null);
+  const setupIssue = setupCode === "gpu.cli_missing" || setupCode === "gpu.unauthenticated";
+  const setupCommand = `modal setup${profile ? ` --profile ${shellQuote(profile)}` : ""}`;
+  // A launch can discover expired credentials after the initial listing.
+  React.useEffect(() => {
+    if (status?.code === "gpu.cli_missing" || status?.code === "gpu.unauthenticated")
+      refreshTargets();
+  }, [status?.code, refreshTargets]);
 
   const effective = effectiveGpuKnobs(knobs, knobSupport);
   const startBody = {
@@ -143,6 +152,8 @@ const GpuLaunchSection: React.FC<{
     video_codec: config.videoCodec,
     s_min: config.sMin,
     slack: knobs.slack,
+    region: config.region,
+    tolerance: config.tolerance,
     // Whatever is selected, always — the backend's "empty means the CLI
     // decides" is for API clients; the panel is explicit about who pays.
     profile,
@@ -194,6 +205,8 @@ const GpuLaunchSection: React.FC<{
           video_codec: status.video_codec,
           s_min: status.s_min,
           slack: status.slack ?? null,
+          region: status.region ?? null,
+          tolerance: status.tolerance ?? null,
           // Undefined on a server too old to echo them; "" is a real value
           // (the checkpoint's dtype, the wrapper's pin) and must not be
           // confused with it — see the two comparisons below.
@@ -218,6 +231,8 @@ const GpuLaunchSection: React.FC<{
     video_codec: string;
     s_min: number | null;
     slack: number | null;
+    region?: string | null;
+    tolerance?: number | null;
     model_dtype: string | null;
     gpu: string | null;
     flow_steps: number | null;
@@ -225,6 +240,8 @@ const GpuLaunchSection: React.FC<{
   } | null = echoed ?? launched;
   const drifted: string[] = [];
   if (reference && up) {
+    if (reference.region != null && reference.region !== startBody.region) drifted.push("region");
+    if (reference.tolerance != null && reference.tolerance !== startBody.tolerance) drifted.push("tolerance");
     if (reference.engine !== startBody.engine) drifted.push("engine");
     if (reference.policy_hub_id !== startBody.policy_hub_id)
       drifted.push("policy");
@@ -290,43 +307,7 @@ const GpuLaunchSection: React.FC<{
           <Cpu className="h-3.5 w-3.5" />
           {t("remoteInference.gpu.title")}
         </p>
-        {restarting ? (
-          <Button type="button" size="sm" disabled className="h-7 gap-1.5 px-2 text-xs">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            {t("remoteInference.gpu.restarting")}
-          </Button>
-        ) : state === "idle" || state === "failed" ? (
-          <Button
-            type="button"
-            size="sm"
-            onClick={launch}
-            disabled={busy || !hubId || taskMissing}
-            className="h-7 gap-1.5 px-2 text-xs"
-          >
-            <Play className="h-3 w-3" />
-            {state === "failed"
-              ? t("remoteInference.gpu.retry")
-              : t("remoteInference.gpu.start")}
-          </Button>
-        ) : (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => void stop()}
-            disabled={busy}
-            className="h-7 gap-1.5 px-2 text-xs"
-          >
-            {busy ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <Square className="h-3 w-3" />
-            )}
-            {state === "starting"
-              ? t("remoteInference.gpu.cancel")
-              : t("remoteInference.gpu.stop")}
-          </Button>
-        )}
+
       </div>
 
       {restarting ? (
@@ -399,6 +380,34 @@ const GpuLaunchSection: React.FC<{
         </div>
       ) : null}
 
+        <div className="space-y-1">
+          <Label htmlFor="remote-gpu" className="text-xs">
+            {t("remoteInference.form.gpuLabel")}
+          </Label>
+          <Select
+            value={knobs.gpu}
+            disabled={busy || running}
+            onValueChange={(v) => knobs.setGpu(v as GpuType)}
+          >
+            <SelectTrigger id="remote-gpu" className="h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {/* Modal's own GPU specs — identifiers, never translated. */}
+              {GPU_TYPES.map((gpu) => (
+                <SelectItem key={gpu} value={gpu} className="text-xs">
+                  <span className={gpu === "auto" ? undefined : "font-mono"}>{gpu === "auto" ? t("remoteInference.form.autoAssignment") : gpu}</span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+      {knobs.gpu === "auto" ? <p className="text-xs text-muted-foreground">{t("remoteInference.form.autoGpuHint")}</p> : null}
+
+      <details className="group rounded-md border border-border p-2">
+        <summary className="cursor-pointer text-xs font-medium">{t("remoteInference.form.gpuTuning")}</summary>
+        <div className="mt-3 space-y-3">
       {/* WHAT LOADS, AND ONTO WHAT. GPU-side only, beside who pays: these
           decide whether the policy fits its latency budget and what the hour
           costs, and describe what WAS launched until that GPU is stopped —
@@ -413,7 +422,7 @@ const GpuLaunchSection: React.FC<{
           controls show it — a select claiming a flag that is not going out
           is the bug this replaced. */}
       <div className="grid gap-2 sm:grid-cols-2">
-        <div className="space-y-1">
+        {knobSupport.modelDtype ? <div className="space-y-1">
           <Label htmlFor="remote-precision" className="text-xs">
             {t("remoteInference.form.precisionLabel")}
           </Label>
@@ -443,38 +452,8 @@ const GpuLaunchSection: React.FC<{
               ))}
             </SelectContent>
           </Select>
-          {/* Said where the disabled control is: the reason belongs to THIS
-              checkpoint, and the operator is looking at a select that will
-              not open. */}
-          {!knobSupport.modelDtype ? (
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              {t("remoteInference.form.precisionUnavailable")}
-            </p>
-          ) : null}
-        </div>
-        <div className="space-y-1">
-          <Label htmlFor="remote-gpu" className="text-xs">
-            {t("remoteInference.form.gpuLabel")}
-          </Label>
-          <Select
-            value={knobs.gpu}
-            disabled={busy || running}
-            onValueChange={(v) => knobs.setGpu(v as GpuType)}
-          >
-            <SelectTrigger id="remote-gpu" className="h-8 text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {/* Modal's own GPU specs — identifiers, never translated. */}
-              {GPU_TYPES.map((gpu) => (
-                <SelectItem key={gpu} value={gpu} className="text-xs">
-                  <span className="font-mono">{gpu}</span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-1">
+        </div> : null}
+        {knobSupport.flowSteps ? <div className="space-y-1">
           <Label htmlFor="remote-flow-steps" className="text-xs">
             {t("remoteInference.form.flowStepsLabel")}
           </Label>
@@ -517,12 +496,7 @@ const GpuLaunchSection: React.FC<{
               ))}
             </SelectContent>
           </Select>
-          {!knobSupport.flowSteps ? (
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              {t("remoteInference.form.flowStepsUnavailable")}
-            </p>
-          ) : null}
-        </div>
+        </div> : null}
       </div>
 
       <div className="space-y-1">
@@ -557,7 +531,68 @@ const GpuLaunchSection: React.FC<{
         </p>
       </div>
 
-      {listing?.error ? (
+        </div>
+      </details>
+      <div className="flex justify-end">
+        {restarting ? (
+          <Button type="button" size="sm" disabled className="h-7 gap-1.5 px-2 text-xs">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            {t("remoteInference.gpu.restarting")}
+          </Button>
+        ) : state === "idle" || state === "failed" ? (
+          <Button
+            type="button"
+            size="sm"
+            onClick={launch}
+            disabled={busy || !hubId || taskMissing || setupIssue}
+            className="h-7 gap-1.5 px-2 text-xs"
+          >
+            <Play className="h-3 w-3" />
+            {state === "failed"
+              ? t("remoteInference.gpu.retry")
+              : t("remoteInference.gpu.start")}
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void stop()}
+            disabled={busy}
+            className="h-7 gap-1.5 px-2 text-xs"
+          >
+            {busy ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Square className="h-3 w-3" />
+            )}
+            {state === "starting"
+              ? t("remoteInference.gpu.cancel")
+              : t("remoteInference.gpu.stop")}
+          </Button>
+        )}
+      </div>
+
+      {setupIssue ? (
+        <div className="space-y-2 rounded-md bg-muted/40 p-3" role="status">
+          <p className="text-sm font-medium">
+            {t(setupCode === "gpu.cli_missing" ? "remoteInference.gpu.setup.install" : "remoteInference.gpu.setup.signIn")}
+          </p>
+          <p className="text-xs text-muted-foreground">{t("remoteInference.gpu.setup.where")}</p>
+          <pre className="overflow-x-auto rounded bg-muted p-2 text-xs">
+            {setupCode === "gpu.cli_missing" ? "uv tool install modal\n" : ""}{setupCommand}
+          </pre>
+          <Button type="button" variant="outline" size="sm" onClick={refreshTargets}>
+            {t("remoteInference.gpu.setup.checkAgain")}
+          </Button>
+          <details className="text-xs text-muted-foreground">
+            <summary className="cursor-pointer">{t("remoteInference.transport.details")}</summary>
+            <p className="mt-2 break-words">{listing?.error?.message ?? status?.message}</p>
+          </details>
+        </div>
+      ) : null}
+
+      {listing?.error && !setupIssue ? (
         // The backend's own text, verbatim. NOT a blocker: Start GPU stays
         // live above, because with no selection the CLI resolves the target
         // itself — a failed listing is not a failed launch.
@@ -566,7 +601,7 @@ const GpuLaunchSection: React.FC<{
         </p>
       ) : null}
 
-      {state === "idle" ? (
+      {state === "idle" && !setupIssue ? (
         <>
           {/* Backend prose, and the one case where an IDLE panel has something
               to say: the idle auto-stop leaves its reason behind so "the GPU is
@@ -584,7 +619,7 @@ const GpuLaunchSection: React.FC<{
               wrapper: MODAL_WRAPPERS[config.engine],
               // The GPU it will actually ask Modal for — data, and no longer
               // safe to write into the sentence: it is a choice now (S3.8e).
-              gpu: knobs.gpu,
+              gpu: knobs.gpu === "auto" ? t("remoteInference.form.autoShort") : knobs.gpu,
             })}
           </p>
         </>
@@ -680,10 +715,12 @@ const GpuLaunchSection: React.FC<{
                 {/* The two GPU-side values, when the record has them. The
                     precision is shown only when one was asked for — an empty
                     echo means the checkpoint's own, which is not a value. */}
-                {reference.gpu ? ` · ${reference.gpu}` : ""}
+                {reference.gpu ? ` · ${reference.gpu === "auto" ? t("remoteInference.form.autoShort") : reference.gpu}` : ""}
                 {reference.model_dtype ? ` · ${reference.model_dtype}` : ""}
                 {reference.flow_steps ? ` · ${reference.flow_steps} steps` : ""}
                 {reference.slack != null ? ` · slack ${reference.slack}` : ""}
+                {reference.region ? ` · ${reference.region}` : ""}
+                {reference.tolerance != null ? ` · tolerance ${reference.tolerance}` : ""}
               </span>
             </span>
           </p>
@@ -701,8 +738,9 @@ const GpuLaunchSection: React.FC<{
         </div>
       ) : null}
 
-      {state === "failed" && status ? (
-        <div className="space-y-1">
+      {state === "failed" && status && !setupIssue ? (
+        <details className="space-y-1">
+          <summary className="cursor-pointer text-xs text-destructive">{t("remoteInference.gpu.setup.failed")}</summary>
           {/* Backend prose, shown as raised. */}
           <p className="flex items-start gap-1.5 text-xs leading-relaxed text-destructive">
             <XCircle className="mt-0.5 h-3 w-3 shrink-0" />
@@ -724,10 +762,10 @@ const GpuLaunchSection: React.FC<{
               {status.code}
             </p>
           ) : null}
-        </div>
+        </details>
       ) : null}
 
-      {error ? (
+      {error && !setupIssue ? (
         // The refusal the request itself raised (a missing `modal` binary, an
         // empty Hub id, no tailnet address) — the backend's own text.
         <p className="text-xs leading-relaxed text-destructive">{error}</p>

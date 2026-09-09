@@ -59,6 +59,8 @@ export interface GpuStatus {
   s_min: number | null;
   /** Synchronization buffering as launched; absent on older servers. */
   slack?: number | null;
+  region?: string | null;
+  tolerance?: number | null;
   /** WHAT IT RUNS AS and WHAT IT RUNS ON, as launched; null only while idle.
    * The empty string is a REAL value for both — the dtype the checkpoint was
    * saved with, and the wrapper's own pinned GPU — which is why they are
@@ -126,6 +128,8 @@ export interface GpuStartRequest {
   video_codec: "H264" | "MJPEG";
   s_min: number;
   slack: number;
+  region?: string;
+  tolerance?: number;
   /** WHICH WORKSPACE PAYS. Empty means the `modal` CLI resolves it itself,
    * which is what an API client that never sends them gets. The UI is
    * deliberately explicit instead: it sends whatever is selected, always. */
@@ -166,6 +170,7 @@ export type ModelDtype = (typeof MODEL_DTYPES)[number] | "";
  * (which is where an off-list value is refused). Modal's own specs — data,
  * shown verbatim. Ordered small to large, which is also the money order. */
 export const GPU_TYPES = [
+  "auto",
   "A10G",
   "L4",
   "A100",
@@ -178,7 +183,7 @@ export type GpuType = (typeof GPU_TYPES)[number];
 /** What both wrappers pin today, and therefore what "unchanged" means: the
  * panel preselects it and SENDS it, so a run that touches neither knob is the
  * same run S3.8 launched. */
-export const DEFAULT_GPU: GpuType = "A100";
+export const DEFAULT_GPU: GpuType = "A10G";
 
 /** The step counts the picker offers, inside the launcher's own 1-20 band
  * (`modal_launcher.FLOW_STEPS_MIN/MAX`, where an off-band value is refused).
@@ -501,6 +506,7 @@ export interface UseGpuTargets {
   environment: string;
   setProfile: (name: string) => void;
   setEnvironment: (name: string) => void;
+  refresh: () => void;
 }
 
 /**
@@ -522,6 +528,8 @@ export interface UseGpuTargets {
 export function useGpuTargets(enabled: boolean): UseGpuTargets {
   const { baseUrl, fetchWithHeaders } = useApi();
   const [targets, setTargets] = useState<GpuTargets | null>(null);
+  const [checkVersion, setCheckVersion] = useState(0);
+  const refresh = useCallback(() => setCheckVersion((version) => version + 1), []);
   // What the LISTING is requested for. State (not derived) because it is an
   // input to the fetch; the displayed selection below is derived from it.
   const [wantedProfile, setWantedProfile] = useState<string>(() =>
@@ -551,7 +559,7 @@ export function useGpuTargets(enabled: boolean): UseGpuTargets {
       }
     })();
     return () => controller.abort();
-  }, [enabled, baseUrl, fetchWithHeaders, wantedProfile]);
+  }, [enabled, baseUrl, fetchWithHeaders, wantedProfile, checkVersion]);
 
   // The one place a stale remembered profile is dropped: the machine answered,
   // it has profiles, and none of them is the remembered one. Clearing it
@@ -592,7 +600,7 @@ export function useGpuTargets(enabled: boolean): UseGpuTargets {
     setWantedEnvironment(name);
   }, []);
 
-  return { targets, profile, environment, setProfile, setEnvironment };
+  return { targets, profile, environment, setProfile, setEnvironment, refresh };
 }
 
 /* -------------------------------------------------------------------------
@@ -603,7 +611,7 @@ export function useGpuTargets(enabled: boolean): UseGpuTargets {
  * and a GPU are answers about the CHECKPOINTS this machine runs, and carrying
  * them to another Lab would carry a bill with them. */
 const MODEL_DTYPE_KEY = "makermodslab.gpuModelDtype";
-const GPU_KEY = "makermodslab.gpuType";
+const GPU_KEY = "makermodslab.gpuType.v2";
 const FLOW_STEPS_KEY = "makermodslab.gpuFlowSteps";
 const SLACK_KEY = "makermodslab.gpuSyncSlack";
 
@@ -710,55 +718,52 @@ export function effectiveGpuKnobs(
  * the same rule `useGpuTargets` applies to a renamed profile: a stale entry
  * must not leave the panel showing something a launch would refuse.
  */
-export function useGpuKnobs(): UseGpuKnobs {
-  // A remembered value outside the current list falls back silently, the rule
-  // `useGpuTargets` applies to a renamed profile.
-  const [modelDtype, setModelDtypeState] = useState<ModelDtype>(() => {
-    const stored = read(MODEL_DTYPE_KEY);
-    return (MODEL_DTYPES as readonly string[]).includes(stored)
-      ? (stored as ModelDtype)
-      : "";
-  });
-  const [gpu, setGpuState] = useState<GpuType>(() => {
-    const stored = read(GPU_KEY);
-    return (GPU_TYPES as readonly string[]).includes(stored)
-      ? (stored as GpuType)
-      : DEFAULT_GPU;
-  });
+type GpuKnobValues = Pick<UseGpuKnobs, "modelDtype" | "gpu" | "flowSteps" | "slack">;
 
-  const setModelDtype = useCallback((value: ModelDtype) => {
-    write(MODEL_DTYPE_KEY, value);
-    setModelDtypeState(value);
-  }, []);
+export function gpuDefaultsForPolicy(policyType?: string | null): GpuKnobValues {
+  return policyType?.toLowerCase() === "molmoact2"
+    ? { modelDtype: "bfloat16", gpu: "A10G", flowSteps: 4, slack: 5 }
+    : { modelDtype: "", gpu: DEFAULT_GPU, flowSteps: null, slack: DEFAULT_SLACK };
+}
 
-  const [flowSteps, setFlowStepsState] = useState<number | null>(() => {
-    const stored = Number(read(FLOW_STEPS_KEY));
-    return (FLOW_STEPS as readonly number[]).includes(stored) ? stored : null;
-  });
-
-  const setGpu = useCallback((value: GpuType) => {
-    write(GPU_KEY, value);
-    setGpuState(value);
-  }, []);
-
-  const setFlowSteps = useCallback((value: number | null) => {
-    write(FLOW_STEPS_KEY, value == null ? "" : String(value));
-    setFlowStepsState(value);
-  }, []);
-
-  const [slack, setSlackState] = useState(() => {
-    const stored = Number(read(SLACK_KEY));
-    return (SYNC_SLACK_OPTIONS as readonly number[]).includes(stored)
-      ? stored
-      : DEFAULT_SLACK;
-  });
-  const setSlack = useCallback((value: number) => {
-    write(SLACK_KEY, String(value));
-    setSlackState(value);
-  }, []);
-
+function readGpuKnobs(scope: string): GpuKnobValues {
+  const defaults = gpuDefaultsForPolicy(scope ? "molmoact2" : null);
+  const dtype = read(MODEL_DTYPE_KEY + scope);
+  const gpu = read(GPU_KEY + scope);
+  const flow = read(FLOW_STEPS_KEY + scope);
+  const slack = Number(read(SLACK_KEY + scope));
   return {
-    modelDtype, gpu, flowSteps, slack,
-    setModelDtype, setGpu, setFlowSteps, setSlack,
+    modelDtype: dtype === "checkpoint" ? "" : (MODEL_DTYPES as readonly string[]).includes(dtype)
+      ? dtype as ModelDtype : defaults.modelDtype,
+    gpu: (GPU_TYPES as readonly string[]).includes(gpu) ? gpu as GpuType : defaults.gpu,
+    flowSteps: flow === "checkpoint" ? null : (FLOW_STEPS as readonly number[]).includes(Number(flow))
+      ? Number(flow) : defaults.flowSteps,
+    slack: (SYNC_SLACK_OPTIONS as readonly number[]).includes(slack) ? slack : defaults.slack,
   };
+}
+
+export function useGpuKnobs(policyType?: string | null): UseGpuKnobs {
+  // MolmoAct2 preferences are separate from older global picks. A fresh browser
+  // and an existing installation both get the tested preset without changing ACT.
+  const scope = policyType?.toLowerCase() === "molmoact2" ? ".molmoact2" : "";
+  const [values, setValues] = useState<Record<string, GpuKnobValues>>({});
+  const current = values[scope] ?? readGpuKnobs(scope);
+  const update = useCallback((patch: Partial<GpuKnobValues>) => {
+    setValues(prev => ({ ...prev, [scope]: { ...(prev[scope] ?? readGpuKnobs(scope)), ...patch } }));
+  }, [scope]);
+  const setModelDtype = useCallback((value: ModelDtype) => {
+    write(MODEL_DTYPE_KEY + scope, value || (scope ? "checkpoint" : ""));
+    update({ modelDtype: value });
+  }, [scope, update]);
+  const setGpu = useCallback((value: GpuType) => {
+    write(GPU_KEY + scope, value); update({ gpu: value });
+  }, [scope, update]);
+  const setFlowSteps = useCallback((value: number | null) => {
+    write(FLOW_STEPS_KEY + scope, value == null ? (scope ? "checkpoint" : "") : String(value));
+    update({ flowSteps: value });
+  }, [scope, update]);
+  const setSlack = useCallback((value: number) => {
+    write(SLACK_KEY + scope, String(value)); update({ slack: value });
+  }, [scope, update]);
+  return { ...current, setModelDtype, setGpu, setFlowSteps, setSlack };
 }

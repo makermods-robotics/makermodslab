@@ -1,3 +1,4 @@
+import { rtcTimingBudget } from "./rtcTimingBudget";
 import React, { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DEFAULT_GPU } from "@/hooks/useGpuLauncher";
@@ -211,6 +212,7 @@ const RemoteSessionBody: React.FC<{
 }) => {
   const { t } = useTranslation();
   const stats = status.stats;
+  const timing = status.engine === "rtc" ? rtcTimingBudget(stats, status.fps) : null;
 
   // The previous sample, kept only to difference `holds` against.
   const [holdsRate, setHoldsRate] = useState<number | null>(null);
@@ -439,11 +441,25 @@ const RemoteSessionBody: React.FC<{
             >
               {t("remoteInference.status.gpuBilling", {
                 profile: gpuProfile,
-                gpu: gpuType || DEFAULT_GPU,
+                gpu: gpuType === "auto" ? t("remoteInference.form.autoShort") : gpuType || DEFAULT_GPU,
               })}
             </span>
           ) : null}
         </div>
+
+        {timing ? (
+          <div className="space-y-1.5 text-xs">
+            <div className="flex justify-between gap-3">
+              <span>{t("remoteInference.network.budget")}</span>
+              <span className={timing.state === "within" ? "text-muted-foreground" : "text-warn"}>{t(`remoteInference.network.${timing.state}`)}</span>
+            </div>
+            <div role="meter" aria-label={t("remoteInference.network.budget")} aria-valuemin={0} aria-valuemax={timing.budgetMs} aria-valuenow={Math.min(timing.delayMs, timing.budgetMs)} className="h-1.5 overflow-hidden rounded-full bg-muted">
+              <div className={`h-full ${timing.state === "within" ? "bg-primary" : "bg-warn"}`} style={{ width: `${timing.percent}%` }} />
+            </div>
+            <p className="text-muted-foreground">{t("remoteInference.network.delay", { delay: Math.round(timing.delayMs), budget: Math.round(timing.budgetMs) })}</p>
+            <p className="text-muted-foreground">{t("remoteInference.network.budgetHint")}</p>
+          </div>
+        ) : null}
 
         {stats ? (
           <>

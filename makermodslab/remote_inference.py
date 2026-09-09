@@ -127,8 +127,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Literal
 
-from pydantic import BaseModel
-
 from . import sfu
 from .api_errors import ErrorCode
 from .arm_capabilities import supports_remote_inference
@@ -163,6 +161,7 @@ from .rollout import (
     _session_cameras,
     _terminate_tree,
 )
+from .schemas.action_filter import ActionFilterOptions
 from .session_events import notify_session_changed
 from .utils.config import (
     DRTC_ENV_PATH,
@@ -315,7 +314,7 @@ def remote_inference_is_active() -> bool:
     return remote_inference_active
 
 
-class RemoteInferenceRequest(BaseModel, extra="forbid"):
+class RemoteInferenceRequest(ActionFilterOptions, extra="forbid"):
     """One remote-inference run.
 
     Robot fields first (sessions.py resolves them from the robot record in
@@ -678,7 +677,7 @@ def _robot_sync_args(
 
     Everything else is left at the child's defaults on purpose (`adaptive`,
     `base_lead`, `align`, `action_delay`, `pacing`, `epsilon`, the JK constants,
-    the rtc engine's low-pass, `video_quality`, `video_bitrate_kbps`,
+    `video_quality`, `video_bitrate_kbps`,
     `reliable_state`): they are knobs whose wrong values present as "the arm
     freezes" or "the arm snaps at every boundary" rather than as an error, and
     `reliable_state` in particular auto-follows the codec — forcing it wrong
@@ -690,7 +689,19 @@ def _robot_sync_args(
         f"--horizon={request.horizon}",
         f"--duration_s={request.duration_s}",
         f"--video_codec={request.video_codec}",
-        *([f"--s_min={request.s_min}"] if request.engine == "rtc" else []),
+        f"--video_quality={request.video_quality}",
+        f"--video_bitrate_kbps={request.video_bitrate_kbps}",
+        *(
+            [
+                f"--s_min={request.s_min}",
+                f"--lpf_hz={request.lpf_hz}",
+                f"--lpf_order={request.lpf_order}",
+                f"--camera_send_hz={request.camera_send_hz}",
+                f"--latency_k={request.latency_k}",
+            ]
+            if request.engine == "rtc"
+            else []
+        ),
         f"--livekit_url={url}",
         f"--livekit_room={room}",
         *([f"--livekit_token={token}"] if token else []),
@@ -1071,6 +1082,7 @@ def _payload_locked(*, shutting_down: bool) -> dict[str, Any]:
         "started_at": _remote_started_at,
         "elapsed_s": elapsed,
         "duration_s": _remote_meta.get("duration_s"),
+        "fps": _remote_meta.get("fps"),
         "log_path": _remote_meta.get("log_path"),
         "returning_to_rest": _returning_to_rest,
         "shutting_down": shutting_down,
@@ -1639,6 +1651,7 @@ def handle_start_remote_inference(request: RemoteInferenceRequest) -> dict[str, 
             "policy_ref": request.policy_ref,
             "engine": request.engine,
             "duration_s": request.duration_s,
+            "fps": request.fps,
             "fingerprint": _fingerprint(request),
         }
         # A new run supersedes the previous run's terminal payload.

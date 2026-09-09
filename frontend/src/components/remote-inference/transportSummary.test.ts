@@ -118,6 +118,16 @@ describe("summarizeTransport picks the first thing to fix", () => {
       null,
     );
     expect(absent.key).toBe("remoteInference.transport.summary.operatorAbsent");
-    expect(absent.tone).toBe("warn");
+    expect(absent.tone).toBe("muted");
+  });
+
+  it.each([
+    ["starting", "gpuStarting"],
+    ["ready", "gpuWaiting"],
+    ["stopping", "gpuWaiting"],
+    ["idle", "operatorAbsent"],
+  ])("keeps the waiting message consistent with a %s GPU", (state, key) => {
+    expect(summarizeTransport({ ...base, operator_present: false }, false, null, state).key)
+      .toBe(`remoteInference.transport.summary.${key}`);
   });
 });

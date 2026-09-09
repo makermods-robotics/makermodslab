@@ -295,3 +295,47 @@ def test_the_two_tailscale_blocks_are_identical() -> None:
         "the tailscale block has drifted between modal_policy.py and "
         "modal_policy_rtc.py; they must stay verbatim copies"
     )
+
+
+@pytest.mark.parametrize("wrapper", _WRAPPERS, ids=lambda p: p.stem)
+def test_gpu_default_is_a10g_and_explicit_override_wins(wrapper: Path) -> None:
+    tree = ast.parse(wrapper.read_text())
+    assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_FN_KWARGS" for target in node.targets)
+    )
+    gpu = next(
+        value
+        for key, value in zip(assignment.value.keys, assignment.value.values, strict=True)
+        if isinstance(key, ast.Constant) and key.value == "gpu"
+    )
+    import os
+    from unittest.mock import patch
+
+    expression = compile(ast.Expression(body=gpu), str(wrapper), "eval")
+    for requested, expected in [("", "A10G"), ("H100", "H100"), ("auto", ["A10G", "L4", "A100", "A100-80GB", "H100", "H200"])]:
+        with patch.dict(os.environ, {"DRTC_GPU": requested}):
+            assert eval(expression, {"os": os}) == expected
+@pytest.mark.parametrize("wrapper", _WRAPPERS, ids=lambda p: p.stem)
+def test_region_default_and_explicit_override(wrapper: Path) -> None:
+    tree = ast.parse(wrapper.read_text())
+    assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_FN_KWARGS" for target in node.targets)
+    )
+    gpu = next(
+        value
+        for key, value in zip(assignment.value.keys, assignment.value.values, strict=True)
+        if isinstance(key, ast.Constant) and key.value == "region"
+    )
+    import os
+    from unittest.mock import patch
+
+    expression = compile(ast.Expression(body=gpu), str(wrapper), "eval")
+    for requested, expected in [("", "us-west"), ("eu", "eu"), ("auto", None)]:
+        with patch.dict(os.environ, {"DRTC_REGION": requested}):
+            assert eval(expression, {"os": os}) == expected

@@ -50,6 +50,8 @@ export interface ModalRunLineInput {
   flowSteps: number | null;
   /** Policy-side synchronization buffering; omitted keeps the wrapper's 5 ticks. */
   slack?: number;
+  region?: string;
+  tolerance?: number;
   /** EXTRA camera views to declare on the checkpoint before the weights load
    * (S3.8g). Empty ⇒ NO flag, i.e. the views the checkpoint was published with.
    * Comma-joined into ONE flag because that is what both wrappers'
@@ -145,7 +147,7 @@ export function buildModalRunLine(input: ModalRunLineInput): string {
     // without re-pointing every other terminal on the machine. DRTC_GPU has no
     // flag it COULD be: both wrappers build `@app.function(gpu=…)` at import,
     // before Click parses anything, so the environment is the only channel.
-    `${profile ? `MODAL_PROFILE=${profile} ` : ""}${gpu ? `DRTC_GPU=${gpu} ` : ""}modal run` +
+    `${profile ? `MODAL_PROFILE=${profile} ` : ""}${gpu ? `DRTC_GPU=${gpu} ` : ""}${input.region ? `DRTC_REGION=${shellQuote(input.region)} ` : ""}modal run` +
       // `--env` is a `modal run` OPTION, so it goes BEFORE the wrapper path.
       // After it, Click hands it to the wrapper's own local_entrypoint — which
       // has no such parameter — and the command dies on an unknown flag.
@@ -177,6 +179,7 @@ export function buildModalRunLine(input: ModalRunLineInput): string {
     // there would make the line fail to parse rather than run with a default.
     ...(input.engine === "rtc" ? [`--s-min ${input.sMin}`] : []),
     ...((input.slack ?? 5) !== 5 ? [`--slack ${input.slack}`] : []),
+    ...((input.tolerance ?? 1.5) !== 1.5 ? [`--tolerance ${input.tolerance}`] : []),
     `--video-codec ${input.videoCodec}`,
   ];
   // The room is what makes the two sides meet. The GPU side otherwise takes it

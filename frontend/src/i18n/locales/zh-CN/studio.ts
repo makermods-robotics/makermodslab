@@ -305,6 +305,8 @@ export default {
         "指导始终使用 Sync 引擎。Real-Time Chunking 会让策略恢复时机械臂朝纠正前的姿态弹回，手就在旁边时这并不安全。",
     },
     cameras: {
+      automaticHint: "摄像头输入按此顺序匹配。请在机器人设置中编辑。",
+      unused: "此策略不使用该摄像头",
       title: "摄像头",
       loading: "正在读取策略配置…",
       configError: "无法加载策略配置：{{error}}",
@@ -320,7 +322,7 @@ export default {
       unmatched:
         "策略需要摄像头 <0>{{name}}</0>，但该机器人没有名为“{{name}}”的摄像头 — 请在机器人设置中重命名。",
       unmatchedRemote:
-        "策略需要摄像头 <0>{{name}}</0>，该机器人没有同名摄像头 — 请在本提示正上方选择由哪个摄像头承担该角色。",
+        "请在机器人设置中添加摄像头 <0>{{name}}</0>。",
       resolutionMismatch:
         "<0>{{name}}</0> 在机器人设置中为 {{robotWidth}}×{{robotHeight}}，而策略是在 {{policyWidth}}×{{policyHeight}} 下训练的 — 运行时按策略的分辨率采集。",
     },

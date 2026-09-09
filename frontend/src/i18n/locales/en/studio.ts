@@ -301,7 +301,7 @@ export default {
       remote: "Remote GPU",
       localHint: "This machine loads the checkpoint and drives the arm.",
       remoteHint:
-        "The arm runs here; the policy runs on a remote GPU, and the two meet in a LiveKit room. This machine never loads the checkpoint.",
+        "The GPU runs the policy. This machine controls the arm.",
     },
     // Coaching-only parameters, shown when run mode is "coach".
     coaching: {
@@ -348,23 +348,23 @@ export default {
       // {{policyType}} is the policy identifier (act, smolvla, …) — data.
       // The field is always shown, so the helper answers "is this even read?"
       // in all three states: no policy picked yet, conditioned, not conditioned.
-      hint: "This policy is language-conditioned ({{policyType}}).",
+      hint: "Task for {{policyType}}.",
       hintUnknown:
-        "Only language-conditioned policies use this — pick a policy to see whether yours does.",
+        "Select a policy to check task support.",
       hintNotConditioned:
-        "This policy ({{policyType}}) isn't language-conditioned — it ignores this.",
+        "{{policyType}} does not use a task.",
       // Appended to `hint` when the task was auto-filled from the checkpoint's
       // own training dataset. Leading space is added by the caller.
       prefilled: "Filled in from the dataset it was trained on.",
       // Placeholder when the lineage offered no task at all. Never an invented
       // example: a fake task greyed into the slot the REAL inherited one uses
       // is indistinguishable from one.
-      placeholderNone: "No task found on the training dataset — type one",
+      placeholderNone: "Describe the task",
       // Shown for a policy that does NOT read the task. Coaching still saves it.
       hintCoach:
         "Saved with every correction, so you can tell later what this session was teaching.",
       leaveEmpty:
-        "Leave it empty to use the greyed task from the dataset it was trained on.",
+        "Leave blank to use the suggested task.",
       multiTaskHint_one:
         "Its training dataset has {{count}} task — pick the one you're running:",
       multiTaskHint_other:
@@ -378,8 +378,8 @@ export default {
         "Per attempt. An attempt that runs this long without a rescue or a finish ends on its own.",
       // Remote only, where 0 is the backend's own unbounded contract rather
       // than a run that ends the instant it starts.
-      remoteHint: "The run stops after this long. Set 0 to run until you stop it.",
-      remoteUnbounded: "0 — the run continues until you stop it.",
+      remoteHint: "0 runs until you stop it.",
+      remoteUnbounded: "Runs until you stop it.",
     },
     episodes: {
       label: "Episodes",
@@ -410,6 +410,8 @@ export default {
         "Coaching always uses the Sync engine. Real-Time Chunking makes the arm jump back toward its pre-correction pose when the policy resumes, which isn't safe with a hand nearby.",
     },
     cameras: {
+      automaticHint: "Inputs match automatically. Edit cameras in Robot settings.",
+      unused: "Not used by this policy",
       title: "Cameras",
       loading: "Reading policy config…",
       // {{error}} is the backend's own message and is shown as sent.
@@ -435,7 +437,7 @@ export default {
       // different remedy: a robot camera's name is its identity and is never
       // renamed to suit a checkpoint.
       unmatchedRemote:
-        "The policy expects camera <0>{{name}}</0> and no camera on this robot has that name — choose which camera plays that role just above this notice.",
+        "Add camera <0>{{name}}</0> in Robot settings.",
       // Matched by name, but the robot captures at a different size than the
       // checkpoint trained at. All four numbers are raw pixel dimensions.
       resolutionMismatch:

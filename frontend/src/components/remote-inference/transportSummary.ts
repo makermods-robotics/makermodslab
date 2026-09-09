@@ -39,6 +39,7 @@ export function summarizeTransport(
   transport: RemoteInferenceTransportStatus | null,
   loading: boolean,
   error: string | null,
+  gpuState?: string,
 ): TransportSummary {
   if (error) {
     return {
@@ -100,9 +101,12 @@ export function summarizeTransport(
   }
   if (transport.operator_present === false) {
     return {
-      key: "remoteInference.transport.summary.operatorAbsent",
-      values: { room: transport.room },
-      tone: "warn",
+      key: gpuState === "starting"
+        ? "remoteInference.transport.summary.gpuStarting"
+        : gpuState === "ready" || gpuState === "stopping"
+          ? "remoteInference.transport.summary.gpuWaiting"
+          : "remoteInference.transport.summary.operatorAbsent",
+      tone: "muted",
     };
   }
   return { key: "remoteInference.transport.summary.notProbed", tone: "muted" };

@@ -1,5 +1,36 @@
 export default {
+  network: {
+    autoRegionHint: "Modal chooses the region. Network delay may vary.",
+    "title": "Network",
+    "region": "GPU region",
+    "regionHint": "Choose a nearby region. Restart GPU to apply.",
+    "advanced": "Advanced",
+    "videoQuality": "MJPEG quality",
+    "videoQualityHint": "Lower uses less bandwidth.",
+    "videoBitrateKbps": "H264 bitrate (kbps)",
+    "videoBitrateKbpsHint": "Per camera. Lower uses less bandwidth.",
+    "cameraSendHz": "Camera send rate (Hz)",
+    "cameraSendHzHint": "0 = automatic. Caps camera and state updates, not arm speed.",
+    "latencyK": "Jitter margin",
+    "latencyKHint": "Higher allows for more variation in delay.",
+    "tolerance": "Frame matching tolerance",
+    "toleranceHint": "In control ticks. Higher accepts less closely timed frames. Restart GPU to apply.",
+    "budget": "RTC timing budget",
+    "delay": "Estimated delay {{delay}} / {{budget}} ms",
+    "within": "Within budget",
+    "near": "Near limit",
+    "over": "Over budget",
+    "budgetHint": "Includes inference and jitter margin. Queue holds may still occur."
+},
   form: {
+    autoAssignment: "Auto (less wait time)",
+    autoShort: "Auto",
+    autoGpuHint: "A10G, L4 or larger. Price varies.",
+
+    motionTuning: "Motion",
+    gpuTuning: "GPU tuning",
+    humanUnavailable: "Human in the loop is unavailable for remote runs.",
+
     hubIdLabel: "Hub policy id",
     // The engine's LABELS live under `studio.deploy.engine` — it is one field
     // for both places a run can happen. These hints are the pair that survived
@@ -13,9 +44,9 @@ export default {
     // remaining sentence for that state is `studio.deploy.engine.rtcUnavailable`.
     engine: {
       syncHint:
-        "Plays each action chunk to the end and asks for the next one just in time. Right for any policy, and the only choice for ACT.",
+        "Plays one chunk at a time.",
       rtcHint:
-        "Sends the moves it has not made yet with every request, so the GPU shapes the next chunk to continue them. Removes the seam between chunks — only flow policies (SmolVLA, π0, π0.5, diffusion) can do this.",
+        "Plans the next chunk while the arm moves.",
     },
     // The Advanced trigger's summary line. Every value is live and is DATA —
     // the codec id is the wire value, the numbers are the ones that go out.
@@ -23,23 +54,25 @@ export default {
     // reaches the wire for rtc, so it is only claimed there. The GPU's own
     // knobs used to be appended here; they live on the Modal card now, and the
     // line says "Transport" because that is all it still describes.
-    advancedSummary: "Transport: horizon {{horizon}} · {{fps}} fps · {{codec}}",
+    advancedSummary: "{{fps}} Hz · {{horizon}} actions · {{codec}}",
     advancedSummaryRtc:
-      "Transport: horizon {{horizon}} · {{fps}} fps · {{codec}} · minimum budget {{sMin}}",
-    horizonLabel: "Horizon",
-    fpsLabel: "Frames per second",
+      "{{fps}} Hz · smoothing {{lpfHz}} Hz",
+    horizonLabel: "Chunk size (actions)",
+    fpsLabel: "Control rate (Hz)",
     codecLabel: "Video codec",
     // The checkpoint's own chunk width. {{steps}} is a number read off its
     // config, never a translated value.
     horizonFromCheckpoint:
-      "This checkpoint returns {{steps}} steps per chunk, so the horizon starts from that and must not go above it.",
+      "Maximum chunk size: {{steps}} actions.",
     horizonOverCeiling:
-      "The horizon is above the {{steps}} steps this checkpoint returns. The two sides then disagree about the chunk shape and every packet is dropped in silence — the run will look connected and receive nothing.",
-    sMinLabel: "Minimum budget",
+      "Use {{steps}} actions or fewer to connect correctly.",
+    filterLabel: "Smoothing (Hz)",
+    filterHint: "Lower is smoother but slower to respond. 0 is off.",
+    sMinLabel: "Replan interval (steps)",
     // "--s-min" is a flag name, kept in the Latin script like every other
     // identifier in this panel.
     sMinHint:
-      "Steps of the plan the arm keeps in hand for the round trip. It must be the same number as --s-min in the command above: the arm works out which part of the next chunk is still fresh from it, and the GPU takes that answer on trust.",
+      "Minimum steps between plans. Start with 4.",
     // The GPU-side knobs, which live on the Modal card rather than under
     // Advanced: nothing here has to match the arm — they decide what the
     // container loads and what it loads onto. Labels only; the card is a strip
@@ -47,27 +80,27 @@ export default {
     precisionLabel: "Precision",
     // The one option that is prose: it stands for passing no flag at all. The
     // others are torch dtype names — wire values, never translated.
-    precisionCheckpoint: "Checkpoint default",
+    precisionCheckpoint: "Model default",
     gpuLabel: "GPU",
     gpuHint:
-      "The Modal GPU the policy server runs on. Bigger is faster and dearer per hour; it is the second lever after precision, and it is billed either way.",
+      "Choose a larger GPU if the model runs out of memory.",
     // Said where the disabled select is, because the reason belongs to THIS
     // checkpoint. No policy type is named: the fact the operator needs is that
     // this one has no such setting, not which family it belongs to.
     precisionUnavailable:
-      "This checkpoint has no precision setting to override — it is loaded the way it was saved.",
+      "Uses the model’s saved precision.",
     // The flow-steps knob (S3.8f).
     flowStepsLabel: "Flow steps",
-    slackLabel: "Sync slack (ticks)",
+    slackLabel: "Buffer (steps)",
     slackHint:
-      "Lower values reduce buffering; higher values handle uneven delivery. Default: 5. Restart the GPU to apply changes.",
+      "Increase for uneven delivery. Restart GPU to apply.",
     // Prose, like the precision's first option: it stands for passing no flag.
     // The second form carries the number this checkpoint will actually run at,
     // which is data — the server works it out, never this file.
-    flowStepsCheckpoint: "Checkpoint default",
-    flowStepsCheckpointKnown: "Checkpoint default ({{steps}})",
+    flowStepsCheckpoint: "Model default",
+    flowStepsCheckpointKnown: "Model default ({{steps}})",
     flowStepsUnavailable:
-      "This checkpoint does not build its actions in steps, so there is nothing to shorten.",
+      "This model has no flow-step setting.",
   },
   // The per-role camera picker. It appears ONLY for checkpoint cameras that
   // matched nothing by name, so most runs never see it.
@@ -79,16 +112,16 @@ export default {
     // Both numbers are raw pixel dimensions from the checkpoint's config.
     capturesAt: "The policy trained at {{width}}×{{height}}.",
     unbound: "Not chosen",
-    noCameras: "This robot has no cameras — add one in Robot settings.",
+    noCameras: "This robot has no cameras. add one in Robot settings.",
     disconnected: "Not plugged in right now.",
     // S3.8g — a view the checkpoint does not declare at all. The role NAME
     // interpolated below is data (cam2), rendered verbatim in every language.
     addRole: "Add a camera role",
     addRoleHint:
-      "This checkpoint was fine-tuned with the two views it declares, but the model underneath takes any number of them, so the GPU can be asked for one more. It costs latency (more image tokens per step) and the checkpoint's own authors never tested it — measure before trusting it. The extra camera needs to be chosen above, and the GPU must be started from this panel so both halves agree.",
+      "This checkpoint was fine-tuned with the two views it declares, but the model underneath takes any number of them, so the GPU can be asked for one more. It costs latency (more image tokens per step) and the checkpoint's own authors never tested it. measure before trusting it. The extra camera needs to be chosen above, and the GPU must be started from this panel so both halves agree.",
     addRoleFull:
       "That is as many extra views as this launcher will add. Each one is more work per step, and past a point the chunk arrives after the arm needed it.",
-    extraBadge: "Added for this run — not a view the checkpoint was trained with.",
+    extraBadge: "Added for this run. not a view the checkpoint was trained with.",
     remove: "Remove",
     removeRole: "Remove the camera role {{role}}",
   },
@@ -99,26 +132,34 @@ export default {
     rtc: "Real-time chunking",
   },
   modalRun: {
-    manualToggle: "Run it yourself instead",
+    manualToggle: "Manual setup",
     title: "What the Lab will run",
     intro:
-      "The same command, for launching by hand — the only route when the modal command is missing or not signed in, and the line to compare against when a run connects but receives nothing.",
+      "Copy this command to start the GPU from a terminal.",
     copy: "Copy",
     copiedTitle: "Command copied",
     copyFailedTitle: "Couldn't copy",
     copyFailedBody: "Select the command and copy it by hand.",
     noRoomYet:
-      "No room resolved yet — re-check the transport below, then copy the command again.",
+      "Check the connection before copying the command.",
     // <0> is the literal placeholder text and <1> the literal key-file path.
     // Both are identifiers and stay in the Latin script.
     secretsHint:
       "Replace <0>{{placeholder}}</0> with the secret beside that key id in <1>{{path}}</1>. The key id in the line is real; the Lab never sends the secret over its own API.",
     noTailnetUrl:
-      "No tailnet address, so the command has no URL for the GPU side to dial. Sign in to Tailscale on this machine and re-check the transport.",
+      "Sign in to Tailscale, then check the connection again.",
   },
   // The GPU half, which the Lab launches itself since S3.8. It does NOT gate
   // the remote verb — that stays the transport probe's operator check.
   gpu: {
+    setup: {
+      install: "Install Modal to start a GPU.",
+      signIn: "Sign in to Modal to start a GPU.",
+      where: "Run these commands on the computer hosting MakerMods Lab.",
+      checkAgain: "Check again",
+      failed: "GPU start failed. Details",
+    },
+
     title: "Policy server on Modal",
     start: "Start GPU",
     retry: "Try again",
@@ -128,13 +169,13 @@ export default {
     // data, shown verbatim. The GPU is interpolated rather than written into
     // the sentence because it is a choice now (S3.8e).
     idleHint:
-      "Runs {{wrapper}} on a Modal {{gpu}} from this machine. Cold start is usually 1-3 minutes; the room and the credentials are filled in for you.",
+      "{{gpu}} on Modal. First start may take 1–3 minutes.",
     // {{seconds}} is a plain integer, deliberately not i18next's magic `count`.
     elapsed: "{{seconds}}s",
     // Backend phase values. Matched on, never displayed raw — the raw value is
     // the fallback for a phase a newer server introduces.
     phase: {
-      pending: "Starting the container",
+      pending: "Waiting for GPU",
       tailscale_up: "Joining the tailnet",
       loading: "Loading the checkpoint",
       warmup: "Warming up the model",
@@ -147,7 +188,7 @@ export default {
     // matches on, and the panel shows them exactly as `modal` reports them.
     profileLabel: "Modal profile",
     environmentLabel: "Environment",
-    running: "GPU running — this is billing.",
+    running: "GPU running. Billing active.",
     // {{profile}}, {{workspace}} and {{environment}} are all DATA — Modal's own
     // names, shown verbatim inside whatever sentence a translator writes.
     billingTo: "Billing to {{profile}}.",
@@ -155,8 +196,8 @@ export default {
     billingEnvironment: "Environment {{environment}}.",
     // {{minutes}} is a plain integer, deliberately not `count`.
     idleStopIn:
-      "It stops itself in about {{minutes}} min if no remote run starts.",
-    idleStopPaused: "A remote run is using it, so it won't stop itself.",
+      "Auto-stop in {{minutes}} min if unused.",
+    idleStopPaused: "Auto-stop pauses during a run.",
     // Drift between the form and the running server. {{fields}} is a list of
     // flag NAMES (engine, horizon, fps, codec, s_min, policy, task) — data.
     // The launched values follow the sentence, verbatim.
@@ -164,17 +205,18 @@ export default {
     // cannot change either — the precision is decided while the weights load,
     // the GPU when the container is created.)
     driftBody:
-      "You changed {{fields}} since the GPU was started. A running server keeps the values it was started with, and a mismatch is a run that receives nothing — not an error. It is running:",
-    restart: "Restart GPU with these settings",
+      "Changed: {{fields}}. Restart GPU to apply. Current settings:",
+    restart: "Apply and restart GPU",
     restarting: "Restarting GPU…",
-    restartingBody: "Stopping the current GPU, then requesting a replacement with the selected settings.",
+    restartingBody: "Starting a GPU with the new settings.",
     // Shown in the idle state while Start GPU is disabled for an empty task.
     taskRequired:
-      "Describe the task first — this policy is language-conditioned, and the GPU's policy server refuses to start without one.",
+      "Enter a task before starting the GPU.",
     roomLabel: "Room",
     logLabel: "Log",
   },
   transport: {
+    details: "Details",
     // What is left of the retired Transport section: the values a human has to
     // read with their eyes and retype somewhere else (the crib sheet beside the
     // hand-typed `modal run` line), the source label the session dialog's
@@ -185,11 +227,11 @@ export default {
       sfu: "the Lab's own SFU",
       cloud: "livekit.env (LiveKit Cloud)",
       process_env: "this process's environment",
-      none: "nowhere — nothing is configured",
+      none: "nowhere. nothing is configured",
     },
     roomLabel: "Room",
     extraMissing:
-      "The optional drtc extra isn't installed, so nothing could be checked. Install it from the primary checkout — an editable install run from a worktree re-points every other session.",
+      "Install the drtc extra in the main checkout.",
     sfuModalUrlLabel: "Address for the GPU",
     sfuNoTailnet: "no tailnet address",
     sfuKeyIdLabel: "Key id",
@@ -200,27 +242,29 @@ export default {
     // backend's install hint, when there is one) beneath this sentence.
     // "the flags below" is that `<pre>`. See transportSummary.ts.
     sfuNotRunning:
-      "This Lab isn't running a LiveKit server. Start it with the flags below, or leave it off and use LiveKit Cloud credentials from livekit.env.",
+      "Start the Lab with --sfu or configure LiveKit Cloud.",
     // The transport as ONE sentence, chosen by the first thing that is wrong —
     // the order is the order an operator has to fix things in. It stands under
     // Start in place of the generic "not ready" line, so each of these has to
     // say what to DO. See transportSummary.ts.
     summary: {
       // {{error}} is the thrown error's own text — backend prose, verbatim.
-      fetchFailed: "Couldn't read the transport: {{error}}",
+      fetchFailed: "Connection check failed: {{error}}",
       checking: "Checking the room…",
-      notChecked: "The room hasn't been checked yet.",
+      notChecked: "Connection not checked.",
       // {{vars}} is a list of environment variable NAMES — data, verbatim.
       missingVars:
         "No LiveKit credentials: {{vars}} missing. Start the Lab with --sfu, or put Cloud credentials in livekit.env.",
       // {{url}} is the address itself — data.
       unreachable:
-        "Nothing is answering at {{url}}. Check the LiveKit server is up and reachable from here.",
-      notProbed: "The room could not be checked from here.",
+        "Cannot reach {{url}}. Check the LiveKit server.",
+      notProbed: "Cannot check this connection.",
       // {{room}} is the room NAME — data.
-      ready: "A GPU is in {{room}}, ready to drive the arm.",
+      ready: "GPU ready in {{room}}.",
+      gpuStarting: "GPU is starting…",
+      gpuWaiting: "Waiting for GPU…",
       operatorAbsent:
-        "No GPU in {{room}} yet — start one above, or run the command yourself.",
+        "Start GPU to continue.",
     },
   },
   // Backend phase values. Matched on, never displayed raw — the raw value is
@@ -254,7 +298,7 @@ export default {
     connectingSubtitle: "Connecting to the GPU & the arm…",
     // A remote run with duration 0 runs until it is stopped. The "/" matches
     // the "/ 01:00" a bounded run shows in the same slot.
-    unbounded: "/ ∞ — stops when you do",
+    unbounded: "/ ∞",
     unboundedDone: "/ ∞",
     // {{ref}} is the policy ref, {{room}} the room NAME and {{source}} the
     // resolved source label — all three data, shown verbatim.
@@ -267,9 +311,9 @@ export default {
     gpuBilling: "Modal · {{profile}} · {{gpu}} · billing",
     // The child writes a log FILE and reports its path; nothing is streamed to
     // the browser, so the log slot holds the path for the operator to open.
-    noLogYet: "No log path yet — the run hasn't opened one.",
+    noLogYet: "No log yet.",
     returningToRest:
-      "Easing the arm back to where it started before letting go.",
+      "Returning to the starting position.",
     operator: "Operator",
     noOperatorYet: "waiting",
     chunks: "Chunks / requests",
@@ -284,7 +328,7 @@ export default {
     leadValue: "{{lead}} of {{margin}}",
     degradeHint: "quality is degrading",
     noSampleYet:
-      "No sample yet — the first one lands a second after connecting.",
+      "Waiting for the first sample.",
   },
   toast: {
     startFailed: "Couldn't start the remote run",

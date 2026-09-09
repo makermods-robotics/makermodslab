@@ -1,18 +1,7 @@
 import type { RobotRecord } from "@/hooks/useRobots";
 import { isCanArmType } from "@/lib/armTypes";
 
-/**
- * The four transport knobs plus the Hub id, held as one object so the start
- * request and the generated `modal run` line are built from the SAME values.
- *
- * They are not defaults anyone should tune casually: horizon, fps and codec
- * MUST match the GPU side, and Portal fingerprints the wire schema — a
- * disagreement silently drops every packet instead of raising, so a mismatched
- * run looks healthy and does nothing. Everything else DRTC exposes (adaptive,
- * base_lead, s_min, align, action_delay, the latency coefficients, video
- * quality/bitrate, reliable_state) stays a backend constant precisely because
- * a wrong value there presents as "the arm freezes" rather than as an error.
- */
+/** Shared configuration for the robot request and Modal launch. */
 export type RemoteEngine = "sync" | "rtc";
 
 export interface RemoteRunConfig {
@@ -33,6 +22,14 @@ export interface RemoteRunConfig {
    * `overlap_end = H - max(s_min, d)` and the GPU server TRUSTS that number, so
    * the two `--s-min` / `--s_min` values must be the same. */
   sMin: number;
+  /** Robot-side action filter; 0 disables it. */
+  lpfHz: number;
+  region: string;
+  tolerance: number;
+  videoQuality: number;
+  videoBitrateKbps: number;
+  cameraSendHz: number;
+  latencyK: number;
 }
 
 /** The GPU side's own default, and the robot's. Changing one without the other
@@ -55,6 +52,13 @@ export const DEFAULT_REMOTE_RUN_CONFIG: RemoteRunConfig = {
   fps: 30,
   videoCodec: "H264",
   sMin: DEFAULT_S_MIN,
+  lpfHz: 0,
+  region: "us-west",
+  tolerance: 1.5,
+  videoQuality: 90,
+  videoBitrateKbps: 4000,
+  cameraSendHz: 0,
+  latencyK: 1.5,
 };
 
 /**
@@ -186,4 +190,15 @@ export function armSupportsRemoteInference(
 ): boolean {
   if (!robot) return false;
   return !isCanArmType(robot.arm_type) && robot.mode !== "bimanual";
+}
+
+/** Defaults measured on the SO101 MolmoAct2 remote runs. */
+export const MOLMO_REMOTE_DEFAULTS = {
+  fps: 20, videoCodec: "MJPEG" as const, sMin: 4, lpfHz: 2,
+};
+
+export function remoteDefaultsForPolicy(policy: PolicyRtcInfo | null | undefined) {
+  return policy?.policy_type?.toLowerCase() === "molmoact2"
+    ? MOLMO_REMOTE_DEFAULTS
+    : { fps: 30, videoCodec: "H264" as const, sMin: DEFAULT_S_MIN, lpfHz: 0 };
 }

@@ -246,6 +246,37 @@ def test_only_the_rtc_engine_is_sent_s_min() -> None:
     assert not [a for a in sync if a.startswith("--s_min")]
 
 
+def test_rtc_action_filter_reaches_the_child() -> None:
+    rtc = ri._robot_sync_args(_request(engine="rtc", fps=20, lpf_hz=4), [], url="u", room="r")
+    assert "--lpf_hz=4.0" in rtc
+    assert "--lpf_order=2" in rtc
+    sync = ri._robot_sync_args(_request(), [], url="u", room="r")
+    assert not any(arg.startswith("--lpf_") for arg in sync)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"lpf_hz": -1},
+        {"lpf_hz": float("nan")},
+        {"lpf_hz": float("inf")},
+        {"lpf_hz": 10},
+        {"lpf_hz": 4, "engine": "sync"},
+        {"lpf_order": 0},
+        {"lpf_order": 5},
+        {"lpf_order": 1.5},
+    ],
+)
+def test_invalid_action_filter_is_rejected_before_start(overrides) -> None:
+    from makermodslab.schemas.sessions import RemoteInferenceOptions
+
+    fields = {"engine": "rtc", "fps": 20, **overrides}
+    with pytest.raises(ValidationError):
+        _request(**fields)
+    with pytest.raises(ValidationError):
+        RemoteInferenceOptions(policy_ref="hub:test/molmo", **fields)
+
+
 def test_both_engines_get_the_same_wire_settings_and_the_same_safe_stop() -> None:
     """The engines share their whole session surface (`_session_glue`), and the
     arg builder is the place that could quietly stop being true — an rtc run
@@ -1203,6 +1234,7 @@ def test_shutdown_stop_never_raises_into_the_shutdown_handler(monkeypatch, relea
 # undeclared fields — so a key added here without the model is a key the API
 # drops on the floor.
 STATUS_KEYS = {
+    "fps",
     "remote_inference_active",
     "exited",
     "exit_code",
@@ -1471,3 +1503,11 @@ def test_an_unreadable_key_file_refuses_before_the_arm_is_claimed(monkeypatch, s
 
 def _raise_oserror(*args, **kwargs):
     raise OSError("permission denied")
+
+
+def test_network_settings_reach_robot_without_changing_control_fps():
+    req = _request(engine="rtc", fps=20, camera_send_hz=5, latency_k=2.5, video_quality=65, video_bitrate_kbps=2048)
+    args = ri._robot_sync_args(req, [], url="u", room="r")
+    assert {"--fps=20", "--camera_send_hz=5.0", "--latency_k=2.5", "--video_quality=65", "--video_bitrate_kbps=2048"} <= set(args)
+    sync = ri._robot_sync_args(_request(), [], url="u", room="r")
+    assert not any(arg.startswith(("--camera_send_hz=", "--latency_k=")) for arg in sync)

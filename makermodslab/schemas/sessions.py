@@ -36,6 +36,8 @@ from pydantic import BaseModel, ConfigDict, Field
 # duplicated, so the sessions surface can never drift from InferenceRequest.
 from makermodslab.rollout import PolicyCameraDims
 
+from .action_filter import ActionFilterOptions
+
 __all__ = [
     "LEASE_TIMEOUT_AUTO_CALIBRATION_S",
     "LEASE_TIMEOUT_DEFAULT_S",
@@ -156,7 +158,7 @@ class InferenceOptions(BaseModel):
     coaching_dataset_name: str = ""
 
 
-class RemoteInferenceOptions(BaseModel):
+class RemoteInferenceOptions(ActionFilterOptions):
     """Policy + transport fields of remote_inference.py's RemoteInferenceRequest.
 
     Everything hardware-shaped resolves server-side from the robot record, as
@@ -494,6 +496,7 @@ class RemoteInferenceStatusResponse(BaseModel):
     # Execution seconds, excluding setup/easing and teardown; frozen at stop.
     # started_at remains the launch time identifying this session.
     elapsed_s: float
+    fps: int | None = None
     duration_s: int | None
     log_path: str | None
     # Terminal-run fields, reusing rollout's contracts verbatim
@@ -665,6 +668,8 @@ class GpuStatusResponse(BaseModel):
     flow_steps: int | None
     # Operator-side buffering as launched; changing it requires a GPU restart.
     slack: int | None = None
+    region: str | None = None
+    tolerance: float | None = None
     flow_steps_applied: bool
     # The EXTRA camera views this launch asked to declare on the checkpoint
     # (S3.8g) — role names, e.g. ["cam2"]. Null while idle; [] is a real answer

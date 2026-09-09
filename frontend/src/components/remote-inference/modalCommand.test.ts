@@ -415,3 +415,16 @@ describe("the task travels to the GPU side too", () => {
     );
   });
 });
+
+
+it("pins the selected region and matching tolerance in the manual command", () => {
+  const line = buildModalRunLine({ ...cloud, region: "eu", tolerance: 2.5 });
+  expect(line).toContain('DRTC_REGION="eu" modal run');
+  expect(line).toContain("--tolerance 2.5");
+});
+
+
+it("passes Auto GPU and region as explicit environment settings", () => {
+  const line = buildModalRunLine({ ...cloud, gpu: "auto", region: "auto" });
+  expect(line).toContain('DRTC_GPU=auto DRTC_REGION="auto" modal run');
+});

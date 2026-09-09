@@ -2,33 +2,10 @@ import React from "react";
 import { useTranslation } from "react-i18next";
 import { Label } from "@/components/ui/label";
 import { NumberInput } from "@/components/ui/number-input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { AdvancedSection } from "@/components/studio/panel/primitives";
-import { VIDEO_CODECS, type RemoteRunConfig } from "./remoteRunConfig";
+import { type RemoteRunConfig } from "./remoteRunConfig";
 
-/**
- * The TRANSPORT knobs behind Advanced — and only those.
- *
- * They are not defaults anyone should tune casually: all four MUST match the
- * GPU side (Portal fingerprints the wire schema, so a disagreement silently
- * drops every packet instead of raising). That is exactly why they are
- * collapsed with their values on the summary line: readable at a glance,
- * without inviting a fiddle.
- *
- * What is NOT here is the point of the split. Precision, GPU type and flow
- * steps live on the "Policy server on Modal" card, beside Start GPU and beside
- * who pays, because they describe what that ONE side loads and what it loads
- * onto — nothing on the robot has to agree with them. The engine is not here
- * either: it is one shared field beside the task, because it is the one choice
- * on this screen that changes how the policy behaves rather than how the two
- * sides agree to talk.
- */
+/** Motion settings shared by the robot and policy worker. */
 
 const RemoteAdvancedSection: React.FC<{
   config: RemoteRunConfig;
@@ -66,6 +43,7 @@ const RemoteAdvancedSection: React.FC<{
           fps: config.fps,
           codec: config.videoCodec,
           sMin: config.sMin,
+          lpfHz: config.lpfHz,
         })
       : t("remoteInference.form.advancedSummary", {
           horizon: config.horizon,
@@ -74,7 +52,7 @@ const RemoteAdvancedSection: React.FC<{
         });
 
   return (
-    <AdvancedSection open={open} onOpenChange={onOpenChange} summary={summary}>
+    <AdvancedSection title={t("remoteInference.form.motionTuning")} open={open} onOpenChange={onOpenChange} summary={summary}>
       <div className="space-y-4">
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-1.5">
@@ -120,35 +98,33 @@ const RemoteAdvancedSection: React.FC<{
               value={config.fps}
               disabled={disabled}
               onChange={(v) => {
-                if (v !== undefined) set("fps", v);
+                if (v !== undefined) onChange({ ...config, fps: v, cameraSendHz: Math.min(config.cameraSendHz, v), lpfHz: Math.min(config.lpfHz, Math.max(0, v / 2 - 0.1)) });
               }}
             />
           </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="remote-codec" className="text-xs">
-              {t("remoteInference.form.codecLabel")}
-            </Label>
-            <Select
-              value={config.videoCodec}
-              disabled={disabled}
-              onValueChange={(v) =>
-                set("videoCodec", v as RemoteRunConfig["videoCodec"])
-              }
-            >
-              <SelectTrigger id="remote-codec">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {/* Codec ids are wire values AND their own labels — there is
-                    nothing here to translate. */}
-                {VIDEO_CODECS.map((codec) => (
-                  <SelectItem key={codec} value={codec}>
-                    {codec}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          {config.engine === "rtc" ? (
+            <div className="space-y-1.5">
+              <Label htmlFor="remote-lpf" className="text-xs">
+                {t("remoteInference.form.filterLabel")}
+              </Label>
+              <NumberInput
+                id="remote-lpf"
+                integer={false}
+                min={0}
+                max={Math.max(0, config.fps / 2 - 0.1)}
+                step={0.5}
+                value={config.lpfHz}
+                disabled={disabled}
+                onChange={(v) => {
+                  if (v !== undefined) set("lpfHz", v);
+                }}
+              />
+              <p className="text-xs text-muted-foreground">
+                {t("remoteInference.form.filterHint")}
+              </p>
+            </div>
+          ) : null}
+
         </div>
         {/* Said once, under the group, rather than beside the field: the
             number is only ever a problem in relation to the GPU side, which is

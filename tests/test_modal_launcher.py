@@ -1006,6 +1006,8 @@ def test_the_status_dict_always_carries_every_key(spawned, fake_clock):
         "video_codec",
         "s_min",
         "slack",
+        "region",
+        "tolerance",
         "model_dtype",
         "gpu",
         "model_dtype_applied",
@@ -1042,15 +1044,21 @@ def test_a_second_start_is_refused(spawned, fake_clock):
 def test_slack_from_api_body_reaches_modal_and_status(spawned, fake_clock, engine):
     from makermodslab.server import GpuStartBody, start_remote_inference_gpu
 
-    body = GpuStartBody(engine=engine, policy_hub_id="someone/p", slack=2)
+    body = GpuStartBody(engine=engine, policy_hub_id="someone/p", slack=2, region="eu", tolerance=2.5)
     result = start_remote_inference_gpu(body)
     argv = spawned["popen"][0][0]
     assert argv[argv.index("--slack") + 1] == "2"
     assert result["gpu"]["slack"] == 2
+    assert result["gpu"]["region"] == "eu"
+    assert result["gpu"]["tolerance"] == 2.5
+    assert spawned["popen"][0][1]["DRTC_REGION"] == "eu"
+    assert argv[argv.index("--tolerance") + 1] == "2.5"
     ml.stop()
     ml._drain_deadline = ml._clock() + ml._STOP_DRAIN_TIMEOUT_S  # remote cleanup succeeded
     ml._handle_exit(spawned["proc"], 0)
     assert ml.status()["slack"] is None
+    assert ml.status()["region"] is None
+    assert ml.status()["tolerance"] is None
 
 
 def test_slack_defaults_to_existing_five_ticks(spawned, fake_clock):
@@ -1989,3 +1997,35 @@ def test_clean_client_disconnect_finalizes_an_early_eof_without_api_fallback(spa
     ml._terminate_and_watch(spawned["proc"])
     assert ml.status()["state"] == "idle"
     assert ml.read_app_record() is None
+
+
+def test_network_settings_reach_modal_and_survive_status(spawned):
+    ml.start(engine="rtc", policy_hub_id="someone/p", region="eu", tolerance=2.5)
+    argv, env = spawned["popen"][0]
+    assert env["DRTC_REGION"] == "eu"
+    assert argv[argv.index("--tolerance") + 1] == "2.5"
+    assert ml.status()["region"] == "eu"
+    assert ml.status()["tolerance"] == 2.5
+
+
+def test_region_is_explicit_even_with_an_ambient_override():
+    assert ml.child_env(_plan(), env={"DRTC_REGION": "ap"})["DRTC_REGION"] == "us-west"
+
+
+@pytest.mark.parametrize("engine", ["sync", "rtc"])
+def test_frame_tolerance_reaches_both_workers(engine):
+    argv = ml.build_argv(_plan(), **_ARGS, engine=engine, tolerance=2.5)
+    assert argv[argv.index("--tolerance") + 1] == "2.5"
+
+
+@pytest.mark.parametrize("engine", ["rtc", "sync"])
+def test_auto_allocation_from_api_reaches_env_and_status(spawned, engine):
+    from makermodslab.server import GpuStartBody, start_remote_inference_gpu
+    result = start_remote_inference_gpu(GpuStartBody(engine=engine, policy_hub_id="someone/p", gpu="auto", region="auto"))
+    argv, env = spawned["popen"][0]
+    assert env["DRTC_GPU"] == "auto"
+    assert env["DRTC_REGION"] == "auto"
+    assert result["gpu"]["gpu"] == "auto"
+    assert result["gpu"]["region"] == "auto"
+    assert "--gpu" not in argv
+    assert "--region" not in argv
