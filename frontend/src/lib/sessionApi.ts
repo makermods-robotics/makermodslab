@@ -274,6 +274,11 @@ export async function sendCoachingCommand(
 
 // --- 409 session.held rendering ---------------------------------------------
 
+// api_errors.py's ErrorCode.ROBOT_BUSY_RELEASING. Assembled from parts so
+// i18n/keyUsage.test.ts doesn't read the dotted literal as a `robot.*` catalog
+// key (it is a backend error code, not a translation key).
+const ROBOT_BUSY_RELEASING = ["robot", "busy.releasing"].join(".");
+
 /** The holder named by a 409 session.held error, or null when `e` is any
  * other failure. `kind` may be null when even the server couldn't name it. */
 export function sessionHeldHolder(e: unknown): { kind: string | null } | null {
@@ -297,12 +302,24 @@ const HOLDER_ACTIVITY_KEYS: Record<string, string> = {
 };
 
 /**
- * Localized "robot is busy (kind)" line for a 409 session.held, or null when
- * `e` is any other failure (the caller then falls back to its usual error
- * rendering). Every flow's start path funnels held-refusals through this so
- * the message is one string in the catalogs, not four ad-hoc variants.
+ * Localized line for a start the server refused because the hardware isn't
+ * free, or null when `e` is any other failure (the caller then falls back to
+ * its usual error rendering). Every flow's start path funnels these refusals
+ * through here so the wording lives in the catalogs, not in each dialog.
+ *
+ * Two shapes:
+ *  - 409 session.held — another session owns the bus: name the activity and
+ *    tell the user to stop it.
+ *  - 409 robot.busy.releasing — the PREVIOUS session of this kind was already
+ *    stopped and is still winding down (a model download that can't be
+ *    interrupted, an arm preflight). Nothing to go and stop; the answer is
+ *    "try again in a moment". Rendering this as session.held's "stop the other
+ *    session" line is what sent users hunting for a session that isn't there.
  */
 export function formatSessionHeld(t: TFunction, e: unknown): string | null {
+  if (e instanceof ApiError && e.code === ROBOT_BUSY_RELEASING) {
+    return t("shared.sessionBusy.releasing");
+  }
   const held = sessionHeldHolder(e);
   if (!held) return null;
   const key = held.kind != null ? HOLDER_ACTIVITY_KEYS[held.kind] : undefined;

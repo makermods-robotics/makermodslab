@@ -6,6 +6,7 @@ export default {
   sessionBusy: {
     message: "机器人正忙 — {{activity}}正在运行。请先停止它。",
     generic: "机器人正忙于另一个会话。请先停止它。",
+    releasing: "上一个会话仍在结束中 — 请稍后重试。",
     activity: {
       teleoperation: "遥操作",
       recording: "录制会话",
