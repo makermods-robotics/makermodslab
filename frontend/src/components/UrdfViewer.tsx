@@ -65,7 +65,7 @@ interface UrdfViewerProps {
   compact?: boolean;
   /**
    * Which arm's URDF to load (path + mesh rewrite). "so101" (default) or
-   * "maker"; see lib/urdfConfigs. An arm type with no shipped URDF should
+   * "maker" or "metal"; see lib/urdfConfigs. An arm type with no shipped URDF should
    * render JointAngleReadout instead of this component.
    */
   armType?: ArmType;

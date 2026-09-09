@@ -14,7 +14,7 @@ interface VisualizerPanelProps {
   bimanual?: boolean;
   /**
    * Show the numeric joint readout instead of the 3D model. Set for an arm
-   * type with no shipped URDF (the Metal arm) — see JointAngleReadout.
+   * type with no shipped URDF — see JointAngleReadout.
    */
   readoutOnly?: boolean;
   /** Arm type whose URDF the 3D viewer should load (ignored when readoutOnly). */

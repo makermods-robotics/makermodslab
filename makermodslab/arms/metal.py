@@ -26,6 +26,7 @@ fork's own Metal docs prescribe.
 from __future__ import annotations
 
 from .can_common import CanArmFamily, CanDeviceClasses
+from .urdf import metal_joint_positions
 
 
 class MetalFamily(CanArmFamily):
@@ -45,11 +46,16 @@ class MetalFamily(CanArmFamily):
 
     follower_library_attr = "METAL_FOLLOWER_CONFIG_PATH"
 
+    telemetry_kind = "urdf"
+
     # Damiao frames — and the handshake that opens the bus IS the enable
     # command, so watching this follower's joints would energize it
     # mid-gesture. Identify a bimanual Metal rig by its leaders instead.
     follower_probe_protocol = "damiao"
     motion_identify_energizes_follower = True
+
+    def urdf_joint_positions(self, degrees: dict[str, float]) -> dict[str, float]:
+        return metal_joint_positions(degrees)
 
     def _device_classes(self) -> CanDeviceClasses:
         from lerobot.robots.bi_metal_follower import BiMetalFollowerConfig

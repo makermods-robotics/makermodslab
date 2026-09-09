@@ -98,7 +98,7 @@ What the contract covers TODAY (refactor step "4a" of docs/extensions/plan.md):
   have no brakes and drop under gravity if released anywhere but near rest.
 
 * telemetry — telemetry_kind, what the live loops broadcast for the
-  viewer: "urdf" (normalized joint fractions that drive the 3D model) or
+  viewer: "urdf" (joint radians/metres that drive the 3D model) or
   "degrees" (angles by motor name for the numeric readout, because no URDF
   ships for that family yet).
 
@@ -218,6 +218,10 @@ class ArmFamily(ABC):
     # observation.state must match.
     joints_per_arm: int
     supports_bimanual: bool
+
+    def urdf_joint_positions(self, degrees: dict[str, float]) -> dict[str, float]:
+        """Map CAN motor degrees to this family's viewer joints, if it ships a model."""
+        return {}
 
     # --- capability flags -------------------------------------------------
     uses_feetech_bus: bool

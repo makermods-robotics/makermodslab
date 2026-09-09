@@ -6,10 +6,10 @@ import { URDF_CONFIGS, urdfConfigFor } from "./urdfConfigs";
 // shared rewrite would send one arm's loader at the other's mesh folder.
 
 describe("URDF_CONFIGS", () => {
-  it("ships an SO-101 and a Maker entry, and no Metal entry", () => {
+  it("ships a model for every built-in arm", () => {
     expect(URDF_CONFIGS.so101).toBeDefined();
     expect(URDF_CONFIGS.maker).toBeDefined();
-    expect(URDF_CONFIGS.metal).toBeUndefined();
+    expect(URDF_CONFIGS.metal).toBeDefined();
   });
 
   it("points each arm at its own public URDF directory", () => {
@@ -39,7 +39,7 @@ describe("urdfConfigFor", () => {
     expect(urdfConfigFor(undefined).urdfPath).toBe(
       "/so-101-urdf/urdf/so101_new_calib.urdf",
     );
-    expect(urdfConfigFor("metal").urdfPath).toBe(
+    expect(urdfConfigFor("unknown_extension").urdfPath).toBe(
       "/so-101-urdf/urdf/so101_new_calib.urdf",
     );
   });
@@ -64,5 +64,21 @@ describe("rewriteMeshUrl", () => {
         "/maker-urdf/meshes/part_012_solid_012.stl",
       ),
     ).toBe("/maker-urdf/meshes/part_012_solid_012.stl");
+  });
+});
+
+describe("Metal model", () => {
+  it("loads the Z-up articulated gripper model", () => {
+    expect(urdfConfigFor("metal").urdfPath).toBe("/metal-urdf/metal_with_gripper.urdf");
+    expect(urdfConfigFor("metal").up).toBe("Z");
+  });
+
+  it.each([
+    "package://metal_description/meshes/link1.STL",
+    "/metal_description/meshes/link1.STL",
+    "meshes/link1.STL",
+    "/metal-urdf/meshes/link1.STL",
+  ])("resolves %s with case preserved", (url) => {
+    expect(urdfConfigFor("metal").rewriteMeshUrl(url)).toBe("/metal-urdf/meshes/link1.STL");
   });
 });

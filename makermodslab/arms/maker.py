@@ -22,6 +22,7 @@ fork registers a dedicated bimanual leader type (bi_rebot_102_leader_maker).
 from __future__ import annotations
 
 from .can_common import CanArmFamily, CanDeviceClasses
+from .urdf import maker_joint_positions
 
 
 class MakerFamily(CanArmFamily):
@@ -43,13 +44,16 @@ class MakerFamily(CanArmFamily):
     # A Maker URDF ships (`frontend/public/maker-urdf/`, from the maker-arm-sdk
     # release), so a teleop session fills `joints` (URDF joint → radians/metres)
     # for the 3D viewer alongside the `joints_deg` readout. See
-    # teleoperate._MAKER_URDF_JOINTS and frontend/src/lib/urdfConfigs.ts.
+    # arms.urdf._MAKER_URDF_JOINTS and frontend/src/lib/urdfConfigs.ts.
     telemetry_kind = "urdf"
 
     # RobStride frames; the probe is strictly read-only, so the gesture that
     # tells a bimanual rig's two followers apart is safe to watch.
     follower_probe_protocol = "robstride"
     motion_identify_energizes_follower = False
+
+    def urdf_joint_positions(self, degrees: dict[str, float]) -> dict[str, float]:
+        return maker_joint_positions(degrees)
 
     def _device_classes(self) -> CanDeviceClasses:
         from lerobot.robots.bi_maker_follower import BiMakerFollowerConfig

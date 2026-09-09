@@ -43,7 +43,7 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({
   const { byId } = useArms();
   const bimanual = selectedRecord?.mode === "bimanual";
   // Same rule as the Teleoperation page: an arm type whose telemetry is "urdf"
-  // drives the 3D model, a "degrees" family (the Metal arm) shows the numeric
+  // drives the 3D model, a "degrees" family shows the numeric
   // readout instead.
   const armType = selectedRecord?.arm_type ?? "so101";
   const readoutOnly =

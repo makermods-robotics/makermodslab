@@ -90,10 +90,20 @@ const MAKER: UrdfConfig = {
   },
 };
 
+const METAL: UrdfConfig = {
+  urdfPath: "/metal-urdf/metal_with_gripper.urdf",
+  packagePath: "/",
+  up: "Z",
+  rewriteMeshUrl: (url) => {
+    const tail = url.match(/meshes\/[^/]+\.stl$/i);
+    return tail ? `/metal-urdf/${tail[0]}` : url;
+  },
+};
+
 export const URDF_CONFIGS: Partial<Record<ArmType, UrdfConfig>> = {
   so101: SO101,
   maker: MAKER,
-  // No `metal` — the Metal arm has no URDF and shows JointAngleReadout.
+  metal: METAL,
 };
 
 /** The URDF wiring for an arm type, or the SO-101's as a safe default. */

@@ -33,7 +33,7 @@ them here.
 - **Joint limits ignored in the viewer.** `robot.urdf` carries the designer's
   unverified arm-joint limits, and the SDK flags physical zero alignment and
   actuator limits as still-to-validate. Until that hardware pass, the teleop
-  broadcast feeds raw motor angles (`teleoperate._MAKER_URDF_JOINTS`, neutral
+  broadcast feeds raw motor angles (`arms.urdf._MAKER_URDF_JOINTS`, neutral
   sign/offset), which can land outside those limits and freeze a joint on
   screen. `urdfConfigs.ts` sets `ignoreLimits` for the `maker` entry so the
   model tracks the arm across its full travel; the gripper value is clamped
@@ -41,7 +41,7 @@ them here.
 
 ## Gripper
 
-`teleoperate._MAKER_URDF_GRIPPER` maps the Maker gripper motor angle to
+`arms.urdf._maker_gripper_joint_metres` maps the Maker gripper motor angle to
 `gripper_left_joint` travel using the two endpoints the SDK's
 `revision_report.json` records (`motor_calibration`: closed ≈ 0.0067 rad,
 commanded-open ≈ −2.079 rad → jaw gap 0 – 104.825 mm). The SDK marks that a

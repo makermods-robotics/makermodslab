@@ -99,8 +99,8 @@ class CanArmFamily(ArmFamily):
 
     leader_library_attr = "MAKER_LEADER_CONFIG_PATH"
 
-    # No Metal URDF ships, so the viewer's slot shows the numeric readout fed
-    # by `joints_deg`. The Maker family overrides this to "urdf".
+    # Families without a bundled model retain the numeric readout.
+    # Maker and Metal each override this and own their URDF conversion.
     telemetry_kind = "degrees"
 
     def _device_classes(self) -> CanDeviceClasses:  # pragma: no cover - abstract by convention
