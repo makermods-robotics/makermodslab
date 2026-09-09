@@ -31,9 +31,9 @@ class MakerFamily(CanArmFamily):
     short_label = "Maker"
     indefinite_label = "a Maker arm"
 
-    follower_zero_pose = (
-        "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully open — then confirm."
-    )
+    supports_gripper_wiggle = True
+
+    follower_zero_pose = "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully closed — then confirm."
 
     single_robot_type = "maker_follower"
     bimanual_robot_type = "bi_maker_follower"
@@ -41,21 +41,24 @@ class MakerFamily(CanArmFamily):
 
     follower_library_attr = "MAKER_FOLLOWER_CONFIG_PATH"
 
-    # A Maker URDF ships (`frontend/public/maker-urdf/`, from the maker-arm-sdk
-    # release), so a teleop session fills `joints` (URDF joint → radians/metres)
-    # for the 3D viewer alongside the `joints_deg` readout. See
-    # arms.urdf._MAKER_URDF_JOINTS and frontend/src/lib/urdfConfigs.ts.
+    # Bundled model plus the family's motor-degrees to URDF mapping.
     telemetry_kind = "urdf"
+
+    def urdf_joint_positions(self, degrees: dict[str, float]) -> dict[str, float]:
+        return maker_joint_positions(degrees)
 
     # RobStride frames; the probe is strictly read-only, so the gesture that
     # tells a bimanual rig's two followers apart is safe to watch.
     follower_probe_protocol = "robstride"
     motion_identify_energizes_follower = False
 
-    def urdf_joint_positions(self, degrees: dict[str, float]) -> dict[str, float]:
-        return maker_joint_positions(degrees)
+    def gripper_bus(self, port: str):
+        from lerobot.motors.robstride import RobstrideMotorsBus
+        from lerobot.robots.maker_follower.maker_follower import MOTOR_MODELS
 
-    def _device_classes(self) -> CanDeviceClasses:
+        return self._build_gripper_bus(port, RobstrideMotorsBus, MOTOR_MODELS)
+
+    def _device_classes(self, leader_kind: str | None = None) -> CanDeviceClasses:
         from lerobot.robots.bi_maker_follower import BiMakerFollowerConfig
         from lerobot.robots.maker_follower import MakerFollowerConfig, MakerFollowerConfigBase
         from lerobot.teleoperators.bi_rebot_102_leader import BiRebot102LeaderMakerConfig

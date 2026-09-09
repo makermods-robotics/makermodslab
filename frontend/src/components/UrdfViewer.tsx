@@ -229,6 +229,8 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
     };
 
     viewer.addEventListener("urdf-processed", onModelProcessed);
+    const resizeObserver = new ResizeObserver(onRobotLoad);
+    resizeObserver.observe(viewer);
 
     // Register listeners before loading: cached meshes can complete synchronously.
     // Setup model loading if a path is available
@@ -245,6 +247,7 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
 
     // Return cleanup function
     return () => {
+      resizeObserver.disconnect();
       cancelAnimationFrame(fitFrame);
       if (cleanupAnimationRef.current) {
         cleanupAnimationRef.current();

@@ -52,7 +52,12 @@ class ReleaseCanTorqueRequest(BaseModel):
     # robot.arm_type.unavailable) by the family's flags — not the schema, so
     # an extension's CAN family can use the route.
     arm_type: str
-    # The follower's CAN adapter port (the leader has no torque to release).
+    # The CAN adapter port of the arm to release: a follower, or the Metal
+    # arm's own (gravity-compensated) leader, which is a Damiao arm on an
+    # adapter of its own and holds torque the same way. (The Star Arm 102
+    # leader has no torque to release.) The follower's motor ids are the
+    # leader's too — leader and follower are the same arm — so one device
+    # config reaches either.
     port: str
 
 

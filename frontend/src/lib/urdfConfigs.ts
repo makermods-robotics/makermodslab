@@ -78,7 +78,7 @@ const MAKER: UrdfConfig = {
   // The SDK keeps the CAD's Y-up geometry and does not encode a display
   // rotation, so mount it Y-up (base plate in the XZ plane).
   up: "+Y",
-  minViewRadius: 0.7,
+  minViewRadius: 0.45,
   ignoreLimits: true,
   rewriteMeshUrl: (url) => {
     // The CAD export writes relative `meshes/part_XXX.stl`; urdf-loader
@@ -97,7 +97,7 @@ const METAL: UrdfConfig = {
   urdfPath: "/metal-urdf/metal_with_gripper.urdf",
   packagePath: "/",
   up: "Z",
-  minViewRadius: 0.75,
+  minViewRadius: 0.45,
   rewriteMeshUrl: (url) => {
     const tail = url.match(/meshes\/[^/]+\.stl$/i);
     return tail ? `/metal-urdf/${tail[0]}` : url;

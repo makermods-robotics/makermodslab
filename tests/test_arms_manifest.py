@@ -46,6 +46,7 @@ from fastapi.routing import APIRoute
 from makermodslab import sessions
 from makermodslab.api_errors import ApiError, ErrorCode
 from makermodslab.arms import registry
+from makermodslab.arms.metal import METAL_LEADER_UNAVAILABLE, _metal_leader_available
 from makermodslab.utils import config as cfg
 from tests.mocks import make_arm_family, scratch_registry
 
@@ -593,6 +594,8 @@ def test_release_torque_refuses_an_unknown_arm_type(client, _release_torque_idle
 # The two ends of the built-in range, pinned whole. Values come from the
 # families themselves (arms/so101.py, arms/metal.py, arms/can_common.py):
 # a change to any of them is a UI-visible change and must come past this.
+METAL_LEADER_INSTALLED = _metal_leader_available()
+
 SO101_ENTRY = {
     "id": "so101",
     "label": "SO-101",
@@ -610,9 +613,21 @@ SO101_ENTRY = {
         "supports_dagger": True,
         "supports_port_probe": False,
         "motion_identify_energizes_follower": False,
+        "supports_gripper_wiggle": False,
     },
     "robot_types": ["so101_follower", "bi_so_follower"],
     "robot_type_markers": ["so100", "so101", "so-100", "so-101", "so_follower", "so_leader"],
+    "default_leader_kind": "so101",
+    "leader_options": [
+        {
+            "id": "so101",
+            "label": "SO-101 leader",
+            "available": True,
+            "unavailable_reason": None,
+            "energized": False,
+            "calibration_summary": None,
+        }
+    ],
 }
 
 METAL_ENTRY = {
@@ -630,14 +645,14 @@ METAL_ENTRY = {
             "leader": {
                 "text": (
                     "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, "
-                    "gripper closed — then confirm."
+                    "gripper fully closed — then confirm."
                 ),
                 "image_url": None,
             },
             "follower": {
                 "text": (
                     "Move the arm by hand to its ZERO POSE — standing upright, all "
-                    "joints at 0 degrees, gripper closed — then confirm."
+                    "joints at 0 degrees, gripper fully closed — then confirm."
                 ),
                 "image_url": None,
             },
@@ -651,9 +666,44 @@ METAL_ENTRY = {
         "supports_dagger": False,
         "supports_port_probe": True,
         "motion_identify_energizes_follower": True,
+        "supports_gripper_wiggle": True,
     },
     "robot_types": ["metal_follower", "bi_metal_follower"],
     "robot_type_markers": ["metal"],
+    "default_leader_kind": "star",
+    "leader_options": [
+        {
+            "id": "star",
+            "label": "Star Arm 102 leader",
+            "available": True,
+            "unavailable_reason": None,
+            "energized": False,
+            "calibration_summary": {
+                "text": (
+                    "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, "
+                    "gripper fully closed — then confirm."
+                ),
+                "image_url": None,
+            },
+        },
+        {
+            "id": "metal",
+            "label": "Metal arm leader (gravity-compensated)",
+            # Pinned by the test below to whatever this machine has installed:
+            # the two fields are live reads of the environment.
+            "available": METAL_LEADER_INSTALLED,
+            "unavailable_reason": None if METAL_LEADER_INSTALLED else METAL_LEADER_UNAVAILABLE,
+            "energized": True,
+            # The Metal leader IS a Metal arm: its zero pose is the follower's.
+            "calibration_summary": {
+                "text": (
+                    "Move the arm by hand to its ZERO POSE — standing upright, all "
+                    "joints at 0 degrees, gripper fully closed — then confirm."
+                ),
+                "image_url": None,
+            },
+        },
+    ],
 }
 
 

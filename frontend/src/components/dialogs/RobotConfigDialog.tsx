@@ -34,7 +34,6 @@ import {
 import {
   Activity,
   CheckCircle,
-  XCircle,
   AlertCircle,
   AlertTriangle,
   ChevronDown,
@@ -65,6 +64,7 @@ import {
 } from "@/lib/sessionApi";
 import { tabOwnerId } from "@/lib/sessionOwner";
 import { isMotorRangeComplete } from "@/lib/calibrationTargets";
+import { calibrationErrorMessage } from "@/lib/calibrationError";
 // Followers use the same family-specific product photos as the "Create a new
 // robot" arm cards. Both CAN families use the same physical Star Arm 102
 // leader, so its calibration gets one dedicated, shared zero-pose reference.
@@ -75,9 +75,7 @@ import starArm102LeaderZeroPose from "@/assets/calibration/star-arm-102-leader-z
 /**
  * Reference photos for the zero-pose calibration, keyed by manifest id — the
  * one place a built-in arm id may appear in this file. Followers get one
- * photo per family: their two zero poses are opposites at the gripper, so
- * showing one family's picture to the other would zero the gripper at the
- * wrong end of its travel. The Star Arm 102 leader is identical on both
+ * photo per family because their arm zero poses differ. The Star Arm 102 leader is identical on both
  * built-in rigs, so their leader rows share one photographed reference
  * (`ZERO_POSE_LEADER_IMAGE`). A family without an entry (an extension's)
  * shows whatever image its manifest summary / step serves, or its text alone.
@@ -117,19 +115,21 @@ import { RobotRecord, formatRobotSetupGap } from "@/hooks/useRobots";
 import { useArms } from "@/hooks/useArms";
 import {
   calibrationKind,
+  effectiveLeaderKind,
+  leaderOption as leaderOptionOf,
+  leaderOptions,
   supportsAutoCalibration,
+  supportsGripperWiggle,
   supportsPortProbe,
   usesFeetechBus,
 } from "@/lib/armTypes";
+import type { LeaderOptionInfo } from "@/lib/armsApi";
 import { servedUrl } from "@/lib/armsApi";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
-
-// Wire text: matched with startsWith() against the backend's own error string,
-// so this must stay byte-identical to what the server sends. Never translated;
-// the heading rendered for it is `robotConfig.calib.discontinuityTitle`.
-const DISCONTINUITY_ERROR_PREFIX = "Motor discontinuity detected";
+import { detectArmPort } from "@/lib/portDetection";
+import { orderedJointEntries } from "@/lib/jointOrder";
 
 interface CalibrationStatus {
   calibration_active: boolean;
@@ -218,9 +218,11 @@ const DeviceSlotCell = ({
   detecting,
   wiggling,
   showWiggle,
-  detectIsGesture,
+  showDetect,
+  showAutoDetect,
   onPortChange,
   onDetect,
+  onAutoDetect,
   onWiggle,
 }: {
   slot: ArmSlot;
@@ -235,10 +237,11 @@ const DeviceSlotCell = ({
   detecting: boolean;
   wiggling: boolean;
   showWiggle: boolean;
-  /** True when Detect needs a hand gesture rather than a silent probe. */
-  detectIsGesture: boolean;
+  showDetect: boolean;
+  showAutoDetect: boolean;
   onPortChange: (port: string) => void;
   onDetect: () => void;
+  onAutoDetect: () => void;
   onWiggle: () => void;
 }) => {
   const { t } = useTranslation();
@@ -247,12 +250,8 @@ const DeviceSlotCell = ({
   // reads as "connected, all good" when nothing is on that bus.
   const undetected = !!port && !portDetected;
   const ready = !!port && portDetected && configured;
-  const detectLabel = detectIsGesture
-    ? t("robotConfig.port.detect")
-    : t("robotConfig.port.detectAuto");
-  const detectTip = detectIsGesture
-    ? t("robotConfig.port.detectTip")
-    : t("robotConfig.port.detectTipAuto");
+  const detectLabel = t("robotConfig.port.detect");
+  const detectTip = t("robotConfig.port.detectTip");
   return (
     // A plain container, not a control. Selecting a slot used to decide which
     // one the single shared port picker edited; every slot now carries its own,
@@ -279,26 +278,40 @@ const DeviceSlotCell = ({
           />
         ) : null}
         <div className="ml-auto flex shrink-0 items-center gap-0.5">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            onClick={onDetect}
-            disabled={busy || detecting || wiggling}
-            aria-label={detectLabel}
-            // Radix tooltips never open on touch, and an unlabelled icon is
-            // unusable without a fallback, so the native title carries it too.
-            title={`${detectLabel}. ${detectTip}`}
-            className="h-7 w-7 text-muted-foreground hover:text-foreground"
-          >
-            {detecting ? (
-              <Loader2 aria-hidden className="h-4 w-4 animate-spin" />
-            ) : detectIsGesture ? (
-              <MoveHorizontal aria-hidden className="h-4 w-4" />
-            ) : (
+          {showDetect && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={onDetect}
+              disabled={busy || detecting || wiggling}
+              aria-label={detectLabel}
+              // Radix tooltips never open on touch, and an unlabelled icon is
+              // unusable without a fallback, so the native title carries it too.
+              title={`${detectLabel}. ${detectTip}`}
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+            >
+              {detecting ? (
+                <Loader2 aria-hidden className="h-4 w-4 animate-spin" />
+              ) : (
+                <MoveHorizontal aria-hidden className="h-4 w-4" />
+              )}
+            </Button>
+          )}
+          {showAutoDetect && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={onAutoDetect}
+              disabled={busy || detecting || wiggling}
+              aria-label={t("robotConfig.port.detectAuto")}
+              title={`${t("robotConfig.port.detectAuto")}. ${t("robotConfig.port.detectTipAuto")}`}
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+            >
               <ScanSearch aria-hidden className="h-4 w-4" />
-            )}
-          </Button>
+            </Button>
+          )}
           {showWiggle && (
             <Button
               type="button"
@@ -520,8 +533,6 @@ const RobotConfigWindow = ({
   const { language } = useLanguage();
   const { byId: armById } = useArms();
 
-  const demoVideoRef = useRef<HTMLDivElement>(null);
-
   const [deviceType, setDeviceType] = useState<string>("teleop");
   const [arm, setArm] = useState<"left" | "right">("left");
   const [port, setPort] = useState<string>("");
@@ -596,6 +607,28 @@ const RobotConfigWindow = ({
   const autoCalibration = supportsAutoCalibration(armInfo);
   const portProbe = supportsPortProbe(armInfo);
   const feetechBus = usesFeetechBus(armInfo);
+  const gripperWiggle = supportsGripperWiggle(armInfo);
+  // Which of the family's leaders drives this robot. Only a family with a
+  // choice (the Metal arm: its Star Arm 102, or a second gravity-compensated
+  // Metal arm) renders the picker and sends `leader_kind` with its port
+  // detection and library requests; every other family's requests are what
+  // they always were. An ENERGIZED leader (holds torque while the human
+  // moves it) answers the follower's protocol, so the probe cannot tell the
+  // two apart and the gesture is refused — the gripper wiggle is what is
+  // left, and its Wiggle button appears on the leader row too.
+  const leaderChoices = leaderOptions(armInfo);
+  const multiLeader = leaderChoices.length > 1;
+  const leaderKind = effectiveLeaderKind(armInfo, robot?.leader_kind);
+  const leaderChoice = leaderOptionOf(armInfo, leaderKind);
+  const leaderEnergized = !!leaderChoice?.energized;
+  const leaderKindParam = multiLeader ? leaderKind : undefined;
+  const [savingLeaderKind, setSavingLeaderKind] = useState(false);
+  // Display name for a leader option: the catalog's per-id override for the
+  // built-ins (what localizes it), else the manifest's own English label.
+  const leaderOptionLabel = (option: LeaderOptionInfo): string =>
+    t(`robotConfig.leaderKind.optionFor.${armType}.${option.id}` as never, {
+      defaultValue: option.label,
+    }) as string;
   // In single (or left) mode the primary leader/follower fields are used; in
   // bimanual mode the right arm uses the right_* fields. Maps the current
   // device_type + arm to the record's port and config field names.
@@ -661,6 +694,8 @@ const RobotConfigWindow = ({
   // row's panel also points deviceType/arm at that slot, so the whole
   // calibration flow (port lookup, save name, start request) targets it.
   const [newCalibFor, setNewCalibFor] = useState<string | null>(null);
+  // CAN arms are posed individually. Advance only after a successful save.
+  const [zeroCalQueue, setZeroCalQueue] = useState<ArmSlot[]>([]);
   // Which flow the open panel is set to. Chosen by the two mode buttons on an
   // SO-101; a CAN arm has only the zero pose, so it needs no choice and this
   // stays null there. Reset whenever the panel closes so reopening starts at
@@ -682,6 +717,7 @@ const RobotConfigWindow = ({
     device: "teleop" | "robot",
     whichArm: "left" | "right",
   ) => {
+    setZeroCalQueue([]);
     if (newCalibFor === field) {
       setNewCalibFor(null);
       setCalibMode(null);
@@ -738,6 +774,17 @@ const RobotConfigWindow = ({
         return String(field);
     }
   };
+
+  // Which half of the rig a port slot belongs to, in the backend's vocabulary.
+  // Detect is invoked PER CARD (handleDetect takes the slot's field), while
+  // `deviceType` tracks whichever calibration row is expanded — so the CAN
+  // detect path must derive the side from the field it was handed. Reading
+  // `deviceType` instead probed for the leader when the user pressed Detect on
+  // the follower, and staged the leader's UART port onto the follower slot.
+  const portFieldDevice = (field: keyof RobotRecord): "teleop" | "robot" =>
+    field === "leader_port" || field === "right_leader_port"
+      ? "teleop"
+      : "robot";
   const [wiggling, setWiggling] = useState(false);
   // Touch-to-identify: watching every port for a hand-moved shoulder-pan swing.
   // Which slot's Detect is running, or null. A field rather than a boolean so
@@ -810,6 +857,7 @@ const RobotConfigWindow = ({
   // before the mount effect fires — and an empty availablePorts would flash a
   // "port not detected" warning on every configured arm card.
   const [portsScanned, setPortsScanned] = useState(false);
+  const [multipleArmsDetected, setMultipleArmsDetected] = useState(false);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
   const releaseStreamsRef = useRef<(() => void) | null>(null);
   // Off by default so merely opening the settings window never grabs a camera.
@@ -934,7 +982,13 @@ const RobotConfigWindow = ({
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ device_type: device, arm_type: armType }),
+            body: JSON.stringify({
+              device_type: device,
+              arm_type: armType,
+              ...(device === "teleop" && leaderKindParam
+                ? { leader_kind: leaderKindParam }
+                : {}),
+            }),
           },
         );
         const data = await res.json().catch(() => ({}));
@@ -953,7 +1007,7 @@ const RobotConfigWindow = ({
         });
       }
     },
-    [baseUrl, fetchWithHeaders, toast, t, armType],
+    [baseUrl, fetchWithHeaders, toast, t, armType, leaderKindParam],
   );
 
   // List the USB-serial ports for the dropdown (filtered to arm-like devices by
@@ -964,6 +1018,7 @@ const RobotConfigWindow = ({
       const res = await fetchWithHeaders(`${baseUrl}/api/v1/available-ports`);
       const data = await res.json();
       setAvailablePorts(Array.isArray(data.ports) ? data.ports : []);
+      setMultipleArmsDetected(false);
     } catch (e) {
       console.error("Failed to list ports:", e);
     } finally {
@@ -1025,6 +1080,7 @@ const RobotConfigWindow = ({
     },
   );
   const [isPolling, setIsPolling] = useState(false);
+  const terminalCalibHandled = useRef(false);
 
   // One /complete-calibration-step POST in flight at a time. A double-click
   // on Next used to post twice, and on a multi-step family the second POST
@@ -1070,13 +1126,14 @@ const RobotConfigWindow = ({
   useSessionHeartbeat(autoCalSessionId, tabOwnerId(), batchAutoCal.active);
   useUnloadWarning(manualCalibLive || batchAutoCal.active);
 
-  const pollStatus = async () => {
+  const pollStatus = async (isCurrent = () => true) => {
     try {
       const response = await fetchWithHeaders(
-        `${baseUrl}/api/v1/calibration-status`,
+        `${baseUrl}/api/v1/calibration-status?arm_type=${encodeURIComponent(armType)}`,
       );
       if (response.ok) {
         const status = await response.json();
+        if (!isCurrent()) return;
         setCalibrationStatus(status);
 
         if (
@@ -1095,7 +1152,51 @@ const RobotConfigWindow = ({
 
   // Defaults to the selected slot's port; section 01's per-row button passes
   // its own row's port so it never depends on what is selected.
-  const handleWiggle = async (wigglePort: string = port) => {
+  // Saved at once, not staged with the port drafts: the calibration flow
+  // resolves the leader from the SAVED record server-side, so a draft that
+  // differed from it would calibrate (and start) the other leader. The
+  // server blanks the leader ports and calibrations on a switch — they name
+  // different hardware and a different library — and the returned record
+  // is adopted as the new baseline.
+  const handleLeaderKindChange = async (next: string) => {
+    if (!robotName || !robot || next === leaderKind) return;
+    setSavingLeaderKind(true);
+    try {
+      const res = await fetchWithHeaders(
+        `${baseUrl}/api/v1/robots/${encodeURIComponent(robotName)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ leader_kind: next }),
+        },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.robot) {
+        setRobot(data.robot);
+        setPortDraft({});
+        toast({ title: t("robotConfig.leaderKind.toast.savedTitle") });
+      } else {
+        toast({
+          title: t("robotConfig.leaderKind.toast.saveFailedTitle"),
+          description: data.detail ?? data.message,
+          variant: "destructive",
+        });
+      }
+    } catch (e) {
+      toast({
+        title: t("robotConfig.leaderKind.toast.saveFailedTitle"),
+        description: String(e),
+        variant: "destructive",
+      });
+    } finally {
+      setSavingLeaderKind(false);
+    }
+  };
+
+  const handleWiggle = async (
+    wigglePort: string = port,
+    device: "teleop" | "robot" = deviceType as "teleop" | "robot",
+  ) => {
     if (armActionsBlocked) return;
     if (!wigglePort) {
       toast({
@@ -1107,11 +1208,27 @@ const RobotConfigWindow = ({
     }
     setWiggling(true);
     try {
-      const res = await fetchWithHeaders(`${baseUrl}/api/v1/wiggle`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ port: wigglePort }),
-      });
+      // A Feetech arm wiggles through the legacy servo route; a CAN family
+      // with a gripper wiggle (the Metal arm) through its own, which opens
+      // the port with ONLY the gripper motor on the bus and disables it
+      // again afterwards — the identification of last resort when the probe
+      // and the gesture cannot tell two Damiao arms apart.
+      const res = feetechBus
+        ? await fetchWithHeaders(`${baseUrl}/api/v1/wiggle`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ port: wigglePort }),
+          })
+        : await fetchWithHeaders(`${baseUrl}/api/v1/maker/wiggle-gripper`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              arm_type: armType,
+              device_type: device,
+              port: wigglePort,
+              ...(leaderKindParam ? { leader_kind: leaderKindParam } : {}),
+            }),
+          });
       const data = await res.json();
       if (data.success) {
         toast({
@@ -1152,79 +1269,30 @@ const RobotConfigWindow = ({
   // this slot had no port the swap degenerates to a take-with-warning that
   // leaves the other slot empty. Confirm/messaging happen in
   // handleConfirmPortAssign.
-  /**
-   * Find the port for the currently selected CAN arm slot (Maker or Metal).
-   *
-   * Two strategies, cheapest first:
-   *
-   * 1. **Probe.** A CAN rig's follower and leader speak different protocols
-   *    on different adapters (RobStride or Damiao over CAN vs FashionStar
-   *    over UART), so simply asking each port which one answers identifies
-   *    them with no gesture at all. Used whenever the probe finds exactly ONE
-   *    port for this side — which is the whole single-arm case.
-   * 2. **Gesture.** A bimanual rig has two identical arms per side, so the
-   *    probe finds two ports and cannot say which is left and which is right.
-   *    Only the user knows, so fall back to watching for a hand swing, exactly
-   *    as the SO-101 flow does. (The server refuses this for a Metal FOLLOWER
-   *    — the Damiao handshake energizes the motors — and its refusal message
-   *    is surfaced by handleDetect's failure toast like any other.)
-   *
-   * Both requests carry the robot's arm_type: the endpoints default to
-   * "maker", and a Metal port answers a Metal probe, not a Maker one.
-   *
-   * Returns the same `{success, port, message}` shape as /identify-arm so the
-   * caller's assignment/confirmation path is untouched.
-   */
-  const detectCanArmPort = async () => {
-    const probeRes = await fetchWithHeaders(
-      `${baseUrl}/api/v1/maker/probe-ports`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // No ports listed = probe every detected port.
-        body: JSON.stringify({ arm_type: armType }),
-      },
-    );
-    const probe = await probeRes.json().catch(() => ({}));
-    const candidates: string[] =
-      (deviceType === "teleop" ? probe?.leader_ports : probe?.follower_ports) ??
-      [];
-
-    if (candidates.length === 1) {
-      return {
-        success: true,
-        port: candidates[0],
-        message: probe.message,
-      };
-    }
-
-    // Zero candidates (nothing answered) or several (a bimanual rig): the
-    // gesture is the only thing that can resolve it. Its own message covers
-    // the nothing-found case too, so the probe's is not surfaced here.
-    const res = await fetchWithHeaders(`${baseUrl}/api/v1/maker/identify-arm`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ device_type: deviceType, arm_type: armType }),
-    });
-    return await res.json();
-  };
-
-  const handleDetect = async (field: keyof RobotRecord = portField) => {
-    // The server would refuse with robot.arm_type.unavailable (or, before the
-    // manifest loads, the wrong endpoint would be asked); the buttons are
-    // disabled too, this is the belt to their braces.
+  const [detectionMethod, setDetectionMethod] = useState<"swing" | "auto">(
+    "swing",
+  );
+  const handleDetect = async (
+    field: keyof RobotRecord = portField,
+    method: "swing" | "auto" = "swing",
+  ) => {
     if (armActionsBlocked) return;
+    setDetectionMethod(method);
     setDetecting(field);
     try {
-      const data = portProbe
-        ? await detectCanArmPort()
-        : await (
-            await fetchWithHeaders(`${baseUrl}/api/v1/identify-arm`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({}), // empty = watch all detected ports
-            })
-          ).json();
+      const data = await detectArmPort(
+        fetchWithHeaders,
+        baseUrl,
+        armType,
+        portFieldDevice(field),
+        t("robotConfig.port.multipleHelp"),
+        method,
+        { portProbe, leaderKind: leaderKindParam, leaderEnergized },
+      );
+      if (data.multiple) {
+        setMultipleArmsDetected(true);
+        return;
+      }
       if (data.success && data.port) {
         // Which OTHER slot (if any) currently holds the detected port? Reuses
         // the same portFields set the dropdown uses (right_* only in bimanual),
@@ -1253,7 +1321,12 @@ const RobotConfigWindow = ({
       } else {
         toast({
           title: t("robotConfig.port.toast.noArmTitle"),
-          description: data.message,
+          // `fallback: "wiggle"` is the server naming the identification of
+          // last resort: point at the row's Wiggle button.
+          description:
+            data.fallback === "wiggle"
+              ? `${data.message ?? ""} ${t("robotConfig.port.wiggleFallback")}`.trim()
+              : data.message,
           variant: "destructive",
         });
       }
@@ -1408,16 +1481,9 @@ const RobotConfigWindow = ({
   const hardwareBusy =
     calibrationStatus.calibration_active || batchAutoCal.active;
 
-  // How Detect works, which differs by FAMILY and by LAYOUT:
-  //  - No protocol probe (SO-101): always a hand gesture. Nothing on the bus
-  //    announces which arm it is, so the user has to move one.
-  //  - Probe, single: no gesture at all. Follower and leader answer different
-  //    protocols, so probing each port identifies both outright.
-  //  - Probe, bimanual: back to the gesture — the two arms on a side are
-  //    identical to a probe, so only motion says which side is which.
-  // The icon follows this: a side-to-side arrow for the gesture, a scan glyph
-  // for the silent probe, because they are different acts.
-  const detectIsGesture = !portProbe || isBimanual;
+  // Swing and wiggle remain available. A single Star/Metal pair also offers
+  // protocol detection; multiple matches or bimanual mode disable that shortcut.
+  const manualPortIdentification = isBimanual || multipleArmsDetected;
 
   // The slots the user ticked, in canonical order, with their inputs.
   const selectedBatchSlots = armSlots.filter((s) => batchSelected[s.key]);
@@ -1433,6 +1499,20 @@ const RobotConfigWindow = ({
   // shows the picker; the per-row button below is single-arm.
   const handleCalibrateAll = () => {
     if (armActionsBlocked) return;
+    if (stepCalibration) {
+      const slots = armSlots.filter((slot) => !!slotPort(slot));
+      if (!slots.length) return;
+      setZeroCalQueue(slots);
+      setDeviceType(slots[0].device);
+      setArm(slots[0].arm);
+      setNewCalibFor(String(slots[0].cfgField));
+      setCalibrationStatus((status) => ({
+        ...status,
+        status: "idle",
+        error: null,
+      }));
+      return;
+    }
     const next: Record<string, boolean> = {};
     for (const slot of armSlots) {
       if (slotPort(slot)) next[slot.key] = true;
@@ -1530,12 +1610,15 @@ const RobotConfigWindow = ({
             setNewCalibFor(null);
             setCalibMode(null);
           } else {
+            const failure = data.arms.find((arm) => arm.error)?.error;
             toast({
               title: t("robotConfig.batch.toast.issuesTitle"),
-              description: t("robotConfig.batch.summary", {
-                completed: data.completed,
-                failed: data.failed,
-              }),
+              description: failure
+                ? calibrationErrorMessage(failure, t)
+                : t("robotConfig.batch.summary", {
+                    completed: data.completed,
+                    failed: data.failed,
+                  }),
               variant: data.completed > 0 ? "default" : "destructive",
             });
           }
@@ -1637,7 +1720,10 @@ const RobotConfigWindow = ({
         // line; every other coded refusal shows the server's own prose.
         description:
           formatSessionHeld(t, e) ??
-          (e instanceof ApiError ? (e.detail ?? e.message) : String(e)),
+          calibrationErrorMessage(
+            e instanceof ApiError ? (e.detail ?? e.message) : String(e),
+            t,
+          ),
         variant: "destructive",
       });
     }
@@ -1688,6 +1774,13 @@ const RobotConfigWindow = ({
     // close before the backend reports calibration_active=true. Reverted
     // below if the start request fails.
     setManualCalibLive(true);
+    terminalCalibHandled.current = false;
+    setCalibrationStatus((status) => ({
+      ...status,
+      calibration_active: true,
+      status: "connecting",
+      error: null,
+    }));
 
     try {
       // Start through the sessions surface: robot NAME + the slot
@@ -1727,6 +1820,12 @@ const RobotConfigWindow = ({
       setIsPolling(true);
     } catch (error) {
       setManualCalibLive(false);
+      setZeroCalQueue([]);
+      setCalibrationStatus((status) => ({
+        ...status,
+        calibration_active: false,
+        status: "idle",
+      }));
       if (error instanceof ApiError) {
         // 409 session.held renders as the shared localized "robot is busy"
         // line; every other coded refusal shows the server's own prose.
@@ -1734,8 +1833,7 @@ const RobotConfigWindow = ({
           title: t("robotConfig.calib.toast.startFailedTitle"),
           description:
             formatSessionHeld(t, error) ??
-            error.detail ??
-            t("robotConfig.calib.toast.startFailedFallback"),
+            calibrationErrorMessage(error.detail, t),
           variant: "destructive",
         });
       } else {
@@ -1750,6 +1848,7 @@ const RobotConfigWindow = ({
   };
 
   const handleStopCalibration = async () => {
+    setZeroCalQueue([]);
     try {
       // Stop by session id (a 404 means the session already ended — fine);
       // fall back to the kind-level stop when this window never started one
@@ -1824,16 +1923,12 @@ const RobotConfigWindow = ({
 
       const data = await response.json();
 
-      if (data.success) {
-        toast({
-          title: t("robotConfig.calib.toast.stepCompletedTitle"),
-          description: data.message,
-        });
-      } else {
+      // The response acknowledges the click; the worker has not saved yet.
+      // Success and failure toasts come from its terminal status instead.
+      if (!response.ok || !data.success) {
         toast({
           title: t("robotConfig.calib.toast.stepFailedTitle"),
-          description:
-            data.message || t("robotConfig.calib.toast.stepFailedFallback"),
+          description: calibrationErrorMessage(data.detail || data.message, t),
           variant: "destructive",
         });
       }
@@ -1851,26 +1946,40 @@ const RobotConfigWindow = ({
   };
 
   useEffect(() => {
-    if (
-      calibrationStatus.status === "error" &&
-      calibrationStatus.error?.startsWith(DISCONTINUITY_ERROR_PREFIX)
-    ) {
-      demoVideoRef.current?.scrollIntoView({
-        behavior: "smooth",
-        block: "center",
-      });
-    }
-  }, [calibrationStatus.status, calibrationStatus.error]);
+    if (calibrationStatus.status !== "error" || terminalCalibHandled.current)
+      return;
+    terminalCalibHandled.current = true;
+    setZeroCalQueue([]);
+    toast({
+      title: t("robotConfig.calib.toast.startFailedTitle"),
+      description: calibrationErrorMessage(
+        calibrationStatus.error || calibrationStatus.message,
+        t,
+      ),
+      variant: "destructive",
+    });
+  }, [
+    calibrationStatus.status,
+    calibrationStatus.error,
+    calibrationStatus.message,
+    toast,
+    t,
+  ]);
 
   useEffect(() => {
     if (!isPolling) return;
-    // Single stable interval. Reads calibration_active from the ref each tick so
-    // the interval doesn't tear down/recreate on every status change.
-    pollStatus();
-    const interval = setInterval(() => {
-      pollStatus();
-    }, 200);
-    return () => clearInterval(interval);
+    // Serialize reads: a slow hardware read must not overwrite a newer result.
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      await pollStatus(() => !cancelled);
+      if (!cancelled) timer = setTimeout(poll, 200);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
     // pollStatus is stable enough — it only reads via fetchWithHeaders + setState.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPolling]);
@@ -1884,25 +1993,38 @@ const RobotConfigWindow = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deviceType, arm, robot, portDraft]);
 
-  // Refresh the robot record when a calibration completes so the checklist
-  // flips to ✓ for the side that was just saved. (No auto-advance of Device
-  // Type anymore — the calibration flow is anchored to the calibration-file
-  // row whose "New calibration" panel is open, and switching device here
-  // would drag that panel to another row mid-look.)
+  // Refresh the saved slot, then open the next queued CAN arm's pose guide.
   useEffect(() => {
-    if (calibrationStatus.status !== "completed") return;
+    if (
+      calibrationStatus.status !== "completed" ||
+      terminalCalibHandled.current
+    )
+      return;
+    terminalCalibHandled.current = true;
     // A completed calibration may have written a new named file — nudge the
     // per-side libraries to re-fetch their config lists so it shows up.
     setCalibReloadToken((t) => t + 1);
     fetchRobot();
-    // Success collapses the panel back to the resting view; the toast is the
-    // only trace. Errors deliberately do NOT collapse — an error panel that
-    // vanishes is an error nobody reads.
+    // Success collapses the panel; failures leave the controls open for retry.
     toast({ title: t("robotConfig.calib.completed") });
+    const remaining = zeroCalQueue.slice(1);
+    setZeroCalQueue(remaining);
+    if (remaining.length) {
+      const next = remaining[0];
+      setDeviceType(next.device);
+      setArm(next.arm);
+      setNewCalibFor(String(next.cfgField));
+      setCalibrationStatus((status) => ({
+        ...status,
+        status: "idle",
+        error: null,
+      }));
+      return;
+    }
     setNewCalibFor(null);
     setCalibMode(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [calibrationStatus.status, fetchRobot]);
+  }, [calibrationStatus.status, fetchRobot, zeroCalQueue]);
 
   // Stage the current side's port into the local draft (no network write). A
   // re-detected USB port (which shuffles on reboot/reconnect) is recorded here
@@ -2211,12 +2333,33 @@ const RobotConfigWindow = ({
     const isLeaderStep = deviceType === "teleop";
     const stepSide = isLeaderStep ? "leader" : "follower";
     const bundledAssets = ZERO_POSE_IMAGES[armType];
+    // A non-default leader (the Metal arm's own leader) is this family's
+    // arm: its zero pose is the FOLLOWER's, so the follower photo stands in
+    // for the Star leader's reference, and the catalog's `leader_<kind>`
+    // entry (if any) overrides the wording.
+    const leaderIsOwnArm = isLeaderStep && leaderEnergized;
+    const leaderKindSuffix =
+      isLeaderStep && multiLeader && leaderKind !== armInfo?.default_leader_kind
+        ? `_${leaderKind}`
+        : "";
     const bundledImage = bundledAssets
       ? {
-          src: isLeaderStep ? bundledAssets.leader : bundledAssets.follower,
-          alt: isLeaderStep
-            ? t("robotConfig.calib.zeroPose.poseImageLeader")
-            : t(`robotConfig.calib.zeroPose.${bundledAssets.altKey}`),
+          src:
+            isLeaderStep && !leaderIsOwnArm
+              ? bundledAssets.leader
+              : bundledAssets.follower,
+          alt: leaderIsOwnArm
+            ? t(
+                `robotConfig.calib.zeroPose.leaderPoseImageFor.${armType}.${leaderKind}` as never,
+                {
+                  defaultValue: t(
+                    `robotConfig.calib.zeroPose.${bundledAssets.altKey}`,
+                  ),
+                },
+              )
+            : isLeaderStep
+              ? t("robotConfig.calib.zeroPose.poseImageLeader")
+              : t(`robotConfig.calib.zeroPose.${bundledAssets.altKey}`),
         }
       : null;
     const servedImage = (url: string | null) => {
@@ -2227,19 +2370,31 @@ const RobotConfigWindow = ({
     };
     const stepImage = (image: { src: string; alt: string } | null) =>
       image ? (
-        <img
-          src={image.src}
-          alt={image.alt}
-          loading="lazy"
-          className="aspect-video w-full rounded-md border border-border bg-muted object-cover"
-        />
+        <figure>
+          <img
+            src={image.src}
+            alt={image.alt}
+            loading="lazy"
+            className="aspect-video w-full rounded-md border border-border bg-muted object-cover"
+          />
+          {bundledAssets && (
+            <figcaption className="mt-2 text-xs text-muted-foreground">
+              {t("robotConfig.calib.zeroPose.poseCaption")}
+            </figcaption>
+          )}
+        </figure>
       ) : null;
     const overrideText = (fallback: string): string =>
       t(
-        `robotConfig.calib.zeroPose.instructionsFor.${armType}.${stepSide}` as never,
+        `robotConfig.calib.zeroPose.instructionsFor.${armType}.${stepSide}${leaderKindSuffix}` as never,
         { defaultValue: fallback },
       );
-    const summarySide = armInfo?.calibration.summary?.[stepSide] ?? null;
+    // The leader side's summary is the SELECTED leader's on a multi-leader
+    // family (the manifest carries one per option); otherwise the family's.
+    const summarySide =
+      isLeaderStep && multiLeader
+        ? (leaderChoice?.calibration_summary ?? null)
+        : (armInfo?.calibration.summary?.[stepSide] ?? null);
     const preStartText = summarySide ? overrideText(summarySide.text) : "";
     const preStartImage =
       bundledImage ?? servedImage(summarySide?.image_url ?? null);
@@ -2408,7 +2563,6 @@ const RobotConfigWindow = ({
         {preStart && mode === "manual" && (
           <>
             <CalibrationClip
-              clipRef={demoVideoRef}
               src={MANUAL_CAL_CLIP}
               poster={MANUAL_CAL_POSTER}
               label={t("robotConfig.calib.demoTitle")}
@@ -2433,7 +2587,9 @@ const RobotConfigWindow = ({
                 would imply it changes something about this run. */}
             <Button
               onClick={() => handleStartCalibration()}
-              disabled={!robotName || !deviceType || !portDetected}
+              disabled={
+                !robotName || !deviceType || !portDetected || manualCalibLive
+              }
               className="w-full"
             >
               <Play className="mr-2 h-4 w-4" />
@@ -2469,6 +2625,22 @@ const RobotConfigWindow = ({
         {/* Steps, before Start: one flow, same shape. */}
         {preStart && stepCalibration && (
           <>
+            {zeroCalQueue.length > 0 && (
+              <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                <span>
+                  {t("robotConfig.calib.zeroPose.sequence", {
+                    count: zeroCalQueue.length,
+                  })}
+                </span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setZeroCalQueue([])}
+                >
+                  {t("robotConfig.calib.zeroPose.cancelAll")}
+                </Button>
+              </div>
+            )}
             {/* No demo clip slot here. A step is one act — pose the arm by
                 hand and press the button — so there is nothing to
                 demonstrate that the photo below does not already show. The
@@ -2509,7 +2681,7 @@ const RobotConfigWindow = ({
         {calibrationStatus.status === "awaiting_step" && (
           <div className="space-y-3">
             {/* Reference pose. The words alone have never been enough here:
-                "folded against the base, gripper fully open" is a shape, and
+                "folded against the base, gripper fully closed" is a shape, and
                 a picture of the shape is what the user actually matches the
                 arm against. It sits ABOVE the instructions because it is the
                 thing being described, and above the Next button because the
@@ -2540,24 +2712,24 @@ const RobotConfigWindow = ({
                     </span>
                   </div>
                   <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-                    {Object.entries(calibrationStatus.current_positions).map(
-                      ([motor, angle]) => (
-                        <div
-                          key={motor}
-                          className="flex items-baseline justify-between gap-2 border-b border-border/50 py-0.5"
-                        >
-                          {/* Motor names are DATA (they key the calibration
+                    {orderedJointEntries(
+                      calibrationStatus.current_positions,
+                    ).map(([motor, angle]) => (
+                      <div
+                        key={motor}
+                        className="flex items-baseline justify-between gap-2 border-b border-border/50 py-0.5"
+                      >
+                        {/* Motor names are DATA (they key the calibration
                               file and the dataset's feature columns), so they
                               render verbatim in every language. */}
-                          <span className="truncate font-mono text-xs text-muted-foreground">
-                            {motor}
-                          </span>
-                          <span className="shrink-0 font-mono text-xs tabular-nums text-foreground">
-                            {angle.toFixed(1)}&deg;
-                          </span>
-                        </div>
-                      ),
-                    )}
+                        <span className="truncate font-mono text-xs text-muted-foreground">
+                          {motor}
+                        </span>
+                        <span className="shrink-0 font-mono text-xs tabular-nums text-foreground">
+                          {angle.toFixed(1)}&deg;
+                        </span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
@@ -2588,7 +2760,7 @@ const RobotConfigWindow = ({
         {calibrationStatus.status === "recording" &&
           (() => {
             const ranges = calibrationStatus.recorded_ranges ?? {};
-            const motors = Object.entries(ranges);
+            const motors = orderedJointEntries(ranges);
             const allComplete =
               motors.length > 0 &&
               motors.every(([motor, range]) =>
@@ -2683,27 +2855,6 @@ const RobotConfigWindow = ({
             );
           })()}
 
-        {calibrationStatus.status === "error" &&
-          calibrationStatus.error &&
-          (calibrationStatus.error.startsWith(DISCONTINUITY_ERROR_PREFIX) ? (
-            <Alert className="border-destructive/40 bg-destructive/10 text-destructive">
-              <XCircle className="h-4 w-4" />
-              <AlertDescription>
-                <div className="mb-1 text-base font-semibold">
-                  {t("robotConfig.calib.discontinuityTitle")}
-                </div>
-                <div>{t("robotConfig.calib.discontinuityBody")}</div>
-              </AlertDescription>
-            </Alert>
-          ) : (
-            <Alert className="border-destructive/40 bg-destructive/10 text-destructive">
-              <XCircle className="h-4 w-4" />
-              <AlertDescription>
-                <strong>{t("robotConfig.calib.errorLabel")}</strong>{" "}
-                {calibrationStatus.error}
-              </AlertDescription>
-            </Alert>
-          ))}
         {/* Auto run: the batch picker, progress, per-arm rows and the log
             terminal, at the bottom of the same single column. On success the
             whole panel collapses; failures keep this up to be read. */}
@@ -2944,7 +3095,9 @@ const RobotConfigWindow = ({
                 variant="ghost"
                 size="sm"
                 onClick={fetchPorts}
-                disabled={portsLoading || hardwareBusy}
+                disabled={
+                  portsLoading || hardwareBusy || !!detecting || wiggling
+                }
                 aria-label={t("robotConfig.port.rescan")}
                 className="ml-auto h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
               >
@@ -2955,6 +3108,62 @@ const RobotConfigWindow = ({
                 {t("robotConfig.port.rescan")}
               </Button>
             </div>
+
+            {/* Which leader drives this robot — only a family with a choice
+                (the Metal arm) renders it. Saved at once (see
+                handleLeaderKindChange); an option this install cannot drive
+                is greyed with the server's own remedy beneath. */}
+            {multiLeader && (
+              <div className="flex flex-wrap items-center gap-2">
+                <Label
+                  htmlFor="leader-kind"
+                  className="text-xs text-muted-foreground"
+                >
+                  {t("robotConfig.leaderKind.label")}
+                </Label>
+                <Select
+                  value={leaderKind}
+                  onValueChange={handleLeaderKindChange}
+                  disabled={
+                    hardwareBusy || armActionsBlocked || savingLeaderKind
+                  }
+                >
+                  <SelectTrigger
+                    id="leader-kind"
+                    aria-label={t("robotConfig.leaderKind.label")}
+                    className="h-8 w-auto min-w-[16rem] text-xs"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {leaderChoices.map((option) => (
+                      <SelectItem
+                        key={option.id}
+                        value={option.id}
+                        disabled={!option.available}
+                      >
+                        {leaderOptionLabel(option)}
+                        {option.available
+                          ? ""
+                          : ` (${t("robotConfig.leaderKind.unavailable")})`}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {leaderChoice && !leaderChoice.available && (
+                  // Server prose (which extra to install): English in every
+                  // language, like every other backend message.
+                  <p className="basis-full text-xs text-warn">
+                    {leaderChoice.unavailable_reason}
+                  </p>
+                )}
+                {leaderEnergized && (
+                  <p className="basis-full text-xs text-muted-foreground">
+                    {t("robotConfig.leaderKind.energizedHint")}
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* One row for a single robot, one row per side when bimanual. */}
             {(isBimanual
@@ -2997,24 +3206,57 @@ const RobotConfigWindow = ({
                           );
                           return holder ? portFieldLabel(holder) : null;
                         }}
-                        busy={hardwareBusy || armActionsBlocked}
+                        busy={
+                          hardwareBusy ||
+                          armActionsBlocked ||
+                          !!detecting ||
+                          wiggling
+                        }
                         detecting={detecting === slot.portField}
                         wiggling={wiggling}
-                        showWiggle={!!armInfo && feetechBus}
-                        detectIsGesture={detectIsGesture}
+                        // Feetech arms always; a CAN family with a gripper
+                        // wiggle on its follower rows, and on its leader rows
+                        // only when the leader has a gripper to move (an
+                        // energized leader — the Star leader has no motors).
+                        showWiggle={
+                          !!armInfo &&
+                          (feetechBus ||
+                            (gripperWiggle &&
+                              (slot.device === "robot" || leaderEnergized)))
+                        }
+                        showDetect={
+                          (!portProbe || slot.device === "teleop") &&
+                          !leaderEnergized
+                        }
+                        showAutoDetect={
+                          !manualPortIdentification &&
+                          portProbe &&
+                          !leaderEnergized
+                        }
                         // No selection side effects: every action names its own
                         // slot, so none of them depend on what is selected.
                         onPortChange={(next) =>
                           handleSelectPort(next, slot.portField)
                         }
                         onDetect={() => handleDetect(slot.portField)}
-                        onWiggle={() => handleWiggle(draftPort(slot.portField))}
+                        onAutoDetect={() =>
+                          handleDetect(slot.portField, "auto")
+                        }
+                        onWiggle={() =>
+                          handleWiggle(draftPort(slot.portField), slot.device)
+                        }
                       />
                     ))}
                   </div>
                 </div>
               );
             })}
+
+            {(manualPortIdentification || !portProbe) && (
+              <p className="text-xs text-muted-foreground">
+                {t("robotConfig.port.multipleHelp")}
+              </p>
+            )}
 
             {/* No ports at all is a whole-section condition, not a per-slot
                 one, so it is said once rather than inside four dropdowns. */}
@@ -3027,14 +3269,9 @@ const RobotConfigWindow = ({
                 it is needed. */}
             {detecting && (
               <p className="text-xs text-ok">
-                {t(`robotConfig.port.detectLiveFor.${armType}` as never, {
-                  // A family without its own wording gets the generic text for
-                  // its detection mechanism: what a probe does, or what the
-                  // gesture asks of the user.
-                  defaultValue: portProbe
-                    ? t("robotConfig.port.detectLiveProbe")
-                    : t("robotConfig.port.detectLive"),
-                })}
+                {detectionMethod === "swing"
+                  ? t("robotConfig.port.detectLive")
+                  : t("robotConfig.port.detectLiveProbe")}
               </p>
             )}
           </section>
@@ -3044,19 +3281,8 @@ const RobotConfigWindow = ({
             <section className="space-y-3 py-5">
               <div className="flex items-center gap-2">
                 <PanelHeader step="02" title={t("robotConfig.files.step")} />
-                {/* One wrapper carries the ml-auto, so the actions right-align
-                    exactly like section 01's Rescan whichever of them render.
-                    It used to sit on "Calibrate all", which a CAN arm hides —
-                    leaving the folder buttons stranded against the title. */}
                 <div className="ml-auto flex items-center gap-1.5">
-                  {/* The multi-arm entry point: same batch flow as a row's own
-                    "Auto-calibrate" (which does its arm alone), but
-                    pre-selecting every detected arm and opening the picker so
-                    the selection can be reviewed before confirming.
-                    Hidden entirely on a family without automatic
-                    calibration — each arm's zero pose has to be set by hand
-                    anyway, so there is nothing to run concurrently. */}
-                  {autoCalibration && (
+                  {(autoCalibration || stepCalibration) && (
                     <Button
                       size="sm"
                       variant="outline"
@@ -3066,13 +3292,19 @@ const RobotConfigWindow = ({
                         !robotName ||
                         !anyArmAvailable ||
                         armActionsBlocked ||
+                        manualCalibLive ||
+                        zeroCalQueue.length > 0 ||
                         panelCalibration ||
                         calibrationStatus.calibration_active ||
                         batchAutoCal.active
                       }
                       title={
                         anyArmAvailable
-                          ? t("robotConfig.files.calibrateAllTitle")
+                          ? t(
+                              stepCalibration
+                                ? "robotConfig.files.calibrateAllZeroTitle"
+                                : "robotConfig.files.calibrateAllTitle",
+                            )
                           : t("robotConfig.files.calibrateAllDisabledTitle")
                       }
                     >
@@ -3223,6 +3455,9 @@ const RobotConfigWindow = ({
                         torque) right below this row, for this arm slot. */}
                     <CalibrationLibrary
                       armType={armType}
+                      leaderKind={
+                        row.device === "teleop" ? leaderKindParam : undefined
+                      }
                       device={row.device}
                       assignedConfig={cfg}
                       configField={row.cfgField}
@@ -3235,7 +3470,12 @@ const RobotConfigWindow = ({
                       onCalibrate={() =>
                         toggleNewCalibration(row.cfgField, row.device, rowArm)
                       }
-                      calibrateDisabled={armActionsBlocked || panelCalibration}
+                      calibrateDisabled={
+                        armActionsBlocked ||
+                        panelCalibration ||
+                        hardwareBusy ||
+                        manualCalibLive
+                      }
                       calibrateOpen={isNewCalibOpen}
                     />
                     {/* Slides open in place, like the studio's entry forms. */}
@@ -3312,21 +3552,21 @@ const RobotConfigWindow = ({
             pressed. Quit closes the window, confirming first if there are
             unsaved drafts (or a live manual calibration to abort). */}
         <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border bg-background px-6 py-3">
-          {/* Left label: draft state first; when everything is saved but the
-              robot still isn't ready (a silently-disabled Save explains
-              nothing), name the concrete setup gap instead of a bare
-              "All changes saved". */}
+          {/* Keep the footer brief; the tooltip explains any missing setup. */}
           <span
             className={`text-sm ${
               isDirty ? "text-warn" : "text-muted-foreground"
             }`}
+            title={
+              !isDirty && robot && !robot.is_clean
+                ? formatRobotSetupGap(t, robot)
+                : undefined
+            }
           >
             {isDirty
               ? t("robotConfig.window.unsaved")
               : robot && !robot.is_clean
-                ? t("robotConfig.window.savedWithGap", {
-                    gap: formatRobotSetupGap(t, robot),
-                  })
+                ? t("robotConfig.window.savedWithGap")
                 : t("robotConfig.window.allSaved")}
           </span>
           <div className="flex gap-2">

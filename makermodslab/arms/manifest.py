@@ -35,7 +35,27 @@ family's after them, reproducing arm_capabilities.arm_type_from_robot_type.
 from __future__ import annotations
 
 from . import registry
-from .base import ArmFamily
+from .base import ArmFamily, LeaderOption, leader_kwargs
+
+
+def describe_leader_option(family: ArmFamily, option: LeaderOption) -> dict:
+    """One leader option (the shape of LeaderOptionInfo): the record's id, a
+    label, availability with its remedy, whether it holds torque, and the
+    pre-start calibration summary for THIS leader (None for a family with
+    nothing to summarize)."""
+    summary = (
+        family.calibration_summary("teleop", **leader_kwargs(family, option.id))
+        if family.calibration_kind == "steps"
+        else None
+    )
+    return {
+        "id": option.id,
+        "label": option.label,
+        "available": option.available,
+        "unavailable_reason": option.unavailable_reason,
+        "energized": option.energized,
+        "calibration_summary": summary,
+    }
 
 
 def describe_family(family: ArmFamily) -> dict:
@@ -70,10 +90,13 @@ def describe_family(family: ArmFamily) -> dict:
             "supports_dagger": family.supports_dagger,
             "supports_port_probe": family.follower_probe_protocol is not None,
             "motion_identify_energizes_follower": family.motion_identify_energizes_follower,
+            "supports_gripper_wiggle": family.supports_gripper_wiggle,
         },
         "robot_types": [family.single_robot_type, family.bimanual_robot_type],
         "robot_type_markers": list(family.robot_type_markers),
         "calibration_name_suffix": family.calibration_name_suffix,
+        "default_leader_kind": family.leader_options()[0].id,
+        "leader_options": [describe_leader_option(family, option) for option in family.leader_options()],
     }
 
 
