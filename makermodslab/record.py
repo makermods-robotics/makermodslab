@@ -42,6 +42,7 @@ from .datasets import (
     invalidate_hub_status,
     push_dataset_to_hub,
 )
+from .recording_preview import observation_tap, recording_preview
 from .rest_pose import RETURN_CEILING_S
 from .session_events import notify_session_changed
 from .teleoperate import force_disconnect_partial
@@ -779,6 +780,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
     # open. Doing it the other way round leaves that race open, and a preview
     # still holding index 0 starves the recorder (OpenCVCamera(0) actual_fps=5.0).
     camera_preview_manager.stop_all()
+    recording_preview.start()
 
     # Start capturing this session's logs into a fresh bounded ring buffer so the
     # Record page can display them (detaches any previous session's handler).
@@ -884,6 +886,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 if recording_start_time:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
             finally:
+                recording_preview.stop()
                 if current_phase != "error":
                     _set_phase("completed")
                 if recording_start_time:
@@ -950,6 +953,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         }
 
     except Exception as e:
+        recording_preview.stop()
         recording_active = False
         # The claim above already broadcast active=True; undo the hint now
         # that the failed start released the flag.
@@ -1598,6 +1602,7 @@ def _reset_loop_with_pause(
     teleop_action_processor,
     robot_action_processor,
     control_time_s: float,
+    observation_callback=None,
 ) -> None:
     """Reset-phase tick loop: same per-tick shape as lerobot's record_loop
     (lerobot.scripts.lerobot_record.record_loop) called with dataset=None —
@@ -1647,6 +1652,8 @@ def _reset_loop_with_pause(
 
         if teleop is not None:
             obs = robot.get_observation()
+            if observation_callback is not None:
+                observation_callback(obs)
             act = teleop.get_action()
             act_processed_teleop = teleop_action_processor((act, obs))
             robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
@@ -1698,6 +1705,11 @@ def record_with_web_events(
     feetech = family.uses_feetech_bus
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
+    publish_preview = observation_tap(robot, family)
+
+    def process_observation(observation):
+        publish_preview(observation)
+        return robot_observation_processor(observation)
 
     action_features = hw_to_dataset_features(robot.action_features, "action", cfg.dataset.video)
     obs_features = hw_to_dataset_features(robot.observation_features, "observation", cfg.dataset.video)
@@ -1995,7 +2007,7 @@ def record_with_web_events(
                 fps=cfg.dataset.fps,
                 teleop_action_processor=teleop_action_processor,
                 robot_action_processor=robot_action_processor,
-                robot_observation_processor=robot_observation_processor,
+                robot_observation_processor=process_observation,
                 teleop=teleop,
                 dataset=dataset,
                 control_time_s=cfg.dataset.episode_time_s,
@@ -2084,6 +2096,7 @@ def record_with_web_events(
                     teleop_action_processor=teleop_action_processor,
                     robot_action_processor=robot_action_processor,
                     control_time_s=cfg.dataset.reset_time_s,
+                    observation_callback=publish_preview,
                 )
 
                 # The loop may have exited (e.g. via exit_early/stop) while
@@ -2164,6 +2177,7 @@ def record_with_web_events(
                     teleop_action_processor=teleop_action_processor,
                     robot_action_processor=robot_action_processor,
                     control_time_s=cfg.dataset.reset_time_s,
+                    observation_callback=publish_preview,
                 )
 
                 # The loop may have exited (e.g. via exit_early/stop) while

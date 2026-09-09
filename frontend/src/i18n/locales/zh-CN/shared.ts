@@ -42,6 +42,11 @@ export default {
     turnOff: "关闭",
   },
   camera: {
+    title: "摄像头",
+    waiting: "正在等待摄像头画面…",
+    paused: "已暂停 — 显示最后捕获的画面。",
+    off: "摄像头预览已关闭。",
+
     retry: "重试摄像头画面",
     retryTitle: "重试摄像头画面（例如重新连接摄像头后）",
     loadingRobot: "正在加载机器人…",

@@ -50,6 +50,11 @@ export default {
     turnOff: "Turn off",
   },
   camera: {
+    title: "Cameras",
+    waiting: "Waiting for camera frames…",
+    paused: "Paused — showing the last captured frames.",
+    off: "Camera previews are off.",
+
     retry: "Retry camera feeds",
     retryTitle: "Retry camera feeds (e.g. after reconnecting a camera)",
     loadingRobot: "Loading robot...",

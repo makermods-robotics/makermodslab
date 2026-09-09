@@ -10271,6 +10271,48 @@
         "summary": "Recording Pause"
       }
     },
+    "/api/v1/recording-preview/{camera_name}": {
+      "get": {
+        "description": "Latest recorder RGB frame by observation key; no device access.",
+        "operationId": "recording_camera_preview",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "camera_name",
+            "required": true,
+            "schema": {
+              "title": "Camera Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/jpeg": {}
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "No recording frame available"
+          }
+        },
+        "summary": "Recording Camera Preview",
+        "tags": [
+          "recording"
+        ]
+      }
+    },
     "/api/v1/recording-rerecord-episode": {
       "post": {
         "description": "Re-record current episode (replaces left arrow key)",

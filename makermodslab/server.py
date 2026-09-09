@@ -145,6 +145,7 @@ from .record import (
     handle_upload_status,
     stop_and_wait as stop_recording_and_wait,
 )
+from .recording_preview import recording_preview
 from .replay import (
     ReplayRequest,
     handle_replay_status,
@@ -652,6 +653,7 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+recording_preview.joint_notifier = manager.broadcast_joint_data_sync
 
 
 def _on_jobs_changed() -> None:
@@ -4392,6 +4394,20 @@ def get_available_cameras():
     except Exception as e:
         logger.error(f"Error detecting cameras: {e}")
         return {"status": "error", "message": str(e), "cameras": []}
+
+
+@v1_router.get(
+    "/recording-preview/{camera_name}",
+    response_class=Response,
+    responses={200: {"content": {"image/jpeg": {}}}, 503: {"description": "No recording frame available"}},
+    tags=["recording"],
+)
+def recording_camera_preview(camera_name: str):
+    """Latest recorder RGB frame by observation key; no device access."""
+    frame = recording_preview.jpeg(camera_name)
+    if frame is None:
+        raise HTTPException(status_code=503, detail="Waiting for a recording camera frame")
+    return Response(frame, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @router.get("/camera-preview/{index}")

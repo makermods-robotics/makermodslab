@@ -221,6 +221,7 @@ def test_no_new_routes_outside_api_v1():
 # checks every entry actually exists so retired surface can't linger.
 V1_ONLY_ROUTES: frozenset[str] = frozenset(
     [
+        "GET /api/v1/recording-preview/{camera_name}",
         # Multi-checkpoint publish: the training view's picker + background queue.
         # Legacy POST /models/upload stays the single-checkpoint synchronous push.
         "GET /api/v1/models/checkpoints",
@@ -334,6 +335,8 @@ def test_v1_mirrors_legacy_surface():
 # these.
 RESPONSE_MODEL_EXEMPT: frozenset[str] = frozenset(
     [
+        # Recorder-owned JPEG snapshots.
+        "GET /api/v1/recording-preview/{camera_name}",
         # 204 No Content: a successful job delete has no body to model.
         "DELETE /api/v1/jobs/{job_id}",
         # 204 No Content: the forwarded peer-job delete mirrors the peer's own.

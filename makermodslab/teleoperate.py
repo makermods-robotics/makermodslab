@@ -312,7 +312,9 @@ class TeleoperateRequest(BaseModel):
     skip_identity_check: bool = False
 
 
-def get_joint_positions_from_robot(robot, prefix: str = "", calibration=None) -> dict[str, float]:
+def get_joint_positions_from_robot(
+    robot, prefix: str = "", calibration=None, *, observation=None
+) -> dict[str, float]:
     """
     Extract current joint positions from the robot and convert to URDF joint format.
 
@@ -322,12 +324,13 @@ def get_joint_positions_from_robot(robot, prefix: str = "", calibration=None) ->
             bimanual BiSO robot pass "left_"/"right_" to pull one arm.
         calibration: Calibration dict to use for the URDF correction. Defaults to
             ``robot.calibration``; for a BiSO robot pass the sub-arm's calibration.
+        observation: An already-read observation (recording); otherwise read the robot.
 
     Returns:
         Dictionary mapping URDF joint names to radian values
     """
     try:
-        observation = robot.get_observation()
+        observation = robot.get_observation() if observation is None else observation
         calibration = calibration if calibration is not None else (getattr(robot, "calibration", None) or {})
 
         joint_positions: dict[str, float] = {}
@@ -404,10 +407,10 @@ def get_maker_joint_degrees(robot, prefix: str = "") -> dict[str, float]:
         return {}
 
 
-def get_can_joint_data(robot, family, is_bimanual: bool, timestamp: float) -> dict:
+def get_can_joint_data(robot, family, is_bimanual: bool, timestamp: float, *, observation=None) -> dict:
     """Read once for both viewers and numeric telemetry; a failed read holds pose."""
     try:
-        observation = robot.get_observation()
+        observation = robot.get_observation() if observation is None else observation
     except Exception as e:
         logger.error(f"Error reading CAN joint positions: {e}")
         observation = {}
