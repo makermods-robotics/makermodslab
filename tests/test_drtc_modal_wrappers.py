@@ -317,9 +317,15 @@ def test_gpu_default_is_a10g_and_explicit_override_wins(wrapper: Path) -> None:
     from unittest.mock import patch
 
     expression = compile(ast.Expression(body=gpu), str(wrapper), "eval")
-    for requested, expected in [("", "A10G"), ("H100", "H100"), ("auto", ["A10G", "L4", "A100", "A100-80GB", "H100", "H200"])]:
+    for requested, expected in [
+        ("", "A10G"),
+        ("H100", "H100"),
+        ("auto", ["A10G", "L4", "A100", "A100-80GB", "H100", "H200"]),
+    ]:
         with patch.dict(os.environ, {"DRTC_GPU": requested}):
             assert eval(expression, {"os": os}) == expected
+
+
 @pytest.mark.parametrize("wrapper", _WRAPPERS, ids=lambda p: p.stem)
 def test_region_default_and_explicit_override(wrapper: Path) -> None:
     tree = ast.parse(wrapper.read_text())

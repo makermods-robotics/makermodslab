@@ -1558,7 +1558,7 @@ Both tsc projects clean. `npx vitest run` 30 files / 335 tests green.
   else configured → `remoteInference.transport.sfuNotRunning` (restored
   verbatim in both catalogs), tone `error`, exported as `SFU_OFF_SUMMARY_KEY`.
   It is ordered ahead of the credentials line because a stopped Lab SFU is
-  *why* the variables are missing, and guarded on `configured` because a Cloud
+  _why_ the variables are missing, and guarded on `configured` because a Cloud
   operator's Lab never hosts one — that is normal, not a fault; both directions
   are tested. When that key fires, the blocked line under Start also renders
   the literal `makermodslab --sfu --sfu-external-ip` in a `<pre>` (data,
@@ -1778,7 +1778,7 @@ the line above it names a 24 GB board.
 `modal_launcher.parse_device_name` lifts it back out of the log stream in
 `_handle_line`, next to `parse_app_id`, and `status()` reports it as
 `device_name` (null until the line arrives). It is **evidence**; `gpu` beside it
-is what was *asked for*. Those are two different facts and the whole bug was
+is what was _asked for_. Those are two different facts and the whole bug was
 that one was being read as the other. `RemoteSessionBody`'s billing line carries
 it as a `title`, which is where an operator looks only when the line already
 looks wrong.
@@ -1831,12 +1831,12 @@ WHICH field it writes is per family, and the table is
 `utils.system.POLICY_FLOW_STEPS_FIELDS`, verified against the pinned fork's own
 source rather than from memory:
 
-| family | field | default |
-| --- | --- | --- |
-| smolvla | `num_steps` | 10 |
-| pi0 / pi05 | `num_inference_steps` | 10 |
+| family        | field                     | default                         |
+| ------------- | ------------------------- | ------------------------------- |
+| smolvla       | `num_steps`               | 10                              |
+| pi0 / pi05    | `num_inference_steps`     | 10                              |
 | **molmoact2** | **`num_inference_steps`** | **saved `None`, applies as 10** |
-| act, pi0_fast | — | — |
+| act, pi0_fast | —                         | —                               |
 
 MolmoAct2 is the trap and it is worth stating plainly, because the names invite
 the opposite answer. **`num_flow_timesteps` (default 8) is a TRAINING knob** —
@@ -1930,14 +1930,14 @@ to the config before the policy and its processors are built, exactly like
 Two claims, both read out of the installed
 `lerobot/policies/molmoact2/` rather than assumed:
 
-* **Nothing counts to two.** `MolmoAct2PackInputsProcessorStep._extract_images`
+- **Nothing counts to two.** `MolmoAct2PackInputsProcessorStep._extract_images`
   (`processor_molmoact2.py:814`) iterates whatever image keys it resolves and
   appends one array per key. `_build_robot_text` joins `Image {i}<|image|>` over
   `range(num_images)` (`:377`) and `infer_molmoact2_max_sequence_length` budgets
   `num_images * 196` (`:100`). `MOLMOACT2_DEFAULT_NUM_IMAGES = 2` (`:67`) exists
   only as the fallback for a `num_images < 1` call. Three declared views really
   are three pictures.
-* **No dataset statistics are needed.** `normalization_mapping["VISUAL"]` is
+- **No dataset statistics are needed.** `normalization_mapping["VISUAL"]` is
   `NormalizationMode.IDENTITY` (`configuration_molmoact2.py:123`), and lerobot's
   `NormalizerProcessorStep` returns the tensor untouched both for IDENTITY and
   for any key it has no stats for (`processor/normalize_processor.py:329`);

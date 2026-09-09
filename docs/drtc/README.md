@@ -175,9 +175,9 @@ cannot be used because it resolves modules through the _local_ interpreter.
 
 ### Modal secrets
 
-| Secret           | Keys                                | Needed for                                                          |
-| ---------------- | ----------------------------------- | ------------------------------------------------------------------- |
-| `huggingface`    | `HF_TOKEN`                          | private/gated checkpoints or base backbones (drop it if all public) |
+| Secret           | Keys                                       | Needed for                                                          |
+| ---------------- | ------------------------------------------ | ------------------------------------------------------------------- |
+| `huggingface`    | `HF_TOKEN`                                 | private/gated checkpoints or base backbones (drop it if all public) |
 | `tailscale-auth` | `TS_AUTHKEY` (REUSABLE, **non-ephemeral**) | `--tailscale` only                                                  |
 
 ```bash
@@ -228,7 +228,7 @@ Two rules follow from that, and the first one is a change:
 
 - **The auth key must be REUSABLE and non-ephemeral.** Until 2026-09-04 this
   page asked for REUSABLE + EPHEMERAL, which was right when the wrapper ran
-  `--state=mem:` and kept nothing. It is wrong now: the control plane *deletes*
+  `--state=mem:` and kept nothing. It is wrong now: the control plane _deletes_
   an ephemeral node as soon as it goes offline, so the persisted node key is
   dead on the next launch and the container re-registers as a new node. With an
   ephemeral key you still get one node while the GPU stays online — and a new

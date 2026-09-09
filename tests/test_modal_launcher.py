@@ -2037,7 +2037,10 @@ def test_frame_tolerance_reaches_both_workers(engine):
 @pytest.mark.parametrize("engine", ["rtc", "sync"])
 def test_auto_allocation_from_api_reaches_env_and_status(spawned, engine):
     from makermodslab.server import GpuStartBody, start_remote_inference_gpu
-    result = start_remote_inference_gpu(GpuStartBody(engine=engine, policy_hub_id="someone/p", gpu="auto", region="auto"))
+
+    result = start_remote_inference_gpu(
+        GpuStartBody(engine=engine, policy_hub_id="someone/p", gpu="auto", region="auto")
+    )
     argv, env = spawned["popen"][0]
     assert env["DRTC_GPU"] == "auto"
     assert env["DRTC_REGION"] == "auto"

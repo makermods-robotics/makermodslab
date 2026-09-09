@@ -734,7 +734,12 @@ def test_remote_inference_request_built_from_the_record(client, tmp_lerobot_home
     # silently run the arm under a regime the caller did not choose.
     assert (req.engine, req.s_min) == ("rtc", 6)
     assert (req.lpf_hz, req.lpf_order) == (4, 2)
-    assert (req.camera_send_hz, req.video_quality, req.video_bitrate_kbps, req.latency_k) == (5, 65, 2048, 2.5)
+    assert (req.camera_send_hz, req.video_quality, req.video_bitrate_kbps, req.latency_k) == (
+        5,
+        65,
+        2048,
+        2.5,
+    )
     assert req.skip_identity_check is True
     # Cameras resolve server-side from this record; no device dict rides along.
     assert not hasattr(req, "cameras")

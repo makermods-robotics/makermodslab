@@ -20,6 +20,9 @@ from makermodslab.drtc._policy_loading import (
 
 @pytest.fixture
 def tiny_checkpoint(tmp_path):
+    # LeRobot imports without policy extras, but leaves the HF model classes
+    # as None. Skip only when the optional dependency itself is absent.
+    pytest.importorskip("transformers")
     molmo = pytest.importorskip("lerobot.policies.molmoact2.modeling_molmoact2")
     from lerobot.configs.types import FeatureType, PolicyFeature
     from lerobot.policies.molmoact2.configuration_molmoact2 import MolmoAct2Config

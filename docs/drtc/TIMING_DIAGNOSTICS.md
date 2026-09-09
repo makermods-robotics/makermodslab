@@ -108,12 +108,12 @@ discard the first 10 seconds and compare the following 30 seconds. Repeat a
 promising comparison with baseline/test order reversed to check network drift.
 Do not select a faster setting if grasping or motion quality worsens.
 
-| Run | Change from baseline | Where to set it | What the result tests |
-| --- | --- | --- | --- |
-| A | None: H264, slack 5, 10 flow steps | Codec in Advanced; flow steps on the Modal card | Fresh paired baseline |
-| B | Slack 5 → 2 only | Modal card → Sync slack (ticks) → 2; the generated command also includes `--slack 2` | Whether less sync buffering lowers residual delay without increasing drops/starvation |
-| C | H264 → MJPEG only; restore slack 5 | Advanced → Codec, then restart GPU and robot with that selection | Whether the video/state transport and matching path accounts for the delay; MJPEG defaults to quality 90 |
-| D | Flow steps 10 → 6 only; restore H264/slack 5 | Modal card → Flow steps; restart GPU | How much prediction and queue time can shrink; evaluate grasp quality as well as latency |
+| Run | Change from baseline                         | Where to set it                                                                      | What the result tests                                                                                    |
+| --- | -------------------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| A   | None: H264, slack 5, 10 flow steps           | Codec in Advanced; flow steps on the Modal card                                      | Fresh paired baseline                                                                                    |
+| B   | Slack 5 → 2 only                             | Modal card → Sync slack (ticks) → 2; the generated command also includes `--slack 2` | Whether less sync buffering lowers residual delay without increasing drops/starvation                    |
+| C   | H264 → MJPEG only; restore slack 5           | Advanced → Codec, then restart GPU and robot with that selection                     | Whether the video/state transport and matching path accounts for the delay; MJPEG defaults to quality 90 |
+| D   | Flow steps 10 → 6 only; restore H264/slack 5 | Modal card → Flow steps; restart GPU                                                 | How much prediction and queue time can shrink; evaluate grasp quality as well as latency                 |
 
 Both codec selections must match the GPU and robot. The slack selector remembers
 2, 3, 4, or 5 ticks (default 5), applies to both RTC and sync, and is locked while

@@ -1468,8 +1468,16 @@ def _raise_oserror(*args, **kwargs):
 
 
 def test_network_settings_reach_robot_without_changing_control_fps():
-    req = _request(engine="rtc", fps=20, camera_send_hz=5, latency_k=2.5, video_quality=65, video_bitrate_kbps=2048)
+    req = _request(
+        engine="rtc", fps=20, camera_send_hz=5, latency_k=2.5, video_quality=65, video_bitrate_kbps=2048
+    )
     args = ri._robot_sync_args(req, [], url="u", room="r")
-    assert {"--fps=20", "--camera_send_hz=5.0", "--latency_k=2.5", "--video_quality=65", "--video_bitrate_kbps=2048"} <= set(args)
+    assert {
+        "--fps=20",
+        "--camera_send_hz=5.0",
+        "--latency_k=2.5",
+        "--video_quality=65",
+        "--video_bitrate_kbps=2048",
+    } <= set(args)
     sync = ri._robot_sync_args(_request(), [], url="u", room="r")
     assert not any(arg.startswith(("--camera_send_hz=", "--latency_k=")) for arg in sync)

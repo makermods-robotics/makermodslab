@@ -474,7 +474,7 @@ def _start_sfu(binary: str, host: str, external_ip: bool = False) -> subprocess.
     # Participants on this machine (a hosting session's in-process worker, the
     # remote-inference child) dial the SFU on the bind host; the wildcard bind
     # is reachable on loopback.
-    os.environ[sfu.ENV_HOST] = "127.0.0.1" if host == "0.0.0.0" else host  # noqa: S104
+    os.environ[sfu.ENV_HOST] = "127.0.0.1" if host == "0.0.0.0" else host  # nosec B104
     os.environ[sfu.ENV_EXTERNAL_IP] = "1" if external_ip else "0"
     if external_ip:
         logger.info("   SFU advertising its STUN-discovered public IP (--sfu-external-ip)")
@@ -502,7 +502,8 @@ def _watch_sfu(proc: subprocess.Popen, server: uvicorn.Server) -> None:
 
 def _open_browser_when_ready(host: str = "127.0.0.1"):
     """Poll the address actually served, then open that address locally."""
-    connect_host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+    # These are comparisons against bind addresses, not new public listeners.
+    connect_host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)  # nosec B104
     url_host = "localhost" if connect_host == "127.0.0.1" else connect_host
     if ":" in url_host:
         url_host = f"[{url_host}]"
