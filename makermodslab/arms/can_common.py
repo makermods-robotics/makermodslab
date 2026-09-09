@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,9 +95,9 @@ class CanDeviceClasses:
 
 
 # Both CAN families use the same Star Arm 102 leader, and it has ONE zero
-# pose: folded against the base, gripper closed. The follower poses are
-# family-specific (follower_zero_pose) and opposite on the gripper.
-_LEADER_ZERO_POSE = "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, gripper closed — then confirm."
+# pose: folded against the base, gripper fully closed. The follower poses are
+# family-specific (follower_zero_pose), with the gripper fully closed.
+_LEADER_ZERO_POSE = "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, gripper fully closed — then confirm."
 
 # The lerobot device names of an energized CAN leader, how a device handed
 # to calibrate() / the stop path is recognized as one (the class name is the
@@ -162,8 +163,7 @@ class CanArmFamily(ArmFamily):
         self, device_type: object | None = None, leader_kind: str | None = None
     ) -> str:
         """The physical pose to ask for: the shared Star-leader pose for
-        "teleop", this family's follower pose otherwise (opposites on the
-        gripper between Maker and Metal). An ENERGIZED leader is this
+        "teleop", this family's follower pose otherwise. An ENERGIZED leader is this
         family's own arm, so its pose is the follower's. The families' own
         helper, not part of the base contract — calibration_summary and
         calibrate serve it."""
@@ -184,24 +184,16 @@ class CanArmFamily(ArmFamily):
         enable_torque() (and an energized leader's starts its gravity thread),
         which would lock the arm rigid exactly when the user needs to move it
         by hand. Open the bus directly and disable torque, which is what
-        lerobot's own calibrate() does internally. The disable is not optional
-        for Damiao even here: the HANDSHAKE inside bus.connect() is itself the
-        enable command, so the arm comes up energized and this write is what
-        frees it for the user's hands.
+        lerobot's own calibrate() does internally. Skip the energizing Damiao
+        handshake; calibration checks fresh replies from every joint before
+        asking for the pose and again before and after setting zero.
         """
         try:
-            device.bus.connect()
+            device.bus.connect(handshake=False)
             device.bus.disable_torque()
         except Exception:
-            # Either the handshake raised partway (a Damiao handshake is
-            # the per-motor enable, so the motors that answered are
-            # energized while is_connected reads False) or it completed
-            # and the write that frees the arm failed. Both: de-energize
-            # the bus the recovery way (reopen without the handshake if
-            # needed, broadcast the disable), close the port, then let the
-            # failure propagate. Same recovery the teleop/replay connect
-            # paths run; without it the arm holds torque with no device
-            # object left to release it through.
+            # Recover a failed open or torque-disable through a fresh bus
+            # connection, then close it before propagating the original error.
             from .. import torque
 
             torque.de_energize_can_device(device, label)
@@ -248,6 +240,7 @@ class CanArmFamily(ArmFamily):
         (its config carries motor_can_ids or joint_ids), so a leader run needs
         no leader_kind here.
         """
+        self._read_fresh_positions(device)
         is_can = self._is_can_device(device)
         is_leader = device_type == "teleop"
         leader_kind = None
@@ -258,11 +251,7 @@ class CanArmFamily(ArmFamily):
         ui.step(self.zero_pose_instructions(device_type, leader_kind), image_url=None, live_positions=True)
         ui.message("Setting zero…")
 
-        pre_zero: dict[str, float] = {}
-        try:
-            pre_zero = self.read_positions(device)
-        except Exception as e:
-            logger.warning(f"Could not read pre-zero positions: {e}")
+        pre_zero = self._read_fresh_positions(device)
         for motor, value in pre_zero.items():
             # Logged so an offset against the PREVIOUS zero stays recoverable
             # from the logs if this one turns out to have been taken in the
@@ -270,11 +259,66 @@ class CanArmFamily(ArmFamily):
             logger.info(f"Pre-zero position of {motor}: {value:.2f} deg")
 
         self._set_zero(device, is_can)
+        self._read_fresh_positions(device)
         logger.info("Arm zero position set.")
         # An energized leader's config has no joint_limits of its own: it is
         # this family's arm, so the FOLLOWER's fixed limits are its ranges.
         ranges = self._follower_joint_limits(device.config.port) if (is_can and is_leader) else None
         return self._build_calibration(device, is_can, ranges)
+
+    def _read_fresh_positions(self, device: Any) -> dict[str, float]:
+        """Require a reply from every joint; cached telemetry cannot prove power."""
+        bus = device.bus
+        if self._is_can_device(device):
+            # Both follower raw/sync readers can reuse old feedback on a miss.
+            # Single-motor reads raise when the motor does not respond.
+            readers = {
+                name: lambda name=name: bus.read("Present_Position", name)
+                for name in device.config.motor_can_ids
+            }
+        else:
+            # sync_monitor's reliable flag also rejects valid near-zero angles
+            # via the SDK's power-cycle filter. Individual raw-angle queries
+            # return a fresh packet or raise on timeout, without that filter.
+            readers = {
+                name: lambda motor_id=motor_id: bus.read_raw_angle(motor_id)
+                for name, motor_id in device.config.joint_ids.items()
+            }
+        positions = {}
+        for name, read in readers.items():
+            for attempt in range(3):
+                try:
+                    positions[name] = float(read())
+                    break
+                except (OSError, RuntimeError) as error:
+                    # Faults are not packet loss; preserve their actual cause.
+                    if "fault" in str(error).lower():
+                        raise
+                    if attempt == 2:
+                        raise ConnectionError(f"No response from motor '{name}': {error}") from error
+                    time.sleep(0.05)
+        if not positions or not all(math.isfinite(value) for value in positions.values()):
+            raise ConnectionError("Arm returned invalid positions. Check its connection.")
+        return positions
+
+    def _build_gripper_bus(self, port: str, bus_class: type, motor_models: dict):
+        from lerobot.motors import Motor, MotorNormMode
+
+        config = self._device_classes().follower_base(port=port)
+        ids = config.motor_can_ids["gripper"]
+        send_id, recv_id = ids if isinstance(ids, tuple) else (ids, ids)
+        model = motor_models["gripper"]
+        motor = Motor(send_id, model, MotorNormMode.DEGREES)
+        motor.recv_id = recv_id
+        motor.motor_type_str = model
+        return bus_class(
+            port=port,
+            motors={"gripper": motor},
+            can_interface="slcan",
+            use_can_fd=False,
+            bitrate=config.can_bitrate,
+            data_bitrate=None,
+        )
 
     def _follower_joint_limits(self, port: str) -> dict[str, tuple[float, float]]:
         return dict(self._device_classes().follower_base(port=port).joint_limits)

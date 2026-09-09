@@ -6660,6 +6660,24 @@
       "get": {
         "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `image_url` and `live_positions` are the step\nwizard's own fields and default (null / False) for the SO-101 sweep, so\nthe frontend reads one shape whichever manager answers.",
         "operationId": "calibration_status",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Arm Type"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -6668,6 +6686,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Calibration Status"
@@ -12093,6 +12121,24 @@
       "get": {
         "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `image_url` and `live_positions` are the step\nwizard's own fields and default (null / False) for the SO-101 sweep, so\nthe frontend reads one shape whichever manager answers.",
         "operationId": "calibration_status_calibration_status_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Arm Type"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -12101,6 +12147,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Calibration Status"

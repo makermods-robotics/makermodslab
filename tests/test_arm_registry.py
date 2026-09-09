@@ -130,10 +130,10 @@ def test_default_calibration_name_is_the_record_name_plus_the_family_suffix(fami
     assert family.default_calibration_name("bot") == "bot" + family.calibration_name_suffix
 
 
-def test_the_can_followers_zero_poses_are_opposites_on_the_gripper() -> None:
+def test_the_can_followers_zero_poses_use_closed_grippers() -> None:
     maker, metal = registry.get("maker"), registry.get("metal")
-    assert "gripper fully open" in maker.calibration_summary("robot")["text"]
-    assert "gripper closed" in metal.calibration_summary("robot")["text"]
+    assert "gripper fully closed" in maker.calibration_summary("robot")["text"]
+    assert "gripper fully closed" in metal.calibration_summary("robot")["text"]
     assert maker.calibration_summary("teleop") == metal.calibration_summary("teleop")
 
 

@@ -765,11 +765,11 @@ def test_stopping_with_no_calibration_running_is_a_clean_refusal() -> None:
 # ---------------------------------------------------------------------------
 
 MAKER_FOLLOWER_ZERO_POSE = (
-    "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully open — then confirm."
+    "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully closed — then confirm."
 )
 STAR_LEADER_ZERO_POSE = (
     "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, "
-    "gripper closed — then confirm."
+    "gripper fully closed — then confirm."
 )
 
 
@@ -873,7 +873,7 @@ def test_maker_open_for_calibration_connects_the_follower_bus_then_disables_torq
 
     assert [c.type for c in built] == ["maker_follower"]
     assert (built[0].port, built[0].id) == ("/dev/can0", "cal")
-    assert device.log == [("bus", "connect"), ("bus", "disable_torque")]
+    assert device.log == [("bus", "connect", False), ("bus", "disable_torque")]
 
 
 def test_maker_open_for_calibration_connects_the_leader_uncalibrated(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -969,7 +969,8 @@ def test_a_failed_torque_disable_after_connect_de_energizes_and_closes_the_bus(
     calls: list[str] = []
 
     class _Bus:
-        def connect(self):
+        def connect(self, handshake=True):
+            assert handshake is False
             calls.append("connect")
 
         def disable_torque(self):
@@ -1015,7 +1016,8 @@ def test_a_handshake_that_raises_partway_is_de_energized_before_the_error_propag
     class _Bus:
         is_connected = False
 
-        def connect(self):
+        def connect(self, handshake=True):
+            assert handshake is False
             calls.append("connect")
             raise RuntimeError("motor 4 did not answer the handshake")
 

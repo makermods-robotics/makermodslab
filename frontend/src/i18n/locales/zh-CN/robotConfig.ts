@@ -106,8 +106,8 @@ export default {
     otherArm: "其他机械臂",
     clear: "清除端口",
     clearTitle: "清除端口 — 释放它且不分配新端口",
-    rescan: "重新扫描",
-    detect: "识别",
+    rescan: "刷新",
+    detect: "摆动识别",
     detecting: "监测中…",
     detectTitle: "手动识别：将机械臂底座大幅向左和向右摆动",
     detectHelp:
@@ -126,6 +126,8 @@ export default {
       metal:
         "正在逐个探测端口。若有两条机械臂响应，请把要分配的那条底座向左右摆动。",
     },
+    multipleHelp:
+      "左右摆动主臂底座来识别主臂。对于从臂，请选择端口并点击抖动，观察哪个夹爪移动。夹爪随后会回到起始位置。",
     wiggle: "抖动",
     wiggling: "抖动中…",
     wiggleTitle: "驱动该端口上的夹爪，看看是哪条机械臂",
@@ -134,7 +136,7 @@ export default {
     detectTip: "把底座向左右大幅摆动。小幅晃动会被忽略。",
     detectAuto: "自动识别",
     detectTipAuto: "逐个探测端口，无需手动摆动。",
-    wiggleTip: "驱动夹爪，你可以看到哪条机械臂有反应。",
+    wiggleTip: "移动夹爪后回到起始位置。",
     wiggleFallback:
       "请改用某个端口上的“抖动”：它只会驱动那条机械臂的夹爪，你可以看到是哪条机械臂，然后手动分配端口。",
     noneAssigned: "无端口",
@@ -182,6 +184,7 @@ export default {
     step: "标定",
     calibrateAll: "全部标定",
     calibrateAllTitle: "选中所有已检测到的机械臂进行自动标定",
+    calibrateAllZeroTitle: "依次设置每个已检测机械臂的零位姿态",
     calibrateAllDisabledTitle: "未检测到机械臂 — 请接上机械臂并重新扫描",
     openLeaderFolder: "打开主臂标定文件夹",
     openFollowerFolder: "打开从臂标定文件夹",
@@ -219,12 +222,15 @@ export default {
       unknown: "未知",
     },
     zeroPose: {
+      sequence_other: "逐一设置机械臂零位。还剩 {{count}} 个机械臂。",
+      cancelAll: "取消全部",
+      poseCaption: "与上图姿势保持一致，夹爪完全闭合。",
       instructionsFor: {
         maker: {
           leader:
             "用手将 Star Arm 102 主控臂摆成上图的姿态：折叠贴近底座，夹爪闭合。关节未通电，可以自由移动。",
           follower:
-            "用手把机械臂摆成上图的姿态：折叠贴近底座，夹爪完全张开。扭矩已关闭，可以自由移动。",
+            "用手把机械臂摆成上图的姿态：折叠贴近底座，夹爪完全闭合。扭矩已关闭，可以自由移动。",
         },
         metal: {
           leader:
@@ -244,7 +250,7 @@ export default {
       start: "设置零位姿态",
       confirm: "设为零位并保存",
       saving: "正在设置零位并保存标定…",
-      poseImage: "零位姿态：折叠，夹爪张开",
+      poseImage: "零位姿态：折叠，夹爪完全闭合",
       poseImageLeader: "Star Arm 102 主控臂零位姿态：折叠，夹爪闭合",
       poseImageMetal: "零位姿态：竖直，夹爪闭合",
     },
@@ -268,9 +274,11 @@ export default {
     errorLabel: "错误：",
     demoTitle: "标定演示",
     start: "开始",
-    sweepNote: "把每个关节向两个方向都移到行程尽头。扭矩已关闭，机械臂会发软，请托住它。",
+    sweepNote:
+      "把每个关节向两个方向都移到行程尽头。扭矩已关闭，机械臂会发软，请托住它。",
     autoNote: "机械臂会自行运动以找到各关节的行程极限。请保持周围空旷。",
-    zeroNote: "把机械臂摆成上图的位置，然后设定零位。扭矩保持关闭，可以自由活动。",
+    zeroNote:
+      "把机械臂摆成上图的位置，然后设定零位。扭矩保持关闭，可以自由活动。",
     panel: {
       notice:
         "这条机械臂通过其扩展自带的面板进行标定。扩展提供该面板后，它会显示在这里。",
@@ -302,6 +310,12 @@ export default {
       stepFailedTitle: "步骤失败",
       stepFailedFallback: "无法完成该步骤",
       stepError: "无法完成标定步骤",
+      failedFallback: "标定失败，请重试。",
+      notResponding: "机械臂无响应，请检查电源和连接线。",
+      jointsNotResponding: "{{joints}} 无响应，请检查电源和接线。",
+      disconnected: "机械臂已断开，请重新连接后重试。",
+      portDenied: "端口访问被拒绝，请检查权限或关闭其他应用。",
+      motorFault: "电机报告故障，请检查机械臂后重试。",
     },
   },
 

@@ -3631,7 +3631,7 @@ def stop_calibration():
 
 
 @router.get("/calibration-status")
-def calibration_status():
+def calibration_status(arm_type: str | None = None):
     """Get current calibration status, from whichever flow is live.
 
     The two status dataclasses are field-compatible where they overlap, so one
@@ -3641,7 +3641,14 @@ def calibration_status():
     """
     from dataclasses import asdict
 
-    if step_calibration_is_active():
+    from .arm_capabilities import calibration_kind, require_known_arm_type
+
+    if arm_type is not None:
+        require_known_arm_type(arm_type)
+    # An explicit family keeps terminal wizard results visible after release.
+    if (arm_type is not None and calibration_kind(arm_type) == "steps") or (
+        arm_type is None and step_calibration_is_active()
+    ):
         return asdict(step_calibration_manager.get_status())
     payload = asdict(calibration_manager.get_status())
     payload.setdefault("image_url", None)

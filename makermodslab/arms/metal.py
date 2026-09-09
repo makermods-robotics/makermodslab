@@ -78,7 +78,7 @@ class MetalFamily(CanArmFamily):
 
     follower_zero_pose = (
         "Move the arm by hand to its ZERO POSE — standing upright, all "
-        "joints at 0 degrees, gripper closed — then confirm."
+        "joints at 0 degrees, gripper fully closed — then confirm."
     )
 
     single_robot_type = "metal_follower"
@@ -119,6 +119,12 @@ class MetalFamily(CanArmFamily):
 
             return config.METAL_LEADER_CONFIG_PATH
         return super().leader_calibration_dir()
+
+    def gripper_bus(self, port: str):
+        from lerobot.motors.damiao import DamiaoMotorsBus
+        from lerobot.robots.metal_follower.metal_follower import MOTOR_MODELS
+
+        return self._build_gripper_bus(port, DamiaoMotorsBus, MOTOR_MODELS)
 
     def _device_classes(self, leader_kind: str | None = None) -> CanDeviceClasses:
         from lerobot.robots.bi_metal_follower import BiMetalFollowerConfig

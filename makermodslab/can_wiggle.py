@@ -11,39 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Gripper wiggle for a Damiao CAN arm — the identification of last resort.
+"""Identify a CAN arm by moving only its gripper, then returning to its start.
 
-``wiggle.py`` finds an SO-101 by jogging the gripper on a port so the user can
-see which physical arm is on it. A Metal rig needs the same thing in exactly
-one situation the probe and the gesture cannot cover: when its leader is a
-second Metal arm (leader kind "metal"), every port answers the Damiao
-protocol — ``maker_ports.probe_maker_ports`` cannot say which is the leader
-and which the follower, and ``identify_maker_arm_by_motion`` is refused for
-every Damiao device because opening its bus to watch a joint energizes the
-motors mid-gesture. Driving ONE port's gripper a small stroke and asking the
-user which arm moved is what is left, and it is safe where the gesture is
-not: the bus is opened with ONLY the gripper motor on it, so the handshake
-(the Damiao enable command, sent per motor) energizes nothing else; the
-stroke stays inside the gripper's soft limits with a wide margin; and the
-gripper is explicitly disabled again before the bus closes, with every
-failure routed through ``torque.de_energize_can_bus`` so a handshake that
-raised partway never leaves a motor held.
-
-The mutex is ``wiggle.wiggle_active`` — this IS a wiggle, so it shares the
-legacy module's flag and its ``robot.busy.wiggle`` discriminant rather than
-adding a discriminant of its own — and it is refused while any feature holds
-the bus (``sessions.held_by``), exactly like the Feetech wiggle.
-
-``choose_identification`` is the pure decision the identify flow makes:
-motion first wherever it is allowed, the wiggle when motion is refused or
-found nothing on a family that supports it. Kept free of I/O so the fallback
-is unit-testable without threads or hardware.
+The family builds a bus with just the gripper motor. Capture its position
+without the energizing handshake, validate it against the soft limits, then
+jog using bounded MIT setpoints. Every exit attempts to return before torque
+release and bus cleanup. The shared wiggle mutex lasts until the worker exits.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Callable
 
@@ -54,22 +34,11 @@ from .utils.config import normalize_arm_type
 
 logger = logging.getLogger(__name__)
 
-# The stroke, in degrees of gripper travel, each side of where the jaws are
-# now: 8 deg is clearly visible on the Metal gripper (its full travel is 137.5
-# deg of jaw opening) and small enough that a gripper holding an object at
-# rest neither drops it nor crushes it. A gripper parked at or past a limit
-# is first pulled the margin's width inside it (plan_can_wiggle).
-WIGGLE_STROKE_DEG = 8.0
-
-# Distance kept from EITHER soft limit. The vendor's gripper table documents
-# jaw opening only up to 116.4 deg although the limit is 137.5, so the
-# stroke never goes anywhere near the top of the range.
-WIGGLE_LIMIT_MARGIN_DEG = 15.0
+# Maximum excursion from the captured position. Near a limit the stroke is
+# one-sided, so a closed/open gripper returns to exactly where it started.
+WIGGLE_STROKE_DEG = 10.0
 
 WIGGLE_REPEATS = 3
-# Time the jaws get to move each way. MIT position control at the gains
-# below reaches an 8 deg step comfortably within this.
-WIGGLE_DWELL_S = 0.35
 # Whole-run budget, mirroring wiggle._WIGGLE_TIMEOUT_S.
 WIGGLE_TIMEOUT_S = 15.0
 
@@ -79,9 +48,6 @@ WIGGLE_TIMEOUT_S = 15.0
 WIGGLE_KP = 20.0
 WIGGLE_KD = 0.6
 
-# Classic CAN at 1 Mbps over slcan, the wiring every Metal config defaults to.
-_CAN_BITRATE = 1_000_000
-
 _GRIPPER = "gripper"
 
 
@@ -89,24 +55,17 @@ def plan_can_wiggle(
     current_deg: float,
     limits: tuple[float, float],
     stroke_deg: float = WIGGLE_STROKE_DEG,
-    margin_deg: float = WIGGLE_LIMIT_MARGIN_DEG,
 ) -> tuple[float, float, float]:
-    """Plan a (high, low, rest) jog inside the gripper's soft limits.
+    """Keep the captured rest position and clip each excursion to the limits.
 
-    The window is the limits shrunk by ``margin_deg`` on each side; ``rest``
-    is the current angle clamped so the whole stroke fits inside that window
-    (a gripper parked at a limit is pulled in first, never pushed further
-    out). Raises when the window is too narrow for the stroke.
+    Refuse an out-of-range start because the limits would prevent returning.
     """
-    lo = min(limits) + margin_deg
-    hi = max(limits) - margin_deg
+    lo, hi = sorted(limits)
     if hi - lo < 2 * stroke_deg:
-        raise ValueError(
-            f"Gripper limits {limits} leave no room for a {stroke_deg:g} deg stroke inside a "
-            f"{margin_deg:g} deg margin."
-        )
-    rest = min(max(float(current_deg), lo + stroke_deg), hi - stroke_deg)
-    return rest + stroke_deg, rest - stroke_deg, rest
+        raise ValueError(f"Gripper limits {limits} leave no room for a {stroke_deg:g} deg stroke.")
+    if not math.isfinite(current_deg) or not lo <= current_deg <= hi:
+        raise ValueError("Gripper is outside its position limits. Recalibrate before wiggling.")
+    return min(current_deg + stroke_deg, hi), max(current_deg - stroke_deg, lo), current_deg
 
 
 def choose_identification(
@@ -146,59 +105,47 @@ def gripper_limits(arm_type: str) -> tuple[float, float]:
 
 
 def _open_gripper_bus(arm_type: str, port: str):
-    """A Damiao bus carrying ONLY the gripper motor, built the way the
-    follower builds its own (ids, model, wiring) and connected — which, on
-    Damiao, enables that one motor and nothing else."""
-    from lerobot.motors import Motor, MotorNormMode
-    from lerobot.motors.damiao import DamiaoMotorsBus
-    from lerobot.robots.metal_follower.metal_follower import MOTOR_MODELS
-
+    """Ask the family for a bus carrying ONLY its gripper motor."""
     family = arm_registry.get(normalize_arm_type(arm_type))
-    send_id, recv_id = family._device_classes().follower_base(port=port).motor_can_ids[_GRIPPER]
-    model = MOTOR_MODELS[_GRIPPER]
-    motor = Motor(send_id, model, MotorNormMode.DEGREES)
-    motor.recv_id = recv_id
-    motor.motor_type_str = model
-    return DamiaoMotorsBus(
-        port=port,
-        motors={_GRIPPER: motor},
-        can_interface="slcan",
-        use_can_fd=False,
-        bitrate=_CAN_BITRATE,
-        data_bitrate=None,
-    )
+    return family.gripper_bus(port)
 
 
 def drive_gripper_wiggle(
     bus,
     limits: tuple[float, float],
     sleep: Callable[[float], None] = time.sleep,
+    gains: tuple[float, float] = (WIGGLE_KP, WIGGLE_KD),
 ) -> None:
-    """Connect ``bus`` (gripper only), jog the jaws, and leave the motor DISABLED.
-
-    Every exit — the normal one and any exception between the handshake and
-    the last write — ends in ``de_energize_can_bus``: reopen without the
-    handshake if the bus looks dead, broadcast the disable, close. That is
-    what turns "the handshake energized the gripper" into "the gripper is
-    limp again", whatever happened in between.
-    """
+    """Capture, jog, return, and disable the gripper even when a write fails."""
     from .torque import de_energize_can_bus
+    from .wiggle import _wait_for_rest
 
     try:
-        bus.connect()  # handshake=True: enables the ONE motor on this bus
+        bus.connect(handshake=False)
         current = float(bus.read("Present_Position", _GRIPPER))
         high, low, rest = plan_can_wiggle(current, limits)
-        for _ in range(WIGGLE_REPEATS):
-            for target in (high, low):
-                bus.sync_write_metal({_GRIPPER: (WIGGLE_KP, WIGGLE_KD, target, 0.0, 0.0)})
-                sleep(WIGGLE_DWELL_S)
-        bus.sync_write_metal({_GRIPPER: (WIGGLE_KP, WIGGLE_KD, rest, 0.0, 0.0)})
-        sleep(WIGGLE_DWELL_S)
+        bus.write("Kp", _GRIPPER, gains[0])
+        bus.write("Kd", _GRIPPER, gains[1])
+
+        def move(target: float) -> None:
+            start = float(bus.read("Present_Position", _GRIPPER))
+            steps = max(1, math.ceil(abs(target - start) / 1.5))
+            for step in range(1, steps + 1):
+                bus.write("Goal_Position", _GRIPPER, start + (target - start) * step / steps)
+                sleep(0.05)
+
+        try:
+            bus.enable_torque(_GRIPPER)
+            bus.write("Goal_Position", _GRIPPER, current)
+            for _ in range(WIGGLE_REPEATS):
+                move(high)
+                move(low)
+        finally:
+            move(rest)
+            _wait_for_rest(lambda: bus.read("Present_Position", _GRIPPER), rest, tolerance=1.0)
     finally:
         problems = de_energize_can_bus(bus, "gripper wiggle")
         if problems:
-            # de_energize_can_bus already logged loudly; make the wiggle's
-            # result say it too.
             raise RuntimeError(" ".join(problems))
 
 
@@ -248,7 +195,11 @@ def _run_and_clear_flag(arm_type: str, port: str) -> None:
     from . import wiggle as _wiggle
 
     try:
-        drive_gripper_wiggle(_open_gripper_bus(arm_type, port), gripper_limits(arm_type))
+        family = arm_registry.get(normalize_arm_type(arm_type))
+        config = family._device_classes().follower_base(port=port)
+        drive_gripper_wiggle(
+            _open_gripper_bus(arm_type, port), gripper_limits(arm_type), gains=config.gains[_GRIPPER]
+        )
     finally:
         _wiggle.wiggle_active = False
         notify_session_changed("wiggle", False)
