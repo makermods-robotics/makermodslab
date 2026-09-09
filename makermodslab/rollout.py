@@ -268,6 +268,11 @@ class InferenceRequest(BaseModel):
 inference_active: bool = False
 _inference_proc: subprocess.Popen | None = None
 _inference_started_at: float | None = None
+# When the rollout's main loop started — set by `_pump_stdout` on
+# `_ROLLOUT_START_MARKER`. Feeds the elapsed-time readout, and doubles as the
+# single-run "is the child able to act on a stop yet?" signal (its
+# `_runner_ready` equivalent): before this, a plain `lerobot-rollout` cannot
+# honour a SIGTERM. See `handle_stop_inference`'s single-run branch.
 _inference_rollout_started_at: float | None = None
 # True once the CURRENT long-lived runner (eval or coaching) has reported READY,
 # which is the event that says it has finished connecting and is reading its
@@ -3806,6 +3811,15 @@ def handle_stop_inference() -> dict[str, Any]:
         # Read under the lock with everything else so the answer cannot change
         # between here and the escalation.
         runner_listening = _runner_ready
+        # The single-run counterpart of `_runner_ready`: a plain `lerobot-rollout`
+        # has no command pipe and no READY event, but it prints
+        # `_ROLLOUT_START_MARKER` the instant `build_rollout_context` is done —
+        # which is exactly when its signal handler's `shutdown_event` starts
+        # being polled (by the strategy loop). Before that line the child
+        # provably cannot act on a SIGTERM: `ProcessSignalHandler` only sets the
+        # event, and the policy load / `robot.connect()` / camera opens never
+        # read it. `_pump_stdout` sets this timestamp on that marker.
+        rollout_setup_complete = _inference_rollout_started_at is not None
         # Surface the stop as its own phase so a status poll racing the
         # terminate/wait below sees "stopping" rather than a stale "running".
         if _inference_meta:
@@ -3853,8 +3867,19 @@ def handle_stop_inference() -> dict[str, Any]:
         # reports no episode end for it.
         _quit_runner(proc, listening=runner_listening)
     else:
+        # Plain single run. Once setup is done a SIGTERM is honoured — the
+        # strategy loop sees `shutdown_event` and breaks, then
+        # `strategy.teardown` eases the follower home and disconnects — so the
+        # full grace is worth waiting. Before then it is dead weight: the same
+        # reasoning `_quit_runner(listening=False)` spells out for the runners.
+        # Waiting the default five seconds there is five seconds of the arm
+        # connecting and homing after Stop was pressed, so cut it to the
+        # pre-READY budget and let the SIGKILL escalation do the rest.
         try:
-            _terminate_tree(proc)
+            if rollout_setup_complete:
+                _terminate_tree(proc)
+            else:
+                _terminate_tree(proc, timeout=_PRE_READY_TERMINATE_TIMEOUT_S)
         except Exception as exc:
             logger.exception("Stop inference: %s", exc)
 
