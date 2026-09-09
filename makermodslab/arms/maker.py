@@ -45,7 +45,7 @@ class MakerFamily(CanArmFamily):
     follower_probe_protocol = "robstride"
     motion_identify_energizes_follower = False
 
-    def _device_classes(self) -> CanDeviceClasses:
+    def _device_classes(self, leader_kind: str | None = None) -> CanDeviceClasses:
         from lerobot.robots.bi_maker_follower import BiMakerFollowerConfig
         from lerobot.robots.maker_follower import MakerFollowerConfig, MakerFollowerConfigBase
         from lerobot.teleoperators.bi_rebot_102_leader import BiRebot102LeaderMakerConfig

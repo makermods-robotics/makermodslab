@@ -301,6 +301,12 @@ class TeleoperateRequest(BaseModel):
     # which of the Feetech-only safety helpers apply. Defaults to so101 so a
     # request from a client that predates the Maker arm is unchanged.
     arm_type: str = "so101"
+    # Which of the family's leaders drives the follower (the record's
+    # leader_kind; blank = the family's default). Only the Metal arm offers a
+    # choice today: its Star Arm 102 or a second, gravity-compensated Metal
+    # arm — an ENERGIZED leader, returned and released on a stop like a
+    # follower. Read through the family; nothing here compares it.
+    leader_kind: str | None = None
     # Escape hatch for the arm-identity guard (see makermodslab/arm_identity.py):
     # when true, start even if the connected arms don't match their calibrations.
     skip_identity_check: bool = False
@@ -669,6 +675,8 @@ def _connect_can(request: TeleoperateRequest):
     Returns (robot, teleop_device, warnings) to match _connect_bimanual.
     """
     family = _can_family_label(request)
+    arm_family = arm_registry.get(request_arm_type(request))
+    leader_label = arm_family.leader_option(request.leader_kind).label
     if request.mode == "bimanual":
         robot_config, teleop_config = build_bimanual_configs(request)
     else:
@@ -694,12 +702,19 @@ def _connect_can(request: TeleoperateRequest):
                 "motors are in MIT mode, then try again."
             ) from e
 
-        logger.info("Connecting to Star Arm 102 leader arm(s)...")
+        logger.info(f"Connecting to {leader_label} arm(s)...")
         try:
             teleop_device.connect(calibrate=False)
         except Exception as e:
+            # An energized leader (the Metal leader) is a Damiao device like
+            # the follower: a handshake that raised partway has energized the
+            # motors that answered, and its connect() also disconnects with
+            # torque left on when the gravity model fails to load. Same
+            # recovery as the follower; a no-op on the Star leader (no CAN
+            # bus of its own to release).
+            de_energize_can_device(teleop_device, f"{leader_label} arm")
             raise RuntimeError(
-                f"Could not connect to the Star Arm 102 leader on {request.leader_port}. "
+                f"Could not connect to the {leader_label} on {request.leader_port}. "
                 "Make sure it's plugged in and powered on, then try again."
             ) from e
 
@@ -710,7 +725,7 @@ def _connect_can(request: TeleoperateRequest):
         # exception so the caller (which holds no device of its own yet) can
         # surface it as a warning instead of losing it.
         e.cleanup_error = _cleanup_after_setup_failure(
-            robot, teleop_device, f"{family} follower arm", "Star 102 leader arm"
+            robot, teleop_device, f"{family} follower arm", f"{leader_label} arm"
         )
         raise
 
@@ -910,6 +925,10 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         # (maker_rest_pose.py), because a RobStride joint has no
         # Goal_Position/Goal_Velocity register to hand the motion off to.
         rest_poses = family.capture_rest_poses(robot)
+        # An ENERGIZED leader (the Metal arm's gravity-compensated leader)
+        # holds torque and has no brakes either: captured here and returned
+        # with the followers on a normal stop. Nothing on every other leader.
+        rest_poses += family.capture_leader_rest_poses(teleop_device)
 
         # Stream the arms in the background; the worker owns disconnect so stop()
         # does not race the serial bus from the request thread.
@@ -1028,13 +1047,16 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 # disconnect() disables torque too, but if it fails partway the
                 # error is swallowed here and the arm stays energized (rigid) —
                 # so make the disable explicit, and make any failure loud.
-                # Every family releases the follower; only a family whose
-                # leader has motors (the SO-101) has a leader to release too.
+                # Every family releases the follower AND the leader: a
+                # leader without motors (the Star Arm 102) is a no-op inside
+                # the family's release, an energized one (the Metal leader)
+                # has its gravity thread stopped and its bus disabled there.
                 if family.uses_feetech_bus:
                     problems = family.release_torque(robot, "follower arm")
                     problems += family.release_torque(teleop_device, "leader arm")
                 else:
                     problems = family.release_torque(robot, f"{family.short_label} follower arm")
+                    problems += family.release_torque(teleop_device, f"{family.short_label} leader arm")
                 for device, label in ((robot, "follower arm"), (teleop_device, "leader arm")):
                     error = _safe_disconnect(device, label)
                     if error:

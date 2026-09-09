@@ -34,9 +34,19 @@ tell apart:
   to tell us which is which by moving one, exactly as on the SO-101, and this
   watches shoulder-pan across the candidate ports of ONE device type.
 
-Both modes are strictly READ-ONLY. No torque is enabled, no register or EEPROM
-is written, and no zero is set. Reading a position does not energize an idle
-arm on either bus.
+Both modes are strictly READ-ONLY on the Maker arm. No torque is enabled, no
+register or EEPROM is written, and no zero is set. Reading a position does not
+energize an idle arm on either bus. The Metal follower probe is the one
+exception (its handshake energizes; see _open_metal_follower_bus).
+
+A Metal rig driven by a second Metal arm (leader kind "metal") defeats both
+modes: every port answers Damiao, so the probe finds arms but cannot say
+which is the leader, and the gesture is refused on BOTH sides because
+opening a Damiao bus energizes it. The probe then lists what it found under
+``unknown_ports`` with a message saying so, ``identify_maker_arm_by_motion``
+answers with ``fallback: "wiggle"``, and ``can_wiggle.py`` — drive one port's
+gripper, let the user say which arm moved — is the identification of last
+resort. ``choose_identification`` there is the pure rule that picks it.
 """
 
 import asyncio
@@ -304,6 +314,48 @@ def _openers_for(arm_type: str) -> dict:
     return _OPENERS_BY_PROTOCOL[protocol]
 
 
+def _probe_same_protocol_sync(ports: list[str], arm_type: str) -> dict:
+    """The probe for a rig whose leader answers the FOLLOWER's protocol.
+
+    Every port that answers is a CAN arm of this family — but which one is
+    the leader and which the follower cannot be told by asking, so they are
+    reported as ``unknown_ports`` (never as followers: a client that fills
+    the follower slot from that list would pick the leader half the time)
+    with a message that says what to do instead.
+    """
+    opener, releaser, _ = _openers_for(arm_type)["robot"]
+    found: list[str] = []
+    unknown: list[str] = []
+    for port in ports:
+        try:
+            bus, _angle = opener(port)
+        except Exception as e:
+            logger.debug(f"maker probe: {port} is not a CAN arm: {e}")
+            unknown.append(port)
+            continue
+        releaser(bus)
+        found.append(port)
+    label = arm_registry.get(normalize_arm_type(arm_type)).short_label
+    if not found:
+        message = (
+            f"No {label} arm answered on any port. Check that both CAN adapters are plugged in, "
+            "the arms are powered, and their motors are in MIT mode."
+        )
+    else:
+        message = (
+            f"Found {label} arms on {', '.join(found)}. The leader and the follower are both "
+            f"{label} arms on the same protocol, so the probe cannot tell them apart: wiggle the "
+            "gripper on one port to see which arm it is, then assign the ports by hand."
+        )
+    return {
+        "success": False,
+        "follower_ports": [],
+        "leader_ports": [],
+        "unknown_ports": found + unknown,
+        "message": message,
+    }
+
+
 def _probe_sync(ports: list[str], arm_type: str = "maker") -> dict:
     """Classify each port by which protocol answers on it.
 
@@ -428,15 +480,21 @@ def _candidate_ports(ports: list[str] | None) -> list[str]:
     return list(dict.fromkeys(candidates))  # dedupe, keep order
 
 
-async def probe_maker_ports(ports: list[str] | None = None, arm_type: str = "maker") -> dict:
+async def probe_maker_ports(
+    ports: list[str] | None = None, arm_type: str = "maker", leader_kind: str | None = None
+) -> dict:
     """Identify which ports carry a Maker follower and which carry a leader.
 
     No user gesture needed — the two halves answer different protocols. Returns
     ``{"success", "follower_ports", "leader_ports", "unknown_ports",
     "message"}``; logical failures are reported rather than raised so the
-    endpoint stays HTTP 200 like the other hardware handlers.
+    endpoint stays HTTP 200 like the other hardware handlers. With an
+    energized leader (``leader_kind``) the halves share a protocol and the
+    probe can only list them (see _probe_same_protocol_sync).
     """
     candidates = _candidate_ports(ports)
+    family = arm_registry.get(normalize_arm_type(arm_type))
+    probe = _probe_same_protocol_sync if family.leader_holds_torque(leader_kind) else _probe_sync
     if not candidates:
         return {
             "success": False,
@@ -447,7 +505,7 @@ async def probe_maker_ports(ports: list[str] | None = None, arm_type: str = "mak
         }
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_probe_sync, candidates, arm_type),
+            asyncio.to_thread(probe, candidates, arm_type),
             timeout=_PROBE_TIMEOUT_S * len(candidates) * 2 + 5.0,
         )
     except TimeoutError:
@@ -469,14 +527,35 @@ async def probe_maker_ports(ports: list[str] | None = None, arm_type: str = "mak
         }
 
 
+def _with_fallback(result: dict, family, device_type: str, leader_kind: str | None) -> dict:
+    """Stamp the identification of last resort onto a motion result.
+
+    ``fallback`` is ``"wiggle"`` when the family's gripper wiggle is what the
+    caller should offer next (can_wiggle.choose_identification decides), and
+    absent otherwise — never null, so the route can exclude None.
+    """
+    from .can_wiggle import choose_identification
+
+    fallback = choose_identification(family, device_type, result, leader_kind)
+    if fallback is not None:
+        result["fallback"] = fallback
+    return result
+
+
 async def identify_maker_arm_by_motion(
-    device_type: str, ports: list[str] | None = None, arm_type: str = "maker"
+    device_type: str,
+    ports: list[str] | None = None,
+    arm_type: str = "maker",
+    leader_kind: str | None = None,
 ) -> dict:
     """Watch for a hand gesture to tell one Maker arm from its twin.
 
     ``device_type`` is "robot" (the CAN follower) or "teleop" (the UART
     leader) — unlike the SO-101 the two need different bus drivers, so the
-    caller has to say which side it is asking about.
+    caller has to say which side it is asking about. The gesture is refused
+    for a Damiao device (an energizing follower, or an energized leader);
+    every answer that is not a found port carries ``fallback: "wiggle"``
+    when the family's gripper wiggle can take over.
     """
     if device_type not in _OPENERS:
         return {
@@ -485,22 +564,29 @@ async def identify_maker_arm_by_motion(
             "skipped": [],
         }
     family = arm_registry.get(normalize_arm_type(arm_type))
-    if family.motion_identify_energizes_follower and device_type == "robot":
-        # Watching this follower means holding its bus open, and (Damiao) the
+    energized_leader = device_type == "teleop" and family.leader_holds_torque(leader_kind)
+    if (family.motion_identify_energizes_follower and device_type == "robot") or energized_leader:
+        # Watching this arm means holding its bus open, and (Damiao) the
         # handshake that opens it energizes the motors — the opposite of a
         # hands-on identification gesture. Refuse plainly rather than
-        # energize behind the user's back. Single-arm rigs never need the
-        # gesture (the probe tells the ports apart by protocol), and the
-        # bimanual left/right case can identify by the LEADERS instead.
-        return {
-            "success": False,
-            "message": (
-                f"Motion identification is not available for the {family.short_label} follower: "
-                "opening its bus would energize the motors mid-gesture. Identify by the leader "
-                "arms instead, or plug in one follower at a time and use the port probe."
-            ),
-            "skipped": [],
-        }
+        # energize behind the user's back. Single-arm rigs with a Star
+        # leader never need the gesture (the probe tells the ports apart by
+        # protocol); everything else falls back to the gripper wiggle.
+        side = "leader" if energized_leader else "follower"
+        return _with_fallback(
+            {
+                "success": False,
+                "message": (
+                    f"Motion identification is not available for the {family.short_label} {side}: "
+                    "opening its bus would energize the motors mid-gesture. Wiggle the gripper on a "
+                    "port to see which arm it is instead."
+                ),
+                "skipped": [],
+            },
+            family,
+            device_type,
+            leader_kind,
+        )
     candidates = _candidate_ports(ports)
     if not candidates:
         return {
@@ -509,12 +595,13 @@ async def identify_maker_arm_by_motion(
             "skipped": [],
         }
     try:
-        return await asyncio.wait_for(
+        result = await asyncio.wait_for(
             asyncio.to_thread(_identify_sync, candidates, device_type, arm_type),
             timeout=_IDENTIFY_TIMEOUT_S + 5.0,
         )
     except TimeoutError:
-        return {"success": False, "message": _NO_MOTION_MESSAGE, "skipped": []}
+        result = {"success": False, "message": _NO_MOTION_MESSAGE, "skipped": []}
     except Exception as e:
         logger.exception("Maker identify-arm failed")
-        return {"success": False, "message": f"Failed to identify the arm: {e}", "skipped": []}
+        result = {"success": False, "message": f"Failed to identify the arm: {e}", "skipped": []}
+    return _with_fallback(result, family, device_type, leader_kind)

@@ -71,9 +71,17 @@ def release_maker_torque(device, label: str = "device") -> list[str]:
     fact is why a Maker arm can never run a DAgger handover — see
     ``arm_capabilities.supports_dagger``.
 
+    An ENERGIZED leader (the gravity-compensated Metal leader) is the
+    opposite case: its Damiao bus has the disable, and its gravity thread is
+    stopped first so nothing keeps writing to the bus being released.
+
     Returns a list of problem descriptions — empty when every bus released.
     """
+    from .maker_rest_pose import stop_gravity_compensation
+
     problems: list[str] = []
+    for arm in _device_arms(device):
+        stop_gravity_compensation(arm)
     for bus in _maker_device_buses(device):
         disable = getattr(bus, "disable_torque", None)
         if disable is None:
@@ -91,12 +99,8 @@ def release_maker_torque(device, label: str = "device") -> list[str]:
     return problems
 
 
-def device_buses(device) -> list:
-    """The motor bus(es) of a robot/teleop device — the one shared copy.
-
-    A single-arm device exposes ``.bus``; a bimanual BiSO device exposes
-    ``left_arm``/``right_arm`` sub-arms which each carry their own bus.
-    """
+def _device_arms(device) -> list:
+    """The drivable arm object(s) of a device: the bimanual sub-arms, else itself."""
     if device is None:
         return []
     arms = [
@@ -104,8 +108,16 @@ def device_buses(device) -> list:
         for arm in (getattr(device, "left_arm", None), getattr(device, "right_arm", None))
         if arm is not None
     ]
-    targets = arms if arms else [device]
-    return [target.bus for target in targets if getattr(target, "bus", None) is not None]
+    return arms if arms else [device]
+
+
+def device_buses(device) -> list:
+    """The motor bus(es) of a robot/teleop device — the one shared copy.
+
+    A single-arm device exposes ``.bus``; a bimanual BiSO device exposes
+    ``left_arm``/``right_arm`` sub-arms which each carry their own bus.
+    """
+    return [target.bus for target in _device_arms(device) if getattr(target, "bus", None) is not None]
 
 
 # Historical name; the CAN helpers above were written when this module could

@@ -254,6 +254,9 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # over UART, neither of which a Feetech bus can open.
         "POST /api/v1/maker/identify-arm",
         "POST /api/v1/maker/probe-ports",
+        # The CAN gripper wiggle (can_wiggle.py): the identification of last
+        # resort for a Metal rig driven by a second Metal arm.
+        "POST /api/v1/maker/wiggle-gripper",
         # CAN crash recovery (can_recovery.py): de-energize a follower whose
         # process died holding torque. Not a session (see the module
         # docstring), and no flat mirror for the same only-shrinks reason.

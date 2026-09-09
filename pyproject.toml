@@ -32,7 +32,8 @@ dependencies = [
     # underneath); `rebot` = motorbridge, the FashionStar UART servo stack the
     # Star Arm 102 leader speaks. NEVER the fork's `metal` extra here — it
     # drags in Pinocchio (`pin`, no Windows wheels) that only the
-    # not-yet-integrated gravity leader needs.
+    # gravity-compensated Metal leader needs; that leader is opt-in through
+    # the `metal-leader` extra below.
     "lerobot[core_scripts,feetech,training,maker,damiao,rebot] @ git+https://github.com/makermods-robotics/lerobot.git@eaab69339120787948776e4354dcee09f501fd16",
     # Windows-only: real DirectShow camera names for /available-cameras so the
     # frontend can match a camera to its browser deviceId (issues #12, #16).
@@ -52,6 +53,17 @@ test = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23",
     "httpx>=0.27",
+]
+# Opt-in: the Metal arm driven by a SECOND Metal arm (robot record
+# `leader_kind: "metal"`, lerobot's gravity-compensated `metal_leader`). Not in
+# the default set because Pinocchio (`pin`) ships no Windows wheels and is a
+# heavy install nobody with a Star Arm 102 leader needs; the fork's `pin-dep`
+# extra is exactly Pinocchio plus its URDF parser. Same SHA pin as above —
+# a direct reference must match the base dependency's exactly. Until this is
+# installed GET /api/v1/arms lists the option as unavailable and every session
+# that opens the leader refuses with robot.leader_kind.unavailable.
+metal-leader = [
+    "lerobot[pin-dep] @ git+https://github.com/makermods-robotics/lerobot.git@eaab69339120787948776e4354dcee09f501fd16",
 ]
 
 [project.scripts]

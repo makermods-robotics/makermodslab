@@ -31,7 +31,7 @@ treats the registry as a set.
 
 from __future__ import annotations
 
-from .base import CALIBRATION_KINDS, REQUIRED_ATTRIBUTES, ArmFamily
+from .base import CALIBRATION_KINDS, REQUIRED_ATTRIBUTES, ArmFamily, leader_kwargs
 
 # The family every record written before arm types existed implicitly is, and
 # what a MISSING arm_type reads as (see utils.config.normalize_arm_type). An
@@ -88,7 +88,7 @@ def register(family: ArmFamily, *, provided_by: str = BUILTIN_PROVIDER) -> None:
     _PROVIDERS[family.id] = provided_by
 
 
-def _calibration_dir(family: ArmFamily, method: str) -> str:
+def _calibration_dir(family: ArmFamily, method: str, **kwargs: str) -> str:
     """Call one of the family's dir methods, refusing a family that cannot answer.
 
     The library dirs are read by every readiness check and every staging
@@ -97,7 +97,7 @@ def _calibration_dir(family: ArmFamily, method: str) -> str:
     than a non-empty path would fail deep in the first flow that asks.
     """
     try:
-        value = getattr(family, method)()
+        value = getattr(family, method)(**kwargs)
     except Exception as exc:
         raise TypeError(f"arm family {family.id!r} cannot answer {method}(): {exc}") from exc
     if not isinstance(value, str) or not value:
@@ -107,11 +107,26 @@ def _calibration_dir(family: ArmFamily, method: str) -> str:
     return value
 
 
+def _leader_dirs(family: ArmFamily) -> list[str]:
+    """Every leader library a family reads: one per leader option."""
+    return [
+        _calibration_dir(family, "leader_calibration_dir", **leader_kwargs(family, option.id))
+        for option in family.leader_options()
+    ]
+
+
 def _check_calibration_dirs(family: ArmFamily) -> None:
-    """Both dir methods answer; the follower dir is the family's alone; a
-    shared leader dir is allowed only behind a calibration_name_suffix."""
-    leader_dir = _calibration_dir(family, "leader_calibration_dir")
+    """Both dir methods answer (the leader one for EVERY leader option); the
+    follower dir is the family's alone; a shared leader dir is allowed only
+    behind a calibration_name_suffix."""
+    leader_dirs = _leader_dirs(family)
     follower_dir = _calibration_dir(family, "follower_calibration_dir")
+    if len(set(leader_dirs)) != len(leader_dirs):
+        raise ValueError(
+            f"arm family {family.id!r} answers the same leader calibration dir for two of its leader "
+            f"options ({leader_dirs}): two leader kinds in one library would load each other's "
+            "files by name"
+        )
     for other in _FAMILIES.values():
         if other.follower_calibration_dir() == follower_dir:
             raise ValueError(
@@ -119,9 +134,10 @@ def _check_calibration_dirs(family: ArmFamily) -> None:
                 f"{other.id!r} already owns: two families writing one follower library would load "
                 "each other's files by name"
             )
-        if other.leader_calibration_dir() == leader_dir and not family.calibration_name_suffix:
+        shared = set(_leader_dirs(other)) & set(leader_dirs)
+        if shared and not family.calibration_name_suffix:
             raise ValueError(
-                f"arm family {family.id!r} shares leader calibration dir {leader_dir!r} with "
+                f"arm family {family.id!r} shares leader calibration dir {sorted(shared)[0]!r} with "
                 f"{other.id!r} but has an empty calibration_name_suffix: sharing a leader library "
                 "(one lerobot leader class, several presets — the Maker/Metal Star-leader case) is "
                 "legitimate only when the suffix mints each family's id into its default calibration "

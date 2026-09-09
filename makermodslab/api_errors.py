@@ -54,6 +54,13 @@ class ErrorCode(StrEnum):
     # normalized to the SO-101: a silent fallback would open a Feetech serial
     # path at whatever the hardware really is. 400 wherever it is raised.
     ROBOT_ARM_TYPE_UNAVAILABLE = "robot.arm_type.unavailable"
+    # The record's leader_kind names a leader its arm family does not offer
+    # (`unknown`: a hand-edited record, or a kind sent for the wrong family),
+    # or one the family offers but this install cannot drive (`unavailable`:
+    # the gravity-compensated Metal leader without the `metal-leader` extra
+    # installed). Both 400; the detail names the remedy.
+    ROBOT_LEADER_KIND_UNKNOWN = "robot.leader_kind.unknown"
+    ROBOT_LEADER_KIND_UNAVAILABLE = "robot.leader_kind.unavailable"
     ROBOT_BUSY_RECORDING = "robot.busy.recording"
     ROBOT_BUSY_TELEOPERATION = "robot.busy.teleoperation"
     ROBOT_BUSY_INFERENCE = "robot.busy.inference"

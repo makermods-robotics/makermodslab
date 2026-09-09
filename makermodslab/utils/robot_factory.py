@@ -97,6 +97,21 @@ def request_arm_type(request) -> str:
     return normalize_arm_type(getattr(request, "arm_type", None))
 
 
+def request_leader_kind(request) -> str | None:
+    """The leader kind a start request names, or None (the family's default)
+    on a request that predates leader kinds or leaves it blank."""
+    return getattr(request, "leader_kind", None) or None
+
+
+def _leader_staging_kwargs(request, arm_type: str) -> dict[str, str]:
+    """``leader_kind=`` for the staging helpers, ONLY for a multi-leader family
+    (arms.base.leader_kwargs): a single-leader family's staging is unchanged,
+    keyword and all, so nothing that patches those helpers sees a new argument."""
+    from ..arms.base import leader_kwargs
+
+    return leader_kwargs(arm_registry.get(arm_type), request_leader_kind(request))
+
+
 def build_single_configs(request, cameras=None):
     """Build (robot_config, teleop_config) for a single leader/follower pair.
 
@@ -108,7 +123,7 @@ def build_single_configs(request, cameras=None):
     """
     arm_type = request_arm_type(request)
     leader_config_name, follower_config_name = setup_calibration_files(
-        request.leader_config, request.follower_config, arm_type
+        request.leader_config, request.follower_config, arm_type, **_leader_staging_kwargs(request, arm_type)
     )
     family = arm_registry.get(arm_type)
     return family.build_single_configs(request, cameras, leader_config_name, follower_config_name)
@@ -133,6 +148,7 @@ def build_bimanual_configs(request, cameras=None):
         request.follower_config,
         request.right_follower_config,
         arm_type,
+        **_leader_staging_kwargs(request, arm_type),
     )
     family = arm_registry.get(arm_type)
     return family.build_bimanual_configs(request, cameras, base, leader_staging, follower_staging)

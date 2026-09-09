@@ -117,10 +117,15 @@ import { RobotRecord, formatRobotSetupGap } from "@/hooks/useRobots";
 import { useArms } from "@/hooks/useArms";
 import {
   calibrationKind,
+  effectiveLeaderKind,
+  leaderOption as leaderOptionOf,
+  leaderOptions,
   supportsAutoCalibration,
+  supportsGripperWiggle,
   supportsPortProbe,
   usesFeetechBus,
 } from "@/lib/armTypes";
+import type { LeaderOptionInfo } from "@/lib/armsApi";
 import { servedUrl } from "@/lib/armsApi";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { isCaselessScript } from "@/i18n/config";
@@ -596,6 +601,28 @@ const RobotConfigWindow = ({
   const autoCalibration = supportsAutoCalibration(armInfo);
   const portProbe = supportsPortProbe(armInfo);
   const feetechBus = usesFeetechBus(armInfo);
+  const gripperWiggle = supportsGripperWiggle(armInfo);
+  // Which of the family's leaders drives this robot. Only a family with a
+  // choice (the Metal arm: its Star Arm 102, or a second gravity-compensated
+  // Metal arm) renders the picker and sends `leader_kind` with its port
+  // detection and library requests; every other family's requests are what
+  // they always were. An ENERGIZED leader (holds torque while the human
+  // moves it) answers the follower's protocol, so the probe cannot tell the
+  // two apart and the gesture is refused — the gripper wiggle is what is
+  // left, and its Wiggle button appears on the leader row too.
+  const leaderChoices = leaderOptions(armInfo);
+  const multiLeader = leaderChoices.length > 1;
+  const leaderKind = effectiveLeaderKind(armInfo, robot?.leader_kind);
+  const leaderChoice = leaderOptionOf(armInfo, leaderKind);
+  const leaderEnergized = !!leaderChoice?.energized;
+  const leaderKindParam = multiLeader ? leaderKind : undefined;
+  const [savingLeaderKind, setSavingLeaderKind] = useState(false);
+  // Display name for a leader option: the catalog's per-id override for the
+  // built-ins (what localizes it), else the manifest's own English label.
+  const leaderOptionLabel = (option: LeaderOptionInfo): string =>
+    t(`robotConfig.leaderKind.optionFor.${armType}.${option.id}` as never, {
+      defaultValue: option.label,
+    }) as string;
   // In single (or left) mode the primary leader/follower fields are used; in
   // bimanual mode the right arm uses the right_* fields. Maps the current
   // device_type + arm to the record's port and config field names.
@@ -934,7 +961,13 @@ const RobotConfigWindow = ({
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ device_type: device, arm_type: armType }),
+            body: JSON.stringify({
+              device_type: device,
+              arm_type: armType,
+              ...(device === "teleop" && leaderKindParam
+                ? { leader_kind: leaderKindParam }
+                : {}),
+            }),
           },
         );
         const data = await res.json().catch(() => ({}));
@@ -953,7 +986,7 @@ const RobotConfigWindow = ({
         });
       }
     },
-    [baseUrl, fetchWithHeaders, toast, t, armType],
+    [baseUrl, fetchWithHeaders, toast, t, armType, leaderKindParam],
   );
 
   // List the USB-serial ports for the dropdown (filtered to arm-like devices by
@@ -1095,7 +1128,51 @@ const RobotConfigWindow = ({
 
   // Defaults to the selected slot's port; section 01's per-row button passes
   // its own row's port so it never depends on what is selected.
-  const handleWiggle = async (wigglePort: string = port) => {
+  // Saved at once, not staged with the port drafts: the calibration flow
+  // resolves the leader from the SAVED record server-side, so a draft that
+  // differed from it would calibrate (and start) the other leader. The
+  // server blanks the leader ports and calibrations on a switch — they name
+  // different hardware and a different library — and the returned record
+  // is adopted as the new baseline.
+  const handleLeaderKindChange = async (next: string) => {
+    if (!robotName || !robot || next === leaderKind) return;
+    setSavingLeaderKind(true);
+    try {
+      const res = await fetchWithHeaders(
+        `${baseUrl}/api/v1/robots/${encodeURIComponent(robotName)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ leader_kind: next }),
+        },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.robot) {
+        setRobot(data.robot);
+        setPortDraft({});
+        toast({ title: t("robotConfig.leaderKind.toast.savedTitle") });
+      } else {
+        toast({
+          title: t("robotConfig.leaderKind.toast.saveFailedTitle"),
+          description: data.detail ?? data.message,
+          variant: "destructive",
+        });
+      }
+    } catch (e) {
+      toast({
+        title: t("robotConfig.leaderKind.toast.saveFailedTitle"),
+        description: String(e),
+        variant: "destructive",
+      });
+    } finally {
+      setSavingLeaderKind(false);
+    }
+  };
+
+  const handleWiggle = async (
+    wigglePort: string = port,
+    device: "teleop" | "robot" = deviceType as "teleop" | "robot",
+  ) => {
     if (armActionsBlocked) return;
     if (!wigglePort) {
       toast({
@@ -1107,11 +1184,27 @@ const RobotConfigWindow = ({
     }
     setWiggling(true);
     try {
-      const res = await fetchWithHeaders(`${baseUrl}/api/v1/wiggle`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ port: wigglePort }),
-      });
+      // A Feetech arm wiggles through the legacy servo route; a CAN family
+      // with a gripper wiggle (the Metal arm) through its own, which opens
+      // the port with ONLY the gripper motor on the bus and disables it
+      // again afterwards — the identification of last resort when the probe
+      // and the gesture cannot tell two Damiao arms apart.
+      const res = feetechBus
+        ? await fetchWithHeaders(`${baseUrl}/api/v1/wiggle`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ port: wigglePort }),
+          })
+        : await fetchWithHeaders(`${baseUrl}/api/v1/maker/wiggle-gripper`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              arm_type: armType,
+              device_type: device,
+              port: wigglePort,
+              ...(leaderKindParam ? { leader_kind: leaderKindParam } : {}),
+            }),
+          });
       const data = await res.json();
       if (data.success) {
         toast({
@@ -1175,20 +1268,26 @@ const RobotConfigWindow = ({
    * Returns the same `{success, port, message}` shape as /identify-arm so the
    * caller's assignment/confirmation path is untouched.
    */
-  const detectCanArmPort = async () => {
+  const detectCanArmPort = async (
+    side: "teleop" | "robot" = deviceType as "teleop" | "robot",
+  ) => {
+    // A multi-leader family's requests name the leader: an energized leader
+    // answers the follower's protocol, and the server's probe says so.
+    const leaderKindBody = leaderKindParam
+      ? { leader_kind: leaderKindParam }
+      : {};
     const probeRes = await fetchWithHeaders(
       `${baseUrl}/api/v1/maker/probe-ports`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // No ports listed = probe every detected port.
-        body: JSON.stringify({ arm_type: armType }),
+        body: JSON.stringify({ arm_type: armType, ...leaderKindBody }),
       },
     );
     const probe = await probeRes.json().catch(() => ({}));
     const candidates: string[] =
-      (deviceType === "teleop" ? probe?.leader_ports : probe?.follower_ports) ??
-      [];
+      (side === "teleop" ? probe?.leader_ports : probe?.follower_ports) ?? [];
 
     if (candidates.length === 1) {
       return {
@@ -1198,13 +1297,27 @@ const RobotConfigWindow = ({
       };
     }
 
+    // With an energized leader every port answers the same protocol: the
+    // probe has already said what it found and that it cannot tell the
+    // halves apart, and the gesture would be refused on both sides (opening
+    // a Damiao bus energizes it). Hand back the probe's own message with
+    // the wiggle named as the way forward, without a round trip that can
+    // only refuse.
+    if (leaderEnergized) {
+      return { success: false, message: probe?.message, fallback: "wiggle" };
+    }
+
     // Zero candidates (nothing answered) or several (a bimanual rig): the
     // gesture is the only thing that can resolve it. Its own message covers
     // the nothing-found case too, so the probe's is not surfaced here.
     const res = await fetchWithHeaders(`${baseUrl}/api/v1/maker/identify-arm`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ device_type: deviceType, arm_type: armType }),
+      body: JSON.stringify({
+        device_type: side,
+        arm_type: armType,
+        ...leaderKindBody,
+      }),
     });
     return await res.json();
   };
@@ -1217,7 +1330,9 @@ const RobotConfigWindow = ({
     setDetecting(field);
     try {
       const data = portProbe
-        ? await detectCanArmPort()
+        ? await detectCanArmPort(
+            String(field).includes("leader") ? "teleop" : "robot",
+          )
         : await (
             await fetchWithHeaders(`${baseUrl}/api/v1/identify-arm`, {
               method: "POST",
@@ -1253,7 +1368,12 @@ const RobotConfigWindow = ({
       } else {
         toast({
           title: t("robotConfig.port.toast.noArmTitle"),
-          description: data.message,
+          // `fallback: "wiggle"` is the server naming the identification of
+          // last resort: point at the row's Wiggle button.
+          description:
+            data.fallback === "wiggle"
+              ? `${data.message ?? ""} ${t("robotConfig.port.wiggleFallback")}`.trim()
+              : data.message,
           variant: "destructive",
         });
       }
@@ -2211,12 +2331,33 @@ const RobotConfigWindow = ({
     const isLeaderStep = deviceType === "teleop";
     const stepSide = isLeaderStep ? "leader" : "follower";
     const bundledAssets = ZERO_POSE_IMAGES[armType];
+    // A non-default leader (the Metal arm's own leader) is this family's
+    // arm: its zero pose is the FOLLOWER's, so the follower photo stands in
+    // for the Star leader's reference, and the catalog's `leader_<kind>`
+    // entry (if any) overrides the wording.
+    const leaderIsOwnArm = isLeaderStep && leaderEnergized;
+    const leaderKindSuffix =
+      isLeaderStep && multiLeader && leaderKind !== armInfo?.default_leader_kind
+        ? `_${leaderKind}`
+        : "";
     const bundledImage = bundledAssets
       ? {
-          src: isLeaderStep ? bundledAssets.leader : bundledAssets.follower,
-          alt: isLeaderStep
-            ? t("robotConfig.calib.zeroPose.poseImageLeader")
-            : t(`robotConfig.calib.zeroPose.${bundledAssets.altKey}`),
+          src:
+            isLeaderStep && !leaderIsOwnArm
+              ? bundledAssets.leader
+              : bundledAssets.follower,
+          alt: leaderIsOwnArm
+            ? t(
+                `robotConfig.calib.zeroPose.leaderPoseImageFor.${armType}.${leaderKind}` as never,
+                {
+                  defaultValue: t(
+                    `robotConfig.calib.zeroPose.${bundledAssets.altKey}`,
+                  ),
+                },
+              )
+            : isLeaderStep
+              ? t("robotConfig.calib.zeroPose.poseImageLeader")
+              : t(`robotConfig.calib.zeroPose.${bundledAssets.altKey}`),
         }
       : null;
     const servedImage = (url: string | null) => {
@@ -2236,10 +2377,15 @@ const RobotConfigWindow = ({
       ) : null;
     const overrideText = (fallback: string): string =>
       t(
-        `robotConfig.calib.zeroPose.instructionsFor.${armType}.${stepSide}` as never,
+        `robotConfig.calib.zeroPose.instructionsFor.${armType}.${stepSide}${leaderKindSuffix}` as never,
         { defaultValue: fallback },
       );
-    const summarySide = armInfo?.calibration.summary?.[stepSide] ?? null;
+    // The leader side's summary is the SELECTED leader's on a multi-leader
+    // family (the manifest carries one per option); otherwise the family's.
+    const summarySide =
+      isLeaderStep && multiLeader
+        ? (leaderChoice?.calibration_summary ?? null)
+        : (armInfo?.calibration.summary?.[stepSide] ?? null);
     const preStartText = summarySide ? overrideText(summarySide.text) : "";
     const preStartImage =
       bundledImage ?? servedImage(summarySide?.image_url ?? null);
@@ -2956,6 +3102,60 @@ const RobotConfigWindow = ({
               </Button>
             </div>
 
+            {/* Which leader drives this robot — only a family with a choice
+                (the Metal arm) renders it. Saved at once (see
+                handleLeaderKindChange); an option this install cannot drive
+                is greyed with the server's own remedy beneath. */}
+            {multiLeader && (
+              <div className="flex flex-wrap items-center gap-2">
+                <Label
+                  htmlFor="leader-kind"
+                  className="text-xs text-muted-foreground"
+                >
+                  {t("robotConfig.leaderKind.label")}
+                </Label>
+                <Select
+                  value={leaderKind}
+                  onValueChange={handleLeaderKindChange}
+                  disabled={hardwareBusy || armActionsBlocked || savingLeaderKind}
+                >
+                  <SelectTrigger
+                    id="leader-kind"
+                    aria-label={t("robotConfig.leaderKind.label")}
+                    className="h-8 w-auto min-w-[16rem] text-xs"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {leaderChoices.map((option) => (
+                      <SelectItem
+                        key={option.id}
+                        value={option.id}
+                        disabled={!option.available}
+                      >
+                        {leaderOptionLabel(option)}
+                        {option.available
+                          ? ""
+                          : ` — ${t("robotConfig.leaderKind.unavailable")}`}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {leaderChoice && !leaderChoice.available && (
+                  // Server prose (which extra to install): English in every
+                  // language, like every other backend message.
+                  <p className="basis-full text-xs text-warn">
+                    {leaderChoice.unavailable_reason}
+                  </p>
+                )}
+                {leaderEnergized && (
+                  <p className="basis-full text-xs text-muted-foreground">
+                    {t("robotConfig.leaderKind.energizedHint")}
+                  </p>
+                )}
+              </div>
+            )}
+
             {/* One row for a single robot, one row per side when bimanual. */}
             {(isBimanual
               ? (["left", "right"] as const)
@@ -3000,7 +3200,16 @@ const RobotConfigWindow = ({
                         busy={hardwareBusy || armActionsBlocked}
                         detecting={detecting === slot.portField}
                         wiggling={wiggling}
-                        showWiggle={!!armInfo && feetechBus}
+                        // Feetech arms always; a CAN family with a gripper
+                        // wiggle on its follower rows, and on its leader rows
+                        // only when the leader has a gripper to move (an
+                        // energized leader — the Star leader has no motors).
+                        showWiggle={
+                          !!armInfo &&
+                          (feetechBus ||
+                            (gripperWiggle &&
+                              (slot.device === "robot" || leaderEnergized)))
+                        }
                         detectIsGesture={detectIsGesture}
                         // No selection side effects: every action names its own
                         // slot, so none of them depend on what is selected.
@@ -3008,7 +3217,9 @@ const RobotConfigWindow = ({
                           handleSelectPort(next, slot.portField)
                         }
                         onDetect={() => handleDetect(slot.portField)}
-                        onWiggle={() => handleWiggle(draftPort(slot.portField))}
+                        onWiggle={() =>
+                          handleWiggle(draftPort(slot.portField), slot.device)
+                        }
                       />
                     ))}
                   </div>
@@ -3223,6 +3434,9 @@ const RobotConfigWindow = ({
                         torque) right below this row, for this arm slot. */}
                     <CalibrationLibrary
                       armType={armType}
+                      leaderKind={
+                        row.device === "teleop" ? leaderKindParam : undefined
+                      }
                       device={row.device}
                       assignedConfig={cfg}
                       configField={row.cfgField}

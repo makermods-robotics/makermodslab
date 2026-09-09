@@ -91,6 +91,31 @@ export default {
     right: "Right",
   },
 
+  // ---- Leader kind ---------------------------------------------------------
+  // Which of the family's leaders drives the robot; rendered only for a
+  // family whose manifest entry lists more than one (the Metal arm: its Star
+  // Arm 102, or a second gravity-compensated Metal arm). The option VALUES
+  // are manifest ids sent as the record's `leader_kind` — data; only the
+  // per-id labels under optionFor are localized (a kind without an entry
+  // renders the manifest's own English label). The "unavailable" reason is
+  // server prose and renders as-is.
+  leaderKind: {
+    label: "Leader arm",
+    unavailable: "not installed",
+    energizedHint:
+      "This leader is powered while you move it — it holds its own weight, is returned to its start pose and de-energized when a session stops, and shares the follower's protocol, so Detect cannot tell the two apart: use Wiggle on a port to see which arm it is.",
+    optionFor: {
+      metal: {
+        star: "Star Arm 102 leader",
+        metal: "Metal arm leader (gravity-compensated)",
+      },
+    },
+    toast: {
+      savedTitle: "Leader arm saved",
+      saveFailedTitle: "Could not change the leader arm",
+    },
+  },
+
   slotCard: {
     // aria-label and title differ on purpose: the title adds the fix.
     undetectedLabel: "Port not detected",
@@ -157,6 +182,11 @@ export default {
     detectAuto: "Auto detect",
     detectTipAuto: "Probes each port. No gesture needed.",
     wiggleTip: "Drives the gripper so you can see which arm answers.",
+    // Appended to a failed Detect when the server names the gripper wiggle
+    // as the identification of last resort (two Damiao arms on one rig:
+    // the probe cannot tell them apart and the gesture would energize them).
+    wiggleFallback:
+      "Use Wiggle on a port instead: it moves only that arm's gripper, so you can see which arm it is and assign the port by hand.",
     // The blank first row of every port dropdown, and what an empty slot's
     // trigger shows. Selecting it clears the port.
     noneAssigned: "No port",
@@ -275,8 +305,23 @@ export default {
         metal: {
           leader:
             "Move the Star Arm 102 leader by hand to match the pose above: folded against the base, gripper closed. Its joints are unpowered, so the arm moves freely.",
+          // The Metal arm driven by a second Metal arm (leader_kind
+          // "metal"): the leader IS a Metal arm, so its zero pose is the
+          // follower's. Keyed `leader_<kind>`; the default leader keeps
+          // the bare `leader` key above.
+          leader_metal:
+            "Move the leader Metal arm by hand to match the pose above: standing upright, all joints at 0°, gripper closed. Torque is off, so the arm moves freely.",
           follower:
             "Move the arm by hand to match the pose above: standing upright, all joints at 0°, gripper closed. Torque is off, so the arm moves freely.",
+        },
+      },
+      // Caption on the reference-pose slot when a NON-default leader is
+      // being calibrated (keyed by manifest id, then leader kind): the photo
+      // shown is the family's follower photo, because that leader is the
+      // family's own arm.
+      leaderPoseImageFor: {
+        metal: {
+          metal: "Leader Metal arm zero pose: upright, gripper closed",
         },
       },
       liveAngles: "Live joint angles",
