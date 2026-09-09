@@ -24,6 +24,13 @@ export interface RobotRecord {
   // unavailable and disables detect/calibrate. Resolve capabilities through
   // useArms().byId(arm_type), which is undefined in that case.
   arm_available: boolean;
+  // Which of the family's leaders drives the follower — an id from the
+  // manifest entry's `leader_options` (its default when the record predates
+  // leader kinds). Only the Metal arm offers a choice today: its Star Arm
+  // 102, or a second gravity-compensated Metal arm. Switching it blanks the
+  // leader ports and calibrations server-side (different hardware, separate
+  // calibration library).
+  leader_kind: string;
   // Primary pair (single mode), or the LEFT arm pair (bimanual mode).
   leader_port: string;
   follower_port: string;

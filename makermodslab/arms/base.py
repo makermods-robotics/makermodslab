@@ -102,6 +102,29 @@ What the contract covers TODAY (refactor step "4a" of docs/extensions/plan.md):
   "degrees" (angles by motor name for the numeric readout, because no URDF
   ships for that family yet).
 
+* leader kinds — leader_options() lists the leader arms a family can be
+  driven by, as LeaderOption records: the id a robot record stores in its
+  ``leader_kind`` field, a label, whether this install can drive it
+  (``available``, with ``unavailable_reason`` naming the remedy) and whether
+  it HOLDS TORQUE while the human moves it (``energized``: the Metal arm's
+  gravity-compensated leader, a Damiao CAN device like its follower). The
+  first option is the default, what a record with no leader_kind reads as.
+  Every leader-side hook takes an optional ``leader_kind`` keyword, and the
+  core passes it ONLY to a family that offers more than one option
+  (``leader_kwargs``), so a single-leader family — every extension family
+  written before this existed — never sees the keyword. An energized leader
+  changes the stop path (capture_leader_rest_poses: it is returned and
+  released like a follower, never just disconnected), port detection (it
+  answers the follower's protocol and refuses the gesture) and calibration
+  (it zeroes on its bus like a follower).
+
+* gripper wiggle — identify_by_gripper_wiggle drives ONE port's gripper a
+  small stroke so the user can see which physical arm it is: the fallback
+  when neither the protocol probe nor the gesture can tell two Damiao
+  devices apart (a Metal rig with a Metal leader answers Damiao on every
+  port, and watching a Damiao arm's joints would energize it). The base
+  answers "unsupported"; supports_gripper_wiggle says whether a family does.
+
 Adding a family means adding a module here and registering it; nothing
 outside this package compares an arm type to a literal
 (tests/test_arm_registry.py sweeps every module for one).
@@ -161,6 +184,53 @@ class FollowerPreflight:
     port: str
     calibration_id: str
     config_name: str | None = None
+
+
+@dataclass(frozen=True)
+class LeaderOption:
+    """One leader arm a family can be driven by (see ArmFamily.leader_options).
+
+    ``id`` is what a robot record stores as ``leader_kind`` and what every
+    leader-side hook receives; ``label`` is for prose (not localized — the
+    backend never is). ``available`` is False when the family offers the
+    leader but THIS install cannot drive it, with ``unavailable_reason``
+    naming what to install; a record may still name it (the user installs
+    the extra later), but no session that opens the leader starts. ``energized``
+    marks a leader that holds torque while the human moves it.
+    """
+
+    id: str
+    label: str
+    available: bool = True
+    unavailable_reason: str | None = None
+    energized: bool = False
+
+
+class UnknownLeaderKind(KeyError):  # noqa: N818 — the registry's UnknownArmType is its model; it is a KeyError
+    """A leader_kind the family does not offer (see ArmFamily.leader_option)."""
+
+    def __init__(self, arm_type: str, leader_kind: object, offered: list[str]) -> None:
+        self.arm_type = arm_type
+        self.leader_kind = leader_kind
+        super().__init__(
+            f"arm family {arm_type!r} offers no leader {leader_kind!r}; offered: {', '.join(offered)}"
+        )
+
+    def __str__(self) -> str:
+        return self.args[0]
+
+
+def leader_kwargs(family: ArmFamily, leader_kind: object) -> dict[str, str]:
+    """The keyword to pass a leader-side hook, or nothing.
+
+    A family with ONE leader never receives ``leader_kind``: its hooks may
+    predate the keyword (every extension family written before it did), and
+    there is nothing to choose. A multi-leader family gets the normalized
+    kind — its default when the caller has none.
+    """
+    if len(family.leader_options()) <= 1:
+        return {}
+    return {"leader_kind": family.normalize_leader_kind(leader_kind)}
 
 
 class CalibrationAborted(Exception):  # noqa: N818 — the contract and its tests name it; it is an abort, not an error
@@ -279,6 +349,51 @@ class ArmFamily(ABC):
     # without a URDF gets (see teleoperate.get_maker_joint_degrees).
     telemetry_kind: str
 
+    # --- leader kinds -------------------------------------------------------------
+    # The id of the one leader a family that does not override leader_options
+    # is driven by (a plain data attribute so the base can answer for it).
+    default_leader_kind: str = "default"
+
+    # --- gripper wiggle -------------------------------------------------------------
+    # True when identify_by_gripper_wiggle is implemented: the family can drive
+    # one port's gripper a visible stroke to tell two look-alike arms apart.
+    supports_gripper_wiggle: bool = False
+
+    def leader_options(self) -> tuple[LeaderOption, ...]:
+        """The leader arms this family can be driven by, default FIRST.
+
+        The base answers with one always-available option named
+        default_leader_kind. A family with a choice overrides this and reads
+        the selected kind back through the ``leader_kind`` keyword its
+        leader-side hooks receive (see leader_kwargs).
+        """
+        return (LeaderOption(id=self.default_leader_kind, label=f"{self.label} leader"),)
+
+    def normalize_leader_kind(self, value: object) -> str:
+        """The leader kind a stored/received value means: MISSING → the default,
+        a string kept as is (known or not — an unknown one is refused by
+        leader_option, and listed as such, rather than silently defaulted)."""
+        if isinstance(value, str) and value:
+            return value
+        return self.leader_options()[0].id
+
+    def leader_option(self, leader_kind: object = None) -> LeaderOption:
+        """The option for ``leader_kind`` (the default when missing).
+
+        Raises UnknownLeaderKind (a KeyError) for a kind this family does not
+        offer; the API gates (arm_capabilities.require_leader_kind) refuse it
+        first so the raise is unreachable from a request.
+        """
+        kind = self.normalize_leader_kind(leader_kind)
+        for option in self.leader_options():
+            if option.id == kind:
+                return option
+        raise UnknownLeaderKind(self.id, kind, [o.id for o in self.leader_options()])
+
+    def leader_holds_torque(self, leader_kind: object = None) -> bool:
+        """True when the selected leader is energized while the human moves it."""
+        return self.leader_option(leader_kind).energized
+
     def robot_config_types(self) -> frozenset[str]:
         """Every lerobot RobotConfig type string a follower of this family registers under."""
         return frozenset({self.single_robot_type, self.bimanual_robot_type})
@@ -287,13 +402,15 @@ class ArmFamily(ABC):
         """The --robot.type= value for a subprocess driving this family."""
         return self.bimanual_robot_type if bimanual else self.single_robot_type
 
-    def leader_calibration_dir(self) -> str:
+    def leader_calibration_dir(self, leader_kind: str | None = None) -> str:
         """The calibration library dir holding this family's LEADER configs (resolved now).
 
         Part of the contract: an extension family overrides this (typically
         returning utils.config.lerobot_calibration_dir("teleoperators",
         <its leader class name>)); the base resolves the built-ins'
         leader_library_attr constant and raises when neither is provided.
+        A multi-leader family receives ``leader_kind`` (see leader_kwargs) and
+        answers the dir lerobot derives for THAT leader's device class.
         """
         if not self.leader_library_attr:
             raise NotImplementedError("override leader_calibration_dir()/follower_calibration_dir()")
@@ -334,7 +451,9 @@ class ArmFamily(ABC):
 
     # --- calibration procedure -----------------------------------------------
 
-    def calibration_summary(self, device_type: object | None = None) -> dict | None:
+    def calibration_summary(
+        self, device_type: object | None = None, leader_kind: str | None = None
+    ) -> dict | None:
         """What the config dialog shows BEFORE Start for one device side.
 
         ``{"text": str, "image_url": str | None}`` — for a "steps" family the
@@ -342,11 +461,15 @@ class ArmFamily(ABC):
         (the default) when there is nothing to summarize, which is every
         "range_sweep" family. ``device_type`` is "teleop" (the leader) or
         "robot" (the follower): the two answers differ, and on the CAN
-        families they are OPPOSITES on the gripper.
+        families they are OPPOSITES on the gripper. A multi-leader family
+        receives ``leader_kind`` for the leader side (the manifest asks once
+        per option).
         """
         return None
 
-    def open_for_calibration(self, device_type: str, port: str, config_id: str) -> Any:
+    def open_for_calibration(
+        self, device_type: str, port: str, config_id: str, leader_kind: str | None = None
+    ) -> Any:
         """Connect ONE device for a "steps" calibration and return it, torque OFF.
 
         Build the device through single_follower_config / single_leader_config
@@ -404,17 +527,20 @@ class ArmFamily(ABC):
         """
 
     @abstractmethod
-    def single_leader_config(self, port: str, config_id: str):
+    def single_leader_config(self, port: str, config_id: str, leader_kind: str | None = None):
         """A config for ONE leader arm, alone — the family's own preset, so the
-        calibration file this run writes carries THIS follower's joint ranges."""
+        calibration file this run writes carries THIS follower's joint ranges.
+        A multi-leader family receives ``leader_kind`` (see leader_kwargs)."""
 
     # --- port detection ---------------------------------------------------------
 
-    async def probe_ports(self, ports: list[str] | None = None) -> dict:
+    async def probe_ports(self, ports: list[str] | None = None, leader_kind: str | None = None) -> dict:
         """Classify ports by which protocol answers on them, with no user gesture.
 
         Same response shape as maker_ports.probe_maker_ports. A family without
-        a protocol probe answers a plain refusal naming the alternative.
+        a protocol probe answers a plain refusal naming the alternative. A
+        multi-leader family receives ``leader_kind``: a leader that answers
+        the follower's protocol cannot be told from it by asking.
         """
         return {
             "success": False,
@@ -428,12 +554,34 @@ class ArmFamily(ABC):
         }
 
     @abstractmethod
-    async def identify_by_motion(self, device_type: str, ports: list[str] | None = None) -> dict:
+    async def identify_by_motion(
+        self, device_type: str, ports: list[str] | None = None, leader_kind: str | None = None
+    ) -> dict:
         """Report which port saw a hand gesture. Read-only on every family.
 
         ``device_type`` is "robot" (the follower) or "teleop" (the leader);
-        a family whose two halves share one bus driver may ignore it.
+        a family whose two halves share one bus driver may ignore it. A
+        multi-leader family receives ``leader_kind`` (an energized leader
+        refuses the gesture the way an energizing follower does).
         """
+
+    async def identify_by_gripper_wiggle(
+        self, device_type: str, port: str, leader_kind: str | None = None
+    ) -> dict:
+        """Drive ONE port's gripper a small visible stroke and return.
+
+        The identification of last resort (see the module docstring): the
+        user watches which physical arm's gripper moved and labels the port
+        in the UI. ``{"success", "message"}`` plus ``"code"`` on a busy
+        refusal — the wiggle claims ``wiggle.wiggle_active`` for its
+        duration and is refused while any feature holds the bus. The base
+        answers "unsupported"; a family sets supports_gripper_wiggle and
+        overrides this.
+        """
+        return {
+            "success": False,
+            "message": f"The {self.short_label} has no gripper wiggle. Identify the arm another way.",
+        }
 
     # --- preflight, before any torque --------------------------------------------
 
@@ -498,6 +646,20 @@ class ArmFamily(ABC):
         drives the gripper and its start width is part of the pose restored.
         Never raises: a session must not fail to start over this.
         """
+
+    def capture_leader_rest_poses(self, teleop: Any) -> list[tuple[Any, dict]]:
+        """Where each ENERGIZED leader arm is right now, as (handle, pose) pairs.
+
+        The leader-side twin of capture_rest_poses, for a leader that holds
+        torque while the human moves it (a LeaderOption with energized=True):
+        such an arm has no brakes either, so it is returned and released on a
+        stop exactly like a follower. The pairs are appended to the follower's
+        and handed to the same return_to_rest, so the handle must accept the
+        family's own return mechanism. The default (a human-held, unpowered
+        leader — every family before the Metal leader) is nothing to capture.
+        Never raises.
+        """
+        return []
 
     @abstractmethod
     def return_to_rest(self, rest_poses: list[tuple[Any, dict]], abort_event: Any = None) -> None:

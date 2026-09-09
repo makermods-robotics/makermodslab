@@ -482,6 +482,7 @@ def _build_teleoperation_request(record: dict, opts: TeleoperationOptions):
         right_follower_config=record["right_follower_config"],
         robot_name=record["name"],
         arm_type=record["arm_type"],
+        leader_kind=record["leader_kind"],
         skip_identity_check=opts.skip_identity_check,
     )
 
@@ -503,6 +504,7 @@ def _build_recording_request(record: dict, opts: RecordingOptions):
         right_follower_config=record["right_follower_config"],
         robot_name=record["name"],
         arm_type=record["arm_type"],
+        leader_kind=record["leader_kind"],
         dataset_repo_id=opts.dataset_repo_id,
         single_task=opts.single_task,
         num_episodes=opts.num_episodes,
@@ -657,7 +659,9 @@ def _build_calibration_request(record: dict, opts: CalibrationOptions):
         "arm": opts.arm,
     }
     if kind == "steps":
-        return StepCalibrationRequest(arm_type=record["arm_type"], **common)
+        return StepCalibrationRequest(
+            arm_type=record["arm_type"], leader_kind=record["leader_kind"], **common
+        )
     return CalibrationRequest(**common)
 
 
@@ -776,9 +780,13 @@ def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict
     # the 400 must name THAT reason — not "needs ports and calibrations". Every
     # builder below resolves the family from this value, so this is also what
     # keeps the registry's UnknownArmType unreachable from here.
-    from .arm_capabilities import require_known_arm_type
+    from .arm_capabilities import require_known_arm_type, require_leader_available, require_leader_kind
 
     require_known_arm_type(record["arm_type"])
+    # And a leader kind the family offers — for every kind, calibration
+    # included (it opens the leader the record names, so a hand-edited
+    # unknown one must not reach the family).
+    require_leader_kind(record["arm_type"], record["leader_kind"])
 
     # The setup kinds skip the record-clean gate (they exist to make records
     # clean); their builders below still refuse a slot with no port.
@@ -796,6 +804,11 @@ def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict
             kind == "inference" and bool(body.options.get("coaching"))
         )
         arms = "follower" if follower_only else "all"
+        # A leader this install cannot drive (the Metal leader without its
+        # extra) is named BEFORE the readiness gate, which would otherwise
+        # blame the ports and calibrations for a missing dependency.
+        if not follower_only:
+            require_leader_available(record["arm_type"], record["leader_kind"])
         if not is_robot_record_clean(record, arms=arms):
             needs = "follower arm" if arms == "follower" else "arms"
             raise ApiError(

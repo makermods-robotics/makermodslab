@@ -73,6 +73,24 @@ export default {
     right: "右",
   },
 
+  // ---- 主控臂类型 ----------------------------------------------------------
+  leaderKind: {
+    label: "主控臂",
+    unavailable: "未安装",
+    energizedHint:
+      "这种主控臂在你移动它时保持通电 — 它会支撑自身重量，会话停止时会回到起始姿态并断电；它与从臂使用相同协议，因此“识别”无法区分两者：请对某个端口使用“抖动”来查看是哪条机械臂。",
+    optionFor: {
+      metal: {
+        star: "Star Arm 102 主控臂",
+        metal: "Metal 机械臂主控臂（重力补偿）",
+      },
+    },
+    toast: {
+      savedTitle: "主控臂已保存",
+      saveFailedTitle: "无法更改主控臂",
+    },
+  },
+
   slotCard: {
     undetectedLabel: "端口未检测到",
     undetectedTitle: "已保存的端口未检测到。请接上机械臂并重新扫描。",
@@ -117,6 +135,8 @@ export default {
     detectAuto: "自动识别",
     detectTipAuto: "逐个探测端口，无需手动摆动。",
     wiggleTip: "驱动夹爪，你可以看到哪条机械臂有反应。",
+    wiggleFallback:
+      "请改用某个端口上的“抖动”：它只会驱动那条机械臂的夹爪，你可以看到是哪条机械臂，然后手动分配端口。",
     noneAssigned: "无端口",
     forSlot: "{{slot}} 的端口",
     toast: {
@@ -209,8 +229,15 @@ export default {
         metal: {
           leader:
             "用手将 Star Arm 102 主控臂摆成上图的姿态：折叠贴近底座，夹爪闭合。关节未通电，可以自由移动。",
+          leader_metal:
+            "用手把主控 Metal 机械臂摆成上图的姿态：竖直站立，各关节归零，夹爪闭合。扭矩已关闭，可以自由移动。",
           follower:
             "用手把机械臂摆成上图的姿态：竖直站立，各关节归零，夹爪闭合。扭矩已关闭，可以自由移动。",
+        },
+      },
+      leaderPoseImageFor: {
+        metal: {
+          metal: "主控 Metal 机械臂零位姿态：竖直，夹爪闭合",
         },
       },
       liveAngles: "实时关节角度",

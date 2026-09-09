@@ -100,6 +100,10 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # touches a Maker calibration writes into the developer's real ~/.cache.
     maker_leader_cfg_dir = cache / "configs" / "rebot_102_leader"
     maker_follower_cfg_dir = cache / "configs" / "maker_follower"
+    # The Metal arm's: its follower library, and the library of its OWN
+    # (gravity-compensated) leader — the Star leader's is shared with Maker.
+    metal_follower_cfg_dir = cache / "configs" / "metal_follower"
+    metal_leader_cfg_dir = cache / "configs" / "metal_leader"
     port_dir = home / "ports"
     robots_dir = home / "robots"
     for d in (
@@ -109,6 +113,8 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         follower_cfg_dir,
         maker_leader_cfg_dir,
         maker_follower_cfg_dir,
+        metal_follower_cfg_dir,
+        metal_leader_cfg_dir,
         port_dir,
         robots_dir,
     ):
@@ -123,6 +129,8 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(cfg, "FOLLOWER_CONFIG_PATH", str(follower_cfg_dir))
     monkeypatch.setattr(cfg, "MAKER_LEADER_CONFIG_PATH", str(maker_leader_cfg_dir))
     monkeypatch.setattr(cfg, "MAKER_FOLLOWER_CONFIG_PATH", str(maker_follower_cfg_dir))
+    monkeypatch.setattr(cfg, "METAL_FOLLOWER_CONFIG_PATH", str(metal_follower_cfg_dir))
+    monkeypatch.setattr(cfg, "METAL_LEADER_CONFIG_PATH", str(metal_leader_cfg_dir))
     monkeypatch.setattr(cfg, "PORT_CONFIG_PATH", str(port_dir))
     monkeypatch.setattr(cfg, "LEADER_PORT_FILE", str(port_dir / "leader_port.txt"))
     monkeypatch.setattr(cfg, "FOLLOWER_PORT_FILE", str(port_dir / "follower_port.txt"))

@@ -100,6 +100,10 @@ FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "so_follower")
 MAKER_LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "rebot_102_leader")
 MAKER_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "maker_follower")
 METAL_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "metal_follower")
+# The Metal arm's SECOND leader (leader kind "metal": a gravity-compensated
+# Metal arm, lerobot's `metal_leader` class) keeps a library of its own —
+# lerobot derives it from that class name — separate from the Star leader's.
+METAL_LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "metal_leader")
 
 # Imported HERE, after every library constant, on purpose: importing the arms
 # package registers the built-in families, and registration validates each
@@ -168,15 +172,38 @@ def lerobot_calibration_dir(kind: Literal["robots", "teleoperators"], class_name
     return os.path.join(base, class_name)
 
 
-def leader_config_path_for(arm_type: object = DEFAULT_ARM_TYPE) -> str:
+def normalize_leader_kind(arm_type: object, value: object) -> str:
+    """The leader kind a stored/received value means: MISSING → the family's
+    default, a string kept as is (known or not — an unknown one lists and is
+    refused, never silently defaulted; see ArmFamily.leader_option). For an
+    arm type nothing registered there is no default to give: the raw value
+    (or "") is kept, and the record is unavailable anyway."""
+    if isinstance(value, str) and value:
+        return value
+    resolved = normalize_arm_type(arm_type)
+    if not is_known_arm_type(resolved):
+        return ""
+    return arm_registry.get(resolved).normalize_leader_kind(None)
+
+
+def _leader_kwargs(arm_type: object, leader_kind: object) -> dict[str, str]:
+    from ..arms.base import leader_kwargs
+
+    return leader_kwargs(arm_registry.get(normalize_arm_type(arm_type)), leader_kind)
+
+
+def leader_config_path_for(arm_type: object = DEFAULT_ARM_TYPE, leader_kind: object = None) -> str:
     """The calibration library dir holding this arm type's LEADER configs.
 
     Maker and Metal share one library (both leaders are the Star Arm 102 —
     same device class, different joint-mapping preset); the per-arm-type
     separation there is carried by the minted config NAMES instead
-    (default_slot_config_name).
+    (default_slot_config_name). ``leader_kind`` picks the library of a family
+    with more than one leader (the Metal arm's own leader keeps a separate
+    one); a missing kind is the family's default.
     """
-    return arm_registry.get(normalize_arm_type(arm_type)).leader_calibration_dir()
+    family = arm_registry.get(normalize_arm_type(arm_type))
+    return family.leader_calibration_dir(**_leader_kwargs(arm_type, leader_kind))
 
 
 def follower_config_path_for(arm_type: object = DEFAULT_ARM_TYPE) -> str:
@@ -509,13 +536,19 @@ def _require_assigned_config(config: str, side: str) -> None:
         )
 
 
-def setup_calibration_files(leader_config: str, follower_config: str, arm_type: object = DEFAULT_ARM_TYPE):
+def setup_calibration_files(
+    leader_config: str,
+    follower_config: str,
+    arm_type: object = DEFAULT_ARM_TYPE,
+    leader_kind: object = None,
+):
     """Setup calibration files in the correct locations for teleoperation and recording.
 
     ``arm_type`` selects which library pair to read/write — an SO-101 session
     stages from so_leader/so_follower, a Maker session from
     rebot_102_leader/maker_follower. Those ARE lerobot's expected locations for
     each device class, so this stays a validating no-op copy within one dir.
+    ``leader_kind`` picks the leader library of a multi-leader family.
     """
     _require_assigned_config(leader_config, "leader")
     _require_assigned_config(follower_config, "follower")
@@ -523,7 +556,7 @@ def setup_calibration_files(leader_config: str, follower_config: str, arm_type: 
     leader_config_name = os.path.splitext(leader_config)[0]
     follower_config_name = os.path.splitext(follower_config)[0]
 
-    leader_library = leader_config_path_for(arm_type)
+    leader_library = leader_config_path_for(arm_type, leader_kind)
     follower_library = follower_config_path_for(arm_type)
 
     # Log the full paths to check if files exist
@@ -664,6 +697,8 @@ _BIMANUAL_CONFIG_FIELDS = (
 )
 _ROBOT_STRING_FIELDS = _SINGLE_CONFIG_FIELDS + _BIMANUAL_CONFIG_FIELDS
 _ROBOT_LIST_FIELDS = ("cameras",)
+# The leader half of the slots — what a leader-kind switch invalidates.
+_LEADER_SLOT_FIELDS = ("leader_port", "leader_config", "right_leader_port", "right_leader_config")
 
 # Auto-calibration drive torque, as a percentage of full torque. Threaded into
 # the vendored autocal subprocess as --torque-limit (percent × 10; see
@@ -738,6 +773,9 @@ def _empty_record(name: str) -> dict:
         "name": name,
         "mode": _DEFAULT_MODE,
         "arm_type": DEFAULT_ARM_TYPE,
+        # "" = the family's default leader (normalized on read); a record
+        # written before leader kinds existed reads back as that default.
+        "leader_kind": "",
         "motor_power": DEFAULT_MOTOR_POWER,
     }
     for field in _ROBOT_STRING_FIELDS:
@@ -777,6 +815,10 @@ def get_robot_record(name: str) -> dict | None:
     # A hand-edited UNKNOWN string is kept as is: the record lists as
     # unavailable and refuses to start, rather than masquerading as an SO-101.
     record["arm_type"] = normalize_arm_type(record.get("arm_type"))
+    # Same rule for the leader kind: missing (every record written before it
+    # existed) reads as the family's default; an unknown string is kept, so
+    # it lists and is refused rather than silently driving the wrong leader.
+    record["leader_kind"] = normalize_leader_kind(record["arm_type"], record.get("leader_kind"))
     # Older records have no motor_power (→ full power via _empty_record); an
     # out-of-range or corrupted value on disk is clamped so every consumer
     # sees a safe 10-100 integer.
@@ -829,6 +871,18 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
     switching_arm_type = is_known_arm_type(data.get("arm_type")) and data["arm_type"] != record.get(
         "arm_type"
     )
+    # A leader-kind switch blanks the LEADER slots only (below): the two
+    # leaders are different hardware on different adapters, with separate
+    # calibration libraries, so the old port and calibration name are stale
+    # for the new one — but the followers are untouched. Validated by the API
+    # layer (require_leader_kind) before it gets here, like arm_type.
+    new_leader_kind = data.get("leader_kind")
+    switching_leader_kind = (
+        isinstance(new_leader_kind, str)
+        and not switching_arm_type
+        and normalize_leader_kind(record.get("arm_type"), new_leader_kind)
+        != normalize_leader_kind(record.get("arm_type"), record.get("leader_kind"))
+    )
     for field in _ROBOT_STRING_FIELDS:
         if field in data and isinstance(data[field], str):
             record[field] = data[field]
@@ -857,7 +911,17 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
         for stale in _ROBOT_STRING_FIELDS:
             if stale not in data:
                 record[stale] = ""
+        # The new family's leaders are different hardware: back to its default
+        # unless this same payload names one.
+        record["leader_kind"] = new_leader_kind if isinstance(new_leader_kind, str) else ""
+    elif isinstance(new_leader_kind, str):
+        record["leader_kind"] = new_leader_kind
+        if switching_leader_kind:
+            for stale in _LEADER_SLOT_FIELDS:
+                if stale not in data:
+                    record[stale] = ""
     record.setdefault("arm_type", DEFAULT_ARM_TYPE)
+    record.setdefault("leader_kind", "")
     record["name"] = name
 
     path = _robot_record_path(name)
@@ -1126,7 +1190,20 @@ def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
     # robot looks for a file that was never going to be there and the robot can
     # never read as ready.
     follower_library = follower_config_path_for(record.get("arm_type"))
-    leader_library = leader_config_path_for(record.get("arm_type"))
+    # The leader library is the selected LEADER's: an unknown leader kind (a
+    # hand-edited record) or one this install cannot drive (its extra is not
+    # installed) leaves nothing to open on that side, so the record is not
+    # ready for a flow that needs the leader — follower-only flows are.
+    leader_library = None
+    if not follower_only:
+        family = arm_registry.get(normalize_arm_type(record.get("arm_type")))
+        try:
+            option = family.leader_option(record.get("leader_kind"))
+        except KeyError:
+            return False
+        if not option.available:
+            return False
+        leader_library = leader_config_path_for(record.get("arm_type"), record.get("leader_kind"))
 
     config_files = [
         _file_for(follower_library, record["follower_config"]),
@@ -1228,6 +1305,7 @@ def stage_bimanual_calibrations(
     follower_left: str,
     follower_right: str,
     arm_type: object = DEFAULT_ARM_TYPE,
+    leader_kind: object = None,
 ) -> tuple[str, str, str]:
     """Stage the four arbitrarily-named library calibrations for a BiSO session.
 
@@ -1246,7 +1324,12 @@ def stage_bimanual_calibrations(
     leader_staging = _bimanual_leader_staging_dir(base)
     follower_staging = _bimanual_follower_staging_dir(base)
     _stage_one_side(
-        leader_config_path_for(arm_type), leader_staging, base, leader_left, leader_right, "leader"
+        leader_config_path_for(arm_type, leader_kind),
+        leader_staging,
+        base,
+        leader_left,
+        leader_right,
+        "leader",
     )
     _stage_one_side(
         follower_config_path_for(arm_type),
@@ -1630,17 +1713,20 @@ def set_excluded_episodes(repo_id: str, episode_indices: list[int]) -> None:
 _CALIBRATION_MOTOR_FIELDS = ("id", "drive_mode", "homing_offset", "range_min", "range_max")
 
 
-def calibration_dir_for_device(device_type: str, arm_type: object = DEFAULT_ARM_TYPE) -> str | None:
+def calibration_dir_for_device(
+    device_type: str, arm_type: object = DEFAULT_ARM_TYPE, leader_kind: object = None
+) -> str | None:
     """Map an API device_type ("teleop"/"robot") to its calibration dir, or None.
 
     ``arm_type`` picks the library: the SO-101 pair and the Maker pair keep
     entirely separate directories (see _CALIBRATION_DIRS), so a caller that
     forgets to thread it through reads the SO-101 library by default.
+    ``leader_kind`` picks the leader library of a multi-leader family.
     """
     if device_type == "robot":
         return follower_config_path_for(arm_type)
     if device_type == "teleop":
-        return leader_config_path_for(arm_type)
+        return leader_config_path_for(arm_type, leader_kind)
     return None
 
 
@@ -1717,7 +1803,11 @@ def validate_calibration_data(data: object) -> tuple[bool, str]:
 
 
 def save_imported_calibration(
-    device_type: str, name: str, data: object, arm_type: object = DEFAULT_ARM_TYPE
+    device_type: str,
+    name: str,
+    data: object,
+    arm_type: object = DEFAULT_ARM_TYPE,
+    leader_kind: object = None,
 ) -> tuple[bool, str, str]:
     """
     Validate and persist an uploaded calibration as <name>.json under the side's
@@ -1726,7 +1816,7 @@ def save_imported_calibration(
     stripped). Reason codes: "invalid_device", "invalid_name",
     "invalid_data:<msg>", "name_taken", "".
     """
-    config_path = calibration_dir_for_device(device_type, arm_type)
+    config_path = calibration_dir_for_device(device_type, arm_type, leader_kind)
     if config_path is None:
         return False, "invalid_device", ""
 
@@ -1751,8 +1841,30 @@ def save_imported_calibration(
     return True, "", name
 
 
+def _record_uses_library(rec: dict, device_type: str, arm_type: str, leader_kind: object) -> bool:
+    """True when a robot record's slot for ``device_type`` names files in the
+    library ``(arm_type, leader_kind)`` addresses. Arm type first (the
+    libraries are separate namespaces); on the leader side ALSO the leader
+    library, because a family with two leaders keeps two, and a record driven
+    by the other leader names a different file under the same stem."""
+    if rec.get("arm_type") != arm_type:
+        return False
+    if device_type != "teleop":
+        return True
+    try:
+        return leader_config_path_for(arm_type, rec.get("leader_kind")) == leader_config_path_for(
+            arm_type, leader_kind
+        )
+    except KeyError:
+        return False  # a hand-edited record naming a leader the family does not offer
+
+
 def rename_calibration_config(
-    device_type: str, old_name: str, new_name: str, arm_type: object = DEFAULT_ARM_TYPE
+    device_type: str,
+    old_name: str,
+    new_name: str,
+    arm_type: object = DEFAULT_ARM_TYPE,
+    leader_kind: object = None,
 ) -> tuple[bool, str]:
     """
     Rename a calibration config file within a side's dir. Never overwrites an
@@ -1762,7 +1874,7 @@ def rename_calibration_config(
     "name_taken", "".
     """
     arm_type = normalize_arm_type(arm_type)
-    config_path = calibration_dir_for_device(device_type, arm_type)
+    config_path = calibration_dir_for_device(device_type, arm_type, leader_kind)
     if config_path is None:
         return False, "invalid_device"
 
@@ -1796,7 +1908,7 @@ def rename_calibration_config(
         else ("follower_config", "right_follower_config")
     )
     for rec in list_robot_records():
-        if rec.get("arm_type") != arm_type:
+        if not _record_uses_library(rec, device_type, arm_type, leader_kind):
             continue
         patch = {f: new_stem for f in fields if rec.get(f) == old_stem}
         if patch:
@@ -1807,7 +1919,10 @@ def rename_calibration_config(
 
 
 def clear_config_references(
-    device_type: str, config_name: str, arm_type: object = DEFAULT_ARM_TYPE
+    device_type: str,
+    config_name: str,
+    arm_type: object = DEFAULT_ARM_TYPE,
+    leader_kind: object = None,
 ) -> list[dict]:
     """Blank every robot-record field (on this side) that references this
     calibration config, across all robot records OF THIS ARM TYPE — both the
@@ -1835,7 +1950,7 @@ def clear_config_references(
     stem = config_name.removesuffix(".json")
     cleared: list[dict] = []
     for rec in list_robot_records():
-        if rec.get("arm_type") != arm_type:
+        if not _record_uses_library(rec, device_type, arm_type, leader_kind):
             continue
         hit = [f for f in fields if rec.get(f) == stem]
         if hit:

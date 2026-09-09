@@ -139,6 +139,10 @@
             "title": "Supports Dagger",
             "type": "boolean"
           },
+          "supports_gripper_wiggle": {
+            "title": "Supports Gripper Wiggle",
+            "type": "boolean"
+          },
           "supports_port_probe": {
             "title": "Supports Port Probe",
             "type": "boolean"
@@ -153,7 +157,8 @@
           "supports_auto_calibration",
           "supports_dagger",
           "supports_port_probe",
-          "motion_identify_energizes_follower"
+          "motion_identify_energizes_follower",
+          "supports_gripper_wiggle"
         ],
         "title": "ArmCapabilities",
         "type": "object"
@@ -176,7 +181,7 @@
         "type": "object"
       },
       "ArmFamilyInfo": {
-        "description": "One entry of the arms manifest (arms/manifest.py describe_family).\n\n`robot_types` are the lerobot RobotConfig type strings the family's\nfollowers register under (single, then bimanual); `robot_type_markers`\nthe substrings that identify it in a dataset's free-form robot_type;\n`calibration_name_suffix` what the server appends to a robot record's\nname when it mints a default calibration id (\"\" for the SO-101);\n`image_url` a served image for the create dialog (null for the built-ins,\nwhose photos the frontend bundles).",
+        "description": "One entry of the arms manifest (arms/manifest.py describe_family).\n\n`robot_types` are the lerobot RobotConfig type strings the family's\nfollowers register under (single, then bimanual); `robot_type_markers`\nthe substrings that identify it in a dataset's free-form robot_type;\n`calibration_name_suffix` what the server appends to a robot record's\nname when it mints a default calibration id (\"\" for the SO-101);\n`image_url` a served image for the create dialog (null for the built-ins,\nwhose photos the frontend bundles); `leader_options` the leader arms the\nfamily can be driven by, default first (`default_leader_kind` names it —\nwhat a record with no `leader_kind` reads as).",
         "properties": {
           "calibration": {
             "$ref": "#/components/schemas/ArmCalibrationInfo"
@@ -187,6 +192,10 @@
           },
           "capabilities": {
             "$ref": "#/components/schemas/ArmCapabilities"
+          },
+          "default_leader_kind": {
+            "title": "Default Leader Kind",
+            "type": "string"
           },
           "id": {
             "title": "Id",
@@ -210,6 +219,13 @@
           "label": {
             "title": "Label",
             "type": "string"
+          },
+          "leader_options": {
+            "items": {
+              "$ref": "#/components/schemas/LeaderOptionInfo"
+            },
+            "title": "Leader Options",
+            "type": "array"
           },
           "provided_by": {
             "title": "Provided By",
@@ -259,7 +275,9 @@
           "capabilities",
           "robot_types",
           "robot_type_markers",
-          "calibration_name_suffix"
+          "calibration_name_suffix",
+          "default_leader_kind",
+          "leader_options"
         ],
         "title": "ArmFamilyInfo",
         "type": "object"
@@ -544,6 +562,70 @@
           "available"
         ],
         "title": "CameraInfo",
+        "type": "object"
+      },
+      "CanGripperWiggleRequest": {
+        "properties": {
+          "arm_type": {
+            "title": "Arm Type",
+            "type": "string"
+          },
+          "device_type": {
+            "title": "Device Type",
+            "type": "string"
+          },
+          "leader_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader Kind"
+          },
+          "port": {
+            "title": "Port",
+            "type": "string"
+          }
+        },
+        "required": [
+          "arm_type",
+          "device_type",
+          "port"
+        ],
+        "title": "CanGripperWiggleRequest",
+        "type": "object"
+      },
+      "CanGripperWiggleResponse": {
+        "description": "can_wiggle.wiggle_can_gripper — one port's gripper was jogged (or not).\n\n`code` is present only on a busy refusal (robot.busy.*), like every\nother hardware handler's refusal dict; the route excludes None.",
+        "properties": {
+          "code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Code"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "CanGripperWiggleResponse",
         "type": "object"
       },
       "CheckpointImageFeature": {
@@ -2654,6 +2736,58 @@
         "title": "JobRecord",
         "type": "object"
       },
+      "LeaderOptionInfo": {
+        "description": "One leader arm a family can be driven by (arms/base.py LeaderOption).\n\n`id` is what a robot record stores as `leader_kind`; `available` is\nfalse when this install cannot drive it, with `unavailable_reason`\nnaming what to install (null when available); `energized` marks a leader\nthat holds torque while the human moves it (the Metal arm's\ngravity-compensated leader): it answers the follower's protocol, refuses\nthe gesture, and is returned and released on a stop like a follower.\n`calibration_summary` is the pre-start summary for THIS leader's side\n(null for a family with nothing to summarize).",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "calibration_summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArmCalibrationSide"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "energized": {
+            "title": "Energized",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "unavailable_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unavailable Reason"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "available",
+          "unavailable_reason",
+          "energized",
+          "calibration_summary"
+        ],
+        "title": "LeaderOptionInfo",
+        "type": "object"
+      },
       "LogLine": {
         "properties": {
           "message": {
@@ -2683,6 +2817,17 @@
             "title": "Device Type",
             "type": "string"
           },
+          "leader_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader Kind"
+          },
           "ports": {
             "anyOf": [
               {
@@ -2707,6 +2852,18 @@
       "MakerIdentifyArmResponse": {
         "description": "maker_ports.identify_maker_arm_by_motion — which port saw the gesture.\n\n`port` is absent on failure rather than null, so the route excludes None.\n`skipped` lists ports that could not be opened (usually the other half of\nthe rig, which speaks a different protocol).",
         "properties": {
+          "fallback": {
+            "anyOf": [
+              {
+                "const": "wiggle",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fallback"
+          },
           "message": {
             "title": "Message",
             "type": "string"
@@ -2748,6 +2905,17 @@
             "default": "maker",
             "title": "Arm Type",
             "type": "string"
+          },
+          "leader_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader Kind"
           },
           "ports": {
             "anyOf": [
@@ -3838,6 +4006,17 @@
           "device_type": {
             "title": "Device Type",
             "type": "string"
+          },
+          "leader_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader Kind"
           }
         },
         "required": [
@@ -3997,6 +4176,17 @@
           "leader_config": {
             "title": "Leader Config",
             "type": "string"
+          },
+          "leader_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader Kind"
           },
           "leader_port": {
             "title": "Leader Port",
@@ -5117,6 +5307,17 @@
             "title": "Leader Config",
             "type": "string"
           },
+          "leader_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader Kind"
+          },
           "leader_port": {
             "title": "Leader Port",
             "type": "string"
@@ -6107,6 +6308,22 @@
               "title": "Arm Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
+            }
           }
         ],
         "responses": {
@@ -6154,6 +6371,22 @@
               "default": "so101",
               "title": "Arm Type",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
             }
           }
         ],
@@ -6224,6 +6457,22 @@
               "title": "Arm Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
+            }
           }
         ],
         "responses": {
@@ -6281,6 +6530,22 @@
               "title": "Arm Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
+            }
           }
         ],
         "responses": {
@@ -6337,6 +6602,22 @@
               "default": "so101",
               "title": "Arm Type",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
             }
           }
         ],
@@ -8604,6 +8885,48 @@
           }
         },
         "summary": "Probe Maker Arm Ports",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/maker/wiggle-gripper": {
+      "post": {
+        "description": "Jog ONE port's gripper so the user can see which CAN arm is on it.\n\nThe identification of last resort (can_wiggle.py): a Metal rig driven by\na second Metal arm answers Damiao on every port, so the probe cannot say\nwhich is the leader and the gesture is refused on both sides (opening a\nDamiao bus energizes it). This opens the port with ONLY the gripper\nmotor on the bus, jogs the jaws a few degrees inside their soft limits,\nand disables the motor again. Claims the wiggle mutex (robot.busy.wiggle)\nand is refused while any session holds the hardware. A family without a\ngripper wiggle answers a plain refusal.",
+        "operationId": "wiggle_can_gripper_port",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CanGripperWiggleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CanGripperWiggleResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Wiggle Can Gripper Port",
         "tags": [
           "system"
         ]
@@ -11418,6 +11741,22 @@
               "title": "Arm Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
+            }
           }
         ],
         "responses": {
@@ -11465,6 +11804,22 @@
               "default": "so101",
               "title": "Arm Type",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
             }
           }
         ],
@@ -11535,6 +11890,22 @@
               "title": "Arm Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
+            }
           }
         ],
         "responses": {
@@ -11592,6 +11963,22 @@
               "title": "Arm Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
+            }
           }
         ],
         "responses": {
@@ -11648,6 +12035,22 @@
               "default": "so101",
               "title": "Arm Type",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
             }
           }
         ],

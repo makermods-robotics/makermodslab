@@ -87,6 +87,57 @@ def require_known_arm_type(arm_type: object) -> None:
         )
 
 
+def require_leader_kind(arm_type: object, leader_kind: object) -> None:
+    """Refuse (400 robot.leader_kind.unknown) a leader kind the family does not offer.
+
+    The gate every request that CARRIES a leader kind calls after
+    require_known_arm_type: the robot-record upsert, the calibration-library
+    routes' ``?leader_kind=``, the CAN port-detection routes. A missing kind
+    (None, "") is the family's default and passes; a string the family's
+    leader_options do not list is refused with the offered ids named.
+    """
+    require_known_arm_type(arm_type)
+    family = _family(arm_type)
+    try:
+        family.leader_option(leader_kind)
+    except KeyError:
+        offered = ", ".join(o.id for o in family.leader_options())
+        raise ApiError(
+            status_code=400,
+            detail=(
+                f"Leader kind {leader_kind!r} is not one the {family.short_label} can be driven by "
+                f"(offered: {offered})."
+            ),
+            code=ErrorCode.ROBOT_LEADER_KIND_UNKNOWN,
+        ) from None
+
+
+def require_leader_available(arm_type: object, leader_kind: object) -> None:
+    """Refuse (400 robot.leader_kind.unavailable) a leader this install cannot drive.
+
+    Called by every start that OPENS the leader (teleoperation, recording, a
+    coaching inference) — never by a follower-only flow, and never by
+    calibration, which zeroes the leader over its bus and needs none of the
+    leader's heavier dependencies. The detail is the option's own remedy
+    (which extra to install). An unknown kind is refused first, as above.
+    """
+    require_leader_kind(arm_type, leader_kind)
+    option = _family(arm_type).leader_option(leader_kind)
+    if not option.available:
+        raise ApiError(
+            status_code=400,
+            detail=option.unavailable_reason or f"The {option.label} is not available on this install.",
+            code=ErrorCode.ROBOT_LEADER_KIND_UNAVAILABLE,
+        )
+
+
+def leader_holds_torque(arm_type: object, leader_kind: object) -> bool:
+    """True when the selected leader is energized while the human moves it
+    (the Metal arm's gravity-compensated leader). What the connect-failure
+    and stop paths read to treat the leader like a follower."""
+    return _family(arm_type).leader_holds_torque(leader_kind)
+
+
 def joints_per_arm(arm_type: object) -> int:
     """Joint count of a single follower arm of this type.
 

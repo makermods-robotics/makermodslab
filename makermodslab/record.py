@@ -45,6 +45,7 @@ from .datasets import (
 from .rest_pose import RETURN_CEILING_S
 from .session_events import notify_session_changed
 from .teleoperate import force_disconnect_partial
+from .torque import de_energize_can_device
 from .utils.config import (
     CameraResolutionError,
     load_robot_cameras,
@@ -375,6 +376,9 @@ class RecordingRequest(BaseModel):
     # which of the Feetech-only safety helpers apply. Defaults to so101 so a
     # request from a client that predates the Maker arm is unchanged.
     arm_type: str = "so101"
+    # Which of the family's leaders drives the follower (the record's
+    # leader_kind; blank = the family's default). See TeleoperateRequest.
+    leader_kind: str | None = None
     dataset_repo_id: str
     single_task: str
     num_episodes: int = 5
@@ -1857,7 +1861,12 @@ def record_with_web_events(
             # The robot connected fine a moment ago; release both so a leader
             # failure can't strand the follower's bus and camera threads for
             # the rest of the process (partial teardown for the same reason as
-            # the robot-connect path above).
+            # the robot-connect path above). A CAN family's leader first goes
+            # through the Damiao recovery: an energized leader whose handshake
+            # raised partway is holding the motors that answered (a no-op on
+            # the Star leader, which has no CAN bus).
+            if not feetech:
+                de_energize_can_device(teleop, "leader arm")
             force_disconnect_partial(robot, "robot")
             force_disconnect_partial(teleop, "teleop")
             raise
@@ -1942,6 +1951,10 @@ def record_with_web_events(
     # maker_rest_pose.py). A Maker arm has no brakes, so releasing torque
     # wherever the last episode ended would drop it.
     rest_poses = family.capture_rest_poses(robot)
+    # An energized leader (the Metal leader) is captured and returned with
+    # the followers; every other leader contributes nothing here.
+    if teleop is not None:
+        rest_poses += family.capture_leader_rest_poses(teleop)
 
     # Start with episode 1 - but track it properly
     current_episode = 1
@@ -2199,13 +2212,17 @@ def record_with_web_events(
             # Belt and braces: disable torque explicitly before disconnect, so a
             # failure inside disconnect() can't leave an arm energized (rigid).
             # force_disable_torque logs any failure at ERROR level with the port.
-            # Every family releases the follower; only a family whose leader
-            # has motors (the SO-101) has a leader to release too.
+            # Every family releases the follower AND the leader: the family's
+            # release is a no-op on a leader without motors (the Star Arm
+            # 102) and stops the gravity thread then disables the bus on an
+            # energized one (the Metal leader).
             if feetech:
                 family.release_torque(robot, "robot")
                 family.release_torque(teleop, "teleop")
             else:
                 family.release_torque(robot, "CAN follower arm")
+                if teleop is not None:
+                    family.release_torque(teleop, "CAN leader arm")
             robot.disconnect()
             if teleop:
                 teleop.disconnect()

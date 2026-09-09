@@ -60,8 +60,9 @@ from . import (
 # Import our custom calibration functionality
 from .__version__ import __version__
 from .api_errors import ApiError, ErrorCode, install_error_handlers
-from .arm_capabilities import require_known_arm_type
+from .arm_capabilities import require_known_arm_type, require_leader_kind
 from .arms import registry as arm_registry
+from .arms.base import leader_kwargs
 from .arms.manifest import arms_manifest
 from .auto_calibrate import (
     AutoCalibrationBatchRequest,
@@ -228,6 +229,7 @@ from .schemas.system import (
     ArmFamiliesResponse,
     AvailableCamerasResponse,
     AvailablePortsResponse,
+    CanGripperWiggleResponse,
     ExtraStatus,
     HealthResponse,
     HfAuthStatusResponse,
@@ -3707,14 +3709,15 @@ def auto_calibration_batch_status():
 
 
 @router.get("/calibration-configs/{device_type}")
-def get_calibration_configs(device_type: str, arm_type: str = "so101"):
+def get_calibration_configs(device_type: str, arm_type: str = "so101", leader_kind: str | None = None):
     """Get all calibration config files for a specific device type"""
     # `?arm_type=nope` is a 400, never the SO-101 library — and outside the
     # try, so the coded ApiError reaches the app-wide handler. Same on every
     # calibration-configs route below.
     require_known_arm_type(arm_type)
+    require_leader_kind(arm_type, leader_kind)
     try:
-        config_path = calibration_dir_for_device(device_type, arm_type)
+        config_path = calibration_dir_for_device(device_type, arm_type, leader_kind)
         if config_path is None:
             return {"success": False, "message": "Invalid device type"}
 
@@ -3745,11 +3748,14 @@ def get_calibration_configs(device_type: str, arm_type: str = "so101"):
 
 
 @router.delete("/calibration-configs/{device_type}/{config_name}")
-def delete_calibration_config(device_type: str, config_name: str, arm_type: str = "so101"):
+def delete_calibration_config(
+    device_type: str, config_name: str, arm_type: str = "so101", leader_kind: str | None = None
+):
     """Delete a calibration config file"""
     require_known_arm_type(arm_type)
+    require_leader_kind(arm_type, leader_kind)
     try:
-        config_path = calibration_dir_for_device(device_type, arm_type)
+        config_path = calibration_dir_for_device(device_type, arm_type, leader_kind)
         if config_path is None:
             return {"success": False, "message": "Invalid device type"}
 
@@ -3778,7 +3784,7 @@ def delete_calibration_config(device_type: str, config_name: str, arm_type: str 
         # those arms return to the "needs calibration" state instead of
         # dangling on a missing file. The response lists them so the UI can
         # refresh the affected robots.
-        unassigned = clear_config_references(device_type, config_name, arm_type)
+        unassigned = clear_config_references(device_type, config_name, arm_type, leader_kind)
         if unassigned:
             robots = ", ".join(u["robot"] for u in unassigned)
             message = (
@@ -3799,7 +3805,9 @@ def delete_calibration_config(device_type: str, config_name: str, arm_type: str 
 
 
 @router.get("/calibration-configs/{device_type}/{config_name}/download")
-def download_calibration_config(device_type: str, config_name: str, arm_type: str = "so101"):
+def download_calibration_config(
+    device_type: str, config_name: str, arm_type: str = "so101", leader_kind: str | None = None
+):
     """
     Download one arm's calibration as a raw lerobot calibration JSON file.
 
@@ -3808,7 +3816,8 @@ def download_calibration_config(device_type: str, config_name: str, arm_type: st
     side/name are supplied by the caller on re-import, not stored in the file.
     """
     require_known_arm_type(arm_type)
-    config_path = calibration_dir_for_device(device_type, arm_type)
+    require_leader_kind(arm_type, leader_kind)
+    config_path = calibration_dir_for_device(device_type, arm_type, leader_kind)
     if config_path is None:
         return JSONResponse(status_code=400, content={"success": False, "message": "Invalid device type"})
 
@@ -3846,19 +3855,22 @@ def download_calibration_config(device_type: str, config_name: str, arm_type: st
 
 
 @router.post("/calibration-configs/{device_type}/upload")
-def upload_calibration_config(device_type: str, body: dict, arm_type: str = "so101"):
+def upload_calibration_config(
+    device_type: str, body: dict, arm_type: str = "so101", leader_kind: str | None = None
+):
     """
     Import a calibration into a side's config dir. Body: {"name": "...",
     "data": {<raw lerobot calibration>}}. The data is shape-validated; an
     existing name is never overwritten (409 → caller renames).
     """
     require_known_arm_type(arm_type)
+    require_leader_kind(arm_type, leader_kind)
     name = (body or {}).get("name", "")
     data = (body or {}).get("data")
     if not isinstance(name, str):
         return JSONResponse(status_code=400, content={"success": False, "message": "name must be a string"})
 
-    ok, reason, saved = save_imported_calibration(device_type, name, data, arm_type)
+    ok, reason, saved = save_imported_calibration(device_type, name, data, arm_type, leader_kind)
     if ok:
         return {"success": True, "name": saved}
 
@@ -3883,20 +3895,21 @@ def upload_calibration_config(device_type: str, body: dict, arm_type: str = "so1
 
 @router.post("/calibration-configs/{device_type}/{config_name}/rename")
 def rename_calibration_config_endpoint(
-    device_type: str, config_name: str, body: dict, arm_type: str = "so101"
+    device_type: str, config_name: str, body: dict, arm_type: str = "so101", leader_kind: str | None = None
 ):
     """
     Rename a calibration config file. Body: {"new_name": "..."}. Never
     overwrites; robot records referencing the old name are repointed.
     """
     require_known_arm_type(arm_type)
+    require_leader_kind(arm_type, leader_kind)
     new_name = (body or {}).get("new_name", "")
     if not isinstance(new_name, str):
         return JSONResponse(
             status_code=400, content={"success": False, "message": "new_name must be a string"}
         )
 
-    ok, reason = rename_calibration_config(device_type, config_name, new_name, arm_type)
+    ok, reason = rename_calibration_config(device_type, config_name, new_name, arm_type, leader_kind)
     if ok:
         return {"success": True, "name": new_name.strip().removesuffix(".json")}
 
@@ -3915,6 +3928,10 @@ class OpenCalibrationFolderRequest(BaseModel):
     # 400). Each family keeps its own directories (so_leader/so_follower vs
     # rebot_102_leader/maker_follower, ...).
     arm_type: str = "so101"
+    # Which of the family's leaders, for the teleop side of a multi-leader
+    # family (the Metal arm's own leader keeps a library apart from the Star
+    # leader's). Missing = the family's default; an unknown kind is a 400.
+    leader_kind: str | None = None
 
 
 @router.post("/open-calibration-folder")
@@ -3925,7 +3942,8 @@ def open_calibration_folder(request: OpenCalibrationFolderRequest):
     than failing. An unknown device_type or arm_type is rejected with 400.
     """
     require_known_arm_type(request.arm_type)
-    path = calibration_dir_for_device(request.device_type, request.arm_type)
+    require_leader_kind(request.arm_type, request.leader_kind)
+    path = calibration_dir_for_device(request.device_type, request.arm_type, request.leader_kind)
     if path is None:
         return JSONResponse(
             status_code=400,
@@ -3990,6 +4008,10 @@ class MakerProbePortsRequest(BaseModel):
     # robot.not_ready) by the family's flags. Defaults to maker so a client
     # that predates the Metal arm is unchanged.
     arm_type: str = "maker"
+    # Which of the family's leaders the rig is driven by (the record's
+    # leader_kind). A leader that answers the follower's protocol (the Metal
+    # arm's own leader) cannot be told from it, and the probe says so.
+    leader_kind: str | None = None
 
 
 class MakerIdentifyArmRequest(BaseModel):
@@ -4002,6 +4024,21 @@ class MakerIdentifyArmRequest(BaseModel):
     # unknown id is refused. A family whose follower bus energizes on open
     # (the Metal arm's Damiao handshake) refuses the follower side itself.
     arm_type: str = "maker"
+    # The record's leader kind: an energized leader refuses the gesture too,
+    # and the answer then names the gripper wiggle as the fallback.
+    leader_kind: str | None = None
+
+
+class CanGripperWiggleRequest(BaseModel):
+    # Any registered family; only one with a gripper wiggle (the manifest's
+    # supports_gripper_wiggle) answers with more than a refusal.
+    arm_type: str
+    # "robot" (a follower port) or "teleop" (a leader port — only an
+    # energized leader has a gripper motor to move).
+    device_type: str
+    # The ONE port whose gripper to jog.
+    port: str
+    leader_kind: str | None = None
 
 
 @v1_router.post("/maker/probe-ports", response_model=MakerProbePortsResponse, tags=["system"])
@@ -4021,6 +4058,7 @@ async def probe_maker_arm_ports(request: MakerProbePortsRequest):
     identify by the gesture instead.
     """
     require_known_arm_type(request.arm_type)
+    require_leader_kind(request.arm_type, request.leader_kind)
     family = arm_registry.get(request.arm_type)
     if family.follower_probe_protocol is None:
         raise ApiError(
@@ -4031,7 +4069,7 @@ async def probe_maker_arm_ports(request: MakerProbePortsRequest):
             ),
             code=ErrorCode.ROBOT_NOT_READY,
         )
-    return await family.probe_ports(request.ports)
+    return await family.probe_ports(request.ports, **leader_kwargs(family, request.leader_kind))
 
 
 # exclude_none: success carries `port`, failure omits it entirely (never null),
@@ -4053,7 +4091,39 @@ async def identify_maker_arm(request: MakerIdentifyArmRequest):
     gesture); an unknown id is a 400.
     """
     require_known_arm_type(request.arm_type)
-    return await arm_registry.get(request.arm_type).identify_by_motion(request.device_type, request.ports)
+    require_leader_kind(request.arm_type, request.leader_kind)
+    family = arm_registry.get(request.arm_type)
+    return await family.identify_by_motion(
+        request.device_type, request.ports, **leader_kwargs(family, request.leader_kind)
+    )
+
+
+# exclude_none: `code` rides only on a busy refusal, like every other
+# hardware handler's refusal dict.
+@v1_router.post(
+    "/maker/wiggle-gripper",
+    response_model=CanGripperWiggleResponse,
+    response_model_exclude_none=True,
+    tags=["system"],
+)
+async def wiggle_can_gripper_port(request: CanGripperWiggleRequest):
+    """Jog ONE port's gripper so the user can see which CAN arm is on it.
+
+    The identification of last resort (can_wiggle.py): a Metal rig driven by
+    a second Metal arm answers Damiao on every port, so the probe cannot say
+    which is the leader and the gesture is refused on both sides (opening a
+    Damiao bus energizes it). This opens the port with ONLY the gripper
+    motor on the bus, jogs the jaws a few degrees inside their soft limits,
+    and disables the motor again. Claims the wiggle mutex (robot.busy.wiggle)
+    and is refused while any session holds the hardware. A family without a
+    gripper wiggle answers a plain refusal.
+    """
+    require_known_arm_type(request.arm_type)
+    require_leader_kind(request.arm_type, request.leader_kind)
+    family = arm_registry.get(request.arm_type)
+    return await family.identify_by_gripper_wiggle(
+        request.device_type, request.port, **leader_kwargs(family, request.leader_kind)
+    )
 
 
 @v1_router.get("/arms", response_model=ArmFamiliesResponse, tags=["system"])
@@ -4456,6 +4526,12 @@ def upsert_robot(name: str, data: dict, create: bool = False):
     # absent or null arm_type is "unspecified" and passes (the disk layer
     # then keeps the existing value, or the SO-101 default on create).
     require_known_arm_type(body.get("arm_type"))
+    # A leader kind is validated against the family the record WILL have:
+    # the body's arm type when it names one, else the stored one (the SO-101
+    # default on create). Refused whole, like an unknown arm type.
+    if "leader_kind" in body and body["leader_kind"] is not None:
+        effective_arm_type = body.get("arm_type") or existing.get("arm_type")
+        require_leader_kind(effective_arm_type, body["leader_kind"])
 
     # Mode is fixed at creation. A bimanual rig is a different machine (different
     # robot_type on datasets, forced _left/_right calibration naming, different
