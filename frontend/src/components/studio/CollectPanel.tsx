@@ -323,29 +323,32 @@ const CollectPanel: React.FC = () => {
         </CollapsibleContent>
       </Collapsible>
 
-      {/* Start recording — pinned directly above the dataset library so the
-          panel's primary action sits at the same level as Train's Start and
-          Deploy's Start/Stop. Disabled until the robot is ready and the
-          required parameters are filled in. */}
-      <div className="mt-auto pt-2">
-        <Button
-          onClick={handleStartRecording}
-          disabled={!canStart}
-          className="w-full gap-2"
-        >
-          <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
-          {t("studio.collect.start")}
-        </Button>
-      </div>
+      {/* Start recording — directly under the form, at the panel's normal
+          gap-5 rhythm, same as Train's Start and Deploy's Start/Stop. Nothing
+          in the column is bottom-pinned any more: everything top-packs and the
+          column scrolls when it overflows. Disabled until the robot is ready
+          and the required parameters are filled in. */}
+      <Button
+        onClick={handleStartRecording}
+        disabled={!canStart}
+        className="w-full gap-2"
+      >
+        <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
+        {t("studio.collect.start")}
+      </Button>
 
-      {/* Dataset library — the user's own datasets, pinned to the panel foot
-          like Train's jobs and Deploy's models. The selected-dataset chip
-          lives in the header row, beside Merge. */}
-      <LibrarySection className="mt-0">
+      {/* Dataset library — the user's own datasets. LibrarySection's own
+          stretch now stands (no mt-0 override): the opener and Start row
+          top-pack, the free space falls between them and this, and the library
+          sits at the column foot so its "Show all" footer lines up with Train's
+          and Deploy's. Its body is a fixed-height viewport, so expanding
+          scrolls inside it and the footer never moves. The selected-dataset
+          chip lives in the header row, beside Merge. */}
+      <LibrarySection>
         <Collapsible
           open={libraryOpen}
           onOpenChange={setLibraryOpen}
-          className="space-y-3"
+          className="flex min-h-0 flex-1 flex-col space-y-3"
         >
           <LibraryHeader
             title={t("studio.collect.library.title")}
@@ -400,7 +403,9 @@ const CollectPanel: React.FC = () => {
               </>
             }
           />
-          <CollapsibleContent className={SLIDE}>
+          <CollapsibleContent
+            className={cn(SLIDE, "flex min-h-0 flex-1 flex-col")}
+          >
             <DatasetLibraryList
               datasets={libraryDatasets}
               loading={datasetsLoading}

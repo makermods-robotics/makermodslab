@@ -19,6 +19,21 @@ export default {
     loading: "正在加载数据集…",
     empty: "还没有数据集。使用“添加数据集”来录制、下载或导入。",
     deleteAria: "删除 {{repoId}}",
+    useHub: "使用 Hub 上的 <0>{{repoId}}</0>",
+    useHubHint: "公开数据集 — 训练时按需拉取。",
+    row: {
+      episodes: "{{episodes}} 片段",
+      hub: "Hub",
+      weighted: "带权重",
+      weightedTitle: "该数据集带有按回合的采样权重，训练时部分回合会被更频繁地采样",
+    },
+  },
+  modelPicker: {
+    searchPlaceholder: "搜索模型…",
+    loading: "正在加载模型…",
+    empty: "还没有模型。使用“添加模型”来训练、下载或导入。",
+    deleteAria: "删除 {{name}}",
+    failedBadge: "运行失败",
   },
   addDatasetFromHub: {
     title: "从 Hugging Face 添加数据集",
@@ -58,6 +73,10 @@ export default {
     duplicate: "已存在同名机器人。",
     armLayout: "机械臂配置",
     armTypeLabel: "机械臂类型",
+    armTypesLoading: "正在加载机械臂类型…",
+    armTypesFailed:
+      "无法从服务器加载机械臂类型 — 正在重试。在服务器响应之前无法创建。",
+    providedBy: "由 {{extension}} 提供",
     armTypes: {
       so101: {
         label: "SO-101",

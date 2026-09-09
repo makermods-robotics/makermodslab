@@ -331,7 +331,10 @@ export const DatasetLibraryList: React.FC<{
   }
 
   return (
-    <div className="space-y-3">
+    // flex-1 + min-h-0: this sits between LibrarySection and CappedGrid's
+    // viewport, so it has to hand the section's height down rather than hug
+    // its content (see LibrarySection's note).
+    <div className="flex min-h-0 flex-1 flex-col space-y-3">
       <LibraryToolbar
         query={query}
         onQueryChange={setQuery}

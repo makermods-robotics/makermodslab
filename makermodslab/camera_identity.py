@@ -1,4 +1,5 @@
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -57,6 +58,10 @@ handle opened for the device that was index 0 stays bound to that device after
 another camera sorts ahead of it and becomes index 0. Callers that cache
 therefore use :func:`identify_cv2_index`, which returns the index to open
 *and* the key to file it under.
+
+Provenance: the AVFoundation device enumeration in ``list_cameras_in_process``
+(the device-type list and the discovery-session call) came from leLab's
+``server.py``, hence the HuggingFace line in the header.
 """
 
 import asyncio

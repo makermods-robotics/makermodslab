@@ -50,7 +50,14 @@ from .utils.naming import (
     derive_imported_title,
     imported_name_suffixes,
 )
-from .utils.system import torchcodec_loads
+from .utils.system import (
+    policy_flow_steps_default,
+    policy_flow_steps_field,
+    policy_requires_task,
+    policy_supports_extra_image_roles,
+    policy_supports_model_dtype,
+    torchcodec_loads,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1662,7 +1669,13 @@ def _list_hub_checkpoints(api, repo_id: str) -> list[JobCheckpoint]:
     return []
 
 
-_LANGUAGE_CONDITIONED_POLICY_TYPES = {"smolvla", "pi0", "pi0_fast", "pi05"}
+# Which policy types need a task string is `utils.system`'s
+# LANGUAGE_CONDITIONED_POLICY_TYPES / policy_requires_task — ONE vocabulary,
+# because the two DRTC policy servers refuse to start without a task for exactly
+# these types and a second copy here would let the Lab and the GPU disagree.
+# The set gained `molmoact2` with that move (S3.7a): MolmoAct2 renders a missing
+# task as the literal prompt "The task is to ." and degrades silently, so
+# `requires_task` was already wrong for it before this became shared.
 
 # Policy types whose class declares Real-Time Chunking support in the pinned
 # lerobot fork. See policy_type_supports_rtc for how this list was derived and
@@ -1748,7 +1761,7 @@ def policy_type_supports_rtc(policy_type: str) -> bool | None:
     return None
 
 
-# None of _LANGUAGE_CONDITIONED_POLICY_TYPES has a legitimate from-scratch
+# None of the four types below has a legitimate from-scratch
 # mode: each builds a pretrained backbone (a vision-language model for
 # smolvla, a PaliGemma+expert stack for pi0/pi05/pi0_fast) from a bare config
 # object with no unconditional download anywhere in modeling_<policy>.py —
@@ -2240,6 +2253,21 @@ def _flat_feature_dim(feat: object) -> int | None:
         return int(shape[0])
     except (TypeError, ValueError):
         return None
+
+
+def _positive_int_or_none(value: object) -> int | None:
+    """A checkpoint config's integer knob, or None when it can't be trusted.
+
+    Sibling of `_flat_feature_dim` for the scalar fields (`n_action_steps`,
+    `chunk_size`). Absent, non-integral or non-positive all answer None: every
+    policy config validates these itself at construction, so a bad value here
+    means a hand-edited or corrupt config.json, and the honest answer
+    downstream is "unknown" rather than a number someone derives a horizon
+    from. `bool` is rejected explicitly because it is an `int` subclass and
+    `True` would otherwise read as a horizon of 1."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
 
 
 def read_pretrained_config(pretrained_path: str) -> dict[str, Any] | None:
@@ -3692,7 +3720,7 @@ class JobRegistry:
             config.policy_pretrained_path = hub_ref
 
         # Asked BEFORE the lock, and for the same reason `_drain_queue` phase 1
-        # asks before its own: `_robot_busy` reads seven feature modules whose
+        # asks before its own: `_robot_busy` reads eight feature modules whose
         # `training_is_active()` calls take THIS lock from inside their own
         # `_state_lock`. Reading them while holding it closes the cycle and
         # deadlocks. Never move this inside.
@@ -5312,7 +5340,7 @@ class JobRegistry:
         return {
             "policy_type": policy_type,
             "image_features": image_features,
-            "requires_task": policy_type in _LANGUAGE_CONDITIONED_POLICY_TYPES,
+            "requires_task": policy_requires_task(policy_type),
             # Whether this architecture can run the Real-Time Chunking engine,
             # so the launch UI can offer the engine choice only where it works
             # instead of letting the run die inside the subprocess with the arm
@@ -5321,6 +5349,32 @@ class JobRegistry:
             # guard in rollout.handle_start_inference, which only refuses on a
             # definite False.
             "supports_rtc": (policy_type_supports_rtc(policy_type) if isinstance(policy_type, str) else None),
+            # Whether the two GPU-launch knobs apply to THIS checkpoint
+            # (S3.8f), so the remote panel can disable a select with a reason
+            # rather than send a value the launcher would drop. Both read off
+            # the same `cfg` every other field here comes from; the rules live
+            # in utils.system so the Lab, the route and the container cannot
+            # disagree about what a checkpoint supports.
+            "supports_model_dtype": policy_supports_model_dtype(cfg),
+            # And whether it has a step count to set at all — which
+            # `flow_steps_default` below CANNOT answer, because null there is
+            # both "no such knob" (ACT) and "the knob exists and this
+            # checkpoint saved nothing we can resolve" (a pi05 with a null
+            # `num_inference_steps`).
+            "supports_flow_steps": policy_flow_steps_field(cfg.get("type")) is not None,
+            # And whether extra camera VIEWS may be declared on it (S3.8g).
+            # Off a table rather than off key presence, because no config.json
+            # field says "this family's vision tower takes any number of
+            # pictures" — that is a fact about its processor, and
+            # `utils.system.VARIABLE_VIEW_POLICY_TYPES` is where it was written
+            # down after reading one.
+            "supports_extra_image_roles": policy_supports_extra_image_roles(cfg.get("type")),
+            # Null when there is no number to show — a policy with no such knob,
+            # or one that saved none and whose applying default this side cannot
+            # see. MolmoAct2 is NOT that case: it saves null and runs at 10, the
+            # pin's backbone default, which `policy_flow_steps_default` fills in.
+            # The client must read null as "no number to show", not "no default".
+            "flow_steps_default": policy_flow_steps_default(cfg),
             # Flat proprioceptive state / action widths. For an SO-101 arm this
             # is 6 (one per joint); a bimanual-trained checkpoint carries 12
             # (two arms). The inference modal compares this against the selected
@@ -5328,6 +5382,20 @@ class JobRegistry:
             # the user hits Start. None when the checkpoint omits the feature.
             "state_dim": _flat_feature_dim(input_features.get("observation.state")),
             "action_dim": _flat_feature_dim((cfg.get("output_features") or {}).get("action")),
+            # The checkpoint's own chunk geometry, straight off config.json.
+            # `n_action_steps` is how many steps of a predicted chunk the policy
+            # actually returns, so it is the CEILING on a remote-inference
+            # horizon: declare more and the two Portal peers disagree about the
+            # action-chunk shape, the fingerprint stops matching, and every
+            # packet is dropped in silence — a healthy-looking session with zero
+            # chunks. The default the panel prints (50) is a smolvla/pi0 number;
+            # MolmoAct2's published checkpoint is 30, which is exactly the case
+            # this field exists to stop the operator walking into. `chunk_size`
+            # is the width the policy predicts internally (>= n_action_steps),
+            # carried alongside so the two are readable together. Both null when
+            # the checkpoint omits them or saves a non-integer.
+            "n_action_steps": _positive_int_or_none(cfg.get("n_action_steps")),
+            "chunk_size": _positive_int_or_none(cfg.get("chunk_size")),
             # Raw lerobot robot_type string (e.g. "maker_follower"); the client
             # normalises it. None when it can't be established.
             "trained_on_robot_type": trained_on_robot_type,
@@ -6140,13 +6208,13 @@ class JobRegistry:
 
         Local training is bounded by this machine's GPU/USB (the premise
         `_local_slot_busy` is built on), and teleoperation, recording,
-        inference, replay, calibration, auto-calibration and wiggle are all
-        mutually exclusive with each other for exactly that reason — each
-        checks the other six before starting (CLAUDE.md: "New features that
-        drive the robot must add the same reciprocal checks against every
-        existing one"). Training never joined that set, which was survivable
-        while a training could only begin from an explicit user submit: the
-        user was present and knew what else they had running.
+        inference, remote inference, replay, calibration, auto-calibration and
+        wiggle are all mutually exclusive with each other for exactly that
+        reason — each checks the other seven before starting (CLAUDE.md: "New
+        features that drive the robot must add the same reciprocal checks
+        against every existing one"). Training never joined that set, which was
+        survivable while a training could only begin from an explicit user
+        submit: the user was present and knew what else they had running.
 
         The queue removes that. `_drain_queue` starts a trainer from a WATCHDOG
         THREAD, at an arbitrary moment, with nobody at the keyboard — several GB
@@ -6159,7 +6227,7 @@ class JobRegistry:
         globals, this is an advisory "is now a good moment" check rather than a
         mutex, and the cost of a stale read is one second's delay.
 
-        Never raises. These seven modules pull in cv2, av and the lerobot robot
+        Never raises. These eight modules pull in cv2, av and the lerobot robot
         backends, none of which `jobs` depended on before the queue existed, and
         this runs as the FIRST statement of `_drain_queue` — so an ImportError
         here (a headless install, a half-installed optional extra, a broken cv2)
@@ -6178,6 +6246,7 @@ class JobRegistry:
                 auto_calibrate as _auto_calibrate,
                 calibrate as _calibrate,
                 record as _record,
+                remote_inference as _remote_inference,
                 replay as _replay,
                 rollout as _rollout,
                 teleoperate as _teleoperate,
@@ -6188,6 +6257,8 @@ class JobRegistry:
                 return "a recording session"
             if _rollout.inference_active:
                 return "an inference session"
+            if _remote_inference.remote_inference_is_active():
+                return "a remote inference session"
             if _teleoperate.teleoperation_active:
                 return "teleoperation"
             if _replay.replay_active:

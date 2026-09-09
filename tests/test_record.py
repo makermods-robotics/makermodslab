@@ -1321,11 +1321,13 @@ def _run_record_session(
     def _spy_return(rest_poses, abort_event):
         return_calls.append((list(rest_poses), abort_event))
 
-    monkeypatch.setattr(record, "_return_followers_to_rest", _spy_return)
-    monkeypatch.setattr(record, "force_disable_torque", lambda device, label="": [])
-    monkeypatch.setattr(record, "reset_torque_limit", lambda *a, **k: [])
-    monkeypatch.setattr(record, "clear_goal_velocity", lambda *a, **k: [])
-    monkeypatch.setattr(record, "verify_devices", lambda *a, **k: [])
+    # The stop path runs through the arm family, which calls these modules.
+    monkeypatch.setattr("makermodslab.rest_pose.return_buses_to_rest", _spy_return)
+    monkeypatch.setattr("makermodslab.torque.force_disable_torque", lambda device, label="": [])
+    # The preflight runs through the arm family, which calls these modules.
+    monkeypatch.setattr("makermodslab.motor_power.reset_torque_limit", lambda *a, **k: [])
+    monkeypatch.setattr("makermodslab.motor_power.clear_goal_velocity", lambda *a, **k: [])
+    monkeypatch.setattr("makermodslab.arm_identity.verify_devices", lambda *a, **k: [])
 
     if preset_release_now:
         record._release_now.set()

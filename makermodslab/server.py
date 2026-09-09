@@ -38,7 +38,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub.errors import HfHubHTTPError
-from pydantic import BaseModel, Field, StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
@@ -51,15 +51,31 @@ from lerobot.policies.factory import make_policy_config
 # lookup at call time, not a bound name frozen at import).
 from . import (
     datasets as dataset_browser,
+    # The GPU half of a remote-inference run, as a LAB-LEVEL resource (S3.8):
+    # it shells out to the `modal` CLI, imports nothing from `drtc/`, and is
+    # deliberately not a session — see its module docstring.
+    modal_launcher,
     models as model_browser,
     record as record_state,
+    remote_host,
+    # The ROBOT half of the same run. Imported as a module (beside the two
+    # handlers pulled in below) because `shutdown_event` calls
+    # `stop_for_shutdown` on it — the child holds an energized arm and does not
+    # die with this process.
+    remote_inference,
+    remote_teleoperate,
     rollout as rollout_state,
     session_events,
+    sfu,
 )
 
 # Import our custom calibration functionality
 from .__version__ import __version__
 from .api_errors import ApiError, ErrorCode, install_error_handlers
+from .arm_capabilities import require_known_arm_type, require_leader_kind
+from .arms import registry as arm_registry
+from .arms.base import leader_kwargs
+from .arms.manifest import arms_manifest
 from .auto_calibrate import (
     AutoCalibrationBatchRequest,
     AutoCalibrationRequest,
@@ -80,7 +96,6 @@ from .dagger_protocol import (
     CMD_RESUME,
     CMD_TAKEOVER,
 )
-from .identify import identify_arm_by_motion
 from .jobs import (
     _KNOWN_FOUNDATION_BASE_REPO_IDS,
     CHECKPOINTS_STAGING_SUFFIX,
@@ -103,7 +118,6 @@ from .jobs import (
     job_registry,
     training_is_active,
 )
-from .maker_ports import identify_maker_arm_by_motion, probe_maker_ports
 from .merge import MergeRequest, handle_merge_status, handle_start_merge
 from .motor_power import read_supply_voltage
 from .nodes import (
@@ -143,6 +157,16 @@ from .record import (
     handle_upload_status,
     stop_and_wait as stop_recording_and_wait,
 )
+from .recording_preview import recording_preview
+
+# Remote inference (DRTC). The module guards its own optional-extra imports
+# (aiohttp / dotenv / livekit.api / drtc._env are one try/except that degrades
+# to `_extra_missing()`), so importing it at server module scope cannot break a
+# no-extra install — and nothing under `makermodslab.drtc` is reached at boot.
+from .remote_inference import (
+    handle_remote_inference_status,
+    handle_remote_inference_transport,
+)
 from .replay import (
     ReplayRequest,
     handle_replay_status,
@@ -160,8 +184,6 @@ from .rollout import (
     handle_stop_episode,
     handle_stop_inference,
 )
-
-# Response models for the typed /api/v1 surface (see makermodslab/schemas/).
 from .schemas.datasets import (
     DatasetHubSettingsResponse,
     DatasetHubStatusResponse,
@@ -212,9 +234,23 @@ from .schemas.nodes import (
     NodeListResponse,
     NodeRemoveResponse,
 )
+from .schemas.remote import (
+    HostingStatusResponse,
+    RemoteCommandResponse,
+    RemoteTeleoperationStatusResponse,
+    StationStatusResponse,
+)
+
+# Response models for the typed /api/v1 surface (see makermodslab/schemas/).
+from .schemas.remote_network import GpuNetworkOptions
 from .schemas.sessions import (
     CoachingCommandResponse,
     CurrentSessionResponse,
+    GpuLaunchResponse,
+    GpuStatusResponse,
+    GpuTargetsResponse,
+    RemoteInferenceStatusResponse,
+    RemoteInferenceTransportStatusResponse,
     SessionCoachingBody,
     SessionCoachingResponse,
     SessionHeartbeatBody,
@@ -223,9 +259,12 @@ from .schemas.sessions import (
     SessionStartResponse,
     SessionStopResponse,
 )
+from .schemas.sfu import SfuTokenResponse
 from .schemas.system import (
+    ArmFamiliesResponse,
     AvailableCamerasResponse,
     AvailablePortsResponse,
+    CanGripperWiggleResponse,
     ExtraStatus,
     HealthResponse,
     HfAuthStatusResponse,
@@ -251,6 +290,7 @@ from .sessions import (
     handle_stop_session,
     held_by,
 )
+from .step_calibrate import step_calibration_is_active, step_calibration_manager
 
 # Import our custom teleoperation functionality
 from .teleoperate import (
@@ -265,6 +305,7 @@ from .teleoperate import (
 from .train import TrainingRequest
 from .update import handle_run_update, handle_update_check
 from .utils.config import (
+    HOME_IS_OVERRIDDEN,
     add_dismissed_hub_job,
     add_hidden_dataset,
     add_hidden_model,
@@ -281,9 +322,11 @@ from .utils.config import (
     get_instance_id,
     get_robot_record,
     get_saved_robot_port,
+    is_known_arm_type,
     is_robot_record_clean,
     is_valid_robot_name,
     list_robot_records,
+    migrate_legacy_state,
     port_slot_conflict,
     prune_dismissed_hub_jobs,
     remove_hidden_dataset,
@@ -305,10 +348,13 @@ from .utils.hf_auth import (
 )
 from .utils.system import (
     handle_get_policy_extra,
+    handle_get_remote_extra,
     handle_get_training_extra,
     handle_get_wandb_extra,
     handle_install_policy_extra,
     handle_install_policy_extra_status,
+    handle_install_remote_extra,
+    handle_install_remote_extra_status,
     handle_install_training_extra,
     handle_install_training_extra_status,
     handle_install_wandb_extra,
@@ -321,7 +367,6 @@ from .utils.system import (
     warn_if_cuda_mismatch,
 )
 from .wiggle import wiggle_gripper
-from .zero_calibrate import zero_calibration_is_active, zero_calibration_manager
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -645,6 +690,7 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+recording_preview.joint_notifier = manager.broadcast_joint_data_sync
 
 
 def _on_jobs_changed() -> None:
@@ -1043,9 +1089,9 @@ def start_session(body: SessionStartBody):
     fields and cameras resolve server-side from the saved robot record, and
     `options` carries only the kind-specific fields (see schemas/sessions.py).
 
-    Startable kinds: teleoperation, recording, inference, replay,
-    calibration, auto_calibration. Only wiggle still starts through its
-    legacy flow endpoint (seconds of open-loop motion, no stop handler) —
+    Startable kinds: teleoperation, recording, inference, remote_inference,
+    replay, calibration, auto_calibration. Only wiggle still starts through
+    its legacy flow endpoint (seconds of open-loop motion, no stop handler) —
     the identity tracker observes it all the same. Calibration's mid-session
     wizard controls (complete-calibration-step, the status polls) stay on
     their existing endpoints, like recording's pause/rerecord.
@@ -1130,8 +1176,304 @@ def coaching_command(session_id: str, body: SessionCoachingBody):
     return handle_coaching_command_for_session(session_id, body.command)
 
 
+# --- Remote inference (DRTC): status + transport (v1-only surface) ---
+#
+# No start/stop verbs live here: a remote-inference session starts through
+# POST /api/v1/sessions with kind "remote_inference" and stops through
+# /sessions/{id}/stop, like every other robot-driving kind. What is left is two
+# reads. The third route this group used to carry — clear-local-override —
+# retired with the shell SFU scripts in S3.6: the Lab hosts the SFU itself now
+# (--sfu), so there is no dotenv file outliving a script to delete.
+
+
+@v1_router.get(
+    "/remote-inference-status",
+    response_model=RemoteInferenceStatusResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_status():
+    """Live telemetry of the remote-inference session: phase, elapsed/duration,
+    the child's 1 Hz STATS sample, and the transport it actually resolved.
+
+    Poll at 1 Hz — the rate the child emits at. Metrics are deliberately NOT
+    pushed on the websocket: `holds` climbing and `degrade` mean the run is
+    losing quality and the operator's response is "stop it", which is not a
+    millisecond decision; and a droppable hint channel drops under queue
+    pressure, which is exactly when a run is in trouble. Only real transitions
+    ride `session_changed`.
+
+    `stats` is null until the first sample lands (and stays null for a run that
+    never connected); every key WITHIN a sample is always present, null where
+    unknown — a dropped or malformed line degrades to "no sample this second",
+    never to a half-populated one the UI would render as real. No exclusion
+    mode: those nulls are meaningful (see RemoteInferenceStats).
+
+    Pollable unconditionally: when idle it answers
+    `remote_inference_active=false` with null stats/transport, mirroring
+    /inference-status.
+    """
+    return handle_remote_inference_status()
+
+
+@v1_router.get(
+    "/remote-inference/transport",
+    response_model=RemoteInferenceTransportStatusResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_transport():
+    """What transport a remote-inference child would resolve RIGHT NOW, and
+    whether anything is answering on it. Read-only; touches no hardware and
+    starts nothing.
+
+    Two transports, one shape. When this process runs the Lab's own SFU
+    (`makermodslab --sfu`) the url, room and credentials come from sfu.py
+    in-process and livekit.env is never read; the `sfu_*` block then carries
+    what the panel needs for the GPU side's command line — including the key
+    NAME and the file the secret lives in, never the secret. Otherwise the
+    LiveKit Cloud credentials are resolved through `drtc._env.read_env()`,
+    never `load_env()`: load_env writes os.environ, and a server that has
+    stamped a url into its own environment can never re-resolve it.
+
+    `endpoint_reachable` / `operator_present` come from one `list_participants`
+    call behind remote_inference._probe_room, bounded at 3s, and are null when
+    that probe did not run at all. A missing [remote] extra is REPORTED here
+    rather than raised: the panel's job is to tell the user what to install,
+    and the install command must name the PRIMARY CHECKOUT — an editable
+    install run from a worktree silently re-points every other session's
+    makermodslab.
+
+    Deliberately NOT refused while a session is live. Unlike
+    /arms/release-torque this reads dotenv files and asks the SFU who is in a
+    room; it touches nothing the running child owns, and a live child already
+    pinned its transport at spawn (READY echoes the effective values).
+    """
+    return handle_remote_inference_transport()
+
+
+# --- Remote inference: the GPU half (modal_launcher.py, v1-only surface) ---
+#
+# A LAB-LEVEL RESOURCE, not a session, and that is the whole design decision of
+# S3.8 (docs/drtc/SLICE3.md "S3.8 as built"). The GPU holds no hardware, so:
+# these are their own verbs rather than a `launch_gpu` field on
+# `RemoteInferenceOptions` — that would hold `robot.busy.remote_inference` for
+# the 1-3 minute cold start while the arm sat completely free; stopping a
+# session does NOT stop the GPU (a lease expiry is a safety stop whose one job
+# is de-energizing an arm, and it must not grow a network call); and the GPU
+# reaching `ready` does NOT gate the arm — `_probe_room` still does, because it
+# observes the room rather than a log line.
+
+
+class GpuStartBody(GpuNetworkOptions):
+    """The GPU side of the remote-run form. Field-for-field the subset of
+    `RemoteInferenceOptions` the container needs, with the same defaults: the
+    two halves are launched from one object precisely so horizon / fps / codec
+    / s_min cannot disagree (Portal fingerprints the wire schema and drops a
+    mismatched stream in silence).
+
+    `extra="forbid"` like every options model — a typo'd knob is a loud 422,
+    never a silently ignored one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    engine: Literal["sync", "rtc"] = "sync"
+    # Required in practice: `--policy-path` has no default in either wrapper,
+    # so an empty one is refused (gpu.launch_failed) BEFORE the spawn rather
+    # than arriving as a Click usage error 90s into a cold-start log.
+    policy_hub_id: str = ""
+    task: str = ""
+    horizon: int = 16
+    fps: int = 30
+    video_codec: Literal["H264", "MJPEG"] = "H264"
+    s_min: int = 4
+    slack: int = Field(
+        default=modal_launcher.DEFAULT_SLACK,
+        ge=modal_launcher.SLACK_MIN,
+        le=modal_launcher.SLACK_MAX,
+        strict=True,
+        description="Policy-side synchronization buffering in ticks; applied on GPU launch.",
+    )
+    # WHICH WORKSPACE PAYS. Both optional, and empty means exactly what S3.8
+    # did: the `modal` CLI resolves the profile and the environment itself
+    # (MODAL_ENVIRONMENT, then the active local profile, then the workspace
+    # default). A client that never sends them sees no change.
+    #
+    # Free-form strings rather than a Literal because the valid set is THIS
+    # MACHINE's, read from the CLI at request time — see
+    # GET /remote-inference/gpu/targets. Unknown values are refused there and
+    # again in `modal_launcher.check_target`, before anything is spawned.
+    profile: str = ""
+    environment: str = ""
+    # WHAT IT RUNS AS and WHAT IT RUNS ON (S3.8e). Both empty is S3.8's
+    # behaviour byte for byte — the checkpoint's own saved dtype, and the
+    # wrapper's own pinned GPU — so a client that never sends them sees no
+    # change.
+    #
+    # Literals here, unlike `profile` / `environment` above, because these two
+    # sets are STATIC rather than this machine's: they are annotated with the
+    # launcher's own types so the allowlist is written down once
+    # (`modal_launcher.GpuChoice` / `.ModelDtypeChoice`). `modal_launcher`
+    # checks them AGAIN before spawning, because `start()` is a plain function
+    # and a pydantic field cannot guard the callers that skip this model.
+    #
+    # A precision that is not the saved one replaces the config's `model_dtype`
+    # before the weights load; the GPU type cannot ride argv at all (the
+    # wrapper's `@app.function(gpu=…)` is evaluated at import) and travels as
+    # DRTC_GPU in the child env.
+    model_dtype: modal_launcher.ModelDtypeChoice = ""
+    gpu: modal_launcher.GpuChoice = ""
+    # HOW HARD IT WORKS PER CHUNK (S3.8f): the flow-matching / denoising steps
+    # the sampler takes for one action chunk. Null (the default) is the
+    # checkpoint's own count and passes no flag at all — an int has no empty
+    # string, so null is what "" is for the two above.
+    #
+    # A RANGE rather than a Literal, unlike those two, because every integer in
+    # it is meaningful — the sampler simply integrates that many times. The
+    # bounds are the launcher's (`modal_launcher.FLOW_STEPS_MIN/MAX`) and it
+    # checks them again before spawning, because `start()` is a plain function
+    # and a pydantic field cannot guard the callers that skip this model.
+    #
+    # Which config field it writes is per family and is resolved in the
+    # container; if the target checkpoint's config carries no such field at
+    # all, the launcher DROPS the knob before spawning rather than paying for a
+    # cold start that ends in the container's refusal (`flow_steps_applied` in
+    # the GPU status says so).
+    flow_steps: int | None = Field(
+        default=None,
+        ge=modal_launcher.FLOW_STEPS_MIN,
+        le=modal_launcher.FLOW_STEPS_MAX,
+    )
+    # EXTRA CAMERA VIEWS to declare on the checkpoint before the weights load
+    # (S3.8g), by role name — `["cam2"]` on a checkpoint published with
+    # `cam0`/`cam1`. Empty (the default) is the checkpoint's own views and
+    # passes no flag, so a client that never sends it sees no change.
+    #
+    # The only knob here that changes the WIRE rather than the GPU's own work:
+    # each role becomes an `observation.images.<role>` input feature, so the
+    # policy expects one more video track and the robot side must publish one
+    # (bind it in the same `camera_bindings` the checkpoint's own roles use).
+    #
+    # A LIST rather than a comma-joined string, because that is what it is;
+    # `modal_launcher.build_argv` does the joining, the wrappers' Click
+    # parameter being a str. `max_length` and the per-item pattern are the
+    # launcher's own (`MAX_EXTRA_IMAGE_ROLES`, `is_valid_image_role`) and it
+    # checks them AGAIN before spawning, because `start()` is a plain function
+    # and a pydantic field cannot guard the callers that skip this model.
+    #
+    # Dropped before the spawn for a checkpoint whose view count is fixed by
+    # its architecture, on `flow_steps`' rule (`extra_image_roles_applied` in
+    # the GPU status says so) — a role remembered from a MolmoAct2 run must not
+    # cost a cold start after the operator switches checkpoint.
+    extra_image_roles: list[str] = Field(
+        default_factory=list,
+        max_length=modal_launcher.MAX_EXTRA_IMAGE_ROLES,
+    )
+
+
+@v1_router.get(
+    "/remote-inference/gpu/targets",
+    response_model=GpuTargetsResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_gpu_targets(profile: str = ""):
+    """This machine's Modal profiles, and one profile's environments.
+
+    What the two pickers above Start GPU are built from, so a launch can be
+    billed to a chosen workspace WITHOUT `modal profile activate` — that
+    rewrites ~/.modal.toml, which every other terminal on this machine shares,
+    and a web request has no business doing that. The profile rides the child's
+    MODAL_PROFILE instead, and the environment rides `modal run --env`.
+
+    `profile` picks whose environments to list (empty: the active one), because
+    `modal environment list` only ever describes one profile's workspace.
+
+    Read-only and never 500: two bounded `modal … list --json` subprocesses, no
+    mutating subcommand, and ~/.modal.toml — which holds every profile's
+    token_id and token_secret — is never opened. A missing CLI, an expired
+    token or a listing this build cannot parse come back as a coded `error` in
+    the body, because a failed listing is not a failed launch: with no selection
+    the CLI still resolves the target on its own."""
+    return modal_launcher.list_targets(profile)
+
+
+@v1_router.post(
+    "/remote-inference/gpu/start",
+    response_model=GpuLaunchResponse,
+    tags=["sessions"],
+)
+def start_remote_inference_gpu(body: GpuStartBody):
+    """Launch the policy server on Modal, attached, from this machine.
+
+    Attached on purpose (no `--detach`): the local `modal run` process is the
+    app's lifeline, so stopping it stops the app — which is the cost-safety
+    property, and it means the GPU dies with the Lab. Detached would buy
+    "survives a restart" in exchange for orphaned A100s nobody knows about.
+
+    The API secret is NEVER in the command line: both wrappers' `main()` falls
+    back to LIVEKIT_API_KEY / LIVEKIT_API_SECRET from the environment, and the
+    launcher passes them there instead of in argv, which is world-readable in
+    `ps` on this machine.
+
+    Deliberately NOT refused while a local training run holds this machine: a
+    Modal A100 is not this machine's GPU.
+    """
+    return modal_launcher.start(
+        engine=body.engine,
+        policy_hub_id=body.policy_hub_id,
+        task=body.task,
+        horizon=body.horizon,
+        fps=body.fps,
+        video_codec=body.video_codec,
+        s_min=body.s_min,
+        slack=body.slack,
+        region=body.region,
+        tolerance=body.tolerance,
+        profile=body.profile,
+        environment=body.environment,
+        model_dtype=body.model_dtype,
+        gpu=body.gpu,
+        flow_steps=body.flow_steps,
+        extra_image_roles=body.extra_image_roles,
+    )
+
+
+@v1_router.post(
+    "/remote-inference/gpu/stop",
+    response_model=GpuStatusResponse,
+    tags=["sessions"],
+)
+def stop_remote_inference_gpu():
+    """Stop the GPU policy server (SIGTERM→SIGKILL over its process group).
+
+    Returns while the group is still going down, in state `stopping`; the
+    launcher's own stdout pump lands it in `idle`. 409 `gpu.not_running` when
+    there is nothing to stop. Never touches the arm — a live remote-inference
+    session keeps running and its watchdogs report the empty room, which is a
+    better diagnosis than a stop the user did not ask for."""
+    return modal_launcher.stop()
+
+
+@v1_router.get(
+    "/remote-inference/gpu",
+    response_model=GpuStatusResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_gpu():
+    """The GPU launcher's state: idle | starting | ready | failed | stopping,
+    plus the container's own phase, the room it was pinned to, the log path and
+    the idle auto-stop countdown.
+
+    Pollable unconditionally, and a poll is also one of the two things (with
+    the log pump) that can notice a cold start that overran or a ready GPU
+    nobody is using — neither deadline needs a thread of its own.
+
+    `state == "ready"` is a HINT derived from the container's stdout, never the
+    authority: the gate on energizing the arm stays the session's own room
+    probe."""
+    return modal_launcher.status()
+
+
 @router.get("/health", response_model=HealthResponse, tags=["system"])
-def health_check():
+def health_check(request: Request):
     """Node identity + capability document.
 
     Doubles as the node-registry verify handshake: a discovered peer is
@@ -1150,8 +1492,186 @@ def health_check():
             # Present only when the torch probe sees an accelerator — an
             # absent key means none/unknown, never guess (see HealthResponse).
             **({"gpu": gpu} if (gpu := probe_gpu()) else {}),
+            # Present only when this process runs (or fronts) a LiveKit SFU
+            # (--sfu): the signalling URL as reachable from the caller's
+            # side. Absent = no SFU here; a peer wanting one asks another
+            # node. Same absent-means-unknown rule as gpu.
+            **(
+                {"sfu": {"url": sfu.sfu_url(request.url.hostname or "localhost")}}
+                if sfu.sfu_enabled()
+                else {}
+            ),
+            # Present only while a hosting session is live — the robot this
+            # station offers for remote teleoperation. A laptop's station
+            # picker filters on it. Same absent-means-none rule.
+            **_hosting_capability(),
         },
     }
+
+
+def _hosting_capability() -> dict:
+    descriptor = remote_host.current_descriptor
+    if not remote_host.hosting_active or not descriptor:
+        return {}
+    return {
+        "hosting": {
+            "robot": descriptor["robot"],
+            "arm_type": descriptor["arm_type"],
+            "phase": remote_host.phase,
+            "active_operator": remote_host.seat_holder(),
+        }
+    }
+
+
+# --- SFU token broker (v1-only surface; see v1_router note above) ---
+
+
+class SfuTokenBody(BaseModel):
+    """Request for a LiveKit room token (sfu.py). Every field is optional:
+    the server picks a unique identity and the station's default room, and
+    `operator` is the role a laptop or a policy worker wants. `robot` is for
+    the one participant that publishes cameras/state (normally this station
+    itself, in a later phase); `viewer` subscribes only."""
+
+    identity: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")] | None = None
+    room: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")] | None = None
+    role: Literal["robot", "operator", "viewer"] = "operator"
+    ttl_seconds: int = Field(sfu.DEFAULT_TTL_SECONDS, ge=sfu.MIN_TTL_SECONDS, le=sfu.MAX_TTL_SECONDS)
+
+
+@v1_router.post("/sfu/token", response_model=SfuTokenResponse, tags=["sfu"])
+def issue_sfu_token(body: SfuTokenBody, request: Request):
+    """Sign a short-lived, role-scoped LiveKit room token.
+
+    The station is the only party holding the SFU secret, so participants
+    (a laptop's makermodslab, a Modal worker, a browser) get their JWT here
+    instead of carrying the secret. The URL is built from the host the
+    caller reached THIS API on — the one address known to be routable from
+    where they sit. 409 sfu.disabled when the launcher wasn't started with
+    --sfu: the remedy is a restart with the flag, not a retry."""
+    if not sfu.sfu_enabled():
+        raise ApiError(
+            409,
+            "No LiveKit SFU is configured on this node. Start it with `makermodslab --sfu`.",
+            code=ErrorCode.SFU_DISABLED,
+        )
+    api_key, api_secret = sfu.api_keys()
+    identity = body.identity or sfu.default_identity(body.role)
+    # Single seat: while a hosting session's seat is held, only its holder
+    # (a reconnect) gets another operator token. The room cap is the SFU's
+    # half of the same rule.
+    if body.role == "operator":
+        holder = remote_host.seat_holder()
+        if holder is not None and holder != identity:
+            raise ApiError(
+                409,
+                f"This station's operator seat is held by {holder!r}. Only one operator drives at a time.",
+                code=ErrorCode.SFU_SEAT_TAKEN,
+                details={"holder": holder},
+            )
+    room = body.room or sfu.default_room(get_instance_id())
+    token, expires_at = sfu.mint_token(
+        api_key=api_key,
+        api_secret=api_secret,
+        identity=identity,
+        room=room,
+        role=body.role,
+        ttl_seconds=body.ttl_seconds,
+    )
+    return {
+        "url": sfu.sfu_url(request.url.hostname or "localhost"),
+        "token": token,
+        "room": room,
+        "identity": identity,
+        "role": body.role,
+        "expires_at": expires_at,
+    }
+
+
+# --- Remote teleoperation (v1-only surface; see v1_router note above) ---
+
+
+@v1_router.get("/hosting", response_model=HostingStatusResponse, tags=["remote"])
+def get_hosting_status(request: Request):
+    """The station's hosting descriptor + status (remote_host.py). An
+    operator node reads this (through its registry) to learn the room, the
+    codec/fps, and the motor/camera schema before joining; the URL is
+    derived from the host the caller reached this API on."""
+    return remote_host.handle_hosting_status(request.url.hostname or "localhost")
+
+
+@v1_router.get("/remote-teleoperation", response_model=RemoteTeleoperationStatusResponse, tags=["remote"])
+def get_remote_teleoperation_status():
+    """The operator side's status (remote_teleoperate.py): which station,
+    which room, the remote cameras being re-streamed, Portal RTT metrics."""
+    return remote_teleoperate.handle_remote_teleoperation_status()
+
+
+@v1_router.get("/remote-teleoperation/camera/{name}", tags=["remote"])
+def get_remote_teleoperation_camera(name: str):
+    """MJPEG re-stream of one remote camera during a remote teleoperation
+    session, from the frames Portal delivers — the existing camera tiles
+    consume it unchanged. 404 when no session (or no such camera)."""
+    if not remote_teleoperate.remote_teleoperation_active or name not in remote_teleoperate.current_cameras:
+        raise ApiError(404, f"No remote camera named {name!r} is streaming.", code=ErrorCode.ROBOT_NOT_FOUND)
+    return StreamingResponse(
+        remote_teleoperate.camera_stream(name), media_type="multipart/x-mixed-replace; boundary=frame"
+    )
+
+
+class StationRobotBody(BaseModel):
+    """PUT /api/v1/station/robot — the robot this station hosts; null clears
+    the choice (hosting stops once idle and waits for a new pick)."""
+
+    robot: str | None = None
+
+
+@v1_router.get("/station", response_model=StationStatusResponse, tags=["remote"])
+def get_station_status():
+    """Station mode posture (remote_host.py): whether this machine was started
+    with --host, which robot it hosts, which saved robots it could host."""
+    return remote_host.handle_station_status()
+
+
+@v1_router.put("/station/robot", response_model=StationStatusResponse, tags=["remote"])
+def set_station_robot(body: StationRobotBody):
+    """Choose (or clear) the hosted robot. Remembered across restarts; a
+    parked, unseated hosting session of another robot yields and the
+    supervisor re-hosts the new choice within seconds; an engaged one is
+    refused with session.held."""
+    return remote_host.set_station_robot(body.robot)
+
+
+@v1_router.post("/remote-teleoperation/home", response_model=RemoteCommandResponse, tags=["remote"])
+def remote_teleoperation_home():
+    """Park the station's arm (return to rest, torque off) and hold it there
+    until Engage. Forwarded to the station as a Portal RPC; the station
+    honours it only from the seated operator."""
+    return remote_teleoperate.handle_remote_home()
+
+
+@v1_router.post("/remote-teleoperation/engage", response_model=RemoteCommandResponse, tags=["remote"])
+def remote_teleoperation_engage():
+    """Re-energize the station's arm after a Home, with a soft start."""
+    return remote_teleoperate.handle_remote_engage()
+
+
+@v1_router.get("/system/remote-extra", response_model=ExtraStatus, tags=["system"])
+def get_remote_extra():
+    """Whether the `remote` extra (LiveKit Portal's lerobot plugins) is importable."""
+    return handle_get_remote_extra()
+
+
+@v1_router.post("/system/remote-extra/install", response_model=InstallStartResponse, tags=["system"])
+def install_remote_extra():
+    """Spawn the Portal plugins' pip install as a background subprocess. No-op if already running."""
+    return handle_install_remote_extra()
+
+
+@v1_router.get("/system/remote-extra/install-status", response_model=InstallStatusResponse, tags=["system"])
+def install_remote_extra_status():
+    """Current install state plus any pending log lines (drained on read)."""
+    return handle_install_remote_extra_status()
 
 
 # --- Node registry (v1-only surface; see v1_router note above) ---
@@ -1163,7 +1683,7 @@ class AddNodeBody(BaseModel):
 
 
 @v1_router.get("/nodes", response_model=NodeListResponse, tags=["nodes"])
-def list_nodes(force: bool = False):
+def list_nodes(request: Request, force: bool = False):
     """All known nodes: this server first (is_self=true, built from the same
     health fields the handshake reads, so clients render one uniform list),
     then every registered peer. Peers whose last probe is older than the TTL
@@ -1174,7 +1694,7 @@ def list_nodes(force: bool = False):
     pass bypasses the TTL — discovery runs now and every known entry is
     probed now — so a refresh button answers with the world as it is, not as
     it was up to TTL seconds ago."""
-    health = health_check()
+    health = health_check(request)
     self_entry = {
         "url": None,  # a server doesn't know its own external address
         "instance_id": health["instance_id"],
@@ -3061,9 +3581,11 @@ def get_checkpoint_policy_config(job_id: str, step: int):
     """Return the UX-relevant slice of a checkpoint's pretrained_model config:
     policy_type, image_features (per-camera height/width), requires_task, the
     flat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference
-    modal uses to flag a single-arm/bimanual mismatch, and trained_on_robot_type
-    (the arm the checkpoint was trained on, for the fine-tune panel's cross-arm
-    warning; null when it can't be established)."""
+    modal uses to flag a single-arm/bimanual mismatch, the n_action_steps /
+    chunk_size geometry (n_action_steps is the ceiling on a remote-inference
+    horizon), and trained_on_robot_type (the arm the checkpoint was trained on,
+    for the fine-tune panel's cross-arm warning; null when it can't be
+    established)."""
     try:
         return job_registry.get_policy_config_summary(job_id, step)
     except JobNotFoundError as exc:
@@ -3615,37 +4137,53 @@ def stop_calibration():
     """Stop calibration process.
 
     Stops whichever calibration flow is live. Stopping is never owner-gated
-    and the two managers are mutually exclusive, so trying the zero-pose flow
+    and the two managers are mutually exclusive, so trying the step wizard
     first and falling through is unambiguous.
     """
-    if zero_calibration_is_active():
-        return zero_calibration_manager.stop()
+    if step_calibration_is_active():
+        return step_calibration_manager.stop()
     return calibration_manager.stop_calibration_process()
 
 
 @router.get("/calibration-status")
-def calibration_status():
+def calibration_status(arm_type: str | None = None):
     """Get current calibration status, from whichever flow is live.
 
     The two status dataclasses are field-compatible where they overlap, so one
-    client shape reads both. `awaiting_pose` is present only on the zero-pose
-    flow and defaults to False for the SO-101 sweep, which is what lets the
-    frontend switch panels on it.
+    client shape reads both. `image_url` and `live_positions` are the step
+    wizard's own fields and default (null / False) for the SO-101 sweep, so
+    the frontend reads one shape whichever manager answers.
     """
     from dataclasses import asdict
 
-    if zero_calibration_is_active():
-        return asdict(zero_calibration_manager.get_status())
+    from .arm_capabilities import calibration_kind, require_known_arm_type
+
+    if arm_type is not None:
+        require_known_arm_type(arm_type)
+    # An explicit family keeps terminal wizard results visible after release.
+    if (arm_type is not None and calibration_kind(arm_type) == "steps") or (
+        arm_type is None and step_calibration_is_active()
+    ):
+        return asdict(step_calibration_manager.get_status())
     payload = asdict(calibration_manager.get_status())
-    payload.setdefault("awaiting_pose", False)
+    payload.setdefault("image_url", None)
+    payload.setdefault("live_positions", False)
     return payload
 
 
+class CompleteCalibrationStepRequest(BaseModel):
+    # The step number the client is confirming (the step wizard sends the one
+    # on screen). Optional: the range-sweep flow and older clients send no
+    # body. When present, a confirm for any other step is refused rather than
+    # carried over to the step the family published next.
+    step: int | None = None
+
+
 @router.post("/complete-calibration-step")
-def complete_calibration_step():
+def complete_calibration_step(request: CompleteCalibrationStepRequest | None = None):
     """Complete the current calibration step (either flow)."""
-    if zero_calibration_is_active():
-        return zero_calibration_manager.complete_step()
+    if step_calibration_is_active():
+        return step_calibration_manager.complete_step(request.step if request else None)
     return calibration_manager.complete_step()
 
 
@@ -3693,10 +4231,15 @@ def auto_calibration_batch_status():
 
 
 @router.get("/calibration-configs/{device_type}")
-def get_calibration_configs(device_type: str, arm_type: str = "so101"):
+def get_calibration_configs(device_type: str, arm_type: str = "so101", leader_kind: str | None = None):
     """Get all calibration config files for a specific device type"""
+    # `?arm_type=nope` is a 400, never the SO-101 library — and outside the
+    # try, so the coded ApiError reaches the app-wide handler. Same on every
+    # calibration-configs route below.
+    require_known_arm_type(arm_type)
+    require_leader_kind(arm_type, leader_kind)
     try:
-        config_path = calibration_dir_for_device(device_type, arm_type)
+        config_path = calibration_dir_for_device(device_type, arm_type, leader_kind)
         if config_path is None:
             return {"success": False, "message": "Invalid device type"}
 
@@ -3727,10 +4270,14 @@ def get_calibration_configs(device_type: str, arm_type: str = "so101"):
 
 
 @router.delete("/calibration-configs/{device_type}/{config_name}")
-def delete_calibration_config(device_type: str, config_name: str, arm_type: str = "so101"):
+def delete_calibration_config(
+    device_type: str, config_name: str, arm_type: str = "so101", leader_kind: str | None = None
+):
     """Delete a calibration config file"""
+    require_known_arm_type(arm_type)
+    require_leader_kind(arm_type, leader_kind)
     try:
-        config_path = calibration_dir_for_device(device_type, arm_type)
+        config_path = calibration_dir_for_device(device_type, arm_type, leader_kind)
         if config_path is None:
             return {"success": False, "message": "Invalid device type"}
 
@@ -3759,7 +4306,7 @@ def delete_calibration_config(device_type: str, config_name: str, arm_type: str 
         # those arms return to the "needs calibration" state instead of
         # dangling on a missing file. The response lists them so the UI can
         # refresh the affected robots.
-        unassigned = clear_config_references(device_type, config_name, arm_type)
+        unassigned = clear_config_references(device_type, config_name, arm_type, leader_kind)
         if unassigned:
             robots = ", ".join(u["robot"] for u in unassigned)
             message = (
@@ -3780,7 +4327,9 @@ def delete_calibration_config(device_type: str, config_name: str, arm_type: str 
 
 
 @router.get("/calibration-configs/{device_type}/{config_name}/download")
-def download_calibration_config(device_type: str, config_name: str, arm_type: str = "so101"):
+def download_calibration_config(
+    device_type: str, config_name: str, arm_type: str = "so101", leader_kind: str | None = None
+):
     """
     Download one arm's calibration as a raw lerobot calibration JSON file.
 
@@ -3788,7 +4337,9 @@ def download_calibration_config(device_type: str, config_name: str, arm_type: st
     drop-in: shareable, hand-copyable, and re-importable anywhere. The arm's
     side/name are supplied by the caller on re-import, not stored in the file.
     """
-    config_path = calibration_dir_for_device(device_type, arm_type)
+    require_known_arm_type(arm_type)
+    require_leader_kind(arm_type, leader_kind)
+    config_path = calibration_dir_for_device(device_type, arm_type, leader_kind)
     if config_path is None:
         return JSONResponse(status_code=400, content={"success": False, "message": "Invalid device type"})
 
@@ -3826,18 +4377,22 @@ def download_calibration_config(device_type: str, config_name: str, arm_type: st
 
 
 @router.post("/calibration-configs/{device_type}/upload")
-def upload_calibration_config(device_type: str, body: dict, arm_type: str = "so101"):
+def upload_calibration_config(
+    device_type: str, body: dict, arm_type: str = "so101", leader_kind: str | None = None
+):
     """
     Import a calibration into a side's config dir. Body: {"name": "...",
     "data": {<raw lerobot calibration>}}. The data is shape-validated; an
     existing name is never overwritten (409 → caller renames).
     """
+    require_known_arm_type(arm_type)
+    require_leader_kind(arm_type, leader_kind)
     name = (body or {}).get("name", "")
     data = (body or {}).get("data")
     if not isinstance(name, str):
         return JSONResponse(status_code=400, content={"success": False, "message": "name must be a string"})
 
-    ok, reason, saved = save_imported_calibration(device_type, name, data, arm_type)
+    ok, reason, saved = save_imported_calibration(device_type, name, data, arm_type, leader_kind)
     if ok:
         return {"success": True, "name": saved}
 
@@ -3862,19 +4417,21 @@ def upload_calibration_config(device_type: str, body: dict, arm_type: str = "so1
 
 @router.post("/calibration-configs/{device_type}/{config_name}/rename")
 def rename_calibration_config_endpoint(
-    device_type: str, config_name: str, body: dict, arm_type: str = "so101"
+    device_type: str, config_name: str, body: dict, arm_type: str = "so101", leader_kind: str | None = None
 ):
     """
     Rename a calibration config file. Body: {"new_name": "..."}. Never
     overwrites; robot records referencing the old name are repointed.
     """
+    require_known_arm_type(arm_type)
+    require_leader_kind(arm_type, leader_kind)
     new_name = (body or {}).get("new_name", "")
     if not isinstance(new_name, str):
         return JSONResponse(
             status_code=400, content={"success": False, "message": "new_name must be a string"}
         )
 
-    ok, reason = rename_calibration_config(device_type, config_name, new_name, arm_type)
+    ok, reason = rename_calibration_config(device_type, config_name, new_name, arm_type, leader_kind)
     if ok:
         return {"success": True, "name": new_name.strip().removesuffix(".json")}
 
@@ -3889,10 +4446,14 @@ def rename_calibration_config_endpoint(
 
 class OpenCalibrationFolderRequest(BaseModel):
     device_type: str  # "teleop" (leader) or "robot" (follower)
-    # Which arm type's library to open — "so101" or "maker". The two live in
-    # separate directories (so_leader/so_follower vs
-    # rebot_102_leader/maker_follower).
+    # Which family's library to open (any registered id; an unknown one is a
+    # 400). Each family keeps its own directories (so_leader/so_follower vs
+    # rebot_102_leader/maker_follower, ...).
     arm_type: str = "so101"
+    # Which of the family's leaders, for the teleop side of a multi-leader
+    # family (the Metal arm's own leader keeps a library apart from the Star
+    # leader's). Missing = the family's default; an unknown kind is a 400.
+    leader_kind: str | None = None
 
 
 @router.post("/open-calibration-folder")
@@ -3900,9 +4461,11 @@ def open_calibration_folder(request: OpenCalibrationFolderRequest):
     """Open a side's calibration folder in the OS file browser (Finder/Explorer/
     xdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.
     The dir is created if missing so a fresh install opens an empty folder rather
-    than failing. An unknown device_type is rejected with 400.
+    than failing. An unknown device_type or arm_type is rejected with 400.
     """
-    path = calibration_dir_for_device(request.device_type, request.arm_type)
+    require_known_arm_type(request.arm_type)
+    require_leader_kind(request.arm_type, request.leader_kind)
+    path = calibration_dir_for_device(request.device_type, request.arm_type, request.leader_kind)
     if path is None:
         return JSONResponse(
             status_code=400,
@@ -3960,22 +4523,44 @@ class IdentifyArmRequest(BaseModel):
 class MakerProbePortsRequest(BaseModel):
     # Candidate ports to probe; empty/omitted = every detected serial port.
     ports: list[str] | None = None
-    # Which CAN family the follower probe should speak: "maker" (RobStride) or
-    # "metal" (Damiao). The leader probe is identical either way (both
-    # families use the Star Arm 102). Defaults to maker so a client that
-    # predates the Metal arm is unchanged.
-    arm_type: Literal["maker", "metal"] = "maker"
+    # Which family's protocol the follower probe should speak (RobStride for
+    # "maker", Damiao for "metal", an extension's own for its family). Any
+    # registered id; the handler refuses an unknown one (400
+    # robot.arm_type.unavailable) and a family without a protocol probe (400
+    # robot.not_ready) by the family's flags. Defaults to maker so a client
+    # that predates the Metal arm is unchanged.
+    arm_type: str = "maker"
+    # Which of the family's leaders the rig is driven by (the record's
+    # leader_kind). A leader that answers the follower's protocol (the Metal
+    # arm's own leader) cannot be told from it, and the probe says so.
+    leader_kind: str | None = None
 
 
 class MakerIdentifyArmRequest(BaseModel):
-    # "robot" (the CAN follower) or "teleop" (the UART leader). Unlike the
-    # SO-101, the two halves of a Maker rig need different bus drivers, so the
-    # caller must say which side it is asking about.
+    # "robot" (the follower) or "teleop" (the leader). Unlike the SO-101, the
+    # two halves of a CAN rig need different bus drivers, so the caller must
+    # say which side it is asking about.
     device_type: str
     ports: list[str] | None = None
-    # See MakerProbePortsRequest. For "metal" the follower side is refused
-    # (opening a Damiao bus energizes it mid-gesture); the leader side works.
-    arm_type: Literal["maker", "metal"] = "maker"
+    # Any registered family (every one implements identify_by_motion); an
+    # unknown id is refused. A family whose follower bus energizes on open
+    # (the Metal arm's Damiao handshake) refuses the follower side itself.
+    arm_type: str = "maker"
+    # The record's leader kind: an energized leader refuses the gesture too,
+    # and the answer then names the gripper wiggle as the fallback.
+    leader_kind: str | None = None
+
+
+class CanGripperWiggleRequest(BaseModel):
+    # Any registered family; only one with a gripper wiggle (the manifest's
+    # supports_gripper_wiggle) answers with more than a refusal.
+    arm_type: str
+    # "robot" (a follower port) or "teleop" (a leader port — only an
+    # energized leader has a gripper motor to move).
+    device_type: str
+    # The ONE port whose gripper to jog.
+    port: str
+    leader_kind: str | None = None
 
 
 @v1_router.post("/maker/probe-ports", response_model=MakerProbePortsResponse, tags=["system"])
@@ -3989,8 +4574,24 @@ async def probe_maker_arm_ports(request: MakerProbePortsRequest):
     follower probe briefly enables the gravity-neutral base joint and disables
     it again (the Damiao handshake is the enable command — see
     maker_ports._open_metal_follower_bus).
+
+    Refused by the family's flag, never by id: a family whose two halves
+    share one protocol (the SO-101) has nothing to ask a port and is told to
+    identify by the gesture instead.
     """
-    return await probe_maker_ports(request.ports, request.arm_type)
+    require_known_arm_type(request.arm_type)
+    require_leader_kind(request.arm_type, request.leader_kind)
+    family = arm_registry.get(request.arm_type)
+    if family.follower_probe_protocol is None:
+        raise ApiError(
+            status_code=400,
+            detail=(
+                f"The {family.short_label} has no protocol probe: its leader and follower speak "
+                "the same protocol. Identify the arm by the hand gesture instead."
+            ),
+            code=ErrorCode.ROBOT_NOT_READY,
+        )
+    return await family.probe_ports(request.ports, **leader_kwargs(family, request.leader_kind))
 
 
 # exclude_none: success carries `port`, failure omits it entirely (never null),
@@ -4008,9 +4609,56 @@ async def identify_maker_arm(request: MakerIdentifyArmRequest):
     Only needed for a BIMANUAL Maker robot: both arms ship with identical CAN
     and servo ids, so probing alone cannot say which is left and which is
     right. The user swings one arm's base and we report the port that saw it.
-    Read-only — no motor writes.
+    Read-only — no motor writes. Any registered family (each implements the
+    gesture); an unknown id is a 400.
     """
-    return await identify_maker_arm_by_motion(request.device_type, request.ports, request.arm_type)
+    require_known_arm_type(request.arm_type)
+    require_leader_kind(request.arm_type, request.leader_kind)
+    family = arm_registry.get(request.arm_type)
+    return await family.identify_by_motion(
+        request.device_type, request.ports, **leader_kwargs(family, request.leader_kind)
+    )
+
+
+# exclude_none: `code` rides only on a busy refusal, like every other
+# hardware handler's refusal dict.
+@v1_router.post(
+    "/maker/wiggle-gripper",
+    response_model=CanGripperWiggleResponse,
+    response_model_exclude_none=True,
+    tags=["system"],
+)
+async def wiggle_can_gripper_port(request: CanGripperWiggleRequest):
+    """Jog ONE port's gripper so the user can see which CAN arm is on it.
+
+    The identification of last resort (can_wiggle.py): a Metal rig driven by
+    a second Metal arm answers Damiao on every port, so the probe cannot say
+    which is the leader and the gesture is refused on both sides (opening a
+    Damiao bus energizes it). This opens the port with ONLY the gripper
+    motor on the bus, jogs the jaws a few degrees inside their soft limits,
+    and disables the motor again. Claims the wiggle mutex (robot.busy.wiggle)
+    and is refused while any session holds the hardware. A family without a
+    gripper wiggle answers a plain refusal.
+    """
+    require_known_arm_type(request.arm_type)
+    require_leader_kind(request.arm_type, request.leader_kind)
+    family = arm_registry.get(request.arm_type)
+    return await family.identify_by_gripper_wiggle(
+        request.device_type, request.port, **leader_kwargs(family, request.leader_kind)
+    )
+
+
+@v1_router.get("/arms", response_model=ArmFamiliesResponse, tags=["system"])
+def list_arm_families():
+    """The arms manifest: every registered arm family and what it can do.
+
+    The one document the UI reads arm capabilities from, so a family an
+    extension registers renders with no frontend change. Registry order,
+    default family FIRST — a client scanning `robot_type_markers` checks the
+    default family LAST (its markers are the loosest), exactly as
+    arm_capabilities.arm_type_from_robot_type does. See arms/manifest.py.
+    """
+    return {"arms": arms_manifest()}
 
 
 @v1_router.post("/arms/release-torque", response_model=ReleaseCanTorqueResponse, tags=["system"])
@@ -4031,7 +4679,8 @@ async def release_can_torque(request: ReleaseCanTorqueRequest):
 async def identify_arm(request: IdentifyArmRequest):
     """The inverse of /wiggle: the user swings an arm's base (shoulder pan) by
     hand and we report which port saw the motion. Read-only — no motor writes."""
-    return await identify_arm_by_motion(request.ports)
+    # The SO-101's two halves share one bus driver, so the side is immaterial.
+    return await arm_registry.default().identify_by_motion("robot", request.ports)
 
 
 # exclude_none: success carries `voltage`, failure carries `message` — never
@@ -4260,6 +4909,20 @@ def get_available_cameras():
         return {"status": "error", "message": str(e), "cameras": []}
 
 
+@v1_router.get(
+    "/recording-preview/{camera_name}",
+    response_class=Response,
+    responses={200: {"content": {"image/jpeg": {}}}, 503: {"description": "No recording frame available"}},
+    tags=["recording"],
+)
+def recording_camera_preview(camera_name: str):
+    """Latest recorder RGB frame by observation key; no device access."""
+    frame = recording_preview.jpeg(camera_name)
+    if frame is None:
+        raise HTTPException(status_code=503, detail="Waiting for a recording camera frame")
+    return Response(frame, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
 @router.get("/camera-preview/{index}")
 def camera_preview_stream(index: int, unique_id: str | None = None):
     """MJPEG preview stream of a camera attached to the *server* machine.
@@ -4296,6 +4959,11 @@ def camera_preview_stream(index: int, unique_id: str | None = None):
         raise HTTPException(
             status_code=409,
             detail="Inference is active — the cameras are in use. Stop the run to preview them.",
+        )
+    if remote_host.hosting_active or remote_host.releasing:
+        raise HTTPException(
+            status_code=409,
+            detail="Hosting is active — the cameras are in use. Stop hosting to preview them.",
         )
     identified = identify_cv2_index(unique_id, index)
     if identified is None:
@@ -4341,12 +5009,18 @@ def _record_with_clean(record: dict) -> dict:
 
     `is_clean` folds every arm of the mode (gates teleop/record, which drive
     leaders AND followers); `follower_ready` scopes to the follower side so
-    follower-only activities (inference, replay) aren't blocked by a leader arm
-    they never touch."""
+    follower-only activities (inference, replay, hosting) aren't blocked by a
+    leader arm they never touch; `leader_ready` is the mirror for remote
+    teleoperation, which drives a STATION's follower with this node's leader.
+    The record's `arms` layout says which of these the UI should even show.
+    `arm_available` says whether the record's arm type is a family this install
+    has registered; unknown ids remain visible but cannot start hardware."""
     return {
         **record,
+        "arm_available": is_known_arm_type(record.get("arm_type")),
         "is_clean": is_robot_record_clean(record),
         "follower_ready": is_robot_record_clean(record, arms="follower"),
+        "leader_ready": is_robot_record_clean(record, arms="leader"),
     }
 
 
@@ -4388,6 +5062,19 @@ def upsert_robot(name: str, data: dict, create: bool = False):
 
     body = data or {}
     existing = get_robot_record(name) or {}
+
+    # An arm type nothing registered is refused on BOTH the create and the
+    # patch path — the whole body, so a record is never left half-switched
+    # (the disk layer would otherwise ignore the key and merge the rest). An
+    # absent or null arm_type is "unspecified" and passes (the disk layer
+    # then keeps the existing value, or the SO-101 default on create).
+    require_known_arm_type(body.get("arm_type"))
+    # A leader kind is validated against the family the record WILL have:
+    # the body's arm type when it names one, else the stored one (the SO-101
+    # default on create). Refused whole, like an unknown arm type.
+    if "leader_kind" in body and body["leader_kind"] is not None:
+        effective_arm_type = body.get("arm_type") or existing.get("arm_type")
+        require_leader_kind(effective_arm_type, body["leader_kind"])
 
     # Mode is fixed at creation. A bimanual rig is a different machine (different
     # robot_type on datasets, forced _left/_right calibration naming, different
@@ -4512,9 +5199,41 @@ def delete_robot(name: str):
 
 
 @app.on_event("startup")
+def migrate_state_home():
+    """Move pre-split state from lerobot's cache into MAKERMODSLAB_HOME.
+
+    Registered FIRST so it runs before any other startup work; every reader
+    of the moved entries is lazy (robot records, ports, the node registry's
+    saved peers, the instance id), so startup is early enough. Skipped under
+    a MAKERMODSLAB_HOME override — see utils/config.HOME_IS_OVERRIDDEN.
+    """
+    if HOME_IS_OVERRIDDEN:
+        return
+    migrate_legacy_state()
+
+
+@app.on_event("startup")
 def startup_event():
     """One-time startup diagnostics surfaced in the server terminal."""
     warn_if_cuda_mismatch()
+    # A Modal app OUTLIVES the `modal run` client that started it (the client
+    # only tells Modal to stop on SIGINT), so a Lab that was hard-killed —
+    # SIGKILL, a crash, a power cut — can leave an A100 billing with nobody
+    # attached. If the last run left an app id on disk and nothing is running
+    # here, stop it. On a background thread, best-effort, and it never blocks
+    # or refuses a launch; what it did shows up as the idle status's message.
+    modal_launcher.reap_orphan_app_async()
+
+
+@app.on_event("startup")
+def start_station_mode():
+    """`makermodslab --host <robot>`: keep that robot hosted for remote
+    teleoperation (remote_host.start_station_mode) — parked from startup,
+    re-armed after any local session, no browser required."""
+    if os.environ.get(remote_host.STATION_ENV) == "1":
+        remote_host.start_station_mode(
+            os.environ.get(remote_host.STATION_ROBOT_ENV, "").strip() or None, manager
+        )
 
 
 # Strong reference so the loop's task set can't drop the pump mid-flight.
@@ -4553,6 +5272,35 @@ async def shutdown_event():
     # reload that this same process survives.
     job_registry.shutdown()
 
+    # Same for the station supervisor (`--host`): it re-arms hosting every few
+    # seconds whenever nothing holds the hardware, and the stops below are
+    # exactly "nothing holds the hardware" from its point of view.
+    remote_host.stop_station_mode()
+
+    # THEN the GPU, before anything else here spends its (bounded but real)
+    # time, because this is the one child that is BILLED BY THE MINUTE and the
+    # one whose death has to be a specific signal. `modal run` tears its app
+    # down from `except KeyboardInterrupt` and nowhere else, so the client has
+    # to receive a SIGINT and be given a moment to make that call; if this
+    # process leaves first — a uvicorn --reload restart on any save under
+    # makermodslab/, a Ctrl-C on the dev launcher, a `makermodslab --stop` —
+    # the client is orphaned or killed and a Modal A100 keeps running for the
+    # 5-7 minutes Modal's own heartbeat timeout takes to notice.
+    #
+    # Synchronous (in a thread) rather than fire-and-forget, for the same
+    # reason: a stop that outlives the process it runs in is not a stop. It
+    # costs ~2s when a GPU is up and returns immediately when none is.
+    #
+    # Ahead of the arm stops below on purpose. A remote run whose policy
+    # vanishes for the second or two this takes is a robot side that stops
+    # receiving actions and holds — and it is being stopped moments later
+    # anyway, by the same handler, with its own return-to-rest.
+    try:
+        if await asyncio.to_thread(modal_launcher.stop_for_shutdown):
+            logger.info("Stopped the GPU policy server on shutdown")
+    except Exception:
+        logger.exception("Failed to stop the GPU policy server during shutdown")
+
     # Stop the AVFoundation pump first so its next tick can't interleave with
     # shutdown (and so --reload restarts don't log a destroyed-pending-task).
     if _avf_pump_task is not None:
@@ -4575,6 +5323,18 @@ async def shutdown_event():
     # ever has real work — gathered concurrently anyway, both because it's
     # cheap and as a defensive measure if that invariant is ever violated,
     # rather than paying each stop's worst case one after another.
+    #
+    # REMOTE INFERENCE belongs here rather than beside the GPU stop above, and
+    # it is the sharpest case on the list: its child is spawned with
+    # `start_new_session=True`, so the SIGTERM/SIGINT that ends this worker
+    # never reaches it, and it ignores stdin EOF by design — `STOP` on that
+    # stdin is the ONLY thing that makes it return the arm before releasing
+    # torque. It is deliberately AFTER the GPU stop (which has already
+    # completed above, awaited, so the two never overlap): the child losing its
+    # policy for a second is a robot side that stops receiving actions and
+    # holds, which is exactly the state a return-to-rest wants to start from,
+    # whereas stopping the arm first would leave a GPU billing while we waited
+    # out its return.
     results = await asyncio.gather(
         asyncio.to_thread(stop_teleoperation_and_wait),
         asyncio.to_thread(stop_recording_and_wait),
@@ -4582,6 +5342,14 @@ async def shutdown_event():
         asyncio.to_thread(auto_calibration_batch_manager.stop_and_wait),
         asyncio.to_thread(handle_stop_inference),
         asyncio.to_thread(stop_replay_and_wait),
+        asyncio.to_thread(remote_inference.stop_for_shutdown),
+        # Hosting drives the follower from an in-process thread like teleop
+        # does — an engaged arm returns to rest, then torque is released.
+        # Remote teleoperation only holds the leader, but it must leave the
+        # room so the station parks the follower now rather than after its
+        # silent-loss grace.
+        asyncio.to_thread(remote_host.stop_hosting_for_shutdown),
+        asyncio.to_thread(remote_teleoperate.stop_for_shutdown),
         return_exceptions=True,
     )
     labels = (
@@ -4591,6 +5359,9 @@ async def shutdown_event():
         "auto-calibration batch",
         "inference",
         "replay",
+        "remote inference",
+        "hosting",
+        "remote teleoperation",
     )
     for label, result in zip(labels, results, strict=True):
         if isinstance(result, Exception):

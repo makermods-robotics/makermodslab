@@ -31,8 +31,9 @@ from lerobot.datasets import LeRobotDataset
 from lerobot.scripts.lerobot_record import RecordConfig
 
 from .api_errors import ErrorCode
-from .arm_capabilities import arm_type_of_robot_config, uses_feetech_bus
-from .arm_identity import ArmIdentityError, verify_devices
+from .arm_capabilities import require_known_arm_type
+from .arm_identity import ArmIdentityError
+from .arms import registry as arm_registry
 from .bus_retry import BUS_SYNC_READ_RETRIES as _BUS_SYNC_READ_RETRIES  # noqa: F401
 from .camera_preview import camera_preview_manager
 from .datasets import (
@@ -41,21 +42,11 @@ from .datasets import (
     invalidate_hub_status,
     push_dataset_to_hub,
 )
-from .maker_rest_pose import (
-    capture_maker_pose,
-    maker_follower_arms,
-    return_maker_arms_to_rest,
-)
-from .motor_power import FOLLOWER, clear_goal_velocity, reset_torque_limit
-from .rest_pose import RETURN_CEILING_S, capture_rest_pose
+from .recording_preview import observation_tap, recording_preview
+from .rest_pose import RETURN_CEILING_S
 from .session_events import notify_session_changed
-from .teleoperate import (
-    _device_buses,
-    _return_followers_to_rest,
-    force_disable_torque,
-    force_disconnect_partial,
-)
-from .torque import release_maker_torque
+from .teleoperate import force_disconnect_partial
+from .torque import de_energize_can_device
 from .utils.config import (
     CameraResolutionError,
     load_robot_cameras,
@@ -386,6 +377,9 @@ class RecordingRequest(BaseModel):
     # which of the Feetech-only safety helpers apply. Defaults to so101 so a
     # request from a client that predates the Maker arm is unchanged.
     arm_type: str = "so101"
+    # Which of the family's leaders drives the follower (the record's
+    # leader_kind; blank = the family's default). See TeleoperateRequest.
+    leader_kind: str | None = None
     dataset_repo_id: str
     single_task: str
     num_episodes: int = 5
@@ -631,11 +625,19 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
     from . import (
         auto_calibrate as _auto_calibrate,
         calibrate as _calibrate,
+        remote_host as _remote_host,
+        remote_inference as _remote_inference,
+        remote_teleoperate as _remote_teleoperate,
         replay as _replay,
         rollout as _rollout,
         teleoperate as _teleoperate,
         wiggle as _wiggle,
     )
+
+    # Argument validation first: an arm type nothing registered is refused
+    # (400 robot.arm_type.unavailable) before the flag is claimed or a device
+    # config built.
+    require_known_arm_type(request.arm_type)
 
     # Claim the active flag under the lock so two concurrent starts can't both
     # pass the precondition check.
@@ -679,6 +681,13 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 "message": "Inference is currently active. Stop it first.",
                 "code": ErrorCode.ROBOT_BUSY_INFERENCE,
             }
+        if _remote_inference.remote_inference_is_active():
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Remote inference is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
+            }
         if _calibrate.calibration_is_active():
             return {
                 "success": False,
@@ -699,6 +708,20 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
                 "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+            }
+        if _remote_host.hosting_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "This robot is hosted for remote teleoperation. Stop hosting first.",
+                "code": ErrorCode.ROBOT_BUSY_HOSTING,
+            }
+        if _remote_teleoperate.remote_teleoperation_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Remote teleoperation is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REMOTE_TELEOPERATION,
             }
         if _replay.replay_active:
             return {
@@ -781,6 +804,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
     # open. Doing it the other way round leaves that race open, and a preview
     # still holding index 0 starves the recorder (OpenCVCamera(0) actual_fps=5.0).
     camera_preview_manager.stop_all()
+    recording_preview.start()
 
     # Start capturing this session's logs into a fresh bounded ring buffer so the
     # Record page can display them (detaches any previous session's handler).
@@ -886,6 +910,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 if recording_start_time:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
             finally:
+                recording_preview.stop()
                 if current_phase != "error":
                     _set_phase("completed")
                 if recording_start_time:
@@ -952,6 +977,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         }
 
     except Exception as e:
+        recording_preview.stop()
         recording_active = False
         # The claim above already broadcast active=True; undo the hint now
         # that the failed start released the flag.
@@ -1600,6 +1626,7 @@ def _reset_loop_with_pause(
     teleop_action_processor,
     robot_action_processor,
     control_time_s: float,
+    observation_callback=None,
 ) -> None:
     """Reset-phase tick loop: same per-tick shape as lerobot's record_loop
     (lerobot.scripts.lerobot_record.record_loop) called with dataset=None —
@@ -1649,6 +1676,8 @@ def _reset_loop_with_pause(
 
         if teleop is not None:
             obs = robot.get_observation()
+            if observation_callback is not None:
+                observation_callback(obs)
             act = teleop.get_action()
             act_processed_teleop = teleop_action_processor((act, obs))
             robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
@@ -1693,12 +1722,18 @@ def record_with_web_events(
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
 
-    # Read the arm type back off the assembled config rather than taking it as
+    # Read the family back off the assembled config rather than taking it as
     # a parameter, so it can never disagree with the devices actually built.
     # Everything below that touches a Feetech register by name is gated on it.
-    feetech = uses_feetech_bus(arm_type_of_robot_config(cfg.robot))
+    family = arm_registry.family_for_robot_config_type(getattr(cfg.robot, "type", None))
+    feetech = family.uses_feetech_bus
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
+    publish_preview = observation_tap(robot, family)
+
+    def process_observation(observation):
+        publish_preview(observation)
+        return robot_observation_processor(observation)
 
     action_features = hw_to_dataset_features(robot.action_features, "action", cfg.dataset.video)
     obs_features = hw_to_dataset_features(robot.observation_features, "observation", cfg.dataset.video)
@@ -1862,7 +1897,12 @@ def record_with_web_events(
             # The robot connected fine a moment ago; release both so a leader
             # failure can't strand the follower's bus and camera threads for
             # the rest of the process (partial teardown for the same reason as
-            # the robot-connect path above).
+            # the robot-connect path above). A CAN family's leader first goes
+            # through the Damiao recovery: an energized leader whose handshake
+            # raised partway is holding the motors that answered (a no-op on
+            # the Star leader, which has no CAN bus).
+            if not feetech:
+                de_energize_can_device(teleop, "leader arm")
             force_disconnect_partial(robot, "robot")
             force_disconnect_partial(teleop, "teleop")
             raise
@@ -1873,13 +1913,13 @@ def record_with_web_events(
     # mismatch, release the arms (torque was never enabled) and let the worker's
     # error path surface the message via the recording status.
     try:
-        identity_warnings = verify_devices(
+        # A CAN family answers with nothing to compare — its zero lives inside
+        # the motors and its calibration writes homing_offset=0 for every
+        # joint — so the guard is a no-op there rather than left to fail open
+        # per arm.
+        identity_warnings = family.verify_identity(
             ((robot, "follower"), (teleop, "leader")),
-            # A Maker arm has no EEPROM fingerprint to compare — its zero lives
-            # inside the RobStride motors and its calibration writes
-            # homing_offset=0 for every joint — so the guard is skipped whole
-            # rather than left to fail open per arm.
-            skip=skip_identity_check or not feetech,
+            skip=skip_identity_check,
             config_names=identity_config_names,
         )
     except ArmIdentityError:
@@ -1929,16 +1969,11 @@ def record_with_web_events(
         # the servos, not in a file the bus reloads.
         logger.info("CAN arm: calibration registered by connect(); skipping the explicit write")
 
-    # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) — the
-    # follower only, never the human-held leader. Clears any torque cap a
-    # previous auto-calibration left in RAM; a failed write degrades to the
-    # previous limit (logged inside) and must not abort the session.
-    if feetech:
-        reset_torque_limit(robot, FOLLOWER)
-        # Clear any leftover Goal_Velocity speed cap a previous arm-driving feature
-        # stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400); the
-        # follower only, never the human-held leader. See makermodslab/motor_power.py.
-        clear_goal_velocity(robot, FOLLOWER)
+    # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) and a
+    # cleared Goal_Velocity speed cap — the follower only, never the human-held
+    # leader; a failed write degrades to the previous value (logged inside)
+    # and must not abort the session. A no-op on a CAN family.
+    family.prepare_follower_registers(robot)
 
     # Capture the follower's rest pose now — after connect/configure/identity
     # guard, before the recording loop moves anything — so a normal stop can
@@ -1951,15 +1986,11 @@ def record_with_web_events(
     # mechanism differs by bus (see teleoperate's matching branch and
     # maker_rest_pose.py). A Maker arm has no brakes, so releasing torque
     # wherever the last episode ended would drop it.
-    if feetech:
-        follower_rest_poses = [
-            (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
-            for bus in _device_buses(robot)
-        ]
-        maker_rest_poses = []
-    else:
-        follower_rest_poses = []
-        maker_rest_poses = [(arm, capture_maker_pose(arm)) for arm, _label in maker_follower_arms(robot)]
+    rest_poses = family.capture_rest_poses(robot)
+    # An energized leader (the Metal leader) is captured and returned with
+    # the followers; every other leader contributes nothing here.
+    if teleop is not None:
+        rest_poses += family.capture_leader_rest_poses(teleop)
 
     # Start with episode 1 - but track it properly
     current_episode = 1
@@ -2000,7 +2031,7 @@ def record_with_web_events(
                 fps=cfg.dataset.fps,
                 teleop_action_processor=teleop_action_processor,
                 robot_action_processor=robot_action_processor,
-                robot_observation_processor=robot_observation_processor,
+                robot_observation_processor=process_observation,
                 teleop=teleop,
                 dataset=dataset,
                 control_time_s=cfg.dataset.episode_time_s,
@@ -2089,6 +2120,7 @@ def record_with_web_events(
                     teleop_action_processor=teleop_action_processor,
                     robot_action_processor=robot_action_processor,
                     control_time_s=cfg.dataset.reset_time_s,
+                    observation_callback=publish_preview,
                 )
 
                 # The loop may have exited (e.g. via exit_early/stop) while
@@ -2169,6 +2201,7 @@ def record_with_web_events(
                     teleop_action_processor=teleop_action_processor,
                     robot_action_processor=robot_action_processor,
                     control_time_s=cfg.dataset.reset_time_s,
+                    observation_callback=publish_preview,
                 )
 
                 # The loop may have exited (e.g. via exit_early/stop) while
@@ -2213,16 +2246,21 @@ def record_with_web_events(
                 # session, not idle yet (the worker's finally emits the final
                 # release hint once cleanup is done).
                 notify_session_changed("recording", True, phase="releasing")
-                _return_followers_to_rest(follower_rest_poses, _release_now)
-                return_maker_arms_to_rest(maker_rest_poses, _release_now)
+                family.return_to_rest(rest_poses, _release_now)
             # Belt and braces: disable torque explicitly before disconnect, so a
             # failure inside disconnect() can't leave an arm energized (rigid).
             # force_disable_torque logs any failure at ERROR level with the port.
+            # Every family releases the follower AND the leader: the family's
+            # release is a no-op on a leader without motors (the Star Arm
+            # 102) and stops the gravity thread then disables the bus on an
+            # energized one (the Metal leader).
             if feetech:
-                force_disable_torque(robot, "robot")
-                force_disable_torque(teleop, "teleop")
+                family.release_torque(robot, "robot")
+                family.release_torque(teleop, "teleop")
             else:
-                release_maker_torque(robot, "CAN follower arm")
+                family.release_torque(robot, "CAN follower arm")
+                if teleop is not None:
+                    family.release_torque(teleop, "CAN leader arm")
             robot.disconnect()
             if teleop:
                 teleop.disconnect()
