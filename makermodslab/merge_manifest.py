@@ -101,7 +101,7 @@ def parse_merge_manifest(raw: object) -> MergeManifest | None:
     try:
         return MergeManifest.model_validate(data)
     except ValidationError as exc:
-        logger.info("Ignoring unparseable merge manifest: %s", exc)
+        logger.info("Ignoring unparsable merge manifest: %s", exc)
         return None
 
 
