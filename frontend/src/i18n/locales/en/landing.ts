@@ -77,9 +77,20 @@ export default {
     armLayout: "Arm layout",
     // Same, for the hardware-family radiogroup.
     armTypeLabel: "Arm type",
-    // The DISPLAY half of ARM_TYPE_OPTIONS. The submitted value ("so101" /
-    // "maker") is logic and stays in the component, untranslated — it is
-    // persisted verbatim into the robot record on disk.
+    // Shown under the (empty) card grid until the arms manifest answers.
+    armTypesLoading: "Loading arm types…",
+    // The manifest fetch failed; the provider keeps retrying. The raw error
+    // is appended by the component.
+    armTypesFailed:
+      "Could not load arm types from the server — retrying. Nothing can be created until it answers.",
+    // {{extension}} is the manifest's provided_by — an extension's name, data.
+    providedBy: "Provided by {{extension}}",
+    // The DISPLAY half of the arm-type cards, keyed by manifest id. The
+    // submitted value ("so101" / "maker" / …) is logic and stays in the
+    // component, untranslated — it is persisted verbatim into the robot
+    // record on disk. These are per-id OVERRIDES of the arms manifest's own
+    // label; a family without an entry shows the manifest's English label and
+    // no description.
     armTypes: {
       so101: {
         label: "SO-101",

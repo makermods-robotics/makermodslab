@@ -1,4 +1,5 @@
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,6 +21,10 @@ HF Jobs pod and a LAN peer alike have no view of this machine's
 deliberate design decision for this phase — and this module is the single
 implementation of "push it there first when it only exists here", so the two
 runners cannot drift on when a push happens or what it looks like.
+
+Provenance: ``ensure_dataset_on_hub`` descends from leLab's
+``HFCloudJobRunner._ensure_dataset_on_hub`` (``lelab/runners/hf_cloud.py``),
+hence the HuggingFace line in the header.
 """
 
 from __future__ import annotations

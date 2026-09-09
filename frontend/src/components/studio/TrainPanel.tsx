@@ -47,11 +47,8 @@ import {
 } from "@/lib/replayApi";
 import { HUB_REPO_ID_RE } from "@/lib/repoId";
 import { cn } from "@/lib/utils";
-import {
-  ArmType,
-  ARM_TYPE_LABEL,
-  armTypeFromRobotType,
-} from "@/lib/armTypes";
+import { ArmType, armTypeFromRobotType, armLabel } from "@/lib/armTypes";
+import { useArms } from "@/hooks/useArms";
 import TrainingConfigurator, {
   FinetuneSeed,
   ResumeSeed,
@@ -190,6 +187,8 @@ const TrainPanel: React.FC = () => {
   // mutation the studio performs (stop, delete, rename, hub dismiss) already
   // pulls the list afterwards rather than trusting the broadcast.
   const { refresh: refreshJobs } = useJobsData();
+  // The arms manifest, for the cross-arm advisory on a combine selection.
+  const { arms, byId } = useArms();
 
   const {
     seen: hasSeenTrainingMilestone,
@@ -610,15 +609,15 @@ const TrainPanel: React.FC = () => {
   const combineArmMismatch = useMemo<string | null>(() => {
     const byArm = new Map<ArmType, string[]>();
     for (const repoId of orderedCombineSources) {
-      const arm = armTypeFromRobotType(combineInfos[repoId]?.robot_type);
+      const arm = armTypeFromRobotType(arms, combineInfos[repoId]?.robot_type);
       if (arm) byArm.set(arm, [...(byArm.get(arm) ?? []), repoId]);
     }
     if (byArm.size < 2) return null;
     const groups = [...byArm.entries()]
-      .map(([arm, ids]) => `${ids.join(", ")} (${ARM_TYPE_LABEL[arm]})`)
+      .map(([arm, ids]) => `${ids.join(", ")} (${armLabel(byId(arm), arm, t)})`)
       .join("; ");
     return t("landing.mergeDatasets.armMismatchWarning", { groups });
-  }, [orderedCombineSources, combineInfos, t]);
+  }, [orderedCombineSources, combineInfos, arms, byId, t]);
 
   // Phase one of a combine launch: merge the selected sources into a throwaway
   // dataset and resolve to the repo id the backend minted. Passed to the

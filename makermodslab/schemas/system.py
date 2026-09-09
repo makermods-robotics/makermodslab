@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,6 +22,8 @@ so the schema cannot drift from the wire format.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict
 
 # Handlers in makermodslab/update.py return these models' dumps directly.
@@ -37,6 +39,12 @@ from makermodslab.utils.system import (
 )
 
 __all__ = [
+    "ArmCalibrationInfo",
+    "ArmCalibrationSide",
+    "ArmCalibrationSummary",
+    "ArmCapabilities",
+    "ArmFamiliesResponse",
+    "ArmFamilyInfo",
     "AvailableCamerasResponse",
     "AvailablePortsResponse",
     "CameraInfo",
@@ -225,3 +233,80 @@ class MakerIdentifyArmResponse(BaseModel):
     message: str
     port: str | None = None
     skipped: list[str] = []
+
+
+class ArmCalibrationSide(BaseModel):
+    """What the config dialog shows BEFORE Start for one device side (the
+    family's own calibration_summary, verbatim — the backend is never
+    localized): the text and an optional served image."""
+
+    text: str
+    image_url: str | None
+
+
+class ArmCalibrationSummary(BaseModel):
+    """The pre-start summary per side; a side is null when the family has
+    nothing to show for it."""
+
+    leader: ArmCalibrationSide | None
+    follower: ArmCalibrationSide | None
+
+
+class ArmCalibrationInfo(BaseModel):
+    """How a family is calibrated: a range sweep (the SO-101's manual or
+    driven flows), a step wizard the family drives (the CAN arms' zero pose),
+    or an extension's own panel at `panel_url`. `summary` and `panel_url` are
+    null — not absent — when they do not apply, so the route must NOT
+    exclude None."""
+
+    kind: Literal["range_sweep", "steps", "panel"]
+    summary: ArmCalibrationSummary | None
+    panel_url: str | None
+
+
+class ArmCapabilities(BaseModel):
+    """The family's capability flags (arms/base.py), plus two derived from
+    its port-detection facts: `supports_port_probe` (a protocol probe exists,
+    so no gesture is needed) and `motion_identify_energizes_follower` (the
+    follower side of the gesture is refused because opening its bus would
+    energize it)."""
+
+    uses_feetech_bus: bool
+    supports_auto_calibration: bool
+    supports_dagger: bool
+    supports_port_probe: bool
+    motion_identify_energizes_follower: bool
+
+
+class ArmFamilyInfo(BaseModel):
+    """One entry of the arms manifest (arms/manifest.py describe_family).
+
+    `robot_types` are the lerobot RobotConfig type strings the family's
+    followers register under (single, then bimanual); `robot_type_markers`
+    the substrings that identify it in a dataset's free-form robot_type;
+    `calibration_name_suffix` what the server appends to a robot record's
+    name when it mints a default calibration id ("" for the SO-101);
+    `image_url` a served image for the create dialog (null for the built-ins,
+    whose photos the frontend bundles).
+    """
+
+    id: str
+    label: str
+    short_label: str
+    provided_by: str
+    joints_per_arm: int
+    supports_bimanual: bool
+    image_url: str | None
+    calibration: ArmCalibrationInfo
+    telemetry_kind: Literal["urdf", "degrees"]
+    capabilities: ArmCapabilities
+    robot_types: list[str]
+    robot_type_markers: list[str]
+    calibration_name_suffix: str
+
+
+class ArmFamiliesResponse(BaseModel):
+    """GET /api/v1/arms (server.py list_arm_families) — registry order,
+    default family first."""
+
+    arms: list[ArmFamilyInfo]

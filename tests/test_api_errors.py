@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -76,6 +76,35 @@ def test_error_codes_follow_grammar():
     for code in ErrorCode:
         assert CODE_GRAMMAR.match(code.value), f"malformed code: {code.value!r}"
         assert code.value.split(".")[0] in DOMAINS, f"unknown domain: {code.value!r}"
+
+
+def test_arm_type_unavailable_is_a_robot_domain_code():
+    """TB5's one new code: an `arm_type` the registry does not know. It is a
+    fact about the persisted robot record (domain `robot`), three levels
+    deep like the busy family, and 400 wherever it is raised."""
+    from makermodslab.api_errors import ErrorCode
+
+    code = ErrorCode.ROBOT_ARM_TYPE_UNAVAILABLE
+    assert code.value == "robot.arm_type.unavailable"
+    assert CODE_GRAMMAR.match(code.value)
+    assert code.value.split(".")[0] == "robot"
+
+
+def test_require_known_arm_type_raises_the_400_every_gate_uses():
+    """ONE helper raises the refusal so every gate (sessions, the legacy
+    starts, the record upsert, the calibration-config queries, the CAN-only
+    routes) speaks the same status, code and remedy."""
+    from makermodslab.api_errors import ApiError, ErrorCode
+    from makermodslab.arm_capabilities import require_known_arm_type
+
+    for known in ("so101", "maker", "metal"):
+        assert require_known_arm_type(known) is None
+    with pytest.raises(ApiError) as excinfo:
+        require_known_arm_type("nope")
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.code == ErrorCode.ROBOT_ARM_TYPE_UNAVAILABLE
+    assert "'nope'" in excinfo.value.detail
+    assert "extension" in excinfo.value.detail
 
 
 def test_busy_discriminants_cover_mutex_matrix():

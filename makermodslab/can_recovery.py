@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,20 +34,24 @@ de-energize at a serial port would be nonsense.
 """
 
 import logging
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel
 
 from .api_errors import ApiError, ErrorCode
+from .arm_capabilities import require_known_arm_type, uses_feetech_bus
 from .torque import de_energize_can_device
 
 logger = logging.getLogger(__name__)
 
 
 class ReleaseCanTorqueRequest(BaseModel):
-    # Only the CAN families: an SO-101 has nothing to recover (see module
-    # docstring), so "so101" is rejected by the schema rather than no-opped.
-    arm_type: Literal["maker", "metal"]
+    # Any registered family whose follower is NOT on a Feetech bus: an SO-101
+    # has nothing to recover (see module docstring). The handler refuses a
+    # Feetech family (400 robot.not_ready) and an unknown one (400
+    # robot.arm_type.unavailable) by the family's flags — not the schema, so
+    # an extension's CAN family can use the route.
+    arm_type: str
     # The follower's CAN adapter port (the leader has no torque to release).
     port: str
 
@@ -55,26 +59,42 @@ class ReleaseCanTorqueRequest(BaseModel):
 def _build_follower_device(arm_type: str, port: str):
     """The follower device whose bus gets de-energized.
 
-    Built through the same factory helpers the calibration flows use, with a
-    throwaway id — construction does no device I/O, and the calibration file
-    (if any) is irrelevant to a torque release.
+    Built through the family's single-follower config, as the calibration
+    flows do, with a throwaway id — construction does no device I/O, and the
+    calibration file (if any) is irrelevant to a torque release.
     """
     from lerobot.robots import make_robot_from_config
 
-    from .utils.robot_factory import maker_follower_config, metal_follower_config
+    from .arms import registry as arm_registry
+    from .utils.config import normalize_arm_type
 
-    builder = metal_follower_config if arm_type == "metal" else maker_follower_config
-    return make_robot_from_config(builder(port, "recovery"))
+    family = arm_registry.get(normalize_arm_type(arm_type))
+    return make_robot_from_config(family.single_follower_config(port, "recovery"))
 
 
 def handle_release_can_torque(request: ReleaseCanTorqueRequest) -> dict[str, Any]:
     """Open the named CAN bus without the handshake and disable torque.
 
     Returns ``{"success", "message", "problems"}``; success means every
-    disable landed. Refuses with 409 session.held while any feature's active
-    flag holds the hardware.
+    disable landed. Refuses (400) an unknown arm type and a Feetech family,
+    and with 409 session.held while any feature's active flag holds the
+    hardware.
     """
+    from .arms import registry as arm_registry
     from .sessions import _held_by
+
+    require_known_arm_type(request.arm_type)
+    if uses_feetech_bus(request.arm_type):
+        label = arm_registry.get(request.arm_type).short_label
+        raise ApiError(
+            status_code=400,
+            detail=(
+                f"The {label} has nothing to recover: its servos go limp on their own when "
+                "the process dies. This release is for CAN followers that hold their last "
+                "command."
+            ),
+            code=ErrorCode.ROBOT_NOT_READY,
+        )
 
     holder = _held_by()
     if holder is not None:
@@ -85,7 +105,7 @@ def handle_release_can_torque(request: ReleaseCanTorqueRequest) -> dict[str, Any
             details={"holder": {"kind": holder, "session_id": None}},
         )
 
-    family = "Metal" if request.arm_type == "metal" else "Maker"
+    family = arm_registry.get(request.arm_type).short_label
     logger.info(f"Releasing torque on the {family} follower at {request.port} (crash recovery)")
     device = _build_follower_device(request.arm_type, request.port)
     problems = de_energize_can_device(device, f"{family} follower arm")

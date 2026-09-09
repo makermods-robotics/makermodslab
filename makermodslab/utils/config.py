@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ import platform
 import re
 import shutil
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
@@ -26,7 +28,42 @@ logger = logging.getLogger(__name__)
 
 RobotSide = Literal["leader", "follower"]
 
-# Define the calibration config paths (shared between features)
+# ---------------------------------------------------------------------------
+# Where MakerMods Lab keeps ITS OWN state.
+#
+# lerobot owns ``~/.cache/huggingface/lerobot``: datasets, models, the
+# calibration libraries its device classes read, and training outputs (local
+# policies live there because they ARE models). Everything that is MakerMods
+# Lab's rather than lerobot's — robot records, saved ports, UI bookkeeping,
+# node identity, the bimanual staging area, and (next) extensions — lives under
+# this root instead, so a user finds the app's files under the app's name and
+# a lerobot cache wipe does not take the robot setup with it.
+#
+# ``MAKERMODSLAB_HOME`` overrides the root (containers, a shared machine, and
+# the test suite, which points it at a tmp dir before anything is imported).
+# An override also switches OFF the legacy migration below: whoever set it is
+# pointing at a place they chose, and silently moving old files there would
+# be a surprise — the test suite relies on exactly that to never touch a
+# developer's real state.
+# ---------------------------------------------------------------------------
+LEGACY_STATE_ROOT = os.path.expanduser("~/.cache/huggingface/lerobot")
+
+
+def resolve_makermodslab_home(env: Mapping[str, str] | None = None) -> str:
+    """The MakerMods Lab state root: ``$MAKERMODSLAB_HOME`` or ``~/.makermods/makermodslab``."""
+    env = os.environ if env is None else env
+    override = env.get("MAKERMODSLAB_HOME")
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    return os.path.expanduser(os.path.join("~", ".makermods", "makermodslab"))
+
+
+MAKERMODSLAB_HOME = resolve_makermodslab_home()
+HOME_IS_OVERRIDDEN = bool(os.environ.get("MAKERMODSLAB_HOME"))
+
+# Define the calibration config paths (shared between features). These stay
+# under lerobot's cache: lerobot's device classes read their calibration from
+# there, and the library IS lerobot calibration data.
 CALIBRATION_BASE_PATH_TELEOP = os.path.expanduser("~/.cache/huggingface/lerobot/calibration/teleoperators")
 CALIBRATION_BASE_PATH_ROBOTS = os.path.expanduser("~/.cache/huggingface/lerobot/calibration/robots")
 LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "so_leader")
@@ -38,9 +75,12 @@ FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "so_follower")
 # leader on FashionStar UART servos. The two share no bus protocol, no
 # calibration procedure and no port-detection method, so the arm type is the
 # discriminant every hardware path branches on.
-ArmType = Literal["so101", "maker", "metal"]
-ARM_TYPES: tuple[str, ...] = ("so101", "maker", "metal")
-DEFAULT_ARM_TYPE = "so101"
+# The registry (makermodslab/arms) is the ONLY source of truth for which
+# families exist, and it is open: an extension can register one after this
+# module is imported. Nothing here captures the set (a tuple or a Literal
+# taken at import is stale the moment that happens); is_known_arm_type asks
+# the registry on every call. DEFAULT_ARM_TYPE is bound below the library
+# constants, where the registry is imported.
 
 # lerobot derives a device's calibration directory from the device CLASS's
 # `name` attribute (Robot.__init__ / Teleoperator.__init__ ->
@@ -61,26 +101,71 @@ MAKER_LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "rebot_102
 MAKER_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "maker_follower")
 METAL_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "metal_follower")
 
+# Imported HERE, after every library constant, on purpose: importing the arms
+# package registers the built-in families, and registration validates each
+# family's calibration dirs by calling its dir methods — which resolve the
+# constants above off THIS module. Imported at the top, a process whose first
+# import is utils.config would reach that check with the constants not yet
+# bound (a circular import), so the import sits below what it needs.
+from ..arms import registry as arm_registry  # noqa: E402
+
+DEFAULT_ARM_TYPE = arm_registry.DEFAULT_ID
+
+
+def is_known_arm_type(value: object) -> bool:
+    """True iff ``value`` is a string the arm registry has a family for.
+
+    Read live from the registry on every call — a set captured at import is
+    stale the moment an extension registers a family. False for a non-string
+    (a corrupted field) as well as for an unknown string.
+    """
+    return isinstance(value, str) and value in arm_registry.ids()
+
 
 def normalize_arm_type(value: object) -> str:
-    """Coerce any stored/received arm_type to a known one, defaulting to so101.
+    """The arm type a stored/received value means: MISSING defaults, a string is kept.
 
-    Unknown values fall back rather than raising for the same reason
-    ``clamp_motor_power`` does: a corrupted or future-dated record must never
-    make a robot unopenable. so101 is the safe default — it is what every
-    record written before the Maker arm existed implicitly is.
+    ``None``, ``""`` and any non-string read as DEFAULT_ARM_TYPE — records
+    written before the Maker arm existed carry no arm_type and ARE SO-101s.
+    A string is returned UNCHANGED, known or not: an unknown id is a family
+    this install does not have, and it is preserved so the record can be
+    listed as unavailable (``arm_available: false``) and every start refused
+    with robot.arm_type.unavailable, instead of silently becoming an SO-101
+    and opening a Feetech serial path at whatever the hardware really is.
+    The callers that need a family go through the registry, which raises
+    UnknownArmType on an unknown id; the API gates
+    (arm_capabilities.require_known_arm_type) make that raise unreachable
+    from a request.
     """
-    return value if value in ARM_TYPES else DEFAULT_ARM_TYPE
+    if isinstance(value, str) and value:
+        return value
+    return DEFAULT_ARM_TYPE
 
 
 # Each arm type owns a SEPARATE calibration library: a Maker zero-pose
 # calibration is meaningless to an SO-101 and vice versa, and lerobot would not
 # look for it in the other directory anyway. Nothing merges the two listings.
 #
-# Both resolvers read the module-level path globals at CALL time rather than
-# capturing them in a lookup table at import time, so a test (or an install
-# with a relocated cache) that monkeypatches LEADER_CONFIG_PATH still steers
-# every caller — a frozen table would silently ignore the patch.
+# Each built-in family NAMES its library constants (ArmFamily.leader_library_attr
+# / follower_library_attr) and resolves them off this module at CALL time rather
+# than capturing a path at import, so a test (or an install with a relocated
+# cache) that monkeypatches LEADER_CONFIG_PATH still steers every caller — a
+# frozen table would silently ignore the patch. An extension family answers
+# its dir methods with lerobot_calibration_dir() instead.
+
+
+def lerobot_calibration_dir(kind: Literal["robots", "teleoperators"], class_name: str) -> str:
+    """The calibration dir lerobot derives from a device class's ``name``.
+
+    lerobot reads a device's calibration from ``<base>/<class name>/`` —
+    ``CALIBRATION_BASE_PATH_ROBOTS`` for a robot (follower), ``..._TELEOP``
+    for a teleoperator (leader). An extension family returns this from its
+    ``leader_calibration_dir()`` / ``follower_calibration_dir()`` rather than
+    re-deriving the path; resolved at call time, like the built-ins'
+    constants, so a redirected base path is honoured.
+    """
+    base = CALIBRATION_BASE_PATH_ROBOTS if kind == "robots" else CALIBRATION_BASE_PATH_TELEOP
+    return os.path.join(base, class_name)
 
 
 def leader_config_path_for(arm_type: object = DEFAULT_ARM_TYPE) -> str:
@@ -91,19 +176,12 @@ def leader_config_path_for(arm_type: object = DEFAULT_ARM_TYPE) -> str:
     separation there is carried by the minted config NAMES instead
     (default_slot_config_name).
     """
-    if normalize_arm_type(arm_type) in ("maker", "metal"):
-        return MAKER_LEADER_CONFIG_PATH
-    return LEADER_CONFIG_PATH
+    return arm_registry.get(normalize_arm_type(arm_type)).leader_calibration_dir()
 
 
 def follower_config_path_for(arm_type: object = DEFAULT_ARM_TYPE) -> str:
     """The calibration library dir holding this arm type's FOLLOWER configs."""
-    normalized = normalize_arm_type(arm_type)
-    if normalized == "maker":
-        return MAKER_FOLLOWER_CONFIG_PATH
-    if normalized == "metal":
-        return METAL_FOLLOWER_CONFIG_PATH
-    return FOLLOWER_CONFIG_PATH
+    return arm_registry.get(normalize_arm_type(arm_type)).follower_calibration_dir()
 
 
 def default_slot_config_name(record_name: str, mode: object, arm: str, arm_type: object) -> str:
@@ -117,20 +195,21 @@ def default_slot_config_name(record_name: str, mode: object, arm: str, arm_type:
     that is wrong for one of them. Followers get the same suffix purely for
     consistency (their libraries are already separate).
 
-    Only a default: a slot that already names a calibration keeps it.
+    Only a default: a slot that already names a calibration keeps it. The
+    single-mode rule is the family's (ArmFamily.default_calibration_name);
+    the bimanual ``_<arm>`` suffix is the same for every family.
     """
-    normalized = normalize_arm_type(arm_type)
-    base = record_name if normalized == DEFAULT_ARM_TYPE else f"{record_name}_{normalized}"
+    base = arm_registry.get(normalize_arm_type(arm_type)).default_calibration_name(record_name)
     return f"{base}_{arm}" if mode == "bimanual" else base
 
 
 # Define port storage path
-PORT_CONFIG_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/ports")
+PORT_CONFIG_PATH = os.path.join(MAKERMODSLAB_HOME, "ports")
 LEADER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "leader_port.txt")
 FOLLOWER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "follower_port.txt")
 
 # Robot config records (per-robot JSON metadata)
-ROBOTS_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/robots")
+ROBOTS_PATH = os.path.join(MAKERMODSLAB_HOME, "robots")
 
 # Staging root for bimanual (BiSO) sessions. lerobot's BiSO devices take ONE
 # calibration_dir + ONE base id and load each sub-arm as "<base>_left.json" /
@@ -141,7 +220,7 @@ ROBOTS_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/robots")
 # root as "<base>_left.json"/"<base>_right.json" for lerobot to load. The copy is
 # unconditional every session (see stage_bimanual_calibrations) so a recalibrated
 # library file always refreshes its stale staging alias.
-MAKERMODSLAB_BISO_STAGING_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/makermodslab_biso")
+MAKERMODSLAB_BISO_STAGING_PATH = os.path.join(MAKERMODSLAB_HOME, "biso_staging")
 
 # Fallback base id when a bimanual start request carries no robot name (older
 # frontends). Filesystem-safe and stable; a single unnamed bimanual robot reuses
@@ -151,26 +230,26 @@ DEFAULT_BIMANUAL_BASE = "bimanual"
 # Hub-job ids the user dismissed from the jobs UI (JSON list of strings). The
 # HF Jobs API has no delete — a finished job stays in list_jobs() indefinitely
 # — so hiding a dead run from the untracked list must be persisted locally.
-DISMISSED_HUB_JOBS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/dismissed_hub_jobs.json")
+DISMISSED_HUB_JOBS_FILE = os.path.join(MAKERMODSLAB_HOME, "dismissed_hub_jobs.json")
 
 # Hub dataset repo ids the user typed straight into the picker and chose to keep
 # ("Use org/name"). They aren't in the user's own namespace listing and have no
 # local copy, so they'd vanish after selection unless we persist them here and
 # fold them back into the merged /datasets listing.
-SAVED_CUSTOM_DATASETS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/saved_custom_datasets.json")
+SAVED_CUSTOM_DATASETS_FILE = os.path.join(MAKERMODSLAB_HOME, "saved_custom_datasets.json")
 
 # Hub MODEL repo ids the user pinned via the "Add model" chooser — the models
 # mirror of SAVED_CUSTOM_DATASETS_FILE (same rationale: a foreign-namespace repo
 # with no local copy vanishes from the /models listing unless persisted here).
-SAVED_CUSTOM_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/saved_custom_models.json")
+SAVED_CUSTOM_MODELS_FILE = os.path.join(MAKERMODSLAB_HOME, "saved_custom_models.json")
 
 # Hub dataset/model repo ids the user removed from their pickers ("hidden").
 # Hiding NEVER touches the Hub repo — it only filters the merged listing, so a
 # repo the user's own namespace listing keeps returning stays gone until they
 # re-add it (re-pinning auto-unhides). Persisted like the dismissed hub jobs
 # (JSON list on disk, a set in memory).
-SAVED_HIDDEN_DATASETS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_datasets.json")
-SAVED_HIDDEN_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_models.json")
+SAVED_HIDDEN_DATASETS_FILE = os.path.join(MAKERMODSLAB_HOME, "hidden_datasets.json")
+SAVED_HIDDEN_MODELS_FILE = os.path.join(MAKERMODSLAB_HOME, "hidden_models.json")
 
 # Per-dataset episode indices the user excluded from training (curation, not
 # deletion — the episode stays on disk and in every listing/upload, it's just
@@ -178,18 +257,18 @@ SAVED_HIDDEN_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidd
 # JSON object keyed by repo_id -> list[int], unlike the flat repo-id lists
 # above, since the thing being persisted is per-dataset state, not membership
 # in one shared collection.
-EXCLUDED_EPISODES_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/excluded_episodes.json")
+EXCLUDED_EPISODES_FILE = os.path.join(MAKERMODSLAB_HOME, "excluded_episodes.json")
 
 # Stable per-install identity, minted on first read. The node registry uses it
 # to recognize a peer across restarts and address changes (a machine's IP or
 # MagicDNS name can change; its instance id doesn't).
-INSTANCE_ID_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/instance_id.txt")
+INSTANCE_ID_FILE = os.path.join(MAKERMODSLAB_HOME, "instance_id.txt")
 
 # The node registry's saved peer list: [{"url": ..., "name": ...}, ...]. Only
 # url + name are persisted — identity (instance_id/version/capabilities) is
 # deliberately NOT: a peer is re-verified against its live /api/v1/health on
 # load/probe, so stale identity can never be served from disk.
-NODES_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/nodes.json")
+NODES_FILE = os.path.join(MAKERMODSLAB_HOME, "nodes.json")
 
 # Tag stamped on every dataset pushed to the Hub from MakerMods Lab, so we can later
 # query the Hub for MakerMods Lab-produced datasets and compute usage metrics.
@@ -216,6 +295,134 @@ def with_makermodslab_tag(tags: list[str] | None) -> list[str]:
         if tag not in out:
             out.append(tag)
     return out
+
+
+# State that versions before the MAKERMODSLAB_HOME split wrote beside lerobot's
+# files: (name under LEGACY_STATE_ROOT, this module's attribute holding the new
+# path). The attribute is looked up AT CALL TIME so a redirected constant (the
+# test fixtures) is honoured. Calibration libraries and training outputs are
+# deliberately absent — they stay where lerobot reads them.
+_LEGACY_STATE_ENTRIES: tuple[tuple[str, str], ...] = (
+    ("ports", "PORT_CONFIG_PATH"),
+    ("robots", "ROBOTS_PATH"),
+    ("makermodslab_biso", "MAKERMODSLAB_BISO_STAGING_PATH"),
+    ("dismissed_hub_jobs.json", "DISMISSED_HUB_JOBS_FILE"),
+    ("saved_custom_datasets.json", "SAVED_CUSTOM_DATASETS_FILE"),
+    ("saved_custom_models.json", "SAVED_CUSTOM_MODELS_FILE"),
+    ("hidden_datasets.json", "SAVED_HIDDEN_DATASETS_FILE"),
+    ("hidden_models.json", "SAVED_HIDDEN_MODELS_FILE"),
+    ("excluded_episodes.json", "EXCLUDED_EPISODES_FILE"),
+    ("instance_id.txt", "INSTANCE_ID_FILE"),
+    ("nodes.json", "NODES_FILE"),
+)
+
+
+def _remove_path(path: str) -> None:
+    """Best-effort removal of a file, symlink or directory tree."""
+    if os.path.islink(path) or os.path.isfile(path):
+        with contextlib.suppress(OSError):
+            os.remove(path)
+    elif os.path.isdir(path):
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _move_entry(src: str, dst: str) -> bool:
+    """Move ``src`` to ``dst`` without ever leaving a half-written ``dst``.
+
+    ``shutil.move`` is a rename on one filesystem but copy-then-delete across
+    two — and ``~/.cache/huggingface`` symlinked onto a big external drive is
+    a common lerobot setup, which puts the two roots on different volumes. A
+    copy that dies half-way (disk full, one unreadable file) would leave a
+    partial ``dst`` that the destination-wins rule then treats as the live
+    state forever. So the move lands in a sibling ``<dst>.migrating`` first
+    and is renamed into place only once complete; on failure the sibling is
+    removed and ``src`` is untouched (``shutil.move`` deletes the source only
+    after a full copy).
+    """
+    staging = dst + ".migrating"
+    _remove_path(staging)
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.move(src, staging)
+        os.replace(staging, dst)
+    except OSError as exc:
+        logger.warning("Could not migrate %s -> %s: %s", src, dst, exc)
+        _remove_path(staging)
+        return False
+    return True
+
+
+def _merge_dir(src: str, dst: str) -> tuple[int, int]:
+    """Move the entries of legacy dir ``src`` that ``dst`` lacks; keep the rest.
+
+    Returns (moved, left). ``src`` is removed once nothing is left in it.
+    """
+    moved = left = 0
+    for name in sorted(os.listdir(src)):
+        s, d = os.path.join(src, name), os.path.join(dst, name)
+        if os.path.lexists(d):
+            left += 1
+        elif _move_entry(s, d):
+            moved += 1
+        else:
+            left += 1
+    if left == 0:
+        with contextlib.suppress(OSError):
+            os.rmdir(src)
+    return moved, left
+
+
+def migrate_legacy_state(legacy_root: str | None = None) -> list[str]:
+    """Move MakerMods Lab state written beside lerobot's cache into MAKERMODSLAB_HOME.
+
+    One-shot and idempotent. A FILE entry moves only when nothing exists at
+    the new path: a destination that already exists is the live state and
+    wins, so an old version run after the split cannot clobber newer files on
+    the next upgrade, and a second call is a no-op. A DIRECTORY entry that
+    exists at both places is merged name by name under the same rule — the
+    new location's directories get created empty by ordinary reads
+    (``list_robot_records`` makes ``robots/`` on every listing), so a
+    new → old → new round-trip would otherwise strand every robot record the
+    old version wrote in between. Whatever is left behind is named in one
+    WARNING per start, so a user can find it. A failed move is logged and
+    skipped; the app then starts with that entry at its defaults rather than
+    refusing to start. Returns the destinations written.
+
+    The caller decides WHEN this runs (server startup, before the first read
+    of any entry — every reader here is lazy) and whether it runs at all
+    (never under a ``MAKERMODSLAB_HOME`` override; see HOME_IS_OVERRIDDEN).
+    """
+    root = LEGACY_STATE_ROOT if legacy_root is None else legacy_root
+    written: list[str] = []
+    left_behind: list[str] = []
+    for legacy_name, attr in _LEGACY_STATE_ENTRIES:
+        src = os.path.join(root, legacy_name)
+        dst = globals()[attr]
+        if not os.path.lexists(src):
+            continue
+        if not os.path.lexists(dst):
+            if _move_entry(src, dst):
+                written.append(dst)
+            continue
+        if os.path.isdir(src) and not os.path.islink(src) and os.path.isdir(dst):
+            moved, left = _merge_dir(src, dst)
+            if moved:
+                written.append(dst)
+            if left:
+                left_behind.append(src)
+        else:
+            left_behind.append(src)
+    if written:
+        logger.info(
+            "Moved %d MakerMods Lab state entries from %s to %s", len(written), root, MAKERMODSLAB_HOME
+        )
+    if left_behind:
+        logger.warning(
+            "Legacy MakerMods Lab state left in place because a newer copy exists under %s: %s",
+            MAKERMODSLAB_HOME,
+            ", ".join(left_behind),
+        )
+    return written
 
 
 def _atomic_write_text(path: str, content: str) -> None:
@@ -567,6 +774,8 @@ def get_robot_record(name: str) -> dict | None:
         record["mode"] = _DEFAULT_MODE
     # Records written before the Maker arm existed carry no arm_type; they are
     # SO-101s by definition, which is exactly what normalize_arm_type returns.
+    # A hand-edited UNKNOWN string is kept as is: the record lists as
+    # unavailable and refuses to start, rather than masquerading as an SO-101.
     record["arm_type"] = normalize_arm_type(record.get("arm_type"))
     # Older records have no motor_power (→ full power via _empty_record); an
     # out-of-range or corrupted value on disk is clamped so every consumer
@@ -612,8 +821,14 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
 
     record = existing if existing is not None else _empty_record(name)
     # Decided BEFORE the merge below, because the switch blanks hardware-bound
-    # fields and must not blank ones this same payload is setting.
-    switching_arm_type = data.get("arm_type") in ARM_TYPES and data["arm_type"] != record.get("arm_type")
+    # fields and must not blank ones this same payload is setting. Only a
+    # KNOWN arm type switches: arm_type is not in _ROBOT_STRING_FIELDS, so an
+    # unknown one handed to this layer writes nothing at all (the API layer
+    # refuses it with 400 robot.arm_type.unavailable before it gets here; a
+    # hand edit of the JSON is the only way an unknown id lands on disk).
+    switching_arm_type = is_known_arm_type(data.get("arm_type")) and data["arm_type"] != record.get(
+        "arm_type"
+    )
     for field in _ROBOT_STRING_FIELDS:
         if field in data and isinstance(data[field], str):
             record[field] = data[field]
@@ -896,6 +1111,15 @@ def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
         value = record.get(field, "")
         if not isinstance(value, str) or not value.strip():
             return False
+
+    # An arm type nothing registered can never be ready — there is no family
+    # to build its devices from, and no library to look its calibrations up
+    # in (the lookup below would raise UnknownArmType). Checked BEFORE the
+    # library resolution for that reason. Normalized first: a record with NO
+    # arm_type (a raw dict, or one written before arm types existed) is an
+    # SO-101, the same reading the library lookups below give it.
+    if not is_known_arm_type(normalize_arm_type(record.get("arm_type"))):
+        return False
 
     # Resolve the libraries by THIS record's arm type: the SO-101 and Maker
     # pairs keep separate directories, so checking the SO-101 ones for a Maker

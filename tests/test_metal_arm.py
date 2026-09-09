@@ -25,10 +25,11 @@ from makermodslab.utils import config as cfg
 
 
 def test_metal_is_a_known_arm_type() -> None:
-    """ "metal" must stop falling back to so101 — the fallback would silently
-    re-enable every Feetech-register guard on a bus that has no registers."""
+    """ "metal" must never read as so101 — that would silently re-enable every
+    Feetech-register guard on a bus that has no registers. Asked of the live
+    registry (TB5 retired the tuple captured at import)."""
     assert cfg.normalize_arm_type("metal") == "metal"
-    assert "metal" in cfg.ARM_TYPES
+    assert cfg.is_known_arm_type("metal") is True
 
 
 def test_metal_capabilities_match_its_hardware() -> None:
@@ -36,17 +37,17 @@ def test_metal_capabilities_match_its_hardware() -> None:
     no Feetech registers, no range sweep (fixed joint_limits), no back-drivable
     leader for a DAgger handover."""
     from makermodslab.arm_capabilities import (
+        calibration_kind,
         joints_per_arm,
         supports_auto_calibration,
         supports_dagger,
         uses_feetech_bus,
-        uses_zero_calibration,
     )
 
     assert joints_per_arm("metal") == 7
     assert uses_feetech_bus("metal") is False
     assert supports_auto_calibration("metal") is False
-    assert uses_zero_calibration("metal") is True
+    assert calibration_kind("metal") == "steps"
     assert supports_dagger("metal") is False
 
 
@@ -168,14 +169,14 @@ def test_an_explicitly_saved_config_name_beats_the_minted_default(tmp_lerobot_ho
 # ---------------------------------------------------------------------------
 
 
-def test_calibrating_a_metal_robot_builds_a_zero_calibration_request(tmp_lerobot_home: Path) -> None:
-    """Metal rides the zero-pose flow, and the request must CARRY its arm type
-    — zero_calibrate builds the device configs and resolves the name-collision
-    directory from it, and a request that defaulted to maker would connect a
-    RobStride config to a Damiao bus."""
+def test_calibrating_a_metal_robot_builds_a_step_calibration_request(tmp_lerobot_home: Path) -> None:
+    """Metal rides the step wizard, and the request must CARRY its arm type
+    — step_calibrate resolves the family (device configs, procedure) and the
+    name-collision directory from it, and a request that defaulted to maker
+    would connect a RobStride config to a Damiao bus."""
     from makermodslab.schemas.sessions import CalibrationOptions
     from makermodslab.sessions import _build_calibration_request
-    from makermodslab.zero_calibrate import ZeroCalibrationRequest
+    from makermodslab.step_calibrate import StepCalibrationRequest
 
     cfg.save_robot_record(
         "mt4", {"arm_type": "metal", "mode": "single", "follower_port": "/dev/can0"}, allow_create=True
@@ -183,12 +184,12 @@ def test_calibrating_a_metal_robot_builds_a_zero_calibration_request(tmp_lerobot
     record = cfg.get_robot_record("mt4")
 
     request = _build_calibration_request(record, CalibrationOptions(device_type="robot", arm="left"))
-    assert isinstance(request, ZeroCalibrationRequest)
+    assert isinstance(request, StepCalibrationRequest)
     assert request.arm_type == "metal"
     assert request.port == "/dev/can0"
 
 
-def test_a_maker_zero_calibration_request_still_says_maker(tmp_lerobot_home: Path) -> None:
+def test_a_maker_step_calibration_request_still_says_maker(tmp_lerobot_home: Path) -> None:
     from makermodslab.schemas.sessions import CalibrationOptions
     from makermodslab.sessions import _build_calibration_request
 
@@ -219,58 +220,139 @@ def test_auto_calibration_refuses_a_metal_robot(tmp_lerobot_home: Path) -> None:
     assert "zero-pose" in excinfo.value.detail
 
 
-def test_zero_calibration_builds_metal_ranges_with_the_send_can_id() -> None:
+METAL_FOLLOWER_ZERO_POSE = "Move the arm by hand to its ZERO POSE — standing upright, all joints at 0 degrees, gripper closed — then confirm."
+
+
+def test_metal_calibrate_builds_ranges_with_the_send_can_id() -> None:
     """The two CAN families disagree about the id field's shape: Maker
     motor_can_ids are plain ints, Metal's are (send_id, recv_id) tuples.
     MotorCalibration.id is an int, and lerobot's own MetalFollower.calibrate()
-    stores the SEND id — storing the tuple would produce an unloadable file."""
-    from lerobot.robots.metal_follower import MetalFollower, MetalFollowerConfig
-    from makermodslab.zero_calibrate import ZeroCalibrationRequest, zero_calibration_manager
+    stores the SEND id — storing the tuple would produce an unloadable file.
+    Run through the family's own ``calibrate`` on a fake device."""
+    from lerobot.robots.metal_follower import MetalFollowerConfig
+    from makermodslab.arms import registry
+    from tests.mocks import FakeCalibrationUI, FakeCanFollower
 
-    manager = zero_calibration_manager
+    log: list = []
     config = MetalFollowerConfig(port="/dev/x", id="unit")
-    device = MetalFollower(config)
-    old_device, old_request = manager.device, manager._current_request
-    try:
-        manager.device = device
-        manager._current_request = ZeroCalibrationRequest(
-            device_type="robot", port="/dev/x", config_file="unit", arm_type="metal"
-        )
-        calibration = manager._build_calibration()
-    finally:
-        manager.device, manager._current_request = old_device, old_request
+    device = FakeCanFollower(config, log)
+    ui = FakeCalibrationUI(log)
 
+    calibration = registry.get("metal").calibrate(device, "robot", ui)
+
+    assert ui.steps == [(METAL_FOLLOWER_ZERO_POSE, None, True)]
+    assert [e for e in log if e[0] == "bus"] == [("bus", "set_zero_position")]
+    assert log.index(("step", METAL_FOLLOWER_ZERO_POSE)) < log.index(("bus", "set_zero_position"))
     for motor, (send_id, _recv_id) in config.motor_can_ids.items():
         assert calibration[motor].id == send_id
         low, high = config.joint_limits[motor]
         assert calibration[motor].range_min == int(low)
         assert calibration[motor].range_max == int(high)
+        assert calibration[motor].homing_offset == 0
 
 
-def test_zero_pose_instructions_differ_per_arm_type() -> None:
+def test_metal_leader_calibrate_sets_origin_per_servo_from_the_metal_preset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lerobot.teleoperators.rebot_102_leader.config_rebot_102_leader_metal import (
+        RebotArm102LeaderMetalTeleopConfig,
+    )
+    from makermodslab.arms import registry
+    from tests.mocks import FakeCalibrationUI, FakeStarLeader
+
+    log: list = []
+    monkeypatch.setattr("time.sleep", lambda seconds: log.append(("sleep", seconds)))
+    config = RebotArm102LeaderMetalTeleopConfig(port="/dev/star0", id="unit")
+    device = FakeStarLeader(config, log)
+
+    calibration = registry.get("metal").calibrate(device, "teleop", FakeCalibrationUI(log))
+
+    assert [e for e in log if e[0] == "bus"] == [
+        call
+        for motor_id in config.joint_ids.values()
+        for call in (("bus", "unlock", motor_id), ("bus", "set_origin_point", motor_id))
+    ]
+    for motor, motor_id in config.joint_ids.items():
+        low, high = config.joint_ranges[motor]
+        assert calibration[motor].id == motor_id
+        assert (calibration[motor].range_min, calibration[motor].range_max) == (int(low), int(high))
+
+
+def test_metal_open_for_calibration_disables_torque_right_after_the_handshake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On Metal this order is not a nicety: the Damiao handshake inside
+    bus.connect() IS the enable command, so the arm comes up energized and
+    the disable is what frees it for the user's hands."""
+    from makermodslab.arms import registry
+    from tests.mocks import FakeCanFollower
+
+    built: list = []
+
+    def fake_make_robot(config):
+        built.append(config)
+        return FakeCanFollower(config)
+
+    monkeypatch.setattr("lerobot.robots.make_robot_from_config", fake_make_robot, raising=False)
+    monkeypatch.setattr("lerobot.robots.utils.make_robot_from_config", fake_make_robot, raising=False)
+
+    device = registry.get("metal").open_for_calibration("robot", "/dev/can0", "cal")
+
+    assert [c.type for c in built] == ["metal_follower"]
+    assert device.log == [("bus", "connect"), ("bus", "disable_torque")]
+
+
+def test_metal_open_for_calibration_connects_the_leader_with_the_metal_preset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from makermodslab.arms import registry
+    from tests.mocks import FakeStarLeader
+
+    built: list = []
+
+    def fake_make_teleop(config):
+        built.append(config)
+        return FakeStarLeader(config)
+
+    monkeypatch.setattr(
+        "lerobot.teleoperators.make_teleoperator_from_config", fake_make_teleop, raising=False
+    )
+    monkeypatch.setattr(
+        "lerobot.teleoperators.utils.make_teleoperator_from_config", fake_make_teleop, raising=False
+    )
+
+    device = registry.get("metal").open_for_calibration("teleop", "/dev/star0", "cal")
+
+    assert [c.type for c in built] == ["rebot_102_leader_metal"]
+    assert device.log == [("device", "connect", False)]
+
+
+def test_calibration_summaries_differ_per_arm_type() -> None:
     """Follower zero poses are family-specific and opposite on the gripper.
 
     The user is being asked to do something physical, and the two poses are
     OPPOSITES on the gripper (Maker: fully open; Metal: closed). Showing the
     Maker text to a Metal user zeroes the gripper at the wrong end of travel."""
-    from makermodslab.zero_calibrate import zero_pose_instructions
+    from makermodslab.arms import registry
 
-    maker_text = zero_pose_instructions("maker")
-    metal_text = zero_pose_instructions("metal")
+    maker_text = registry.get("maker").calibration_summary("robot")["text"]
+    metal_text = registry.get("metal").calibration_summary("robot")["text"]
     assert maker_text != metal_text
     assert "open" in maker_text
+    assert metal_text == METAL_FOLLOWER_ZERO_POSE
     assert "upright" in metal_text and "closed" in metal_text
 
 
-def test_zero_pose_instructions_share_star_leader_pose() -> None:
+def test_calibration_summaries_share_the_star_leader_pose() -> None:
     """Maker and Metal rigs use the same physical Star Arm 102 leader."""
-    from makermodslab.zero_calibrate import zero_pose_instructions
+    from makermodslab.arms import registry
 
-    maker_text = zero_pose_instructions("maker", "teleop")
-    metal_text = zero_pose_instructions("metal", "teleop")
-    assert maker_text == metal_text
-    assert "Star Arm 102" in maker_text
-    assert "folded" in maker_text and "closed" in maker_text
+    maker = registry.get("maker").calibration_summary("teleop")
+    metal = registry.get("metal").calibration_summary("teleop")
+    assert maker == metal
+    assert maker["image_url"] is None
+    assert "Star Arm 102" in maker["text"]
+    assert "folded" in maker["text"] and "closed" in maker["text"]
 
 
 # ---------------------------------------------------------------------------
@@ -371,8 +453,8 @@ def test_bimanual_metal_cameras_go_on_the_left_arm_not_the_top_level(_no_staging
     assert robot.right_arm_config.cameras == {}
 
 
-def test_metal_zero_calibration_device_configs() -> None:
-    """The single-device helpers zero_calibrate connects through."""
+def test_metal_single_device_configs_for_calibration() -> None:
+    """The single-device helpers the step wizard's open_for_calibration builds."""
     from makermodslab.utils.robot_factory import metal_follower_config, metal_leader_config
 
     follower = metal_follower_config("/dev/can0", "cal")
@@ -408,10 +490,14 @@ def test_rollout_names_the_metal_robot_type(arm_type: str, mode: str, expected: 
 
 def test_arm_count_guard_measures_a_metal_checkpoint_at_seven_dims() -> None:
     """Same 7-dim contract as the Maker arm — pinned separately so a future
-    per-family divergence has to come past a test."""
-    from makermodslab.rollout import _ARM_STATE_DIMS
+    per-family divergence has to come past a test. Asserted through the guard
+    itself (the width is read live off the family, not off a table)."""
+    from makermodslab.rollout import _arm_count_mismatch
 
-    assert _ARM_STATE_DIMS["metal"] == 7
+    assert _arm_count_mismatch("single", 7, "metal") is None
+    assert _arm_count_mismatch("bimanual", 14, "metal") is None
+    assert _arm_count_mismatch("single", 14, "metal") is not None
+    assert _arm_count_mismatch("bimanual", 7, "metal") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -711,14 +797,13 @@ def test_release_torque_reports_a_failed_disable_loudly(monkeypatch: pytest.Monk
     assert any("TORQUE MAY STILL BE ENABLED" in p for p in result["problems"])
 
 
-def test_release_torque_request_rejects_an_so101_arm() -> None:
+def test_release_torque_request_takes_any_arm_type_string() -> None:
     """An SO-101 arm goes limp on its own when the process dies — there is
-    nothing for this endpoint to recover, and pointing a CAN de-energize at a
-    Feetech serial port would be nonsense. The request model refuses it at
-    the schema level."""
-    import pydantic
-
+    nothing for this endpoint to recover. That refusal moved OUT of the
+    schema (TB5 opened the Literal so an extension's CAN family can use the
+    route) and into the handler, by the family's `uses_feetech_bus` flag —
+    see tests/test_arms_manifest.py. The model itself now takes any string."""
     from makermodslab.can_recovery import ReleaseCanTorqueRequest
 
-    with pytest.raises(pydantic.ValidationError):
-        ReleaseCanTorqueRequest(arm_type="so101", port="/dev/tty0")
+    assert ReleaseCanTorqueRequest(arm_type="so101", port="/dev/tty0").arm_type == "so101"
+    assert ReleaseCanTorqueRequest(arm_type="so101_twin", port="/dev/can9").arm_type == "so101_twin"
