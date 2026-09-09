@@ -54,6 +54,10 @@ export default {
     image: "镜像",
     updated: "更新于",
     base: "基础模型",
+    // 策略卡上的训练数据配方。标签旁的值（仓库 id、权重、百分比、合并名称）为数据。
+    trainingData: "训练数据",
+    weightedSource: "权重 · 采样占比 · 回合数",
+    fromTemporaryMerge: "来自临时合并 · {{name}}",
   },
   kind: {
     finetune: "微调",

@@ -492,11 +492,32 @@ const ModelCard: React.FC<Props> = ({
   // than a dishonest "0 / 0".
   // Only the LABELS are translated; every value beside them is data (policy
   // type, dataset repo id) or a pre-formatted number left exactly as it was.
+  // Frozen recipe of a merged training dataset (Task 4). When present it
+  // REPLACES the single Dataset row with a per-source block below the meta
+  // rows — the merged repo id alone tells the user nothing about what went in.
+  const prov = model.merge_provenance ?? null;
+  // Post-weight sampling share per source: weight × episodes, normalized. A
+  // source with no episode count falls back to weight-only so the row still
+  // renders a share rather than a blank. Repo ids, weights and percentages
+  // are data — never translated.
+  const provSources =
+    prov?.sources.map((s) => ({
+      ...s,
+      units: (s.episodes ?? 1) * s.weight,
+    })) ?? [];
+  const provTotal = provSources.reduce((a, s) => a + s.units, 0) || 1;
+  const provShare = provSources.map((s) => ({
+    ...s,
+    pct: Math.round((s.units / provTotal) * 100),
+  }));
+
   const metaRows: Array<[string, string]> = [];
   if (model.config?.policy_type)
     metaRows.push([t("jobs.meta.policy"), model.config.policy_type]);
   // Imported pseudo-jobs carry the "(imported)" sentinel, not a real dataset.
+  // A merge-provenance run gets the training-data block instead of this row.
   if (
+    !prov &&
     model.config?.dataset_repo_id &&
     model.config.dataset_repo_id !== "(imported)"
   )
@@ -684,6 +705,37 @@ const ModelCard: React.FC<Props> = ({
 
         <div className="min-h-0 overflow-hidden">
           <MetaRows rows={metaRows} />
+          {prov ? (
+            <div className="mt-1 space-y-0.5 text-[11px]">
+              <div className="text-muted-foreground">
+                {t("jobs.meta.trainingData")}
+              </div>
+              {provShare.map((s) => (
+                <div
+                  key={s.repo_id}
+                  className="flex items-baseline gap-1.5"
+                  title={t("jobs.meta.weightedSource")}
+                >
+                  <span
+                    className="min-w-0 flex-1 truncate font-mono text-foreground"
+                    title={s.repo_id}
+                  >
+                    {s.repo_id}
+                  </span>
+                  <span className="shrink-0 text-muted-foreground">
+                    ×{s.weight} · {s.pct}% · {s.episodes ?? "?"} ep
+                  </span>
+                </div>
+              ))}
+              {prov.temporary ? (
+                <div className="truncate text-muted-foreground/80">
+                  {t("jobs.meta.fromTemporaryMerge", {
+                    name: prov.merged_repo_id,
+                  })}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
 
         {/* Bottom-pinned control cluster: the checkpoint row and the action
