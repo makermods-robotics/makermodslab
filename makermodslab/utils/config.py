@@ -1509,7 +1509,12 @@ def stage_bimanual_leader_calibrations(
     ``leader_kind`` selects the source library for a multi-leader family."""
     leader_staging = _bimanual_leader_staging_dir(base)
     _stage_one_side(
-        leader_config_path_for(arm_type, leader_kind), leader_staging, base, leader_left, leader_right, "leader"
+        leader_config_path_for(arm_type, leader_kind),
+        leader_staging,
+        base,
+        leader_left,
+        leader_right,
+        "leader",
     )
     return leader_staging, base
 
