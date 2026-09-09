@@ -382,6 +382,10 @@ def host_joint_data(observation: dict, ranges: dict, arm_type: str, bimanual: bo
             if feetech
             else observation_degrees(observation, prefix=prefix)
         )
+        if not feetech:
+            family = arm_registry.get(arm_type)
+            if family.telemetry_kind == "urdf":
+                result[f"joints{suffix}"] = family.urdf_joint_positions(result[f"joints_deg{suffix}"])
         if not bimanual:
             break
     return result

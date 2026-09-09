@@ -710,13 +710,16 @@ def setup_calibration_files(
     return leader_config_name, follower_config_name
 
 
-def setup_leader_calibration_file(leader_config: str, arm_type: object = DEFAULT_ARM_TYPE) -> str:
+def setup_leader_calibration_file(
+    leader_config: str, arm_type: object = DEFAULT_ARM_TYPE, leader_kind: object = None
+) -> str:
     """Leader twin of setup_follower_calibration_file (remote teleoperation
     opens ONLY the leader). Validates the assigned config exists in the arm
-    type's leader library and returns its stem — lerobot's `id`."""
+    type's leader library and returns its stem — lerobot's `id`.
+    ``leader_kind`` selects the library for a multi-leader family."""
     _require_assigned_config(leader_config, "leader")
     leader_config_name = os.path.splitext(leader_config)[0]
-    leader_library = leader_config_path_for(arm_type)
+    leader_library = leader_config_path_for(arm_type, leader_kind)
     target = os.path.join(leader_library, f"{leader_config_name}.json")
     if not os.path.exists(target):
         raise FileNotFoundError(
@@ -1499,12 +1502,14 @@ def stage_bimanual_leader_calibrations(
     leader_left: str,
     leader_right: str,
     arm_type: object = DEFAULT_ARM_TYPE,
+    leader_kind: object = None,
 ) -> tuple[str, str]:
     """Leader twin of stage_bimanual_follower_calibrations (remote
-    teleoperation opens only the leaders). Returns (leader_staging_dir, base)."""
+    teleoperation opens only the leaders). Returns (leader_staging_dir, base).
+    ``leader_kind`` selects the source library for a multi-leader family."""
     leader_staging = _bimanual_leader_staging_dir(base)
     _stage_one_side(
-        leader_config_path_for(arm_type), leader_staging, base, leader_left, leader_right, "leader"
+        leader_config_path_for(arm_type, leader_kind), leader_staging, base, leader_left, leader_right, "leader"
     )
     return leader_staging, base
 

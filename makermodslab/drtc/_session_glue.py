@@ -257,6 +257,42 @@ def return_step(start_poses: list, abort_event: threading.Event):
 # --- the interrupt shield -----------------------------------------------------
 
 
+def disconnect_robot(robot, connected: bool) -> None:
+    """Release startup failures even when the device's disconnect guard refuses.
+
+    A camera/configuration failure can leave an open, energized bus while
+    robot.is_connected is false. Release components independently in that case.
+    """
+    if connected:
+        try:
+            robot.disconnect()
+            return
+        except Exception:
+            # Complete the fallback before propagating the original failure.
+            disconnect_robot(robot, False)
+            raise
+    from ..torque import device_buses, force_disable_torque
+
+    problems = []
+
+    def attempt(what, fn, *args, **kwargs):
+        try:
+            return shielded(what, fn, *args, reraise=True, **kwargs)
+        except Exception as exc:
+            problems.append(f"{what}: {exc}")
+            return None
+
+    problems.extend(attempt("disabling startup torque", force_disable_torque, robot) or [])
+    for name, camera in (getattr(robot, "cameras", None) or {}).items():
+        if getattr(camera, "is_connected", False):
+            attempt(f"closing camera {name}", camera.disconnect)
+    for bus in device_buses(robot):
+        if getattr(bus, "is_connected", False):
+            attempt("closing startup bus", bus.disconnect, disable_torque=False)
+    if problems:
+        raise RuntimeError("; ".join(problems))
+
+
 def shielded(what: str, fn, *args, attempts: int = 2, reraise: bool = False, **kwargs):
     """Run one TEARDOWN step so that no interrupt can skip the steps after it.
 

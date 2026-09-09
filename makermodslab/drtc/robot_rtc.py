@@ -151,6 +151,7 @@ from ._session_glue import (
     LoopControl,
     _shielded_disconnect,
     capture_start_poses_or_warn,
+    disconnect_robot,
     ease_in_field,
     ease_into_first_action,
     emit,
@@ -313,39 +314,43 @@ async def run(cfg: RobotSideRTCConfig) -> None:
     emit(EVENT_READY, format_ready(url, room))
 
     robot = make_robot_from_config(cfg.robot)
-    robot.connect()
-
-    # Un-throttle the servos before anything commands them. `Torque_Limit` is a
-    # RAM register that SURVIVES between sessions on one power-up, so a cap an
-    # earlier auto-calibration left behind would silently throttle this whole
-    # run: the arm tracks the policy sluggishly, everything looks healthy, and
-    # nothing anywhere says why. Feetech-only, like the register itself. Stated
-    # here rather than lifted into the glue because a source assertion pins the
-    # call site (see tests/test_drtc_robot_rtc.py, and the note in
-    # _session_glue's docstring on what deliberately did not move).
-    if feetech_buses(robot):
-        for warning in reset_torque_limit(robot, FOLLOWER):
-            print(f"[robot] WARNING: {warning}")
-
-    # Only now is it safe to read stdin — see LoopControl.start_command_pump for
-    # why the pump cannot start before connect().
-    control.start_command_pump()
-
-    schema, state_keys, action_keys = robot_wire_schema(robot)
-    print(
-        f"[robot] hardware schema: state={len(state_keys)} action={len(action_keys)} cameras={schema.cameras}"
-    )
-    print(f"[robot]   state keys : {state_keys}")
-    print(f"[robot]   action keys: {action_keys}")
-
-    # Capture where the operator left the arm, now — after connect, before
-    # anything moves — so every exit path can drive it back there while torque
-    # is still on.
-    start_poses = capture_start_poses_or_warn(robot, cfg.return_to_rest)
-
+    connected = False
+    start_poses = []
     portal = None
-    camera_timing = CameraTimingMonitor(getattr(robot, "cameras", {}))
+    camera_timing = None
     try:
+        robot.connect()
+        connected = True
+
+        # Un-throttle the servos before anything commands them. `Torque_Limit` is a
+        # RAM register that SURVIVES between sessions on one power-up, so a cap an
+        # earlier auto-calibration left behind would silently throttle this whole
+        # run: the arm tracks the policy sluggishly, everything looks healthy, and
+        # nothing anywhere says why. Feetech-only, like the register itself. Stated
+        # here rather than lifted into the glue because a source assertion pins the
+        # call site (see tests/test_drtc_robot_rtc.py, and the note in
+        # _session_glue's docstring on what deliberately did not move).
+        if feetech_buses(robot):
+            for warning in reset_torque_limit(robot, FOLLOWER):
+                print(f"[robot] WARNING: {warning}")
+
+        # Only now is it safe to read stdin — see LoopControl.start_command_pump for
+        # why the pump cannot start before connect().
+        control.start_command_pump()
+
+        schema, state_keys, action_keys = robot_wire_schema(robot)
+        print(
+            f"[robot] hardware schema: state={len(state_keys)} action={len(action_keys)} cameras={schema.cameras}"
+        )
+        print(f"[robot]   state keys : {state_keys}")
+        print(f"[robot]   action keys: {action_keys}")
+
+        # Capture where the operator left the arm, now — after connect, before
+        # anything moves — so every exit path can drive it back there while torque
+        # is still on.
+        start_poses = capture_start_poses_or_warn(robot, cfg.return_to_rest)
+
+        camera_timing = CameraTimingMonitor(getattr(robot, "cameras", {}))
         camera_timing.start()
         codec = getattr(VideoCodec, cfg.video_codec.upper())
 
@@ -755,7 +760,8 @@ async def run(cfg: RobotSideRTCConfig) -> None:
         raise
     finally:
         shielded("the STOPPING event", emit, EVENT_STOPPING, attempts=1)
-        camera_timing.stop()
+        if camera_timing is not None:
+            shielded("stopping camera diagnostics", camera_timing.stop)
         # Order is load-bearing: the return needs torque, and it is
         # robot.disconnect() that releases it. QUIT is the one path that skips
         # the return — it means "stop now", and the caller has accepted that
@@ -792,7 +798,7 @@ async def run(cfg: RobotSideRTCConfig) -> None:
         # `reraise`: a disconnect that genuinely FAILS still ends the process
         # non-zero and without a BYE — the parent reads that as the child
         # dying, which is the truth. Only the interrupt is swallowed.
-        shielded("the torque release (robot.disconnect)", robot.disconnect, reraise=True)
+        shielded("the torque release (robot.disconnect)", disconnect_robot, robot, connected, reraise=True)
         shielded("the BYE event", emit, EVENT_BYE, attempts=1)
 
 

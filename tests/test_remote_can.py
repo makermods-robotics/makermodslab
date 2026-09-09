@@ -56,9 +56,13 @@ def test_station_publishes_every_can_joint_in_degrees(family, bimanual):
     observation = {f"{prefix}{motor}.pos": i + 0.5 for prefix in prefixes for i, motor in enumerate(motors)}
     expected = {motor: i + 0.5 for i, motor in enumerate(motors)}
     result = remote_host.host_joint_data(observation, {}, family, bimanual)
-    assert result == (
-        {"joints_deg": expected, "joints_deg_right": expected} if bimanual else {"joints_deg": expected}
-    )
+    assert result["joints_deg"] == expected
+    assert result["joints"]
+    if bimanual:
+        assert result["joints_deg_right"] == expected
+        assert result["joints_right"]
+    else:
+        assert "joints_right" not in result
     descriptor = {"arm_type": family, "motors": remote_teleoperate.leader_motors(observation)}
     assert remote_teleoperate.schema_mismatch(descriptor, family, descriptor["motors"]) is None
     assert remote_teleoperate.schema_mismatch(descriptor, "metal" if family == "maker" else "maker", None)

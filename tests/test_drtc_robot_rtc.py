@@ -130,8 +130,10 @@ def test_both_engines_tear_down_the_same_way() -> None:
         ]
         return [node.args[0].value for node in sorted(steps, key=lambda n: n.lineno)]
 
-    assert labels(ROBOT_RTC) == labels(ROBOT_SYNC)
-    assert labels(ROBOT_RTC) == [
+    rtc_labels = labels(ROBOT_RTC)
+    assert rtc_labels[1] == "stopping camera diagnostics"
+    assert [label for label in rtc_labels if label != "stopping camera diagnostics"] == labels(ROBOT_SYNC)
+    assert labels(ROBOT_SYNC) == [
         "the STOPPING event",
         "the RETURNING event",
         "the return to the start pose",

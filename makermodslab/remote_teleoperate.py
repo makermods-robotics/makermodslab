@@ -59,8 +59,7 @@ from .arm_identity import verify_devices
 from .nodes import NodeNotFoundError, NodeUnreachableError, PeerJobRefusalError, node_registry
 from .remote_host import (
     REMOTE_EXTRA_HINT,
-    observation_degrees,
-    observation_to_urdf_joints,
+    host_joint_data,
     remote_extra_available,
 )
 from .session_events import notify_session_changed
@@ -407,7 +406,6 @@ def handle_start_remote_teleoperation(
 
     ranges = dict(descriptor.get("joint_ranges_deg") or {})
     fps = int(descriptor["fps"])
-    feetech = uses_feetech_bus(request.arm_type)
     is_bimanual = request.mode == "bimanual"
     camera_names = [c["name"] for c in cameras]
 
@@ -432,23 +430,9 @@ def handle_start_remote_teleoperation(
                     if now - last_broadcast >= _BROADCAST_INTERVAL_S:
                         try:
                             joint_data: dict[str, Any] = {"type": "joint_update", "timestamp": now}
-                            if feetech:
-                                joint_data["joints"] = observation_to_urdf_joints(
-                                    observation, ranges, prefix="left_" if is_bimanual else ""
-                                )
-                                if is_bimanual:
-                                    joint_data["joints_right"] = observation_to_urdf_joints(
-                                        observation, ranges, prefix="right_"
-                                    )
-                            else:
-                                joint_data["joints"] = {}
-                                joint_data["joints_deg"] = observation_degrees(
-                                    observation, prefix="left_" if is_bimanual else ""
-                                )
-                                if is_bimanual:
-                                    joint_data["joints_deg_right"] = observation_degrees(
-                                        observation, prefix="right_"
-                                    )
+                            joint_data.update(
+                                host_joint_data(observation, ranges, request.arm_type, is_bimanual)
+                            )
                             if websocket_manager and websocket_manager.active_connections:
                                 websocket_manager.broadcast_joint_data_sync(joint_data)
                             last_broadcast = now
