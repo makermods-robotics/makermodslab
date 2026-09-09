@@ -161,18 +161,6 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
       packageRef.current = urdfConfig.packagePath;
     }
 
-    // Setup model loading if a path is available
-    let cleanupModelLoading = () => {};
-    if (urdfPath) {
-      cleanupModelLoading = setupModelLoading(
-        viewer,
-        urdfPath,
-        packageRef.current,
-        setCustomUrdfPath,
-        alternativeUrdfModels
-      );
-    }
-
     // Setup joint highlighting
     const cleanupJointHighlighting = setupJointHighlighting(
       viewer,
@@ -189,37 +177,22 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
       }
 
       try {
-        // Create a bounding box for the robot
-        const boundingBox = new THREE.Box3().setFromObject(viewer.robot);
-
-        // Calculate the center of the bounding box
-        const center = new THREE.Vector3();
-        boundingBox.getCenter(center);
-
-        // Calculate the size of the bounding box
-        const size = new THREE.Vector3();
-        boundingBox.getSize(size);
-
-        // Get the maximum dimension to ensure the entire robot is visible
-        const maxDim = Math.max(size.x, size.y, size.z);
-
-        // Position camera to see the center of the model
-        viewer.camera.position.copy(center);
-
-        // Move the camera back to see the entire robot
-        // Use the model's up direction to determine which axis to move along
-        const upVector = new THREE.Vector3();
-        if (viewer.up === "+Z" || viewer.up === "Z") {
-          upVector.set(1, 1, 1); // Move back in a diagonal
-        } else if (viewer.up === "+Y" || viewer.up === "Y") {
-          upVector.set(1, 1, 1); // Move back in a diagonal
-        } else {
-          upVector.set(1, 1, 1); // Default direction
-        }
-
-        // Normalize the vector and multiply by the size
-        upVector.normalize().multiplyScalar(maxDim * 1.3);
-        viewer.camera.position.add(upVector);
+        // Cached meshes may finish before the first render updates the scene.
+        viewer.robot.updateWorldMatrix(true, true);
+        const bounds = new THREE.Box3().setFromObject(viewer.robot);
+        if (bounds.isEmpty()) return;
+        const sphere = bounds.getBoundingSphere(new THREE.Sphere());
+        // Reserve room for a CAN arm to unfold after its first live sample.
+        // Fit the narrower field of view, including tall bimanual panels.
+        const radius = Math.max(sphere.radius, isDefaultModel ? urdfConfig.minViewRadius ?? 0 : 0);
+        const aspect = viewer.clientWidth / Math.max(viewer.clientHeight, 1);
+        const halfVerticalFov = THREE.MathUtils.degToRad(viewer.camera.fov / 2);
+        const halfFov = Math.atan(Math.tan(halfVerticalFov) * Math.min(aspect, 1));
+        const distance = radius * 1.15 / Math.sin(halfFov);
+        const center = sphere.center;
+        viewer.camera.position.copy(center).add(
+          new THREE.Vector3(1, 0.8, 1).normalize().multiplyScalar(distance)
+        );
 
         // Make the camera look at the center of the model
         viewer.controls.target.copy(center);
@@ -235,8 +208,10 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
     };
 
     // Add event listener for when the robot is loaded to auto-fit to view
+    let fitFrame = 0;
     const onRobotLoad = () => {
-      fitRobotToView(viewer);
+      cancelAnimationFrame(fitFrame);
+      fitFrame = requestAnimationFrame(() => fitRobotToView(viewer));
     };
 
     // Setup animation event handler for the default model or when hasAnimation is true
@@ -255,8 +230,22 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
 
     viewer.addEventListener("urdf-processed", onModelProcessed);
 
+    // Register listeners before loading: cached meshes can complete synchronously.
+    // Setup model loading if a path is available
+    let cleanupModelLoading = () => {};
+    if (urdfPath) {
+      cleanupModelLoading = setupModelLoading(
+        viewer,
+        urdfPath,
+        packageRef.current,
+        setCustomUrdfPath,
+        alternativeUrdfModels
+      );
+    }
+
     // Return cleanup function
     return () => {
+      cancelAnimationFrame(fitFrame);
       if (cleanupAnimationRef.current) {
         cleanupAnimationRef.current();
         cleanupAnimationRef.current = null;

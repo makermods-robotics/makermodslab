@@ -20,6 +20,8 @@ export interface UrdfConfig {
    * the default Z-up scene lays the arm flat on its side.
    */
   up: string;
+  /** Minimum framing sphere radius (metres), leaving room for the arm to unfold. */
+  minViewRadius?: number;
   /**
    * Let the model ignore the URDF's own joint limits (`ignore-limits` on the
    * viewer element). Set for the Maker arm: its shipped URDF carries the
@@ -76,6 +78,7 @@ const MAKER: UrdfConfig = {
   // The SDK keeps the CAD's Y-up geometry and does not encode a display
   // rotation, so mount it Y-up (base plate in the XZ plane).
   up: "+Y",
+  minViewRadius: 0.7,
   ignoreLimits: true,
   rewriteMeshUrl: (url) => {
     // The CAD export writes relative `meshes/part_XXX.stl`; urdf-loader
@@ -94,6 +97,7 @@ const METAL: UrdfConfig = {
   urdfPath: "/metal-urdf/metal_with_gripper.urdf",
   packagePath: "/",
   up: "Z",
+  minViewRadius: 0.75,
   rewriteMeshUrl: (url) => {
     const tail = url.match(/meshes\/[^/]+\.stl$/i);
     return tail ? `/metal-urdf/${tail[0]}` : url;

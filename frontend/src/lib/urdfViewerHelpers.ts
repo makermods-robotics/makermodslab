@@ -94,20 +94,25 @@ export function setupMeshLoader(
       // Apply URL modifier if available (for custom uploads)
       const modifiedPath = urlModifierFunc ? urlModifierFunc(path) : path;
 
-      // If loading fails, log the error but continue
+      // Three.js coalesces concurrent requests for the same URL. Only the
+      // first FileLoader registers with its manager, so a second arm can
+      // otherwise emit urdf-processed before any of its meshes arrive.
+      manager.itemStart(modifiedPath);
+      let completed = false;
+      const finish = (result: Object3D | null, err?: Error) => {
+        if (completed) return;
+        completed = true;
+        try {
+          if (err) console.warn(`Error loading mesh ${modifiedPath}:`, err);
+          done(result, err);
+        } finally {
+          manager.itemEnd(modifiedPath);
+        }
+      };
       try {
-        loadMeshFile(modifiedPath, manager, (result, err) => {
-          if (err) {
-            console.warn(`Error loading mesh ${modifiedPath}:`, err);
-            // Try to continue with other meshes
-            done(null);
-          } else {
-            done(result);
-          }
-        });
+        loadMeshFile(modifiedPath, manager, finish);
       } catch (err) {
-        console.error(`Exception loading mesh ${modifiedPath}:`, err);
-        done(null, err as Error);
+        finish(null, err as Error);
       }
     };
   }
