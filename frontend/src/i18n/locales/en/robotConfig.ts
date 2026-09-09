@@ -27,10 +27,9 @@ export default {
     armsNotLoaded:
       "Arm types have not loaded from the server yet — retrying. Port detection and calibration are held until they do.",
     unsaved: "Unsaved changes",
-    // {{gap}} is the setup-gap predicate rendered from the `robot.setupGap.*`
-    // keys, so this line reads as one sentence in both languages.
-    savedWithGap: "Saved — but this robot {{gap}}",
-    allSaved: "All changes saved",
+    // The footer tooltip explains which setup step is missing.
+    savedWithGap: "Saved. Setup incomplete.",
+    allSaved: "Saved",
     quit: "Quit",
     save: "Save",
     saving: "Saving…",
@@ -103,7 +102,7 @@ export default {
     label: "Leader arm",
     unavailable: "not installed",
     energizedHint:
-      "This leader is powered while you move it — it holds its own weight, is returned to its start pose and de-energized when a session stops, and shares the follower's protocol, so Detect cannot tell the two apart: use Wiggle on a port to see which arm it is.",
+      "This leader supports its own weight. Use Wiggle to find its port.",
     optionFor: {
       metal: {
         star: "Star Arm 102 leader",

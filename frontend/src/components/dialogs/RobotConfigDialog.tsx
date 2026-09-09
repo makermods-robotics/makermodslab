@@ -3145,7 +3145,7 @@ const RobotConfigWindow = ({
                         {leaderOptionLabel(option)}
                         {option.available
                           ? ""
-                          : ` — ${t("robotConfig.leaderKind.unavailable")}`}
+                          : ` (${t("robotConfig.leaderKind.unavailable")})`}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -3552,21 +3552,21 @@ const RobotConfigWindow = ({
             pressed. Quit closes the window, confirming first if there are
             unsaved drafts (or a live manual calibration to abort). */}
         <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border bg-background px-6 py-3">
-          {/* Left label: draft state first; when everything is saved but the
-              robot still isn't ready (a silently-disabled Save explains
-              nothing), name the concrete setup gap instead of a bare
-              "All changes saved". */}
+          {/* Keep the footer brief; the tooltip explains any missing setup. */}
           <span
             className={`text-sm ${
               isDirty ? "text-warn" : "text-muted-foreground"
             }`}
+            title={
+              !isDirty && robot && !robot.is_clean
+                ? formatRobotSetupGap(t, robot)
+                : undefined
+            }
           >
             {isDirty
               ? t("robotConfig.window.unsaved")
               : robot && !robot.is_clean
-                ? t("robotConfig.window.savedWithGap", {
-                    gap: formatRobotSetupGap(t, robot),
-                  })
+                ? t("robotConfig.window.savedWithGap")
                 : t("robotConfig.window.allSaved")}
           </span>
           <div className="flex gap-2">

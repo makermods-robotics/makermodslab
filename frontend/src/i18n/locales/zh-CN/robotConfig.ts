@@ -19,8 +19,8 @@ export default {
     armsNotLoaded:
       "尚未从服务器加载机械臂类型 — 正在重试。在加载完成之前，端口识别和标定暂不可用。",
     unsaved: "有未保存的更改",
-    savedWithGap: "已保存 — 但该机器人{{gap}}",
-    allSaved: "所有更改已保存",
+    savedWithGap: "已保存。设置未完成。",
+    allSaved: "已保存",
     quit: "退出",
     save: "保存",
     saving: "正在保存…",
@@ -78,7 +78,7 @@ export default {
     label: "主控臂",
     unavailable: "未安装",
     energizedHint:
-      "这种主控臂在你移动它时保持通电 — 它会支撑自身重量，会话停止时会回到起始姿态并断电；它与从臂使用相同协议，因此“识别”无法区分两者：请对某个端口使用“抖动”来查看是哪条机械臂。",
+      "主控臂可支撑自身重量。使用“抖动”查找它的端口。",
     optionFor: {
       metal: {
         star: "Star Arm 102 主控臂",
