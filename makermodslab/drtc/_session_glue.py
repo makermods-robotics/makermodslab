@@ -21,7 +21,7 @@ same session, and the only honest way to do that is to lift the pieces here
 rather than to copy them: two divergent copies of a teardown whose entire job
 is to make an energized arm safe is exactly the bug this module prevents.
 
-Importable WITHOUT the `[drtc]` extra, deliberately — same rule as `._pose`,
+Importable WITHOUT the `[remote]` extra, deliberately — same rule as `._pose`,
 and for the same reason. Nothing here imports `livekit.portal` (the FFI dylib),
 `livekit.api` or `python-dotenv`; the two `portal`-typed helpers take the portal
 object as an argument and only call methods on it. So the pure parts stay
@@ -347,12 +347,12 @@ def livekit_token_field():
     return field(
         default="",
         metadata={
-            "help": "Pre-minted room token to join with. Unset mints one from "
-            "LIVEKIT_API_KEY/SECRET, which is the LiveKit Cloud path. The "
-            "Lab passes one when it runs its own SFU (makermodslab --sfu): "
-            "the API secret then lives only in a 0600 file the server "
-            "reads, and the child — which needs no credential beyond a "
-            "token scoped to one room and one identity — is never given it."
+            "help": "Pre-minted room token to join with. The Lab always passes "
+            "one (it signs it from its own SFU's 0600 key file, and the child "
+            "— which needs no credential beyond a token scoped to one room "
+            "and one identity — is never given the secret). Unset mints one "
+            "from LIVEKIT_API_KEY/SECRET in the environment: the hand-run "
+            "bench fallback."
         },
     )
 

@@ -57,11 +57,13 @@ from . import (
     modal_launcher,
     models as model_browser,
     record as record_state,
+    remote_host,
     # The ROBOT half of the same run. Imported as a module (beside the two
     # handlers pulled in below) because `shutdown_event` calls
     # `stop_for_shutdown` on it — the child holds an energized arm and does not
     # die with this process.
     remote_inference,
+    remote_teleoperate,
     rollout as rollout_state,
     session_events,
     sfu,
@@ -100,6 +102,7 @@ from .jobs import (
     JobHasChildrenError,
     JobNotFoundError,
     JobNotRunningError,
+    JobPublishInProgressError,
     JobRemovalFailedError,
     JobSourceOfQueuedRunError,
     JobState,
@@ -217,13 +220,22 @@ from .schemas.models import (
     ModelDeleteResponse,
     ModelInfoResponse,
     ModelListItem,
+    ModelPublishStartResponse,
+    ModelPublishStatusResponse,
     ModelUploadResponse,
+    RunCheckpointsResponse,
     SkillsResponse,
 )
 from .schemas.nodes import (
     NodeEntry,
     NodeListResponse,
     NodeRemoveResponse,
+)
+from .schemas.remote import (
+    HostingStatusResponse,
+    RemoteCommandResponse,
+    RemoteTeleoperationStatusResponse,
+    StationStatusResponse,
 )
 
 # Response models for the typed /api/v1 surface (see makermodslab/schemas/).
@@ -287,6 +299,7 @@ from .teleoperate import (
 from .train import TrainingRequest
 from .update import handle_run_update, handle_update_check
 from .utils.config import (
+    HOME_IS_OVERRIDDEN,
     add_dismissed_hub_job,
     add_hidden_dataset,
     add_hidden_model,
@@ -306,6 +319,7 @@ from .utils.config import (
     is_robot_record_clean,
     is_valid_robot_name,
     list_robot_records,
+    migrate_legacy_state,
     port_slot_conflict,
     prune_dismissed_hub_jobs,
     remove_hidden_dataset,
@@ -327,10 +341,13 @@ from .utils.hf_auth import (
 )
 from .utils.system import (
     handle_get_policy_extra,
+    handle_get_remote_extra,
     handle_get_training_extra,
     handle_get_wandb_extra,
     handle_install_policy_extra,
     handle_install_policy_extra_status,
+    handle_install_remote_extra,
+    handle_install_remote_extra_status,
     handle_install_training_extra,
     handle_install_training_extra_status,
     handle_install_wandb_extra,
@@ -1212,7 +1229,7 @@ def get_remote_inference_transport():
 
     `endpoint_reachable` / `operator_present` come from one `list_participants`
     call behind remote_inference._probe_room, bounded at 3s, and are null when
-    that probe did not run at all. A missing [drtc] extra is REPORTED here
+    that probe did not run at all. A missing [remote] extra is REPORTED here
     rather than raised: the panel's job is to tell the user what to install,
     and the install command must name the PRIMARY CHECKOUT — an editable
     install run from a worktree silently re-points every other session's
@@ -1477,7 +1494,25 @@ def health_check(request: Request):
                 if sfu.sfu_enabled()
                 else {}
             ),
+            # Present only while a hosting session is live — the robot this
+            # station offers for remote teleoperation. A laptop's station
+            # picker filters on it. Same absent-means-none rule.
+            **_hosting_capability(),
         },
+    }
+
+
+def _hosting_capability() -> dict:
+    descriptor = remote_host.current_descriptor
+    if not remote_host.hosting_active or not descriptor:
+        return {}
+    return {
+        "hosting": {
+            "robot": descriptor["robot"],
+            "arm_type": descriptor["arm_type"],
+            "phase": remote_host.phase,
+            "active_operator": remote_host.seat_holder(),
+        }
     }
 
 
@@ -1515,6 +1550,18 @@ def issue_sfu_token(body: SfuTokenBody, request: Request):
         )
     api_key, api_secret = sfu.api_keys()
     identity = body.identity or sfu.default_identity(body.role)
+    # Single seat: while a hosting session's seat is held, only its holder
+    # (a reconnect) gets another operator token. The room cap is the SFU's
+    # half of the same rule.
+    if body.role == "operator":
+        holder = remote_host.seat_holder()
+        if holder is not None and holder != identity:
+            raise ApiError(
+                409,
+                f"This station's operator seat is held by {holder!r}. Only one operator drives at a time.",
+                code=ErrorCode.SFU_SEAT_TAKEN,
+                details={"holder": holder},
+            )
     room = body.room or sfu.default_room(get_instance_id())
     token, expires_at = sfu.mint_token(
         api_key=api_key,
@@ -1532,6 +1579,92 @@ def issue_sfu_token(body: SfuTokenBody, request: Request):
         "role": body.role,
         "expires_at": expires_at,
     }
+
+
+# --- Remote teleoperation (v1-only surface; see v1_router note above) ---
+
+
+@v1_router.get("/hosting", response_model=HostingStatusResponse, tags=["remote"])
+def get_hosting_status(request: Request):
+    """The station's hosting descriptor + status (remote_host.py). An
+    operator node reads this (through its registry) to learn the room, the
+    codec/fps, and the motor/camera schema before joining; the URL is
+    derived from the host the caller reached this API on."""
+    return remote_host.handle_hosting_status(request.url.hostname or "localhost")
+
+
+@v1_router.get("/remote-teleoperation", response_model=RemoteTeleoperationStatusResponse, tags=["remote"])
+def get_remote_teleoperation_status():
+    """The operator side's status (remote_teleoperate.py): which station,
+    which room, the remote cameras being re-streamed, Portal RTT metrics."""
+    return remote_teleoperate.handle_remote_teleoperation_status()
+
+
+@v1_router.get("/remote-teleoperation/camera/{name}", tags=["remote"])
+def get_remote_teleoperation_camera(name: str):
+    """MJPEG re-stream of one remote camera during a remote teleoperation
+    session, from the frames Portal delivers — the existing camera tiles
+    consume it unchanged. 404 when no session (or no such camera)."""
+    if not remote_teleoperate.remote_teleoperation_active or name not in remote_teleoperate.current_cameras:
+        raise ApiError(404, f"No remote camera named {name!r} is streaming.", code=ErrorCode.ROBOT_NOT_FOUND)
+    return StreamingResponse(
+        remote_teleoperate.camera_stream(name), media_type="multipart/x-mixed-replace; boundary=frame"
+    )
+
+
+class StationRobotBody(BaseModel):
+    """PUT /api/v1/station/robot — the robot this station hosts; null clears
+    the choice (hosting stops once idle and waits for a new pick)."""
+
+    robot: str | None = None
+
+
+@v1_router.get("/station", response_model=StationStatusResponse, tags=["remote"])
+def get_station_status():
+    """Station mode posture (remote_host.py): whether this machine was started
+    with --host, which robot it hosts, which saved robots it could host."""
+    return remote_host.handle_station_status()
+
+
+@v1_router.put("/station/robot", response_model=StationStatusResponse, tags=["remote"])
+def set_station_robot(body: StationRobotBody):
+    """Choose (or clear) the hosted robot. Remembered across restarts; a
+    parked, unseated hosting session of another robot yields and the
+    supervisor re-hosts the new choice within seconds; an engaged one is
+    refused with session.held."""
+    return remote_host.set_station_robot(body.robot)
+
+
+@v1_router.post("/remote-teleoperation/home", response_model=RemoteCommandResponse, tags=["remote"])
+def remote_teleoperation_home():
+    """Park the station's arm (return to rest, torque off) and hold it there
+    until Engage. Forwarded to the station as a Portal RPC; the station
+    honours it only from the seated operator."""
+    return remote_teleoperate.handle_remote_home()
+
+
+@v1_router.post("/remote-teleoperation/engage", response_model=RemoteCommandResponse, tags=["remote"])
+def remote_teleoperation_engage():
+    """Re-energize the station's arm after a Home, with a soft start."""
+    return remote_teleoperate.handle_remote_engage()
+
+
+@v1_router.get("/system/remote-extra", response_model=ExtraStatus, tags=["system"])
+def get_remote_extra():
+    """Whether the `remote` extra (LiveKit Portal's lerobot plugins) is importable."""
+    return handle_get_remote_extra()
+
+
+@v1_router.post("/system/remote-extra/install", response_model=InstallStartResponse, tags=["system"])
+def install_remote_extra():
+    """Spawn the Portal plugins' pip install as a background subprocess. No-op if already running."""
+    return handle_install_remote_extra()
+
+
+@v1_router.get("/system/remote-extra/install-status", response_model=InstallStatusResponse, tags=["system"])
+def install_remote_extra_status():
+    """Current install state plus any pending log lines (drained on read)."""
+    return handle_install_remote_extra_status()
 
 
 # --- Node registry (v1-only surface; see v1_router note above) ---
@@ -2268,11 +2401,69 @@ def models_upload(body: ModelUploadBody):
     """Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged
     model repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when
     the token can't write the namespace; 404 when the local model has no saved
-    checkpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}."""
+    checkpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.
+
+    The single-checkpoint synchronous push, frozen for SDK clients — including
+    its ON-HUB SHAPE: files land at the repo root, loadable by a plain
+    from_pretrained(repo_id) (root_layout=True). The training view's
+    multi-checkpoint picker uses POST /api/v1/models/publish instead, which
+    step-addresses under checkpoints/<step>/."""
     try:
-        return model_browser.upload_local_model(body.id, body.repo_id)
+        return model_browser.upload_local_model(body.id, body.repo_id, root_layout=True)
     except model_browser.ModelError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+@v1_router.get("/models/checkpoints", response_model=RunCheckpointsResponse, tags=["models"])
+def models_checkpoints(id: str):
+    """The publish picker's source of truth for one local run: every checkpoint
+    it saved, which steps are already on the Hub, and the repo a publish would
+    target. `id` is a run id (query param for symmetry with /models/info).
+    404 when the run has no uploadable checkpoint."""
+    try:
+        return model_browser.list_run_checkpoints(id)
+    except model_browser.ModelError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+class ModelPublishBody(BaseModel):
+    id: str
+    repo_id: str | None = None
+    # Which checkpoints to publish. Omitted ⇒ the run's final checkpoint only.
+    # Every step lands in the SAME repo under checkpoints/<step>/pretrained_model,
+    # so a later call adds to the same model card instead of creating a second repo.
+    steps: list[int] | None = None
+
+
+@v1_router.post("/models/publish", response_model=ModelPublishStartResponse, tags=["models"])
+def models_publish(body: ModelPublishBody):
+    """START publishing a local run's checkpoints to the Hub as ONE PUBLIC,
+    MakerModsLab-tagged model repo. MUTATES the Hub (creates/updates the repo).
+
+    Returns immediately with {started, model_id, message} — the queue runs
+    sequentially in a background thread (a run's worth of checkpoints is
+    gigabytes, far past what an inline request should hold open) and
+    GET /api/v1/models/publish-status reports progress. 409 when a publish is
+    already running; the per-step failures (400 offline, 403 permission, 404
+    unknown step, 502 Hub) surface through that status, not this call."""
+    try:
+        result = model_browser.model_upload_manager.start(body.id, body.repo_id, body.steps)
+    except model_browser.ModelError as exc:
+        # A worker that could not even be spawned — the manager has already
+        # released the slot (state "error"), so this is a 500, not a 409.
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+    if not result.get("started"):
+        raise HTTPException(status_code=409, detail=result.get("message", "Publish busy"))
+    return result
+
+
+@v1_router.get("/models/publish-status", response_model=ModelPublishStatusResponse, tags=["models"])
+def models_publish_status():
+    """Poll the single background publish: state (idle/running/done/error),
+    target repo + url, `done`/`total`/`current_step` for the queue position, and
+    `done_steps` — the steps already on the Hub, which stay meaningful after an
+    error because a failed queue keeps everything it published before it died."""
+    return model_browser.model_upload_manager.get_status()
 
 
 class ModelDeleteBody(BaseModel):
@@ -3631,6 +3822,18 @@ def delete_job(job_id: str):
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
     except JobNotRunningError as exc:
         raise HTTPException(status_code=409, detail=f"Job {job_id!r} is running; stop it first") from exc
+    except JobPublishInProgressError as exc:
+        # The background Hub publish is reading this run's checkpoint dirs
+        # right now; deleting them mid-upload kills the publish with an
+        # opaque error. Same refusal POST /models/delete gives.
+        raise ApiError(
+            status_code=409,
+            detail=(
+                f"Job {job_id!r} is being published to the Hub — wait for the "
+                "publish to finish before deleting it."
+            ),
+            code=ErrorCode.JOB_PUBLISH_IN_PROGRESS,
+        ) from exc
     except JobHasChildrenError as exc:
         # Mid-chain delete: name the runs that continue from this one so the
         # user can work inwards from the tip instead of guessing.
@@ -4609,6 +4812,11 @@ def camera_preview_stream(index: int, unique_id: str | None = None):
             status_code=409,
             detail="Inference is active — the cameras are in use. Stop the run to preview them.",
         )
+    if remote_host.hosting_active or remote_host.releasing:
+        raise HTTPException(
+            status_code=409,
+            detail="Hosting is active — the cameras are in use. Stop hosting to preview them.",
+        )
     identified = identify_cv2_index(unique_id, index)
     if identified is None:
         raise HTTPException(
@@ -4653,12 +4861,15 @@ def _record_with_clean(record: dict) -> dict:
 
     `is_clean` folds every arm of the mode (gates teleop/record, which drive
     leaders AND followers); `follower_ready` scopes to the follower side so
-    follower-only activities (inference, replay) aren't blocked by a leader arm
-    they never touch."""
+    follower-only activities (inference, replay, hosting) aren't blocked by a
+    leader arm they never touch; `leader_ready` is the mirror for remote
+    teleoperation, which drives a STATION's follower with this node's leader.
+    The record's `arms` layout says which of these the UI should even show."""
     return {
         **record,
         "is_clean": is_robot_record_clean(record),
         "follower_ready": is_robot_record_clean(record, arms="follower"),
+        "leader_ready": is_robot_record_clean(record, arms="leader"),
     }
 
 
@@ -4824,6 +5035,20 @@ def delete_robot(name: str):
 
 
 @app.on_event("startup")
+def migrate_state_home():
+    """Move pre-split state from lerobot's cache into MAKERMODSLAB_HOME.
+
+    Registered FIRST so it runs before any other startup work; every reader
+    of the moved entries is lazy (robot records, ports, the node registry's
+    saved peers, the instance id), so startup is early enough. Skipped under
+    a MAKERMODSLAB_HOME override — see utils/config.HOME_IS_OVERRIDDEN.
+    """
+    if HOME_IS_OVERRIDDEN:
+        return
+    migrate_legacy_state()
+
+
+@app.on_event("startup")
 def startup_event():
     """One-time startup diagnostics surfaced in the server terminal."""
     warn_if_cuda_mismatch()
@@ -4834,6 +5059,17 @@ def startup_event():
     # here, stop it. On a background thread, best-effort, and it never blocks
     # or refuses a launch; what it did shows up as the idle status's message.
     modal_launcher.reap_orphan_app_async()
+
+
+@app.on_event("startup")
+def start_station_mode():
+    """`makermodslab --host <robot>`: keep that robot hosted for remote
+    teleoperation (remote_host.start_station_mode) — parked from startup,
+    re-armed after any local session, no browser required."""
+    if os.environ.get(remote_host.STATION_ENV) == "1":
+        remote_host.start_station_mode(
+            os.environ.get(remote_host.STATION_ROBOT_ENV, "").strip() or None, manager
+        )
 
 
 # Strong reference so the loop's task set can't drop the pump mid-flight.
@@ -4871,6 +5107,11 @@ async def shutdown_event():
     # regardless — the exit-status file + TailingJobRunner still cover a worker
     # reload that this same process survives.
     job_registry.shutdown()
+
+    # Same for the station supervisor (`--host`): it re-arms hosting every few
+    # seconds whenever nothing holds the hardware, and the stops below are
+    # exactly "nothing holds the hardware" from its point of view.
+    remote_host.stop_station_mode()
 
     # THEN the GPU, before anything else here spends its (bounded but real)
     # time, because this is the one child that is BILLED BY THE MINUTE and the
@@ -4938,6 +5179,13 @@ async def shutdown_event():
         asyncio.to_thread(handle_stop_inference),
         asyncio.to_thread(stop_replay_and_wait),
         asyncio.to_thread(remote_inference.stop_for_shutdown),
+        # Hosting drives the follower from an in-process thread like teleop
+        # does — an engaged arm returns to rest, then torque is released.
+        # Remote teleoperation only holds the leader, but it must leave the
+        # room so the station parks the follower now rather than after its
+        # silent-loss grace.
+        asyncio.to_thread(remote_host.stop_hosting_for_shutdown),
+        asyncio.to_thread(remote_teleoperate.stop_for_shutdown),
         return_exceptions=True,
     )
     labels = (
@@ -4948,6 +5196,8 @@ async def shutdown_event():
         "inference",
         "replay",
         "remote inference",
+        "hosting",
+        "remote teleoperation",
     )
     for label, result in zip(labels, results, strict=True):
         if isinstance(result, Exception):

@@ -227,7 +227,9 @@ class _AutoCalArmRunner:
             from . import (
                 calibrate as _calibrate,
                 record as _record,
+                remote_host as _remote_host,
                 remote_inference as _remote_inference,
+                remote_teleoperate as _remote_teleoperate,
                 replay as _replay,
                 rollout as _rollout,
                 teleoperate as _teleoperate,
@@ -269,6 +271,18 @@ class _AutoCalArmRunner:
                     "success": False,
                     "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
                     "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+                }
+            if _remote_host.hosting_active:
+                return {
+                    "success": False,
+                    "message": "This robot is hosted for remote teleoperation. Stop hosting first.",
+                    "code": ErrorCode.ROBOT_BUSY_HOSTING,
+                }
+            if _remote_teleoperate.remote_teleoperation_active:
+                return {
+                    "success": False,
+                    "message": "Remote teleoperation is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_REMOTE_TELEOPERATION,
                 }
             if _replay.replay_active:
                 return {
@@ -648,7 +662,9 @@ class AutoCalibrationBatchManager:
             from . import (
                 calibrate as _calibrate,
                 record as _record,
+                remote_host as _remote_host,
                 remote_inference as _remote_inference,
+                remote_teleoperate as _remote_teleoperate,
                 replay as _replay,
                 rollout as _rollout,
                 teleoperate as _teleoperate,
@@ -690,6 +706,18 @@ class AutoCalibrationBatchManager:
                     "success": False,
                     "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
                     "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+                }
+            if _remote_host.hosting_active:
+                return {
+                    "success": False,
+                    "message": "This robot is hosted for remote teleoperation. Stop hosting first.",
+                    "code": ErrorCode.ROBOT_BUSY_HOSTING,
+                }
+            if _remote_teleoperate.remote_teleoperation_active:
+                return {
+                    "success": False,
+                    "message": "Remote teleoperation is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_REMOTE_TELEOPERATION,
                 }
             if _replay.replay_active:
                 return {

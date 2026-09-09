@@ -159,11 +159,18 @@ def _ensure_path_symlinks(
         logger.debug("PATH symlink self-install skipped: %s", exc)
 
 
-def _wait_for_port(port: int, timeout: int = 30) -> bool:
+def _wait_for_port(port: int, timeout: int = 30, host: str = "localhost") -> bool:
+    """Poll until `port` accepts a connection on `host`.
+
+    `host` must be the address the child actually BOUND: a --bind run pins
+    livekit's `bind_addresses` to one interface, so polling loopback there
+    would time out on a perfectly healthy server and kill it. The wildcard
+    bind is reachable on loopback, so it keeps the default.
+    """
     for _ in range(timeout):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(1)
-        result = sock.connect_ex(("localhost", port))
+        result = sock.connect_ex((host, port))
         sock.close()
         if result == 0:
             return True
@@ -455,12 +462,19 @@ def _start_sfu(binary: str, host: str, external_ip: bool = False) -> subprocess.
         [binary, "--config", LIVEKIT_CONFIG_FILE, "--key-file", key_file],
         start_new_session=True,
     )
-    if not _wait_for_port(sfu.SFU_HTTP_PORT, timeout=15):
+    # The wildcard bind is reachable on loopback; a specific --bind address is
+    # the only place the server answers, so poll it there.
+    probe_host = "localhost" if host == "0.0.0.0" else host  # noqa: S104  # nosec B104 — comparison, not a bind
+    if not _wait_for_port(sfu.SFU_HTTP_PORT, timeout=15, host=probe_host):
         logger.error("❌ LiveKit SFU never came up on :%d (see its log lines above)", sfu.SFU_HTTP_PORT)
         _terminate_tree(proc.pid)
         sys.exit(1)
     os.environ[sfu.ENV_KEY_FILE] = key_file
     os.environ[sfu.ENV_PORT] = str(sfu.SFU_HTTP_PORT)
+    # Participants on this machine (a hosting session's in-process worker, the
+    # remote-inference child) dial the SFU on the bind host; the wildcard bind
+    # is reachable on loopback.
+    os.environ[sfu.ENV_HOST] = "127.0.0.1" if host == "0.0.0.0" else host  # noqa: S104
     os.environ[sfu.ENV_EXTERNAL_IP] = "1" if external_ip else "0"
     if external_ip:
         logger.info("   SFU advertising its STUN-discovered public IP (--sfu-external-ip)")
@@ -813,6 +827,20 @@ def main():
         ),
     )
     parser.add_argument(
+        "--host",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ROBOT",
+        help=(
+            "Station mode: this machine hosts a robot for remote teleoperation — its follower and "
+            "cameras join the LiveKit room parked (torque off), an operator engages it automatically, "
+            "and hosting re-arms after any local session. ROBOT (optional) names the saved robot and "
+            "is remembered; without it the last choice is used, a lone hostable robot is picked, or the "
+            "station's UI chooses one. Requires --sfu"
+        ),
+    )
+    parser.add_argument(
         "--stop",
         action="store_true",
         help="Stop a running MakerMods Lab and free its ports (:8000/:8080/:7880), then exit.",
@@ -840,6 +868,17 @@ def main():
     sfu_bin = _require_livekit_server() if args.sfu else None
     if args.sfu_external_ip and not args.sfu:
         logger.warning("--sfu-external-ip does nothing without --sfu")
+    if args.host is not None:
+        if not args.sfu and not os.environ.get(sfu.ENV_URL):
+            logger.error(
+                "❌ --host needs the LiveKit SFU: add --sfu (or set %s to an external SFU).", sfu.ENV_URL
+            )
+            sys.exit(1)
+        # Read by makermodslab.server at startup (remote_host.start_station_mode)
+        # — same import-order rule as the other flags. STATION marks the
+        # posture; HOST_ROBOT is the optional robot (empty = remembered/auto/UI).
+        os.environ["MAKERMODSLAB_STATION"] = "1"
+        os.environ["MAKERMODSLAB_HOST_ROBOT"] = args.host.strip()
 
     _ensure_path_symlinks()
 

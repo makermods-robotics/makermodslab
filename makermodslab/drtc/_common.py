@@ -3,6 +3,10 @@
 Ported from the `livekit-drtc` repo. Credential loading lives in `_env` (so it
 is importable without LiveKit) and is re-exported here to keep the call sites
 `from ._common import load_env, mint_token, ...` unchanged.
+
+`mint_token` is the hand-run bench fallback: every process the Lab starts
+(the robot child, the Modal container) is handed a station-signed token
+instead and never holds an API key/secret.
 """
 
 from __future__ import annotations

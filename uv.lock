@@ -976,6 +976,34 @@ training = [
 ]
 
 [[package]]
+name = "lerobot-robot-livekit"
+version = "0.2.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "lerobot" },
+    { name = "livekit-portal" },
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9b/d8/253912d937433f2cee29d85a50a33f636b3ea8193786cb284ce505a09053/lerobot_robot_livekit-0.2.4.tar.gz", hash = "sha256:bcce3492e283b65830b4cf2a1955c81feffd846084d60f3b284ffce33c0a297a", size = 5711, upload-time = "2026-06-24T13:59:28.455Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ed/2b/81f977ed86094a02b6f61fcb5169457af81cf0aa27507f0a61006d079b56/lerobot_robot_livekit-0.2.4-py3-none-any.whl", hash = "sha256:56bac8ec1ee2274cb388633ee611bff4dd3d4ec66d38da91a54c2b15e3334214", size = 6454, upload-time = "2026-06-24T13:59:26.462Z" },
+]
+
+[[package]]
+name = "lerobot-teleoperator-livekit"
+version = "0.2.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "lerobot" },
+    { name = "livekit-portal" },
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cc/fd/bb6b40c8c9e1468339984b20551472a8f7e6beb6b1a1a886ad712987ae50/lerobot_teleoperator_livekit-0.2.4.tar.gz", hash = "sha256:37b6900700a792bc8e0274a319082895ec328d3ca22e4526c063e59204394ad5", size = 4755, upload-time = "2026-06-24T13:59:29.202Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/87/64/50a16800fbe4ed689670979d6c77d070f54b66d9fd0597ec2e94e8063561/lerobot_teleoperator_livekit-0.2.4-py3-none-any.whl", hash = "sha256:555a0f85232c23df19ce85c06bd5144e76b12159ee6bb0ea9e70f27fb8d3395e", size = 5661, upload-time = "2026-06-24T13:59:27.446Z" },
+]
+
+[[package]]
 name = "livekit-api"
 version = "1.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1039,7 +1067,9 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
-drtc = [
+remote = [
+    { name = "lerobot-robot-livekit" },
+    { name = "lerobot-teleoperator-livekit" },
     { name = "livekit-portal" },
     { name = "python-dotenv" },
 ]
@@ -1054,20 +1084,22 @@ requires-dist = [
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.12" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27" },
     { name = "lerobot", extras = ["core-scripts", "feetech", "training", "maker", "damiao", "rebot"], git = "https://github.com/makermods-robotics/lerobot.git?rev=eaab69339120787948776e4354dcee09f501fd16" },
+    { name = "lerobot-robot-livekit", marker = "extra == 'remote'", specifier = "==0.2.4" },
+    { name = "lerobot-teleoperator-livekit", marker = "extra == 'remote'", specifier = "==0.2.4" },
     { name = "livekit-api", specifier = ">=1.0" },
-    { name = "livekit-portal", marker = "extra == 'drtc'", specifier = "==0.2.4" },
+    { name = "livekit-portal", marker = "extra == 'remote'", specifier = "==0.2.4" },
     { name = "makermodslab", extras = ["test"], marker = "extra == 'dev'" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.0" },
     { name = "psutil", specifier = ">=5.9.0" },
     { name = "pygrabber", marker = "sys_platform == 'win32'", specifier = ">=0.2" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23" },
-    { name = "python-dotenv", marker = "extra == 'drtc'", specifier = ">=1" },
+    { name = "python-dotenv", marker = "extra == 'remote'", specifier = ">=1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "uvicorn", specifier = ">=0.24.0" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]
-provides-extras = ["dev", "test", "drtc"]
+provides-extras = ["dev", "remote", "test"]
 
 [[package]]
 name = "markdown-it-py"

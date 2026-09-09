@@ -63,6 +63,14 @@ class ErrorCode(StrEnum):
     # other's Stop button would get an endpoint that reports idle.
     ROBOT_BUSY_REMOTE_INFERENCE = "robot.busy.remote_inference"
     ROBOT_BUSY_RELEASING = "robot.busy.releasing"
+    # The remote pair (remote_host.py / remote_teleoperate.py): `hosting`
+    # holds the follower + cameras for a LiveKit room; `remote_teleoperation`
+    # holds the leader while driving a remote station's follower.
+    ROBOT_BUSY_HOSTING = "robot.busy.hosting"
+    ROBOT_BUSY_REMOTE_TELEOPERATION = "robot.busy.remote_teleoperation"
+    # The operator's leader and the station's follower disagree on the motor
+    # set (or arm family) — Portal would silently drop every packet.
+    ROBOT_SCHEMA_MISMATCH = "robot.schema_mismatch"
     # A live LOCAL training run holds the machine (GPU + the arms' USB bus).
     # The reverse direction never refuses: a submit made while a feature runs
     # QUEUES instead (jobs.JobRegistry._robot_busy).
@@ -107,6 +115,11 @@ class ErrorCode(StrEnum):
     # stop/cancel it where it lives (the jobs surface), not to retry the
     # delete.
     JOB_NOT_TERMINAL = "job.not_terminal"
+    # `publish_in_progress`: a delete was aimed at a run whose checkpoints the
+    # background Hub publish (models.model_upload_manager) is uploading RIGHT
+    # NOW — the rmtree would pull the files out from under upload_folder
+    # mid-read. The remedy is to wait for the publish to finish (or fail).
+    JOB_PUBLISH_IN_PROGRESS = "job.publish_in_progress"
 
     # Library resources.
     DATASET_NOT_FOUND = "dataset.not_found"
@@ -121,6 +134,9 @@ class ErrorCode(StrEnum):
     NODE_UNREACHABLE = "node.unreachable"
     NODE_DUPLICATE = "node.duplicate"
     NODE_SELF = "node.self"
+    # The station answered but has no hosting session up: the user there has
+    # to press "Available for remote teleop" first.
+    NODE_NOT_HOSTING = "node.not_hosting"
 
     # session.* — the /api/v1/sessions surface (sessions.py). `held`: another
     # session holds the hardware (details name the holder). `not_found`: a
@@ -140,8 +156,9 @@ class ErrorCode(StrEnum):
     # the same reason `hub` has one: folding it into `hardware.connect_failed`
     # would lie (that is the serial bus) and so would `system.*` (it is not
     # this process). `no_policy` is the empty-room case — the room answers but
-    # no GPU-side operator is in it, caught BEFORE the arm is energized.
-    TRANSPORT_EXTRA_MISSING = "transport.extra_missing"
+    # no GPU-side operator is in it, caught BEFORE the arm is energized. A
+    # missing Portal extra is NOT a transport fact and lives under `system.*`
+    # (`SYSTEM_EXTRA_MISSING`), shared with hosting / remote teleoperation.
     TRANSPORT_NOT_CONFIGURED = "transport.not_configured"
     TRANSPORT_UNREACHABLE = "transport.unreachable"
     TRANSPORT_UNAUTHORIZED = "transport.unauthorized"
@@ -154,6 +171,10 @@ class ErrorCode(StrEnum):
     # would orphan a live pip subprocess mid-write — retry once it finishes.
     SYSTEM_RESTART_UNSUPPORTED = "system.restart_unsupported"
     SYSTEM_INSTALL_IN_PROGRESS = "system.install_in_progress"
+    # An optional extra the flow needs is not importable (the `remote` extra:
+    # LiveKit Portal and its lerobot plugins, shared by hosting, remote
+    # teleoperation and remote inference) — install it, then retry.
+    SYSTEM_EXTRA_MISSING = "system.extra_missing"
 
     # gpu.* — the remote GPU that runs the policy for a remote-inference run
     # (modal_launcher.py), reached through the `modal` CLI. Its own level-1
@@ -186,6 +207,10 @@ class ErrorCode(StrEnum):
     # no secret to sign room tokens with — the remedy is restarting the
     # launcher with --sfu, not retrying.
     SFU_DISABLED = "sfu.disabled"
+    # The station's single operator seat is held by someone else: the room
+    # admits one operator beside the robot, and the token route refuses a
+    # second operator token while the seat is occupied.
+    SFU_SEAT_TAKEN = "sfu.seat_taken"
 
     # The residual 500.
     INTERNAL_UNEXPECTED = "internal.unexpected"

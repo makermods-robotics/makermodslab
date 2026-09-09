@@ -83,6 +83,8 @@ BUSY_DISCRIMINANTS = frozenset(
         "wiggle",
         "releasing",
         "training",
+        "hosting",
+        "remote_teleoperation",
     ]
 )
 
@@ -122,6 +124,8 @@ def _teleop_request():
         ),
         ("makermodslab.replay.replay_active", "robot.busy.replay"),
         ("makermodslab.wiggle.wiggle_active", "robot.busy.wiggle"),
+        ("makermodslab.remote_host.hosting_active", "robot.busy.hosting"),
+        ("makermodslab.remote_teleoperate.remote_teleoperation_active", "robot.busy.remote_teleoperation"),
     ],
 )
 def test_teleop_start_refusals_carry_codes(monkeypatch, patch_target, expected_code):

@@ -5,7 +5,6 @@ import { SFU_OFF_SUMMARY_KEY, summarizeTransport } from "./transportSummary";
 const base: RemoteInferenceTransportStatus = {
   extra_installed: true,
   configured: true,
-  missing_vars: [],
   url: "ws://100.64.0.1:7880",
   room: "drtc-bench",
   source: "sfu",
@@ -13,8 +12,7 @@ const base: RemoteInferenceTransportStatus = {
   sfu_url: "ws://127.0.0.1:7880",
   sfu_modal_url: "ws://100.64.0.1:7880",
   sfu_external_ip: true,
-  sfu_key_id: "local-abc",
-  sfu_key_file: "/keys.yaml",
+  policy_token: "jwt.policy.abc",
   sfu_install_hint: null,
   endpoint_reachable: true,
   operator_present: true,
@@ -39,60 +37,19 @@ describe("summarizeTransport picks the first thing to fix", () => {
     );
   });
 
-  // The SFU being off is the REASON credentials are missing when the Lab's own
-  // server is the intended source, so it is named ahead of them.
-  it("blames the stopped SFU before the missing variables", () => {
+  it("reports a stopped SFU", () => {
     const s = summarizeTransport(
-      {
-        ...base,
-        sfu_enabled: false,
-        configured: false,
-        missing_vars: ["LIVEKIT_URL", "LIVEKIT_API_KEY"],
-        source: "none",
-      },
-      false,
-      null,
+      { ...base, sfu_enabled: false, configured: false, source: "none" },
+      false, null,
     );
     expect(s.key).toBe(SFU_OFF_SUMMARY_KEY);
     expect(s.tone).toBe("error");
   });
 
-  // ...but a Cloud operator's Lab never hosts one, and that is not a fault.
-  it("says nothing about the SFU when livekit.env already configured it", () => {
-    const s = summarizeTransport(
-      { ...base, sfu_enabled: false, source: "cloud" },
-      false,
-      null,
-    );
-    expect(s.key).toBe("remoteInference.transport.summary.ready");
-  });
-
-  it("still names the missing variables when the SFU is running", () => {
-    const s = summarizeTransport(
-      {
-        ...base,
-        sfu_enabled: true,
-        configured: false,
-        missing_vars: ["LIVEKIT_API_KEY"],
-      },
-      false,
-      null,
-    );
-    expect(s.key).toBe("remoteInference.transport.summary.missingVars");
-  });
-
-  it("names the missing variables verbatim", () => {
-    const s = summarizeTransport(
-      {
-        ...base,
-        configured: false,
-        missing_vars: ["LIVEKIT_URL", "LIVEKIT_API_KEY"],
-      },
-      false,
-      null,
-    );
-    expect(s.key).toBe("remoteInference.transport.summary.missingVars");
-    expect(s.values).toEqual({ vars: "LIVEKIT_URL, LIVEKIT_API_KEY" });
+  it("reports unavailable configuration when the SFU is enabled", () => {
+    const s = summarizeTransport({ ...base, configured: false }, false, null);
+    expect(s.key).toBe("remoteInference.transport.summary.notConfigured");
+    expect(s.tone).toBe("error");
   });
 
   // null is "the probe did not run" — a third state, never a failure.

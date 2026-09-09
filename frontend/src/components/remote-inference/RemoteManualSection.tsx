@@ -20,9 +20,9 @@ import type { RemoteRunConfig } from "./remoteRunConfig";
  * and the ground truth an operator compares against when a run connects and
  * receives nothing.
  *
- * The four rows under the command are what the retired Transport section was
+ * The address and room rows under the command are what the retired Transport section was
  * actually FOR. Everything else it showed (source, reachability, the operator
- * verdict) is now one sentence under Start, re-probed on its own; these four
+ * verdict) is now one sentence under Start, re-probed on its own; these two
  * are the values a human has to read with their eyes and retype somewhere else,
  * so they stay — beside the command they belong to rather than in a panel of
  * their own. Every one of them is data and appears verbatim.
@@ -107,19 +107,6 @@ const RemoteManualSection: React.FC<{
                 {transport.room || t("remoteInference.transport.unresolved")}
               </span>
             </Row>
-            <Row label={t("remoteInference.transport.sfuKeyIdLabel")}>
-              {/* The key NAME. The secret is never sent here — the file below
-                  is where a human reads it. */}
-              <span className="font-mono">
-                {transport.sfu_key_id ??
-                  t("remoteInference.transport.unresolved")}
-              </span>
-            </Row>
-            {transport.sfu_key_file ? (
-              <Row label={t("remoteInference.transport.sfuKeyFileLabel")}>
-                <span className="font-mono">{transport.sfu_key_file}</span>
-              </Row>
-            ) : null}
           </div>
         ) : null}
       </CollapsibleContent>

@@ -1,56 +1,43 @@
 """Run the GPU-side policy loop (`policy.py`) on a Modal serverless GPU.
 
-Identical to the wrapper in the earlier `lerobot_inference` prototype (a separate
-project, not a directory in this repo) — the DRTC example's `policy.py` and wire
-protocol are unchanged; all DRTC scheduling lives on the robot side. So the
-policy side deploys to Modal exactly the same way.
-
 This is a thin wrapper: it does NOT reimplement anything. It builds a GPU image,
-feeds LiveKit + policy config through environment variables, and calls
-``policy.main()`` unchanged. `policy.py` is a pure *outbound* WebRTC client — it
-dials into the LiveKit SFU — so nothing needs to listen on a port and Modal's
-outbound-only networking is a clean fit. The SFU itself is **not** here: we use
-LiveKit Cloud (or later a self-hosted server) as a separate, publicly reachable
-service so media stays on UDP.
+feeds the LiveKit connection + policy config through environment variables, and
+calls ``policy.main()`` unchanged. `policy.py` is a pure *outbound* WebRTC
+client — it dials into the LiveKit SFU — so nothing needs to listen on a port
+and Modal's outbound-only networking is a clean fit. The SFU itself is **not**
+here: it is the station's own (`makermodslab --sfu`), and the container reaches
+its signalling over the tailnet and its media over a public UDP candidate
+(`--sfu-external-ip` on the station).
 
 Topology:
 
-    robot_sync.py (on-prem) ─► LiveKit Cloud SFU ◄─ modal_policy.py (this, on Modal GPU)
+    robot_sync.py (on-prem) ─► the station's SFU ◄─ modal_policy.py (this, on Modal GPU)
+
+Credentials
+-----------
+There are none to set up. The station signs a short-lived, one-room,
+OPERATOR-role token for identity `policy` and hands it to this run — the Lab's
+launcher (makermodslab/modal_launcher.py) passes it as `LIVEKIT_TOKEN` in the
+`modal run` child env, and the Deploy panel's generated line carries it as
+`--livekit-token`. The station's signing secret never leaves the station.
 
 One-time setup
 --------------
-1. Create a LiveKit Cloud project (https://cloud.livekit.io) and grab its
-   `wss://` URL, API key, and API secret.
-2. Stash them (plus the room) as a Modal secret — these become container env vars
-   that `makermodslab.drtc._env.load_env()` / `_common.mint_token()` read directly:
-
-       modal secret create LiveKit-cloud \
-           LIVEKIT_URL=wss://<your-project>.livekit.cloud \
-           LIVEKIT_API_KEY=<key> \
-           LIVEKIT_API_SECRET=<secret> \
-           LIVEKIT_ROOM=portal-lerobot-inference
-
-3. Point the robot side at the SAME `LIVEKIT_URL` / key / secret / room — write
-   them to `~/.cache/huggingface/lerobot/livekit.env` (see
-   docs/drtc/livekit.env.example). The secret's `LIVEKIT_ROOM` is the DEFAULT
-   room on the GPU side; `--livekit-room` overrides it per run, which is how a
-   launcher pins both peers to the same room without editing the secret.
+    modal secret create huggingface HF_TOKEN=hf_...       # private/gated checkpoints only
+    modal secret create tailscale-auth TS_AUTHKEY=tskey-...   # for --tailscale
 
 Run
 ---
-    modal run makermodslab/drtc/modal_policy.py --policy-path ${HF_USER}/my_policy
+The Deploy panel writes this line for you (Start GPU runs it):
 
-    # language-conditioned (VLA) policies:
-    modal run makermodslab/drtc/modal_policy.py --policy-path ${HF_USER}/my_policy --task "Put the lego brick in the box"
-
-    # local SFU reached over the tailnet (signaling only; media still direct UDP):
     modal run makermodslab/drtc/modal_policy.py --policy-path ${HF_USER}/my_policy \
+        --horizon 16 --fps 30 --video-codec H264 \
+        --livekit-room mml-<station id> \
         --tailscale --livekit-url ws://100.x.y.z:7880 \
-        --livekit-api-key <key> --livekit-api-secret <secret>
+        --livekit-token <jwt from the transport section>
 
-    # pin the room explicitly (mirrors robot_sync.py's --livekit_room):
-    modal run makermodslab/drtc/modal_policy.py --policy-path ${HF_USER}/my_policy \
-        --livekit-room portal-lerobot-inference
+    # language-conditioned (VLA) policies add:
+        --task "Put the lego brick in the box"
 
 `--horizon` MUST match the robot side's `--horizon`. DRTC knobs (`--s_min`,
 `--epsilon`, `--pacing`, ...) are flags on whichever robot script you run
@@ -160,7 +147,7 @@ def _ephemeral_node() -> bool:
     from the tailnet, so a second concurrent GPU has to be a different node.
     Read from the container env; `main()` forwards the operator's own
     `DRTC_TS_EPHEMERAL=1 modal run ...` into it as a remote kwarg, the same way
-    it forwards LIVEKIT_API_KEY (Modal does not ship the caller's environment).
+    it forwards LIVEKIT_TOKEN (Modal does not ship the caller's environment).
     """
     return os.environ.get("DRTC_TS_EPHEMERAL", "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -500,7 +487,7 @@ image = (
     # it, and nothing else in this image pulls it in.
     #
     # livekit-portal comes from PyPI, pinned to the same version as
-    # pyproject.toml's `[drtc]` extra so robot and GPU sides speak the identical
+    # pyproject.toml's `[remote]` extra so robot and GPU sides speak the identical
     # wire code (Portal fingerprints the schema and drops mismatched packets
     # SILENTLY — a healthy-looking session with zero chunks).
     .run_commands(
@@ -600,14 +587,7 @@ _FN_KWARGS = {
     # `serve` never writes it, and identical kwargs keep the two declarations
     # from drifting.
     "volumes": {"/cache": hf_cache, _TS_STATE_DIR: ts_state},
-    # Region: place the GPU near the LiveKit Cloud edge the robot uses, so media
-    # doesn't cross an ocean. For a robot in China, "ap-southeast" (Singapore)
-    # gives the best reachability of Modal's Asia regions; "ap-northeast"
-    # (Seoul/Tokyo) is the alternative — pick whichever your robot's ISP routes
-    # to with lower RTT. Any China<->Modal path still crosses the GFW (Modal has
-    # no mainland-China presence), but co-locating in Asia cuts the ~440ms
-    # trans-Pacific RTT to roughly robot<->Singapore (~60-150ms).
-    # "region": "ap-southeast",
+    # Prefer a region near the robot. Auto leaves placement to Modal.
     "region": None if os.environ.get("DRTC_REGION") == "auto" else os.environ.get("DRTC_REGION") or "us-west",
     # "min_containers": 1,  # pre-warm to avoid a cold start when the robot connects
     #                       # (keeps an idle GPU billed — opt in for latency-critical runs)
@@ -621,12 +601,11 @@ _FN_KWARGS = {
 # drop it if everything you pull is public. Create it with:
 #   modal secret create huggingface HF_TOKEN=hf_...
 _BASE_SECRETS = [
-    modal.Secret.from_name("LiveKit-cloud"),
     modal.Secret.from_name("huggingface"),
 ]
 
 
-def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not passed", not credentials
+def _serve_impl(  # nosec B107 — the empty `livekit_token` default is "flag not passed", not a credential
     policy_path: str,
     task: str = "",
     model_dtype: str = "",
@@ -637,8 +616,7 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
     duration: float = 0.0,
     video_codec: str = "H264",  # MUST match robot_sync.py's --video-codec default
     livekit_url: str = "",
-    livekit_api_key: str = "",
-    livekit_api_secret: str = "",
+    livekit_token: str = "",
     livekit_room: str = "",
     tailscale: bool = False,
     ts_ephemeral: bool = False,
@@ -656,25 +634,24 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
     if ts_ephemeral:
         os.environ["DRTC_TS_EPHEMERAL"] = "1"
 
-    # Optional per-run LiveKit override: point this run at a different SFU than
-    # the LiveKit-cloud secret — e.g. the LOCAL SFU exposed through a Cloudflare
-    # Lab's own SFU (`makermodslab --sfu`), whose url/key/secret the Deploy
-    # panel prints as a ready-made line (see docs/drtc/README.md "Local SFU").
-    # They ride per-run CLI args rather than a Modal secret because they are
-    # per-station, not per-account. Unset flags fall through to the secret.
+    # The transport is the Lab's own SFU (`makermodslab --sfu`), and the three
+    # values that reach it ride per-run CLI args / the launcher's child env
+    # rather than a Modal secret, because they are per-station and per-run,
+    # not per-account: the url a container can dial (the station's tailnet
+    # address), the room the robot child joined, and an OPERATOR-role token
+    # the station signed for this identity. The station's signing secret
+    # never leaves the station — this container holds a short-lived JWT for
+    # one room and nothing else. The policy module reads all three from the
+    # environment (`LIVEKIT_TOKEN` wins over its key/secret bench fallback).
     if livekit_url:
         os.environ["LIVEKIT_URL"] = livekit_url
-    if livekit_api_key:
-        os.environ["LIVEKIT_API_KEY"] = livekit_api_key
-    if livekit_api_secret:
-        os.environ["LIVEKIT_API_SECRET"] = livekit_api_secret
+    if livekit_token:
+        os.environ["LIVEKIT_TOKEN"] = livekit_token
 
-    # `LIVEKIT_ROOM` used to be settable ONLY by the `LiveKit-cloud` secret, which
-    # made "the two peers are in different rooms" a silent failure — they simply
-    # never see each other, and the robot reports a healthy connection with zero
-    # chunks forever. `--livekit-room` closes that class: a launcher that already
-    # knows which room the robot is in can pin this run to it. Unset still falls
-    # through to the secret, so every existing invocation is unchanged.
+    # `--livekit-room` pins this run to the room the robot is in. Two peers in
+    # different rooms never see each other, and the robot reports a healthy
+    # connection with zero chunks forever — the one mismatch that is invisible
+    # by construction, which is why the launcher always passes it.
     if livekit_room:
         os.environ["LIVEKIT_ROOM"] = livekit_room
 
@@ -708,8 +685,7 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
         "duration": duration,
         "video_codec": video_codec,
         "livekit_url": livekit_url,
-        "livekit_api_key": livekit_api_key,
-        "livekit_api_secret": livekit_api_secret,
+        "livekit_token": livekit_token,
         "livekit_room": livekit_room,
         # Recorded so /reset replays onto the right twin (serve_ts vs serve).
         "tailscale": tailscale,
@@ -795,10 +771,10 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
 #     differently in the local and remote environments."
 # Both definitions below are unconditional, so they evaluate identically on both
 # sides. Users who never created `tailscale-auth` simply never invoke serve_ts,
-# so the LiveKit-Cloud and quick-tunnel paths are unaffected by its existence.
+# so the direct path is unaffected by its existence.
 @app.function(**_FN_KWARGS, secrets=_BASE_SECRETS)
 def serve(**kwargs) -> None:
-    """Standard path: LiveKit Cloud, or a local SFU via the Cloudflare tunnel."""
+    """Standard path: the station's SFU reached directly (a public or LAN address)."""
     _serve_impl(**kwargs)
 
 
@@ -848,7 +824,7 @@ def reset() -> dict:
 
 
 @app.local_entrypoint()
-def main(  # nosec B107 — the empty `*_secret` defaults are "flag not passed", not credentials
+def main(  # nosec B107 — the empty `livekit_token` default is "flag not passed", not a credential
     policy_path: str,
     task: str = "",
     model_dtype: str = "",
@@ -859,31 +835,27 @@ def main(  # nosec B107 — the empty `*_secret` defaults are "flag not passed",
     duration: float = 0.0,
     video_codec: str = "H264",  # MUST match robot_sync.py's --video-codec default
     livekit_url: str = "",
-    livekit_api_key: str = "",
-    livekit_api_secret: str = "",
+    livekit_token: str = "",
     livekit_room: str = "",
     tailscale: bool = False,
 ) -> None:
     """Resolve the run's arguments locally, then fire the container.
 
     THIS BODY RUNS ON THE USER'S MACHINE: a @local_entrypoint is executed by
-    the local `modal` CLI, never in the container. That is why the two
-    credentials below may also arrive in the ENVIRONMENT — a
-    `--livekit-api-secret <secret>` flag would put a signing key in `ps` for
-    every process on that machine to read, so the Lab's launcher
-    (makermodslab/modal_launcher.py) passes them as env instead. The resolved
-    value then travels to the container as a `fn.remote(...)` kwarg over
-    Modal's own TLS channel.
+    the local `modal` CLI, never in the container. That is why the token below
+    may also arrive in the ENVIRONMENT — a `--livekit-token <jwt>` flag would
+    put a credential in `ps` for every process on that machine to read, so the
+    Lab's launcher (makermodslab/modal_launcher.py) passes it as
+    `LIVEKIT_TOKEN` in the child env instead. The resolved value then travels
+    to the container as a `fn.remote(...)` kwarg over Modal's own TLS channel.
     """
-    # The flag still wins when present, so every hand-typed invocation and
-    # every line in docs/drtc/README.md is unchanged. Scoped to the two
-    # credentials ONLY, deliberately not to --livekit-url / --livekit-room:
-    # those are not secrets, and keeping them flag-only means "which SFU, which
-    # room" stays a VISIBLE decision rather than one a stray LIVEKIT_ROOM in an
-    # operator's shell can flip — which is the exact failure class
-    # --livekit-room was added to close.
-    livekit_api_key = livekit_api_key or os.environ.get("LIVEKIT_API_KEY", "")
-    livekit_api_secret = livekit_api_secret or os.environ.get("LIVEKIT_API_SECRET", "")
+    # The flag still wins when present, so a hand-typed line from the Deploy
+    # panel works unchanged. Scoped to the token ONLY, deliberately not to
+    # --livekit-url / --livekit-room: those are not secrets, and keeping them
+    # flag-only means "which SFU, which room" stays a VISIBLE decision rather
+    # than one a stray LIVEKIT_ROOM in an operator's shell can flip — which is
+    # the exact failure class --livekit-room was added to close.
+    livekit_token = livekit_token or os.environ.get("LIVEKIT_TOKEN", "")
 
     # Same channel, same reason: `DRTC_TS_EPHEMERAL=1 modal run ...` is read in
     # THIS body (the operator's shell) and travels as a kwarg, because Modal
@@ -905,8 +877,7 @@ def main(  # nosec B107 — the empty `*_secret` defaults are "flag not passed",
         duration=duration,
         video_codec=video_codec,
         livekit_url=livekit_url,
-        livekit_api_key=livekit_api_key,
-        livekit_api_secret=livekit_api_secret,
+        livekit_token=livekit_token,
         livekit_room=livekit_room,
         tailscale=tailscale,
         ts_ephemeral=ts_ephemeral,

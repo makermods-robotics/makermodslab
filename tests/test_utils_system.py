@@ -704,3 +704,20 @@ def test_torchcodec_probe_subprocess_failure_means_unusable(monkeypatch):
 
     monkeypatch.setattr(sysmod.subprocess, "run", boom)
     assert sysmod._probe_torchcodec_uncached() is False
+
+
+def test_build_install_cmd_keeps_several_requirements_as_separate_tokens(monkeypatch) -> None:
+    """The remote extra installs Portal and its two plugin packages by name:
+    each must be its own argv token, never a space-joined string pip would
+    read as one bogus requirement."""
+    from makermodslab.utils import system
+    from makermodslab.utils.system import REMOTE_INSTALL_TARGET, _build_install_cmd
+
+    monkeypatch.setattr(system, "_find_uv", lambda: None)
+    cmd = _build_install_cmd(REMOTE_INSTALL_TARGET)
+    tail = cmd[-len(REMOTE_INSTALL_TARGET) :]
+    assert tail == list(REMOTE_INSTALL_TARGET)
+    assert all(" " not in token for token in tail)
+    # And never the package itself: uv refuses the lerobot git pin as a
+    # transitive URL dependency, pip would look for `makermodslab` on PyPI.
+    assert not any(token.startswith("makermodslab") for token in cmd)

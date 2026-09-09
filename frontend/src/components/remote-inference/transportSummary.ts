@@ -59,23 +59,12 @@ export function summarizeTransport(
   if (!transport.extra_installed) {
     return { key: "remoteInference.transport.extraMissing", tone: "warn" };
   }
-  // Ahead of the credentials line, because when the Lab's own SFU is the
-  // intended source its being off is WHY there are no credentials — and
-  // "LIVEKIT_URL is missing" sends the operator hunting for a file to write
-  // instead of a server to start.
-  //
-  // Guarded on `configured` in the same breath: credentials from livekit.env
-  // or the process environment are a complete transport on their own, and for
-  // an operator using LiveKit Cloud the Lab not hosting a server is the normal
-  // state, not a fault. So this fires only when the SFU is off AND nothing
-  // else supplied credentials.
-  if (!transport.sfu_enabled && !transport.configured) {
+  if (!transport.sfu_enabled) {
     return { key: SFU_OFF_SUMMARY_KEY, tone: "error" };
   }
   if (!transport.configured) {
     return {
-      key: "remoteInference.transport.summary.missingVars",
-      values: { vars: transport.missing_vars.join(", ") },
+      key: "remoteInference.transport.summary.notConfigured",
       tone: "error",
     };
   }

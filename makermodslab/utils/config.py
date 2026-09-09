@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ import re
 import secrets
 import shutil
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
@@ -27,7 +29,42 @@ logger = logging.getLogger(__name__)
 
 RobotSide = Literal["leader", "follower"]
 
-# Define the calibration config paths (shared between features)
+# ---------------------------------------------------------------------------
+# Where MakerMods Lab keeps ITS OWN state.
+#
+# lerobot owns ``~/.cache/huggingface/lerobot``: datasets, models, the
+# calibration libraries its device classes read, and training outputs (local
+# policies live there because they ARE models). Everything that is MakerMods
+# Lab's rather than lerobot's — robot records, saved ports, UI bookkeeping,
+# node identity, the bimanual staging area, and (next) extensions — lives under
+# this root instead, so a user finds the app's files under the app's name and
+# a lerobot cache wipe does not take the robot setup with it.
+#
+# ``MAKERMODSLAB_HOME`` overrides the root (containers, a shared machine, and
+# the test suite, which points it at a tmp dir before anything is imported).
+# An override also switches OFF the legacy migration below: whoever set it is
+# pointing at a place they chose, and silently moving old files there would
+# be a surprise — the test suite relies on exactly that to never touch a
+# developer's real state.
+# ---------------------------------------------------------------------------
+LEGACY_STATE_ROOT = os.path.expanduser("~/.cache/huggingface/lerobot")
+
+
+def resolve_makermodslab_home(env: Mapping[str, str] | None = None) -> str:
+    """The MakerMods Lab state root: ``$MAKERMODSLAB_HOME`` or ``~/.makermods/makermodslab``."""
+    env = os.environ if env is None else env
+    override = env.get("MAKERMODSLAB_HOME")
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    return os.path.expanduser(os.path.join("~", ".makermods", "makermodslab"))
+
+
+MAKERMODSLAB_HOME = resolve_makermodslab_home()
+HOME_IS_OVERRIDDEN = bool(os.environ.get("MAKERMODSLAB_HOME"))
+
+# Define the calibration config paths (shared between features). These stay
+# under lerobot's cache: lerobot's device classes read their calibration from
+# there, and the library IS lerobot calibration data.
 CALIBRATION_BASE_PATH_TELEOP = os.path.expanduser("~/.cache/huggingface/lerobot/calibration/teleoperators")
 CALIBRATION_BASE_PATH_ROBOTS = os.path.expanduser("~/.cache/huggingface/lerobot/calibration/robots")
 LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "so_leader")
@@ -126,26 +163,24 @@ def default_slot_config_name(record_name: str, mode: object, arm: str, arm_type:
 
 
 # Define port storage path
-PORT_CONFIG_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/ports")
+PORT_CONFIG_PATH = os.path.join(MAKERMODSLAB_HOME, "ports")
 LEADER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "leader_port.txt")
 FOLLOWER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "follower_port.txt")
 
 # Robot config records (per-robot JSON metadata)
-ROBOTS_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/robots")
+ROBOTS_PATH = os.path.join(MAKERMODSLAB_HOME, "robots")
 
-# LiveKit CLOUD credentials for remote inference (makermodslab.drtc). A dotenv
-# file holding LIVEKIT_URL / LIVEKIT_ROOM / LIVEKIT_API_KEY / LIVEKIT_API_SECRET.
-# It lives beside the rest of our persistent state rather than in the package
-# so a wheel install and a source checkout read the same credentials, and so
-# `.env` never lands inside site-packages.
+# BENCH-ONLY LiveKit credentials for running the drtc entrypoints by hand
+# (`python -m makermodslab.drtc.robot_sync` / `.policy` against some LiveKit
+# server): a dotenv file holding LIVEKIT_URL / LIVEKIT_ROOM and either a
+# LIVEKIT_TOKEN or an API key/secret to mint one from (drtc/_env.py).
 #
-# It is the FALLBACK, not the primary path: when this process runs the bundled
-# SFU (`makermodslab --sfu`, see sfu.py) the session mints its own url, room
-# and token in-process and never reads this file. It is also the only file left
-# in the chain — the cwd `.env` / `.env.local` rungs and the `livekit.local.env`
-# override the retired tools/drtc scripts wrote are gone (S3.6), so the whole
-# precedence is now: process environment, then this file.
-DRTC_ENV_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/livekit.env")
+# THE SERVER NEVER READS IT. Remote inference has one transport, the bundled
+# SFU (`makermodslab --sfu`, sfu.py): the session mints the url, the room and
+# every participant's token in-process from LIVEKIT_KEY_FILE, and the GPU
+# launcher hands the container a token the same way. It lives beside the rest
+# of our state so a wheel install and a source checkout read the same file.
+DRTC_ENV_PATH = os.path.join(MAKERMODSLAB_HOME, "livekit.env")
 
 # Remote-inference session logs, one file per run (remote_inference._LOG_DIR
 # appends "sessions/"). The directory predates the bundled SFU, when the
@@ -165,7 +200,7 @@ DRTC_LOG_DIR = os.path.expanduser("~/.cache/huggingface/lerobot/logs/drtc")
 # Deliberately tiny and disposable: it names no credential, and losing it costs
 # at most one orphan reap. Written when the launcher first sees the app id in
 # the child's output, cleared once the app is confirmed stopped.
-DRTC_GPU_APP_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/drtc_gpu_app.json")
+DRTC_GPU_APP_FILE = os.path.join(MAKERMODSLAB_HOME, "drtc_gpu_app.json")
 
 # Staging root for bimanual (BiSO) sessions. lerobot's BiSO devices take ONE
 # calibration_dir + ONE base id and load each sub-arm as "<base>_left.json" /
@@ -176,7 +211,7 @@ DRTC_GPU_APP_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/drtc_gpu_ap
 # root as "<base>_left.json"/"<base>_right.json" for lerobot to load. The copy is
 # unconditional every session (see stage_bimanual_calibrations) so a recalibrated
 # library file always refreshes its stale staging alias.
-MAKERMODSLAB_BISO_STAGING_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/makermodslab_biso")
+MAKERMODSLAB_BISO_STAGING_PATH = os.path.join(MAKERMODSLAB_HOME, "biso_staging")
 
 # Fallback base id when a bimanual start request carries no robot name (older
 # frontends). Filesystem-safe and stable; a single unnamed bimanual robot reuses
@@ -186,26 +221,26 @@ DEFAULT_BIMANUAL_BASE = "bimanual"
 # Hub-job ids the user dismissed from the jobs UI (JSON list of strings). The
 # HF Jobs API has no delete — a finished job stays in list_jobs() indefinitely
 # — so hiding a dead run from the untracked list must be persisted locally.
-DISMISSED_HUB_JOBS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/dismissed_hub_jobs.json")
+DISMISSED_HUB_JOBS_FILE = os.path.join(MAKERMODSLAB_HOME, "dismissed_hub_jobs.json")
 
 # Hub dataset repo ids the user typed straight into the picker and chose to keep
 # ("Use org/name"). They aren't in the user's own namespace listing and have no
 # local copy, so they'd vanish after selection unless we persist them here and
 # fold them back into the merged /datasets listing.
-SAVED_CUSTOM_DATASETS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/saved_custom_datasets.json")
+SAVED_CUSTOM_DATASETS_FILE = os.path.join(MAKERMODSLAB_HOME, "saved_custom_datasets.json")
 
 # Hub MODEL repo ids the user pinned via the "Add model" chooser — the models
 # mirror of SAVED_CUSTOM_DATASETS_FILE (same rationale: a foreign-namespace repo
 # with no local copy vanishes from the /models listing unless persisted here).
-SAVED_CUSTOM_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/saved_custom_models.json")
+SAVED_CUSTOM_MODELS_FILE = os.path.join(MAKERMODSLAB_HOME, "saved_custom_models.json")
 
 # Hub dataset/model repo ids the user removed from their pickers ("hidden").
 # Hiding NEVER touches the Hub repo — it only filters the merged listing, so a
 # repo the user's own namespace listing keeps returning stays gone until they
 # re-add it (re-pinning auto-unhides). Persisted like the dismissed hub jobs
 # (JSON list on disk, a set in memory).
-SAVED_HIDDEN_DATASETS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_datasets.json")
-SAVED_HIDDEN_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_models.json")
+SAVED_HIDDEN_DATASETS_FILE = os.path.join(MAKERMODSLAB_HOME, "hidden_datasets.json")
+SAVED_HIDDEN_MODELS_FILE = os.path.join(MAKERMODSLAB_HOME, "hidden_models.json")
 
 # Per-dataset episode indices the user excluded from training (curation, not
 # deletion — the episode stays on disk and in every listing/upload, it's just
@@ -213,18 +248,18 @@ SAVED_HIDDEN_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidd
 # JSON object keyed by repo_id -> list[int], unlike the flat repo-id lists
 # above, since the thing being persisted is per-dataset state, not membership
 # in one shared collection.
-EXCLUDED_EPISODES_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/excluded_episodes.json")
+EXCLUDED_EPISODES_FILE = os.path.join(MAKERMODSLAB_HOME, "excluded_episodes.json")
 
 # Stable per-install identity, minted on first read. The node registry uses it
 # to recognize a peer across restarts and address changes (a machine's IP or
 # MagicDNS name can change; its instance id doesn't).
-INSTANCE_ID_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/instance_id.txt")
+INSTANCE_ID_FILE = os.path.join(MAKERMODSLAB_HOME, "instance_id.txt")
 
 # The node registry's saved peer list: [{"url": ..., "name": ...}, ...]. Only
 # url + name are persisted — identity (instance_id/version/capabilities) is
 # deliberately NOT: a peer is re-verified against its live /api/v1/health on
 # load/probe, so stale identity can never be served from disk.
-NODES_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/nodes.json")
+NODES_FILE = os.path.join(MAKERMODSLAB_HOME, "nodes.json")
 
 # The bundled LiveKit SFU's API key/secret (sfu.py, `makermodslab --sfu`):
 # one pair per install, minted on the first --sfu run, in the `key: secret`
@@ -232,12 +267,18 @@ NODES_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/nodes.json")
 # every room token, so it never rides in a command line or an env var; both
 # the SFU child and the token route read this file. Deleting it rotates the
 # pair (tokens minted before the restart stop validating, nothing else).
-LIVEKIT_KEY_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/livekit_keys.yaml")
+LIVEKIT_KEY_FILE = os.path.join(MAKERMODSLAB_HOME, "livekit_keys.yaml")
 
 # The livekit-server config the launcher renders per run (sfu.render_config).
 # Regenerated on every --sfu start; its path is also the identity signal
 # `makermodslab --stop` uses to recognise the SFU child as ours.
-LIVEKIT_CONFIG_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/livekit_config.yaml")
+LIVEKIT_CONFIG_FILE = os.path.join(MAKERMODSLAB_HOME, "livekit_config.yaml")
+
+# Station mode's remembered choice: {"robot": name} — which saved robot this
+# machine hosts for remote teleoperation. Written by `--host <robot>` and by
+# the station UI's picker; read by a bare `--host`. Absent/blank = no choice
+# yet (a lone hostable robot is picked automatically, else the UI chooses).
+STATION_FILE = os.path.join(MAKERMODSLAB_HOME, "station.json")
 
 # Tag stamped on every dataset pushed to the Hub from MakerMods Lab, so we can later
 # query the Hub for MakerMods Lab-produced datasets and compute usage metrics.
@@ -264,6 +305,134 @@ def with_makermodslab_tag(tags: list[str] | None) -> list[str]:
         if tag not in out:
             out.append(tag)
     return out
+
+
+# State that versions before the MAKERMODSLAB_HOME split wrote beside lerobot's
+# files: (name under LEGACY_STATE_ROOT, this module's attribute holding the new
+# path). The attribute is looked up AT CALL TIME so a redirected constant (the
+# test fixtures) is honoured. Calibration libraries and training outputs are
+# deliberately absent — they stay where lerobot reads them.
+_LEGACY_STATE_ENTRIES: tuple[tuple[str, str], ...] = (
+    ("ports", "PORT_CONFIG_PATH"),
+    ("robots", "ROBOTS_PATH"),
+    ("makermodslab_biso", "MAKERMODSLAB_BISO_STAGING_PATH"),
+    ("dismissed_hub_jobs.json", "DISMISSED_HUB_JOBS_FILE"),
+    ("saved_custom_datasets.json", "SAVED_CUSTOM_DATASETS_FILE"),
+    ("saved_custom_models.json", "SAVED_CUSTOM_MODELS_FILE"),
+    ("hidden_datasets.json", "SAVED_HIDDEN_DATASETS_FILE"),
+    ("hidden_models.json", "SAVED_HIDDEN_MODELS_FILE"),
+    ("excluded_episodes.json", "EXCLUDED_EPISODES_FILE"),
+    ("instance_id.txt", "INSTANCE_ID_FILE"),
+    ("nodes.json", "NODES_FILE"),
+)
+
+
+def _remove_path(path: str) -> None:
+    """Best-effort removal of a file, symlink or directory tree."""
+    if os.path.islink(path) or os.path.isfile(path):
+        with contextlib.suppress(OSError):
+            os.remove(path)
+    elif os.path.isdir(path):
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _move_entry(src: str, dst: str) -> bool:
+    """Move ``src`` to ``dst`` without ever leaving a half-written ``dst``.
+
+    ``shutil.move`` is a rename on one filesystem but copy-then-delete across
+    two — and ``~/.cache/huggingface`` symlinked onto a big external drive is
+    a common lerobot setup, which puts the two roots on different volumes. A
+    copy that dies half-way (disk full, one unreadable file) would leave a
+    partial ``dst`` that the destination-wins rule then treats as the live
+    state forever. So the move lands in a sibling ``<dst>.migrating`` first
+    and is renamed into place only once complete; on failure the sibling is
+    removed and ``src`` is untouched (``shutil.move`` deletes the source only
+    after a full copy).
+    """
+    staging = dst + ".migrating"
+    _remove_path(staging)
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.move(src, staging)
+        os.replace(staging, dst)
+    except OSError as exc:
+        logger.warning("Could not migrate %s -> %s: %s", src, dst, exc)
+        _remove_path(staging)
+        return False
+    return True
+
+
+def _merge_dir(src: str, dst: str) -> tuple[int, int]:
+    """Move the entries of legacy dir ``src`` that ``dst`` lacks; keep the rest.
+
+    Returns (moved, left). ``src`` is removed once nothing is left in it.
+    """
+    moved = left = 0
+    for name in sorted(os.listdir(src)):
+        s, d = os.path.join(src, name), os.path.join(dst, name)
+        if os.path.lexists(d):
+            left += 1
+        elif _move_entry(s, d):
+            moved += 1
+        else:
+            left += 1
+    if left == 0:
+        with contextlib.suppress(OSError):
+            os.rmdir(src)
+    return moved, left
+
+
+def migrate_legacy_state(legacy_root: str | None = None) -> list[str]:
+    """Move MakerMods Lab state written beside lerobot's cache into MAKERMODSLAB_HOME.
+
+    One-shot and idempotent. A FILE entry moves only when nothing exists at
+    the new path: a destination that already exists is the live state and
+    wins, so an old version run after the split cannot clobber newer files on
+    the next upgrade, and a second call is a no-op. A DIRECTORY entry that
+    exists at both places is merged name by name under the same rule — the
+    new location's directories get created empty by ordinary reads
+    (``list_robot_records`` makes ``robots/`` on every listing), so a
+    new → old → new round-trip would otherwise strand every robot record the
+    old version wrote in between. Whatever is left behind is named in one
+    WARNING per start, so a user can find it. A failed move is logged and
+    skipped; the app then starts with that entry at its defaults rather than
+    refusing to start. Returns the destinations written.
+
+    The caller decides WHEN this runs (server startup, before the first read
+    of any entry — every reader here is lazy) and whether it runs at all
+    (never under a ``MAKERMODSLAB_HOME`` override; see HOME_IS_OVERRIDDEN).
+    """
+    root = LEGACY_STATE_ROOT if legacy_root is None else legacy_root
+    written: list[str] = []
+    left_behind: list[str] = []
+    for legacy_name, attr in _LEGACY_STATE_ENTRIES:
+        src = os.path.join(root, legacy_name)
+        dst = globals()[attr]
+        if not os.path.lexists(src):
+            continue
+        if not os.path.lexists(dst):
+            if _move_entry(src, dst):
+                written.append(dst)
+            continue
+        if os.path.isdir(src) and not os.path.islink(src) and os.path.isdir(dst):
+            moved, left = _merge_dir(src, dst)
+            if moved:
+                written.append(dst)
+            if left:
+                left_behind.append(src)
+        else:
+            left_behind.append(src)
+    if written:
+        logger.info(
+            "Moved %d MakerMods Lab state entries from %s to %s", len(written), root, MAKERMODSLAB_HOME
+        )
+    if left_behind:
+        logger.warning(
+            "Legacy MakerMods Lab state left in place because a newer copy exists under %s: %s",
+            MAKERMODSLAB_HOME,
+            ", ".join(left_behind),
+        )
+    return written
 
 
 def _atomic_write_text(path: str, content: str) -> None:
@@ -325,6 +494,22 @@ def get_instance_id() -> str:
         _atomic_write_text(INSTANCE_ID_FILE, stored + "\n")
     _instance_id_cache = stored
     return stored
+
+
+def load_station_robot(path: str | None = None) -> str | None:
+    """The remembered hosted-robot name, or None (missing/corrupt/blank)."""
+    try:
+        with open(path or STATION_FILE) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    robot = data.get("robot") if isinstance(data, dict) else None
+    return robot if isinstance(robot, str) and is_valid_robot_name(robot) else None
+
+
+def save_station_robot(robot: str | None, path: str | None = None) -> None:
+    """Persist (or clear, with None) the station's hosted-robot choice."""
+    _atomic_write_text(path or STATION_FILE, json.dumps({"robot": robot}, indent=2) + "\n")
 
 
 def parse_livekit_keys(text: str) -> dict[str, str]:
@@ -450,6 +635,22 @@ def setup_calibration_files(leader_config: str, follower_config: str, arm_type: 
     return leader_config_name, follower_config_name
 
 
+def setup_leader_calibration_file(leader_config: str, arm_type: object = DEFAULT_ARM_TYPE) -> str:
+    """Leader twin of setup_follower_calibration_file (remote teleoperation
+    opens ONLY the leader). Validates the assigned config exists in the arm
+    type's leader library and returns its stem — lerobot's `id`."""
+    _require_assigned_config(leader_config, "leader")
+    leader_config_name = os.path.splitext(leader_config)[0]
+    leader_library = leader_config_path_for(arm_type)
+    target = os.path.join(leader_library, f"{leader_config_name}.json")
+    if not os.path.exists(target):
+        raise FileNotFoundError(
+            f"Leader calibration file not found: {target}. Calibrate the leader arm "
+            "(or assign an existing calibration) before starting."
+        )
+    return leader_config_name
+
+
 def setup_follower_calibration_file(follower_config: str, arm_type: object = DEFAULT_ARM_TYPE):
     """Setup follower calibration file in the correct location for replay functionality"""
     _require_assigned_config(follower_config, "follower")
@@ -546,6 +747,17 @@ _BIMANUAL_CONFIG_FIELDS = (
     "right_follower_config",
 )
 _ROBOT_STRING_FIELDS = _SINGLE_CONFIG_FIELDS + _BIMANUAL_CONFIG_FIELDS
+
+# Which arm SIDES this machine has plugged in — the record's layout, which is
+# a UI-and-readiness hint, not a hardware fact the sessions branch on (each
+# session kind gates on the arm scope it actually drives, see
+# is_robot_record_clean). "both" is a local leader/follower pair (every record
+# written before the remote kinds existed reads back as this); "follower" is a
+# station that only hosts / runs policies / replays; "leader" is a controller
+# that only drives a REMOTE follower. Bimanual composes with it (two leaders,
+# two followers, or both pairs).
+ROBOT_ARMS = ("both", "follower", "leader")
+_DEFAULT_ARMS = "both"
 _ROBOT_LIST_FIELDS = ("cameras",)
 
 # Auto-calibration drive torque, as a percentage of full torque. Threaded into
@@ -620,6 +832,7 @@ def _empty_record(name: str) -> dict:
     record: dict = {
         "name": name,
         "mode": _DEFAULT_MODE,
+        "arms": _DEFAULT_ARMS,
         "arm_type": DEFAULT_ARM_TYPE,
         "motor_power": DEFAULT_MOTOR_POWER,
     }
@@ -655,6 +868,10 @@ def get_robot_record(name: str) -> dict | None:
     # Guard against an unknown mode on disk.
     if record.get("mode") not in _VALID_MODES:
         record["mode"] = _DEFAULT_MODE
+    # Records written before the remote kinds existed carry no layout; they
+    # are local pairs by definition.
+    if record.get("arms") not in ROBOT_ARMS:
+        record["arms"] = _DEFAULT_ARMS
     # Records written before the Maker arm existed carry no arm_type; they are
     # SO-101s by definition, which is exactly what normalize_arm_type returns.
     record["arm_type"] = normalize_arm_type(record.get("arm_type"))
@@ -718,6 +935,9 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
     if data.get("mode") in _VALID_MODES:
         record["mode"] = data["mode"]
     record.setdefault("mode", _DEFAULT_MODE)
+    if data.get("arms") in ROBOT_ARMS:
+        record["arms"] = data["arms"]
+    record.setdefault("arms", _DEFAULT_ARMS)
     # Switching arm type invalidates every hardware-bound field on the record.
     # The ports name physically different adapters (a Feetech USB-serial bridge
     # vs a CANable + a FashionStar UART bridge) and the calibration names point
@@ -967,10 +1187,14 @@ def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
     - "follower" — follower side only (inference, replay never open the leader
       bus, so an unassigned leader port / missing leader calibration must not
       block them; bimanual = both followers, still no leaders).
+    - "leader"   — leader side only (remote teleoperation drives a STATION's
+      follower with this node's leader; a laptop record with no follower at
+      all is exactly the expected shape).
     """
     if not record:
         return False
     follower_only = arms == "follower"
+    leader_only = arms == "leader"
 
     # Config fields are stems; the file on disk is "<stem>.json". Tolerate a
     # stored value that still carries the extension (defensive).
@@ -982,6 +1206,8 @@ def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
     required_fields = _SINGLE_CONFIG_FIELDS + (_BIMANUAL_CONFIG_FIELDS if bimanual else ())
     if follower_only:
         required_fields = tuple(f for f in required_fields if "follower" in f)
+    elif leader_only:
+        required_fields = tuple(f for f in required_fields if "leader" in f)
     for field in required_fields:
         value = record.get(field, "")
         if not isinstance(value, str) or not value.strip():
@@ -994,13 +1220,14 @@ def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
     follower_library = follower_config_path_for(record.get("arm_type"))
     leader_library = leader_config_path_for(record.get("arm_type"))
 
-    config_files = [
-        _file_for(follower_library, record["follower_config"]),
-    ]
+    config_files = []
+    if not leader_only:
+        config_files.append(_file_for(follower_library, record["follower_config"]))
     if not follower_only:
         config_files.append(_file_for(leader_library, record["leader_config"]))
     if bimanual:
-        config_files.append(_file_for(follower_library, record["right_follower_config"]))
+        if not leader_only:
+            config_files.append(_file_for(follower_library, record["right_follower_config"]))
         if not follower_only:
             config_files.append(_file_for(leader_library, record["right_leader_config"]))
     return all(os.path.exists(p) for p in config_files)
@@ -1123,6 +1350,21 @@ def stage_bimanual_calibrations(
         "follower",
     )
     return leader_staging, follower_staging, base
+
+
+def stage_bimanual_leader_calibrations(
+    base: str,
+    leader_left: str,
+    leader_right: str,
+    arm_type: object = DEFAULT_ARM_TYPE,
+) -> tuple[str, str]:
+    """Leader twin of stage_bimanual_follower_calibrations (remote
+    teleoperation opens only the leaders). Returns (leader_staging_dir, base)."""
+    leader_staging = _bimanual_leader_staging_dir(base)
+    _stage_one_side(
+        leader_config_path_for(arm_type), leader_staging, base, leader_left, leader_right, "leader"
+    )
+    return leader_staging, base
 
 
 def stage_bimanual_follower_calibrations(

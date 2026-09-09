@@ -89,7 +89,11 @@ from .config import (
     bimanual_base_id,
     normalize_arm_type,
     setup_calibration_files,
+    setup_follower_calibration_file,
+    setup_leader_calibration_file,
     stage_bimanual_calibrations,
+    stage_bimanual_follower_calibrations,
+    stage_bimanual_leader_calibrations,
 )
 
 
@@ -180,6 +184,94 @@ def build_single_configs(request, cameras=None):
     )
 
     return robot_config, teleop_config
+
+
+def build_follower_config(request, cameras=None):
+    """Follower-only config of the request's arm type, single or bimanual
+    (hosting: the station opens no leader). Stages only the follower
+    calibration(s); ``cameras`` (if given) go on the (left) follower exactly
+    as in the pair builders above."""
+    arm_type = request_arm_type(request)
+    if getattr(request, "mode", "single") == "bimanual":
+        base = bimanual_base_id(request.robot_name)
+        follower_staging, _ = stage_bimanual_follower_calibrations(
+            base, request.follower_config, request.right_follower_config, arm_type
+        )
+        if arm_type == "maker":
+            left = MakerFollowerConfigBase(
+                port=request.follower_port, **({"cameras": cameras} if cameras else {})
+            )
+            return BiMakerFollowerConfig(
+                id=base,
+                calibration_dir=Path(follower_staging),
+                left_arm_config=left,
+                right_arm_config=MakerFollowerConfigBase(port=request.right_follower_port),
+            )
+        if arm_type == "metal":
+            left = MetalFollowerConfigBase(
+                port=request.follower_port, **({"cameras": cameras} if cameras else {})
+            )
+            return BiMetalFollowerConfig(
+                id=base,
+                calibration_dir=Path(follower_staging),
+                left_arm_config=left,
+                right_arm_config=MetalFollowerConfigBase(port=request.right_follower_port),
+            )
+        left = SO101FollowerConfig(port=request.follower_port, **({"cameras": cameras} if cameras else {}))
+        return BiSOFollowerConfig(
+            id=base,
+            calibration_dir=Path(follower_staging),
+            left_arm_config=left,
+            right_arm_config=SO101FollowerConfig(port=request.right_follower_port),
+        )
+
+    follower_id = setup_follower_calibration_file(request.follower_config, arm_type)
+    extra = {"cameras": cameras} if cameras else {}
+    if arm_type == "maker":
+        return MakerFollowerConfig(port=request.follower_port, id=follower_id, **extra)
+    if arm_type == "metal":
+        return MetalFollowerConfig(port=request.follower_port, id=follower_id, **extra)
+    return SO101FollowerConfig(port=request.follower_port, id=follower_id, **extra)
+
+
+def build_leader_config(request):
+    """Leader-only config of the request's arm type, single or bimanual
+    (remote teleoperation: this node drives a STATION's follower). The Star
+    leader preset follows the FOLLOWER family the record names, never the
+    bare rebot_102_leader — see CLAUDE.md "Hardware target"."""
+    arm_type = request_arm_type(request)
+    if getattr(request, "mode", "single") == "bimanual":
+        base = bimanual_base_id(request.robot_name)
+        leader_staging, _ = stage_bimanual_leader_calibrations(
+            base, request.leader_config, request.right_leader_config, arm_type
+        )
+        if arm_type == "maker":
+            return BiRebot102LeaderMakerConfig(
+                id=base,
+                calibration_dir=Path(leader_staging),
+                left_arm_config=RebotArm102LeaderMakerConfig(port=request.leader_port),
+                right_arm_config=RebotArm102LeaderMakerConfig(port=request.right_leader_port),
+            )
+        if arm_type == "metal":
+            return BiRebot102LeaderConfig(
+                id=base,
+                calibration_dir=Path(leader_staging),
+                left_arm_config=RebotArm102LeaderMetalConfig(port=request.leader_port),
+                right_arm_config=RebotArm102LeaderMetalConfig(port=request.right_leader_port),
+            )
+        return BiSOLeaderConfig(
+            id=base,
+            calibration_dir=Path(leader_staging),
+            left_arm_config=SO101LeaderConfig(port=request.leader_port),
+            right_arm_config=SO101LeaderConfig(port=request.right_leader_port),
+        )
+
+    leader_id = setup_leader_calibration_file(request.leader_config, arm_type)
+    if arm_type == "maker":
+        return RebotArm102LeaderMakerTeleopConfig(port=request.leader_port, id=leader_id)
+    if arm_type == "metal":
+        return RebotArm102LeaderMetalTeleopConfig(port=request.leader_port, id=leader_id)
+    return SO101LeaderConfig(port=request.leader_port, id=leader_id)
 
 
 def build_bimanual_configs(request, cameras=None):

@@ -221,6 +221,11 @@ def test_no_new_routes_outside_api_v1():
 # checks every entry actually exists so retired surface can't linger.
 V1_ONLY_ROUTES: frozenset[str] = frozenset(
     [
+        # Multi-checkpoint publish: the training view's picker + background queue.
+        # Legacy POST /models/upload stays the single-checkpoint synchronous push.
+        "GET /api/v1/models/checkpoints",
+        "GET /api/v1/models/publish-status",
+        "POST /api/v1/models/publish",
         # Coaching (DAgger) controls. Born versioned: the flat mount was frozen
         # before coaching landed, so every coaching verb exists only under
         # /api/v1.
@@ -262,6 +267,22 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # secret signs short-lived, role-scoped room tokens for Portal
         # participants. Born versioned; 409 sfu.disabled without --sfu.
         "POST /api/v1/sfu/token",
+        # Remote teleoperation (remote_host.py / remote_teleoperate.py): the
+        # station's hosting descriptor, the operator's status + camera
+        # re-stream, and the `remote` extra's install trio. Born versioned.
+        "GET /api/v1/hosting",
+        "GET /api/v1/remote-teleoperation",
+        "GET /api/v1/remote-teleoperation/camera/{name}",
+        "GET /api/v1/system/remote-extra",
+        "POST /api/v1/system/remote-extra/install",
+        "GET /api/v1/system/remote-extra/install-status",
+        # Operator-side Home / Engage: forwarded to the station as Portal RPCs.
+        "POST /api/v1/remote-teleoperation/home",
+        "POST /api/v1/remote-teleoperation/engage",
+        # Station mode posture: the hosted-robot choice, changeable from the
+        # station's UI and remembered across restarts.
+        "GET /api/v1/station",
+        "PUT /api/v1/station/robot",
         "POST /api/v1/nodes/{instance_id}/jobs/{job_id}/stop",
         "DELETE /api/v1/nodes/{instance_id}/jobs/{job_id}",
         # Environment proxies: the peer's own policy-extra status / install /
@@ -352,6 +373,8 @@ RESPONSE_MODEL_EXEMPT: frozenset[str] = frozenset(
         "GET /api/v1/calibration-configs/{device_type}/{config_name}/download",
         # StreamingResponse: MJPEG camera preview stream.
         "GET /api/v1/camera-preview/{index}",
+        # StreamingResponse: MJPEG re-stream of a remote station's camera.
+        "GET /api/v1/remote-teleoperation/camera/{name}",
         # FileResponse: episode MP4 (Range-request video playback).
         "GET /api/v1/datasets/episode-video",
         # Raw Response: checkpoint zip served as an attachment download.

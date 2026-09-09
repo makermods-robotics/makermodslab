@@ -24,7 +24,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from pydantic import BaseModel
@@ -98,8 +98,11 @@ def _find_uv() -> str | None:
     return None
 
 
-def _build_install_cmd(package: str) -> list[str]:
+def _build_install_cmd(package: str | Sequence[str]) -> list[str]:
     """Pick the best installer for the running Python.
+
+    ``package`` is one requirement or several (each its own argv token —
+    never a space-joined string, which pip would read as one bogus name).
 
     Venvs created with `uv venv` don't ship pip, so `python -m pip` fails with
     `No module named pip`. Find uv (PATH, then the standard install
@@ -107,10 +110,11 @@ def _build_install_cmd(package: str) -> list[str]:
     install lands in this Python's site-packages. Otherwise fall back to
     `python -m pip`.
     """
+    packages = [package] if isinstance(package, str) else list(package)
     uv = _find_uv()
     if uv:
-        return [uv, "pip", "install", "--python", sys.executable, package]
-    return [sys.executable, "-m", "pip", "install", package]
+        return [uv, "pip", "install", "--python", sys.executable, *packages]
+    return [sys.executable, "-m", "pip", "install", *packages]
 
 
 class ExtraStatus(BaseModel):
@@ -230,6 +234,28 @@ class InstallManager:
 
 training_install_manager = InstallManager("accelerate")
 wandb_install_manager = InstallManager("wandb")
+# The LiveKit Portal lerobot plugins (remote teleoperation / inference) —
+# the packages of pyproject's `remote` extra, installed BY NAME. Not
+# `makermodslab[remote]`: a bare package name makes uv treat the lerobot git
+# pin inside makermodslab as a transitive URL dependency and refuse to
+# resolve ("URL dependencies must be expressed as direct requirements"), and
+# pip would go looking for a `makermodslab` on PyPI instead. Keep these pins
+# in step with pyproject.toml's extra.
+REMOTE_PROBE_MODULE = "lerobot_teleoperator_livekit"
+# Exact pins, mirroring pyproject's `remote` extra: Portal fingerprints the
+# wire schema, so the station, the operator and the GPU image must all run
+# the same version (see pyproject.toml).
+REMOTE_INSTALL_TARGET = (
+    "livekit-portal==0.2.4",
+    "lerobot-teleoperator-livekit==0.2.4",
+    "lerobot-robot-livekit==0.2.4",
+)
+REMOTE_INSTALL_HINT = (
+    "Remote teleoperation and remote inference need LiveKit Portal (Python 3.12; Linux x86_64/aarch64 or Apple Silicon). "
+    "From a checkout: `uv pip install -e '.[remote]'`; for a `uv tool` install: "
+    "`uv tool install 'makermodslab[remote] @ git+https://github.com/makermods-robotics/makermodslab'`. Then restart."
+)
+remote_install_manager = InstallManager(REMOTE_INSTALL_TARGET)
 
 
 def handle_get_training_extra() -> dict[str, Any]:
@@ -245,6 +271,21 @@ def handle_install_training_extra() -> dict[str, Any]:
 
 def handle_install_training_extra_status() -> dict[str, Any]:
     return training_install_manager.get_status()
+
+
+def handle_get_remote_extra() -> dict[str, Any]:
+    return {
+        "available": _extra_available(REMOTE_PROBE_MODULE),
+        "install_hint": REMOTE_INSTALL_HINT,
+    }
+
+
+def handle_install_remote_extra() -> dict[str, Any]:
+    return remote_install_manager.start()
+
+
+def handle_install_remote_extra_status() -> dict[str, Any]:
+    return remote_install_manager.get_status()
 
 
 def handle_get_wandb_extra() -> dict[str, Any]:

@@ -68,9 +68,11 @@ from .schemas.sessions import (
     OWNER_MAX_LENGTH,
     AutoCalibrationOptions,
     CalibrationOptions,
+    HostingOptions,
     InferenceOptions,
     RecordingOptions,
     RemoteInferenceOptions,
+    RemoteTeleoperationOptions,
     ReplayOptions,
     SessionStartBody,
     TeleoperationOptions,
@@ -80,6 +82,7 @@ from .utils.config import (
     get_robot_record,
     is_robot_record_clean,
     is_valid_robot_name,
+    record_cameras_by_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,7 +97,9 @@ STARTABLE_KINDS = (
     "replay",
     "calibration",
     "auto_calibration",
+    "hosting",
     "remote_inference",
+    "remote_teleoperation",
 )
 
 # Kinds that never open the leader bus, mirroring the frontend's robotSetupGap
@@ -102,7 +107,12 @@ STARTABLE_KINDS = (
 # block them (bimanual = both followers, still no leaders). remote_inference is
 # in unconditionally — unlike inference it has no coaching exception, because a
 # remote session has no handover to a leader arm at all.
-_FOLLOWER_ONLY_KINDS = frozenset({"inference", "replay", "remote_inference"})
+_FOLLOWER_ONLY_KINDS = frozenset({"inference", "replay", "hosting", "remote_inference"})
+
+# Kinds that never open the FOLLOWER bus: remote teleoperation drives a
+# station's follower with this node's leader, so a laptop record with no
+# follower fields at all is the expected shape.
+_LEADER_ONLY_KINDS = frozenset({"remote_teleoperation"})
 
 # Setup kinds: calibration CREATES the record's calibrations (and writes the
 # port back on success), so the record-clean readiness gate the driving kinds
@@ -118,6 +128,8 @@ _OPTIONS_MODELS = {
     "replay": ReplayOptions,
     "calibration": CalibrationOptions,
     "auto_calibration": AutoCalibrationOptions,
+    "hosting": HostingOptions,
+    "remote_teleoperation": RemoteTeleoperationOptions,
 }
 
 
@@ -436,7 +448,9 @@ def _held_by() -> str | None:
         auto_calibrate,
         calibrate,
         record,
+        remote_host,
         remote_inference,
+        remote_teleoperate,
         replay,
         rollout,
         teleoperate,
@@ -459,6 +473,10 @@ def _held_by() -> str | None:
         return "auto_calibration"
     if wiggle.wiggle_active:
         return "wiggle"
+    if remote_host.hosting_active:
+        return "hosting"
+    if remote_teleoperate.remote_teleoperation_active:
+        return "remote_teleoperation"
     return None
 
 
@@ -498,6 +516,42 @@ def _build_teleoperation_request(record: dict, opts: TeleoperationOptions):
         right_follower_config=record["right_follower_config"],
         robot_name=record["name"],
         arm_type=record["arm_type"],
+        skip_identity_check=opts.skip_identity_check,
+    )
+
+
+def _build_hosting_request(record: dict, opts: HostingOptions):
+    from .remote_host import HostingRequest
+
+    return HostingRequest(
+        follower_port=record["follower_port"],
+        follower_config=record["follower_config"],
+        mode=record["mode"],
+        right_follower_port=record["right_follower_port"],
+        right_follower_config=record["right_follower_config"],
+        robot_name=record["name"],
+        arm_type=record["arm_type"],
+        # Cameras resolve from the record here, exactly like recording: the
+        # options never carry devices.
+        cameras=record_cameras_by_name(record.get("cameras") or []),
+        fps=opts.fps,
+        video_codec=opts.video_codec,
+        skip_identity_check=opts.skip_identity_check,
+    )
+
+
+def _build_remote_teleoperation_request(record: dict, opts: RemoteTeleoperationOptions):
+    from .remote_teleoperate import RemoteTeleoperateRequest
+
+    return RemoteTeleoperateRequest(
+        leader_port=record["leader_port"],
+        leader_config=record["leader_config"],
+        mode=record["mode"],
+        right_leader_port=record["right_leader_port"],
+        right_leader_config=record["right_leader_config"],
+        robot_name=record["name"],
+        arm_type=record["arm_type"],
+        station=opts.station,
         skip_identity_check=opts.skip_identity_check,
     )
 
@@ -767,6 +821,8 @@ _REQUEST_BUILDERS = {
     "replay": _build_replay_request,
     "calibration": _build_calibration_request,
     "auto_calibration": _build_auto_calibration_request,
+    "hosting": _build_hosting_request,
+    "remote_teleoperation": _build_remote_teleoperation_request,
 }
 
 
@@ -775,7 +831,9 @@ def _dispatch_start(kind: str, request, websocket_manager) -> dict[str, Any]:
         auto_calibrate,
         calibrate,
         record,
+        remote_host,
         remote_inference,
+        remote_teleoperate,
         replay,
         rollout,
         teleoperate,
@@ -784,6 +842,10 @@ def _dispatch_start(kind: str, request, websocket_manager) -> dict[str, Any]:
 
     if kind == "teleoperation":
         return teleoperate.handle_start_teleoperation(request, websocket_manager)
+    if kind == "hosting":
+        return remote_host.handle_start_hosting(request, websocket_manager)
+    if kind == "remote_teleoperation":
+        return remote_teleoperate.handle_start_remote_teleoperation(request, websocket_manager)
     if kind == "recording":
         return record.handle_start_recording(request)
     if kind == "inference":
@@ -828,6 +890,15 @@ def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict
     kind = body.kind
 
     held = _held_by()
+    if held == "hosting" and kind != "hosting":
+        # Station mode's "local wins when idle": a PARKED, UNSEATED hosting
+        # session yields to a flow started at the station (and the station
+        # supervisor re-arms hosting once that flow ends). Engaged or seated,
+        # it is a held session like any other.
+        from . import remote_host
+
+        if remote_host.yield_for_local():
+            held = _held_by()
     if held is not None:
         _raise_held(
             held,
@@ -857,9 +928,9 @@ def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict
         follower_only = kind in _FOLLOWER_ONLY_KINDS and not (
             kind == "inference" and bool(body.options.get("coaching"))
         )
-        arms = "follower" if follower_only else "all"
+        arms = "follower" if follower_only else ("leader" if kind in _LEADER_ONLY_KINDS else "all")
         if not is_robot_record_clean(record, arms=arms):
-            needs = "follower arm" if arms == "follower" else "arms"
+            needs = {"follower": "follower arm", "leader": "leader arm"}.get(arms, "arms")
             raise ApiError(
                 status_code=400,
                 detail=f"Robot {body.robot!r} is not fully set up for {kind}: "
@@ -1012,7 +1083,9 @@ def _dispatch_stop(kind: str) -> dict[str, Any]:
         auto_calibrate,
         calibrate,
         record,
+        remote_host,
         remote_inference,
+        remote_teleoperate,
         replay,
         rollout,
         teleoperate,
@@ -1021,6 +1094,10 @@ def _dispatch_stop(kind: str) -> dict[str, Any]:
 
     if kind == "teleoperation":
         return teleoperate.handle_stop_teleoperation()
+    if kind == "hosting":
+        return remote_host.handle_stop_hosting()
+    if kind == "remote_teleoperation":
+        return remote_teleoperate.handle_stop_remote_teleoperation()
     if kind == "recording":
         return record.handle_stop_recording()
     if kind == "inference":

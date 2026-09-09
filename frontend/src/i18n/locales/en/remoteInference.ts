@@ -142,10 +142,7 @@ export default {
     copyFailedBody: "Select the command and copy it by hand.",
     noRoomYet:
       "Check the connection before copying the command.",
-    // <0> is the literal placeholder text and <1> the literal key-file path.
-    // Both are identifiers and stay in the Latin script.
-    secretsHint:
-      "Replace <0>{{placeholder}}</0> with the secret beside that key id in <1>{{path}}</1>. The key id in the line is real; the Lab never sends the secret over its own API.",
+    tokenHint: "This room token expires in about an hour. Copy again to get a fresh token.",
     noTailnetUrl:
       "Sign in to Tailscale, then check the connection again.",
   },
@@ -225,24 +222,20 @@ export default {
     unresolved: "not set",
     source: {
       sfu: "the Lab's own SFU",
-      cloud: "livekit.env (LiveKit Cloud)",
-      process_env: "this process's environment",
-      none: "nowhere. nothing is configured",
+      none: "SFU is off",
     },
     roomLabel: "Room",
     extraMissing:
-      "Install the drtc extra in the main checkout.",
+      "Install the remote extra in the main checkout.",
     sfuModalUrlLabel: "Address for the GPU",
     sfuNoTailnet: "no tailnet address",
-    sfuKeyIdLabel: "Key id",
-    sfuKeyFileLabel: "Secret is in",
     // A summary verdict like the ones below, kept out of `summary` because it
     // outlived the retired Transport section unchanged: it is the one case
     // whose remedy is a command, and the panel prints that command (and the
     // backend's install hint, when there is one) beneath this sentence.
     // "the flags below" is that `<pre>`. See transportSummary.ts.
     sfuNotRunning:
-      "Start the Lab with --sfu or configure LiveKit Cloud.",
+      "Start the Lab with --sfu.",
     // The transport as ONE sentence, chosen by the first thing that is wrong —
     // the order is the order an operator has to fix things in. It stands under
     // Start in place of the generic "not ready" line, so each of these has to
@@ -252,9 +245,8 @@ export default {
       fetchFailed: "Connection check failed: {{error}}",
       checking: "Checking the room…",
       notChecked: "Connection not checked.",
-      // {{vars}} is a list of environment variable NAMES — data, verbatim.
-      missingVars:
-        "No LiveKit credentials: {{vars}} missing. Start the Lab with --sfu, or put Cloud credentials in livekit.env.",
+      notConfigured:
+        "Connection setup failed. Restart the Lab with --sfu.",
       // {{url}} is the address itself — data.
       unreachable:
         "Cannot reach {{url}}. Check the LiveKit server.",

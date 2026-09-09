@@ -86,6 +86,44 @@ def test_wait_for_port_returns_true_immediately_for_already_open_port(
         server.close()
 
 
+def test_wait_for_port_probes_the_host_it_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: `--bind <iface>` pins livekit's `bind_addresses` to that one
+    interface, so probing loopback timed out on a healthy SFU and the launcher
+    killed it. The probe must go to the address the child actually bound."""
+    from makermodslab.scripts.makermodslab import _wait_for_port
+
+    probed: list[tuple[str, int]] = []
+
+    class _RecordingSocket:
+        def settimeout(self, _t): ...
+
+        def connect_ex(self, address):
+            probed.append(address)
+            return 0
+
+        def close(self): ...
+
+    monkeypatch.setattr(
+        "makermodslab.scripts.makermodslab.socket.socket",
+        lambda *_a, **_k: _RecordingSocket(),
+    )
+
+    assert _wait_for_port(7880, timeout=1, host="100.64.0.1") is True
+    assert probed == [("100.64.0.1", 7880)]
+
+
+def test_wait_for_port_defaults_to_loopback() -> None:
+    """The default host keeps the loopback behaviour every other call site
+    (dev-mode Vite and backend, both hardcoded to 127.0.0.1) relies on."""
+    import inspect
+
+    from makermodslab.scripts.makermodslab import _wait_for_port
+
+    assert inspect.signature(_wait_for_port).parameters["host"].default == "localhost"
+
+
 def _fake_entry_points(tmp_path):
     """A fake venv bin dir containing all three entry-point scripts."""
     from makermodslab.scripts.makermodslab import ENTRY_POINT_NAMES
@@ -824,6 +862,47 @@ def test_identity_reason_recognises_our_sfu_child_but_not_a_foreign_livekit() ->
     foreign = _FakeProc(301, ["livekit-server", "--config", "/etc/livekit/livekit.yaml"])
     assert launcher._identity_reason(" ".join(ours.info["cmdline"]), ours) == "livekit-server (--sfu)"
     assert launcher._identity_reason(" ".join(foreign.info["cmdline"]), foreign) is None
+
+
+def test_host_flag_requires_the_sfu_and_exports_the_robot(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    """`--host ROBOT` is station mode: it needs the SFU (--sfu or an external
+    MAKERMODSLAB_SFU_URL) and hands the robot name to the app through the
+    environment before the server import."""
+    import os
+
+    import makermodslab.scripts.makermodslab as launcher
+
+    monkeypatch.delenv("MAKERMODSLAB_HOST_ROBOT", raising=False)
+    monkeypatch.delenv(launcher.sfu.ENV_URL, raising=False)
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
+    monkeypatch.setattr(
+        launcher.sfu, "find_livekit_server", lambda *a, **k: "/opt/homebrew/bin/livekit-server"
+    )
+    seen: dict = {}
+    monkeypatch.setattr(
+        launcher,
+        "_run_prod",
+        lambda **kwargs: seen.update(kwargs, robot=os.environ.get("MAKERMODSLAB_HOST_ROBOT")),
+    )
+
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--host", "arm1"])
+    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit):
+        launcher.main()
+    assert "--sfu" in caplog.text
+
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--sfu", "--host", "arm1"])
+    launcher.main()
+    assert seen["robot"] == "arm1"
+    assert seen["sfu_bin"] == "/opt/homebrew/bin/livekit-server"
+    assert os.environ.get("MAKERMODSLAB_STATION") == "1"
+
+    # A bare --host is station mode with the robot chosen later (remembered,
+    # auto-picked, or from the station's UI): the posture is set, the name empty.
+    monkeypatch.delenv("MAKERMODSLAB_STATION", raising=False)
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--sfu", "--host"])
+    launcher.main()
+    assert seen["robot"] == ""
+    assert os.environ.get("MAKERMODSLAB_STATION") == "1"
 
 
 # --- _frontend_deps_current ---------------------------------------------------

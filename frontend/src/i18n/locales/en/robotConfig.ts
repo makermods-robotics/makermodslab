@@ -72,6 +72,17 @@ export default {
     robot: "robot",
   },
 
+  // ---- Arm layout --------------------------------------------------------
+  // "What's plugged into this machine?" — the record's `arms` field. The
+  // VALUES ("both"/"follower"/"leader") are data; a leader-only record is a
+  // controller, not a robot, and the option says so.
+  layout: {
+    question: "What's plugged into this machine?",
+    both: "Leader and follower",
+    followerOnly: "Follower only — a robot station",
+    leaderOnly: "Leader only — a controller for a remote robot",
+  },
+
   // ---- 01 · Device -------------------------------------------------------
   device: {
     step: "Device",

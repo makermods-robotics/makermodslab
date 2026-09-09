@@ -1304,6 +1304,7 @@
             "default": "",
             "enum": [
               "",
+              "auto",
               "A10G",
               "L4",
               "A100",
@@ -1340,15 +1341,49 @@
             "title": "Profile",
             "type": "string"
           },
+          "region": {
+            "default": "us-west",
+            "enum": [
+              "auto",
+              "us-west",
+              "us-east",
+              "us-central",
+              "eu",
+              "ap",
+              "uk",
+              "ca",
+              "me",
+              "sa",
+              "af",
+              "mx"
+            ],
+            "title": "Region",
+            "type": "string"
+          },
           "s_min": {
             "default": 4,
             "title": "S Min",
+            "type": "integer"
+          },
+          "slack": {
+            "default": 5,
+            "description": "Policy-side synchronization buffering in ticks; applied on GPU launch.",
+            "maximum": 30.0,
+            "minimum": 2.0,
+            "title": "Slack",
             "type": "integer"
           },
           "task": {
             "default": "",
             "title": "Task",
             "type": "string"
+          },
+          "tolerance": {
+            "default": 1.5,
+            "maximum": 5.0,
+            "minimum": 0.1,
+            "title": "Tolerance",
+            "type": "number"
           },
           "video_codec": {
             "default": "H264",
@@ -1594,6 +1629,17 @@
             ],
             "title": "Profile"
           },
+          "region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Region"
+          },
           "room": {
             "anyOf": [
               {
@@ -1615,6 +1661,17 @@
               }
             ],
             "title": "S Min"
+          },
+          "slack": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slack"
           },
           "started_at": {
             "anyOf": [
@@ -1641,6 +1698,17 @@
               }
             ],
             "title": "Task"
+          },
+          "tolerance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tolerance"
           },
           "video_codec": {
             "anyOf": [
@@ -1911,6 +1979,214 @@
           "login_command"
         ],
         "title": "HfLoginResponse",
+        "type": "object"
+      },
+      "HostingCamera": {
+        "properties": {
+          "height": {
+            "title": "Height",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "width": {
+            "title": "Width",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "width",
+          "height"
+        ],
+        "title": "HostingCamera",
+        "type": "object"
+      },
+      "HostingDescriptor": {
+        "description": "What an operator needs to join this station's room and agree on the\nwire contract (remote_host.build_descriptor). `motors` are the bare\nmotor names (bimanual: `left_`/`right_` prefixed) — Portal's state and\naction schema; both peers must declare the same set in the same order.\n`joint_ranges_deg` is the SO-101 follower's calibrated full travel per\nbody joint, so the OPERATOR can render the remote arm on the URDF viewer\nwithout holding the station's calibration file; absent for the CAN\narms, whose angles are already degrees.",
+        "properties": {
+          "active_operator": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Operator"
+          },
+          "arm_type": {
+            "title": "Arm Type",
+            "type": "string"
+          },
+          "cameras": {
+            "items": {
+              "$ref": "#/components/schemas/HostingCamera"
+            },
+            "title": "Cameras",
+            "type": "array"
+          },
+          "fps": {
+            "title": "Fps",
+            "type": "integer"
+          },
+          "joint_ranges_deg": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Joint Ranges Deg",
+            "type": "object"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "motors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Motors",
+            "type": "array"
+          },
+          "phase": {
+            "enum": [
+              "parked",
+              "engaging",
+              "engaged",
+              "parking"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "robot": {
+            "title": "Robot",
+            "type": "string"
+          },
+          "room": {
+            "title": "Room",
+            "type": "string"
+          },
+          "station_mode": {
+            "title": "Station Mode",
+            "type": "boolean"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          },
+          "video_codec": {
+            "enum": [
+              "H264",
+              "MJPEG",
+              "PNG",
+              "RAW"
+            ],
+            "title": "Video Codec",
+            "type": "string"
+          }
+        },
+        "required": [
+          "robot",
+          "arm_type",
+          "mode",
+          "room",
+          "url",
+          "fps",
+          "video_codec",
+          "motors",
+          "cameras",
+          "joint_ranges_deg",
+          "active_operator",
+          "phase",
+          "station_mode"
+        ],
+        "title": "HostingDescriptor",
+        "type": "object"
+      },
+      "HostingStatusResponse": {
+        "description": "remote_host.handle_hosting_status — the descriptor rides only while a\nhosting session is live (null otherwise); the rest mirrors the\nteleoperation status payload's post-session fields.",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "hosting": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostingDescriptor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hosting_active": {
+            "title": "Hosting Active",
+            "type": "boolean"
+          },
+          "last_cleanup_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Cleanup Error"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "releasing": {
+            "title": "Releasing",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "hosting_active",
+          "hosting",
+          "releasing",
+          "last_cleanup_error",
+          "outcome",
+          "error",
+          "hint",
+          "message"
+        ],
+        "title": "HostingStatusResponse",
         "type": "object"
       },
       "HubJobDismissResponse": {
@@ -3506,6 +3782,21 @@
             ],
             "title": "Last Modified"
           },
+          "local_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run",
+                  "downloaded"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Kind"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -3664,6 +3955,21 @@
             ],
             "title": "Last Modified"
           },
+          "local_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run",
+                  "downloaded"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Kind"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -3778,6 +4084,178 @@
           "source"
         ],
         "title": "ModelListItem",
+        "type": "object"
+      },
+      "ModelPublishBody": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Id"
+          },
+          "steps": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Steps"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ModelPublishBody",
+        "type": "object"
+      },
+      "ModelPublishStartResponse": {
+        "description": "POST /api/v1/models/publish (models.py ModelUploadManager.start) — the\nqueue was accepted and runs in the background; poll publish-status.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "model_id": {
+            "title": "Model Id",
+            "type": "string"
+          },
+          "started": {
+            "title": "Started",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "started",
+          "model_id",
+          "message"
+        ],
+        "title": "ModelPublishStartResponse",
+        "type": "object"
+      },
+      "ModelPublishStatusResponse": {
+        "description": "GET /api/v1/models/publish-status (models.py ModelUploadManager.get_status).\n`done_steps` stays meaningful on `error` — a queue that fails part-way keeps\neverything it published before it died.",
+        "properties": {
+          "current_step": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Step"
+          },
+          "done": {
+            "title": "Done",
+            "type": "integer"
+          },
+          "done_steps": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Done Steps",
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id"
+          },
+          "repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Id"
+          },
+          "state": {
+            "enum": [
+              "idle",
+              "running",
+              "done",
+              "error"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "state",
+          "model_id",
+          "repo_id",
+          "url",
+          "message",
+          "error",
+          "total",
+          "done",
+          "current_step",
+          "done_steps"
+        ],
+        "title": "ModelPublishStatusResponse",
         "type": "object"
       },
       "ModelUploadBody": {
@@ -4316,6 +4794,25 @@
         "title": "ReleaseCanTorqueResponse",
         "type": "object"
       },
+      "RemoteCommandResponse": {
+        "description": "Home / engage from the operator side (remote_teleoperate): accepted or\nrefused with a reason. Refusals that are the station's verdict ride as a\ncoded 4xx instead.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "RemoteCommandResponse",
+        "type": "object"
+      },
       "RemoteInferenceStats": {
         "description": "One 1 Hz STATS sample from the child, decoded by drtc_protocol.parse_stats.\n\nField-for-field :data:`makermodslab.drtc_protocol.STATS_KEYS`, in its order,\nwith that module's own nullability. Every key is ALWAYS present —\n`format_stats` fills missing ones with null and raises on an unknown one,\nand `parse_stats` refills the full set on the way back — which is what\nmakes this model exact instead of `exclude_none`. Adding a field here\nwithout adding it to STATS_KEYS is a lie; change STATS_KEYS and nowhere\nelse.",
         "properties": {
@@ -4500,6 +4997,17 @@
             "title": "Exited",
             "type": "boolean"
           },
+          "fps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fps"
+          },
           "hint": {
             "anyOf": [
               {
@@ -4634,7 +5142,7 @@
         "type": "object"
       },
       "RemoteInferenceTransport": {
-        "description": "The transport the session actually resolved (the READY echo, not what\nthe parent believed it passed — see drtc_protocol.format_ready).\n\n`source` is `remote_inference._transport_source`'s range, the SAME set the\ntransport ROUTE reports: `sfu` (this process runs the Lab's own LiveKit\nserver, so the url, room and the child's token were minted in-process),\n`process_env`, `cloud` (livekit.env) or `none`. It used to be narrower than\nthe route's; one walker now serves both, and the two values it lost —\n`local_override` and `cwd` — retired with the shell SFU scripts in S3.6.",
+        "description": "The transport the session actually resolved (the READY echo, not what\nthe parent believed it passed — see drtc_protocol.format_ready).\n\n`source` is `remote_inference._transport_source`'s range, the SAME set the\ntransport ROUTE reports: `sfu` (this process runs the Lab's own LiveKit\nserver, so the url, room and every token were minted in-process) or\n`none`. The LiveKit Cloud values (`cloud`, `process_env`) retired with the\ncombine — the SFU is the one transport remote inference has.",
         "properties": {
           "operator_present": {
             "title": "Operator Present",
@@ -4647,8 +5155,6 @@
           "source": {
             "enum": [
               "sfu",
-              "cloud",
-              "process_env",
               "none"
             ],
             "title": "Source",
@@ -4712,13 +5218,6 @@
             ],
             "title": "Message"
           },
-          "missing_vars": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Missing Vars",
-            "type": "array"
-          },
           "operator_present": {
             "anyOf": [
               {
@@ -4729,6 +5228,17 @@
               }
             ],
             "title": "Operator Present"
+          },
+          "policy_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Token"
           },
           "room": {
             "title": "Room",
@@ -4752,28 +5262,6 @@
               }
             ],
             "title": "Sfu Install Hint"
-          },
-          "sfu_key_file": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Sfu Key File"
-          },
-          "sfu_key_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Sfu Key Id"
           },
           "sfu_modal_url": {
             "anyOf": [
@@ -4800,8 +5288,6 @@
           "source": {
             "enum": [
               "sfu",
-              "cloud",
-              "process_env",
               "none"
             ],
             "title": "Source",
@@ -4815,7 +5301,6 @@
         "required": [
           "extra_installed",
           "configured",
-          "missing_vars",
           "url",
           "room",
           "source",
@@ -4823,15 +5308,226 @@
           "sfu_url",
           "sfu_modal_url",
           "sfu_external_ip",
-          "sfu_key_id",
-          "sfu_key_file",
           "sfu_install_hint",
+          "policy_token",
           "endpoint_reachable",
           "operator_present",
           "error_code",
           "message"
         ],
         "title": "RemoteInferenceTransportStatusResponse",
+        "type": "object"
+      },
+      "RemoteStation": {
+        "properties": {
+          "instance_id": {
+            "title": "Instance Id",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "instance_id",
+          "name",
+          "url"
+        ],
+        "title": "RemoteStation",
+        "type": "object"
+      },
+      "RemoteTeleoperationMetrics": {
+        "description": "Portal transport metrics, in ms (None until the first sample).",
+        "properties": {
+          "observations": {
+            "title": "Observations",
+            "type": "integer"
+          },
+          "rtt_ms_last": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtt Ms Last"
+          },
+          "rtt_ms_mean": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtt Ms Mean"
+          },
+          "rtt_ms_p95": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtt Ms P95"
+          },
+          "states_dropped": {
+            "title": "States Dropped",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rtt_ms_last",
+          "rtt_ms_mean",
+          "rtt_ms_p95",
+          "observations",
+          "states_dropped"
+        ],
+        "title": "RemoteTeleoperationMetrics",
+        "type": "object"
+      },
+      "RemoteTeleoperationStatusResponse": {
+        "description": "remote_teleoperate.handle_remote_teleoperation_status. `station_phase`\nis the station's live phase (its hosting descriptor, re-read at most once\na second) — null when the station could not be read.",
+        "properties": {
+          "cameras": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Cameras",
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "last_cleanup_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Cleanup Error"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "metrics": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemoteTeleoperationMetrics"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "remote_teleoperation_active": {
+            "title": "Remote Teleoperation Active",
+            "type": "boolean"
+          },
+          "room": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Room"
+          },
+          "station": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemoteStation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "station_phase": {
+            "anyOf": [
+              {
+                "enum": [
+                  "parked",
+                  "engaging",
+                  "engaged",
+                  "parking"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Station Phase"
+          }
+        },
+        "required": [
+          "remote_teleoperation_active",
+          "station",
+          "station_phase",
+          "room",
+          "cameras",
+          "metrics",
+          "last_cleanup_error",
+          "outcome",
+          "error",
+          "hint",
+          "message"
+        ],
+        "title": "RemoteTeleoperationStatusResponse",
         "type": "object"
       },
       "RenameJobBody": {
@@ -4955,6 +5651,79 @@
           "default_port"
         ],
         "title": "RobotPortResponse",
+        "type": "object"
+      },
+      "RunCheckpointItem": {
+        "description": "One saved checkpoint of a local run (models.py list_run_checkpoints).",
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "published": {
+            "title": "Published",
+            "type": "boolean"
+          },
+          "step": {
+            "title": "Step",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "step",
+          "path",
+          "published"
+        ],
+        "title": "RunCheckpointItem",
+        "type": "object"
+      },
+      "RunCheckpointsResponse": {
+        "description": "GET /api/v1/models/checkpoints (models.py list_run_checkpoints) — what the\npublish picker needs for one run: its checkpoints, which are already on the\nHub, and the repo a publish would target. `hub_readable` is False when the\nHub could not be asked, in which case every `published` means \"unknown\".",
+        "properties": {
+          "checkpoints": {
+            "items": {
+              "$ref": "#/components/schemas/RunCheckpointItem"
+            },
+            "title": "Checkpoints",
+            "type": "array"
+          },
+          "default_repo_id": {
+            "title": "Default Repo Id",
+            "type": "string"
+          },
+          "hf_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hf Repo Id"
+          },
+          "hub_readable": {
+            "title": "Hub Readable",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "legacy_root_checkpoint": {
+            "title": "Legacy Root Checkpoint",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "default_repo_id",
+          "hf_repo_id",
+          "legacy_root_checkpoint",
+          "hub_readable",
+          "checkpoints"
+        ],
+        "title": "RunCheckpointsResponse",
         "type": "object"
       },
       "RunnerFlavor": {
@@ -5244,7 +6013,9 @@
               "replay",
               "calibration",
               "auto_calibration",
-              "remote_inference"
+              "hosting",
+              "remote_inference",
+              "remote_teleoperation"
             ],
             "title": "Kind",
             "type": "string"
@@ -5523,6 +6294,21 @@
             ],
             "title": "Last Modified"
           },
+          "local_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run",
+                  "downloaded"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Kind"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -5734,6 +6520,81 @@
           "hub"
         ],
         "title": "SkillsResponse",
+        "type": "object"
+      },
+      "StationRobotBody": {
+        "description": "PUT /api/v1/station/robot — the robot this station hosts; null clears\nthe choice (hosting stops once idle and waits for a new pick).",
+        "properties": {
+          "robot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Robot"
+          }
+        },
+        "title": "StationRobotBody",
+        "type": "object"
+      },
+      "StationStatusResponse": {
+        "description": "remote_host.handle_station_status — the --host posture. `robot` is the\nremembered/auto-picked choice (null = nothing chosen yet), `hostable` the\nsaved robots whose follower side is set up, `phase` the live hosting\nphase (null when hosting is down).",
+        "properties": {
+          "hostable": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Hostable",
+            "type": "array"
+          },
+          "hosting_active": {
+            "title": "Hosting Active",
+            "type": "boolean"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "enum": [
+                  "parked",
+                  "engaging",
+                  "engaged",
+                  "parking"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "robot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Robot"
+          },
+          "station_mode": {
+            "title": "Station Mode",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "station_mode",
+          "robot",
+          "hostable",
+          "hosting_active",
+          "phase"
+        ],
+        "title": "StationStatusResponse",
         "type": "object"
       },
       "SuccessRepoIdResponse": {
@@ -8291,6 +9152,28 @@
         ]
       }
     },
+    "/api/v1/hosting": {
+      "get": {
+        "description": "The station's hosting descriptor + status (remote_host.py). An\noperator node reads this (through its registry) to learn the room, the\ncodec/fps, and the motor/camera schema before joining; the URL is\nderived from the host the caller reached this API on.",
+        "operationId": "get_hosting_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostingStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Hosting Status",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
     "/api/v1/identify-arm": {
       "post": {
         "description": "The inverse of /wiggle: the user swings an arm's base (shoulder pan) by\nhand and we report which port saw the motion. Read-only — no motor writes.",
@@ -9279,6 +10162,49 @@
         ]
       }
     },
+    "/api/v1/models/checkpoints": {
+      "get": {
+        "description": "The publish picker's source of truth for one local run: every checkpoint\nit saved, which steps are already on the Hub, and the repo a publish would\ntarget. `id` is a run id (query param for symmetry with /models/info).\n404 when the run has no uploadable checkpoint.",
+        "operationId": "models_checkpoints",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunCheckpointsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Checkpoints",
+        "tags": [
+          "models"
+        ]
+      }
+    },
     "/api/v1/models/custom": {
       "delete": {
         "description": "Unpin a saved custom model (does NOT touch the Hub or any local copy).",
@@ -9634,9 +10560,73 @@
         ]
       }
     },
+    "/api/v1/models/publish": {
+      "post": {
+        "description": "START publishing a local run's checkpoints to the Hub as ONE PUBLIC,\nMakerModsLab-tagged model repo. MUTATES the Hub (creates/updates the repo).\n\nReturns immediately with {started, model_id, message} — the queue runs\nsequentially in a background thread (a run's worth of checkpoints is\ngigabytes, far past what an inline request should hold open) and\nGET /api/v1/models/publish-status reports progress. 409 when a publish is\nalready running; the per-step failures (400 offline, 403 permission, 404\nunknown step, 502 Hub) surface through that status, not this call.",
+        "operationId": "models_publish",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelPublishBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelPublishStartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Publish",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/publish-status": {
+      "get": {
+        "description": "Poll the single background publish: state (idle/running/done/error),\ntarget repo + url, `done`/`total`/`current_step` for the queue position, and\n`done_steps` — the steps already on the Hub, which stay meaningful after an\nerror because a failed queue keeps everything it published before it died.",
+        "operationId": "models_publish_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelPublishStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Models Publish Status",
+        "tags": [
+          "models"
+        ]
+      }
+    },
     "/api/v1/models/upload": {
       "post": {
-        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.",
+        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.\n\nThe single-checkpoint synchronous push, frozen for SDK clients — including\nits ON-HUB SHAPE: files land at the repo root, loadable by a plain\nfrom_pretrained(repo_id) (root_layout=True). The training view's\nmulti-checkpoint picker uses POST /api/v1/models/publish instead, which\nstep-addresses under checkpoints/<step>/.",
         "operationId": "models_upload",
         "requestBody": {
           "content": {
@@ -10662,7 +11652,7 @@
     },
     "/api/v1/remote-inference/transport": {
       "get": {
-        "description": "What transport a remote-inference child would resolve RIGHT NOW, and\nwhether anything is answering on it. Read-only; touches no hardware and\nstarts nothing.\n\nTwo transports, one shape. When this process runs the Lab's own SFU\n(`makermodslab --sfu`) the url, room and credentials come from sfu.py\nin-process and livekit.env is never read; the `sfu_*` block then carries\nwhat the panel needs for the GPU side's command line — including the key\nNAME and the file the secret lives in, never the secret. Otherwise the\nLiveKit Cloud credentials are resolved through `drtc._env.read_env()`,\nnever `load_env()`: load_env writes os.environ, and a server that has\nstamped a url into its own environment can never re-resolve it.\n\n`endpoint_reachable` / `operator_present` come from one `list_participants`\ncall behind remote_inference._probe_room, bounded at 3s, and are null when\nthat probe did not run at all. A missing [drtc] extra is REPORTED here\nrather than raised: the panel's job is to tell the user what to install,\nand the install command must name the PRIMARY CHECKOUT — an editable\ninstall run from a worktree silently re-points every other session's\nmakermodslab.\n\nDeliberately NOT refused while a session is live. Unlike\n/arms/release-torque this reads dotenv files and asks the SFU who is in a\nroom; it touches nothing the running child owns, and a live child already\npinned its transport at spawn (READY echoes the effective values).",
+        "description": "What transport a remote-inference child would resolve RIGHT NOW, and\nwhether anything is answering on it. Read-only; touches no hardware and\nstarts nothing.\n\nTwo transports, one shape. When this process runs the Lab's own SFU\n(`makermodslab --sfu`) the url, room and credentials come from sfu.py\nin-process and livekit.env is never read; the `sfu_*` block then carries\nwhat the panel needs for the GPU side's command line — including the key\nNAME and the file the secret lives in, never the secret. Otherwise the\nLiveKit Cloud credentials are resolved through `drtc._env.read_env()`,\nnever `load_env()`: load_env writes os.environ, and a server that has\nstamped a url into its own environment can never re-resolve it.\n\n`endpoint_reachable` / `operator_present` come from one `list_participants`\ncall behind remote_inference._probe_room, bounded at 3s, and are null when\nthat probe did not run at all. A missing [remote] extra is REPORTED here\nrather than raised: the panel's job is to tell the user what to install,\nand the install command must name the PRIMARY CHECKOUT — an editable\ninstall run from a worktree silently re-points every other session's\nmakermodslab.\n\nDeliberately NOT refused while a session is live. Unlike\n/arms/release-torque this reads dotenv files and asks the SFU who is in a\nroom; it touches nothing the running child owns, and a live child already\npinned its transport at spawn (READY echoes the effective values).",
         "operationId": "get_remote_inference_transport",
         "responses": {
           "200": {
@@ -10679,6 +11669,113 @@
         "summary": "Get Remote Inference Transport",
         "tags": [
           "sessions"
+        ]
+      }
+    },
+    "/api/v1/remote-teleoperation": {
+      "get": {
+        "description": "The operator side's status (remote_teleoperate.py): which station,\nwhich room, the remote cameras being re-streamed, Portal RTT metrics.",
+        "operationId": "get_remote_teleoperation_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteTeleoperationStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Remote Teleoperation Status",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
+    "/api/v1/remote-teleoperation/camera/{name}": {
+      "get": {
+        "description": "MJPEG re-stream of one remote camera during a remote teleoperation\nsession, from the frames Portal delivers — the existing camera tiles\nconsume it unchanged. 404 when no session (or no such camera).",
+        "operationId": "get_remote_teleoperation_camera",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Remote Teleoperation Camera",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
+    "/api/v1/remote-teleoperation/engage": {
+      "post": {
+        "description": "Re-energize the station's arm after a Home, with a soft start.",
+        "operationId": "remote_teleoperation_engage",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Remote Teleoperation Engage",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
+    "/api/v1/remote-teleoperation/home": {
+      "post": {
+        "description": "Park the station's arm (return to rest, torque off) and hold it there\nuntil Engage. Forwarded to the station as a Portal RPC; the station\nhonours it only from the seated operator.",
+        "operationId": "remote_teleoperation_home",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Remote Teleoperation Home",
+        "tags": [
+          "remote"
         ]
       }
     },
@@ -11441,6 +12538,70 @@
         "summary": "Start Replay"
       }
     },
+    "/api/v1/station": {
+      "get": {
+        "description": "Station mode posture (remote_host.py): whether this machine was started\nwith --host, which robot it hosts, which saved robots it could host.",
+        "operationId": "get_station_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StationStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Station Status",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
+    "/api/v1/station/robot": {
+      "put": {
+        "description": "Choose (or clear) the hosted robot. Remembered across restarts; a\nparked, unseated hosting session of another robot yields and the\nsupervisor re-hosts the new choice within seconds; an engaged one is\nrefused with session.held.",
+        "operationId": "set_station_robot",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StationRobotBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StationStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Station Robot",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
     "/api/v1/stop-auto-calibration": {
       "post": {
         "description": "Stop a running auto-calibration.",
@@ -11749,6 +12910,72 @@
           }
         },
         "summary": "Install Policy Extra Status",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/system/remote-extra": {
+      "get": {
+        "description": "Whether the `remote` extra (LiveKit Portal's lerobot plugins) is importable.",
+        "operationId": "get_remote_extra",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtraStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Remote Extra",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/system/remote-extra/install": {
+      "post": {
+        "description": "Spawn the Portal plugins' pip install as a background subprocess. No-op if already running.",
+        "operationId": "install_remote_extra",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Install Remote Extra",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/system/remote-extra/install-status": {
+      "get": {
+        "description": "Current install state plus any pending log lines (drained on read).",
+        "operationId": "install_remote_extra_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Install Remote Extra Status",
         "tags": [
           "system"
         ]
@@ -14622,7 +15849,7 @@
     },
     "/models/upload": {
       "post": {
-        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.",
+        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.\n\nThe single-checkpoint synchronous push, frozen for SDK clients — including\nits ON-HUB SHAPE: files land at the repo root, loadable by a plain\nfrom_pretrained(repo_id) (root_layout=True). The training view's\nmulti-checkpoint picker uses POST /api/v1/models/publish instead, which\nstep-addresses under checkpoints/<step>/.",
         "operationId": "models_upload_models_upload_post",
         "requestBody": {
           "content": {

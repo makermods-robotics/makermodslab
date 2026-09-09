@@ -119,9 +119,8 @@ export default {
     copyFailedTitle: "复制失败",
     copyFailedBody: "请手动选中命令并复制。",
     noRoomYet: "尚未解析出房间 — 请先在下方重新检查传输，然后再复制命令。",
-    // <0> 是字面占位符，<1> 是字面路径，二者都是标识符，保持拉丁字符。
-    secretsHint:
-      "请把 <0>{{placeholder}}</0> 替换为 <1>{{path}}</1> 中该 key id 对应的 secret。命令中的 key id 是真实值；MakerMods Lab 的接口从不返回 secret。",
+    tokenHint:
+      "命令中的 token 由本 MakerMods Lab 为 GPU 端签发：只能进入这个房间、只对应一个身份，约一小时后过期 — 如果命令放了一段时间，请重新复制。MakerMods Lab 的接口从不返回签名用的 secret。",
     noTailnetUrl:
       "没有 tailnet 地址，命令中也就没有可供 GPU 端拨号的 URL。请在本机登录 Tailscale，然后重新检查传输。",
   },
@@ -192,22 +191,18 @@ export default {
     unresolved: "未设置",
     source: {
       sfu: "MakerMods Lab 自带的 SFU",
-      cloud: "livekit.env（LiveKit Cloud）",
-      process_env: "本进程的环境变量",
-      none: "无来源 — 尚未配置任何内容",
+      none: "无来源 — MakerMods Lab 未运行自带的 SFU",
     },
     roomLabel: "房间",
     extraMissing:
-      "未安装可选的 drtc 附加依赖，因此无法进行任何检查。请在主检出目录中安装 — 在 worktree 中执行可编辑安装会让其他所有会话都指向该目录。",
+      "未安装可选的 remote 附加依赖，因此无法进行任何检查。请在主检出目录中安装 — 在 worktree 中执行可编辑安装会让其他所有会话都指向该目录。",
     sfuModalUrlLabel: "供 GPU 使用的地址",
     sfuNoTailnet: "没有 tailnet 地址",
-    sfuKeyIdLabel: "Key id",
-    sfuKeyFileLabel: "Secret 位于",
     // 和下面那些结论句一样，只是没有放进 summary：它是唯一一条“解决办法是一条
     // 命令”的结论，面板会把那条命令（以及后端给出的安装提示，如果有）打印在这
     // 句话下面。“下面的参数”指的就是那段 <pre>。参见 transportSummary.ts。
     sfuNotRunning:
-      "本 MakerMods Lab 未运行 LiveKit 服务器。可以用下面的参数启动它，也可以保持关闭并改用 livekit.env 里的 LiveKit Cloud 凭据。",
+      "请用 --sfu 启动 MakerMods Lab。",
     // 把传输状态归纳成一句话，按“第一个出问题的环节”来选 —— 顺序就是操作者
     // 需要依次解决的顺序。它会取代“开始”下面那句笼统的“尚未就绪”，所以每一条
     // 都必须说清楚接下来该做什么。参见 transportSummary.ts。
@@ -216,9 +211,8 @@ export default {
       fetchFailed: "无法读取传输状态：{{error}}",
       checking: "正在检查房间…",
       notChecked: "尚未检查房间。",
-      // {{vars}} 是一组环境变量名，属于数据，原样显示。
-      missingVars:
-        "没有 LiveKit 凭据：缺少 {{vars}}。请用 --sfu 启动 MakerMods Lab，或在 livekit.env 中填入 Cloud 凭据。",
+      notConfigured:
+        "连接配置失败。请用 --sfu 重新启动 MakerMods Lab。",
       // {{url}} 就是地址本身，属于数据。
       unreachable:
         "{{url}} 上没有任何响应。请确认 LiveKit 服务器已启动，并且本机能连上它。",

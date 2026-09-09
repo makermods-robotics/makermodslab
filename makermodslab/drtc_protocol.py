@@ -21,7 +21,7 @@ sides of a dependency wall.
   - the parent (the future `makermodslab.remote_inference`, imported by the
     FastAPI server at boot) must NEVER import `livekit.portal` — it is an FFI
     dylib behind an optional extra, and loading it into the server process is
-    exactly what the `[drtc]` split exists to avoid;
+    exactly what the `[remote]` split exists to avoid;
   - the child (`makermodslab.drtc.robot_sync`) is precisely the process that
     does.
 

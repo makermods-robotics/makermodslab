@@ -71,6 +71,10 @@ SFU_UDP_PORT = 7882
 # infer from the request).
 ENV_KEY_FILE = "MAKERMODSLAB_SFU_KEY_FILE"
 ENV_PORT = "MAKERMODSLAB_SFU_PORT"
+# The host THIS process can reach its own SFU on (the bind host, or loopback
+# for the wildcard) — for in-process participants (the hosting worker), which
+# have no request to derive a host from.
+ENV_HOST = "MAKERMODSLAB_SFU_HOST"
 ENV_URL = "MAKERMODSLAB_SFU_URL"
 ENV_BIN = "MAKERMODSLAB_LIVEKIT_BIN"
 # "1" when the SFU was started with --sfu-external-ip. Reported, never acted
@@ -219,17 +223,9 @@ def render_config(
     if bind_host != "0.0.0.0":  # noqa: S104  # nosec B104 — the wildcard is livekit's default listener, so it needs no bind line
         lines.append("bind_addresses:")
         lines.append(f"  - {bind_host}")
-        # A specific address (the tailnet case) ALSO binds loopback. Two
-        # things dial this server from the machine itself and both use
-        # 127.0.0.1: the launcher's readiness probe (`_wait_for_port`
-        # connects to localhost, and on failure kills the server it just
-        # started — a `--bind <tailnet-ip>` dev session died this way on
-        # 2026-09-03 with "never came up" while livekit was perfectly
-        # healthy) and the robot child, which dials `sfu.local_url()`. The
-        # tailnet address is only for the remote peer. Wildcard covers both
-        # already; loopback is loopback already.
-        if _is_specific_address(bind_host):
-            lines.append("  - 127.0.0.1")
+        # A specific address is the ONLY place the server answers: the
+        # launcher's readiness probe and every participant on this machine
+        # (`local_url`) dial the bind host, never loopback.
     lines += [
         "room:",
         "  auto_create: true",
@@ -289,15 +285,19 @@ def sfu_url(request_host: str, env: Mapping[str, str] | None = None) -> str:
 
 
 def local_url(env: Mapping[str, str] | None = None) -> str:
-    """The signalling URL for a participant running on THIS machine.
-
-    :func:`sfu_url` derives its host from the address the CALLER reached the
-    API on; a child this process spawns (remote inference's `robot_sync` /
-    `robot_rtc`) has no request to derive one from, and loopback is the one
-    address it is always reachable on regardless of what the SFU bound.
-    MAKERMODSLAB_SFU_URL still wins, so an external SFU stays external.
-    """
-    return sfu_url("127.0.0.1", env)
+    """The signalling URL for a participant running on THIS machine — a
+    hosting session's in-process worker, or the remote-inference child this
+    process spawns. Neither has a request to derive a host from (see
+    :func:`sfu_url`), so it is MAKERMODSLAB_SFU_URL if set (an external SFU
+    stays external), else the bind host the launcher exported (loopback for
+    the wildcard bind) plus the port."""
+    env = os.environ if env is None else env
+    override = env.get(ENV_URL)
+    if override:
+        return override
+    host = env.get(ENV_HOST) or "127.0.0.1"
+    port = env.get(ENV_PORT) or str(SFU_HTTP_PORT)
+    return f"ws://{host}:{port}"
 
 
 @functools.lru_cache(maxsize=4)
@@ -336,6 +336,7 @@ def mint_token(
     role: Role,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
     now: datetime.datetime | None = None,
+    max_participants: int | None = None,
 ) -> tuple[str, int]:
     """Sign a LiveKit room token for `identity`. Returns (jwt, expires_at
     epoch seconds).
@@ -346,7 +347,10 @@ def mint_token(
     `can_update_own_metadata`: Portal sets the `lk.portal.role` participant
     attribute at connect and fails without it. The room config pins playout
     delay to 0–1 ms, LiveKit's own teleop recommendation (smoothness traded
-    for latency); the room is created on first join with it.
+    for latency); the room is created on first join with it. `max_participants`
+    (the STATION's own token sets it, since the robot joins first and the
+    room is created from its config) makes the SFU itself enforce the single
+    operator seat: robot + one operator = 2.
     """
     from livekit import api
     from livekit.protocol.room import RoomConfiguration
@@ -363,6 +367,8 @@ def mint_token(
         can_update_own_metadata=True,
     )
     room_config = RoomConfiguration(name=room, min_playout_delay=0, max_playout_delay=1)
+    if max_participants is not None:
+        room_config.max_participants = max_participants
     ttl = datetime.timedelta(seconds=ttl_seconds)
     token = (
         api.AccessToken(api_key, api_secret)

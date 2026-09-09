@@ -254,7 +254,6 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({
                       <HubModelCard
                         key={model.repo_id}
                         model={model}
-                        onDeleted={refresh}
                         onAction={handleHubAction}
                       />
                     ),
