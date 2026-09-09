@@ -33,6 +33,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ..datasets import (
+    _lerobot_cache_root,
     hub_copy_has_data,
     hub_repo_exists,
     local_pushable_copy_exists,
@@ -42,9 +43,11 @@ from ..utils.config import with_makermodslab_tag
 
 
 def _local_dataset_dir(local_repo_id: str) -> Path:
-    from lerobot.utils.constants import HF_LEROBOT_HOME
-
-    return Path(HF_LEROBOT_HOME) / local_repo_id
+    # The same cache root the merge subprocess writes the sidecar under, and
+    # that record.py / jobs.py read it back from — $HF_LEROBOT_HOME per call,
+    # not lerobot's import-frozen constant (which a test cannot redirect and
+    # which ignores a post-import env change).
+    return _lerobot_cache_root() / local_repo_id
 
 
 def _dataset_upload_plan(local_repo_id: str, hub_repo_id: str) -> tuple[bool, bool]:
