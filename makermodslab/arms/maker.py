@@ -30,9 +30,9 @@ class MakerFamily(CanArmFamily):
     short_label = "Maker"
     indefinite_label = "a Maker arm"
 
-    follower_zero_pose = (
-        "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully open — then confirm."
-    )
+    supports_gripper_wiggle = True
+
+    follower_zero_pose = "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully closed — then confirm."
 
     single_robot_type = "maker_follower"
     bimanual_robot_type = "bi_maker_follower"
@@ -44,6 +44,12 @@ class MakerFamily(CanArmFamily):
     # tells a bimanual rig's two followers apart is safe to watch.
     follower_probe_protocol = "robstride"
     motion_identify_energizes_follower = False
+
+    def gripper_bus(self, port: str):
+        from lerobot.motors.robstride import RobstrideMotorsBus
+        from lerobot.robots.maker_follower.maker_follower import MOTOR_MODELS
+
+        return self._build_gripper_bus(port, RobstrideMotorsBus, MOTOR_MODELS)
 
     def _device_classes(self, leader_kind: str | None = None) -> CanDeviceClasses:
         from lerobot.robots.bi_maker_follower import BiMakerFollowerConfig

@@ -645,14 +645,14 @@ METAL_ENTRY = {
             "leader": {
                 "text": (
                     "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, "
-                    "gripper closed — then confirm."
+                    "gripper fully closed — then confirm."
                 ),
                 "image_url": None,
             },
             "follower": {
                 "text": (
                     "Move the arm by hand to its ZERO POSE — standing upright, all "
-                    "joints at 0 degrees, gripper closed — then confirm."
+                    "joints at 0 degrees, gripper fully closed — then confirm."
                 ),
                 "image_url": None,
             },
@@ -681,7 +681,7 @@ METAL_ENTRY = {
             "calibration_summary": {
                 "text": (
                     "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, "
-                    "gripper closed — then confirm."
+                    "gripper fully closed — then confirm."
                 ),
                 "image_url": None,
             },
@@ -698,7 +698,7 @@ METAL_ENTRY = {
             "calibration_summary": {
                 "text": (
                     "Move the arm by hand to its ZERO POSE — standing upright, all "
-                    "joints at 0 degrees, gripper closed — then confirm."
+                    "joints at 0 degrees, gripper fully closed — then confirm."
                 ),
                 "image_url": None,
             },

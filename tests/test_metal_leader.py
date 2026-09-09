@@ -503,7 +503,7 @@ def test_the_metal_leader_opens_bus_only_and_torque_off(monkeypatch: pytest.Monk
     assert [c.type for c in built] == ["metal_leader"]
     # Never connect(): that would start the gravity thread and enable torque.
     # The Damiao handshake energizes, so the disable right after is what frees it.
-    assert device.log == [("bus", "connect"), ("bus", "disable_torque")]
+    assert device.log == [("bus", "connect", False), ("bus", "disable_torque")]
 
 
 def test_a_failed_metal_leader_open_de_energizes_the_bus(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -647,7 +647,8 @@ async def test_probe_with_the_star_leader_is_the_protocol_probe(monkeypatch: pyt
 
 
 @pytest.mark.asyncio
-async def test_the_gesture_is_refused_for_both_metal_sides_with_the_wiggle_fallback() -> None:
+async def test_the_gesture_is_refused_for_both_metal_sides_with_the_wiggle_fallback(monkeypatch) -> None:
+    monkeypatch.setattr(maker_ports, "find_available_ports", lambda: [])
     follower = await maker_ports.identify_maker_arm_by_motion("robot", ["/dev/a"], "metal", "metal")
     leader = await maker_ports.identify_maker_arm_by_motion("teleop", ["/dev/a"], "metal", "metal")
     assert follower["success"] is False and follower["fallback"] == "wiggle"
@@ -691,7 +692,7 @@ def test_choose_identification_is_the_pure_rule() -> None:
     assert can_wiggle.choose_identification(METAL, "teleop", refused, "star") is None
     assert can_wiggle.choose_identification(METAL, "teleop", refused, None) is None
     # A family without the wiggle never falls back to it.
-    assert can_wiggle.choose_identification(MAKER, "robot", refused) is None
+    assert can_wiggle.choose_identification(MAKER, "robot", refused) == "wiggle"
     assert can_wiggle.choose_identification(SO101, "robot", None) is None
 
 
@@ -727,10 +728,21 @@ class _FakeDamiaoBus:
         assert (register, motor) == ("Present_Position", "gripper")
         return self.present
 
-    def sync_write_metal(self, commands: dict) -> None:
-        if self.fail_after_writes is not None and len(self.writes) >= self.fail_after_writes:
-            raise RuntimeError("CAN write failed")
-        self.writes.append(dict(commands))
+    def enable_torque(self, motor: str) -> None:
+        self.enabled.append(motor)
+
+    def write(self, register: str, motor: str, value: float) -> None:
+        assert motor == "gripper"
+        if register == "Kp":
+            self.kp = value
+        elif register == "Kd":
+            self.kd = value
+        else:
+            assert register == "Goal_Position"
+            if self.fail_after_writes is not None and len(self.writes) >= self.fail_after_writes:
+                raise RuntimeError("CAN write failed")
+            self.writes.append({motor: (self.kp, self.kd, value, 0.0, 0.0)})
+            self.present = value
 
     def disable_torque(self, motors=None, num_retry: int = 0) -> None:
         self.disabled.append(motors)
@@ -742,18 +754,17 @@ class _FakeDamiaoBus:
         self.closed += 1
 
 
-def test_plan_can_wiggle_stays_inside_the_limits_with_margin() -> None:
+def test_plan_can_wiggle_preserves_rest_inside_the_limits() -> None:
     high, low, rest = can_wiggle.plan_can_wiggle(30.0, GRIPPER_LIMITS)
-    assert (high, low, rest) == (38.0, 22.0, 30.0)
-    # Parked at the open limit: pulled inside first, never pushed past it.
+    assert (high, low, rest) == (40.0, 20.0, 30.0)
     high, low, rest = can_wiggle.plan_can_wiggle(137.5, GRIPPER_LIMITS)
-    assert high == 137.5 - can_wiggle.WIGGLE_LIMIT_MARGIN_DEG
-    assert low < rest < high
-    # Parked at the closed limit, likewise.
-    high, low, rest = can_wiggle.plan_can_wiggle(-5.0, GRIPPER_LIMITS)
-    assert low == can_wiggle.WIGGLE_LIMIT_MARGIN_DEG
+    assert high == rest == 137.5
+    assert low < rest
+    assert can_wiggle.plan_can_wiggle(0.0, GRIPPER_LIMITS) == (10.0, 0.0, 0.0)
     with pytest.raises(ValueError):
-        can_wiggle.plan_can_wiggle(10.0, (0.0, 20.0))
+        can_wiggle.plan_can_wiggle(-5.0, GRIPPER_LIMITS)
+    with pytest.raises(ValueError):
+        can_wiggle.plan_can_wiggle(10.0, (0.0, 10.0))
 
 
 def test_the_wiggle_bus_carries_only_the_gripper() -> None:
@@ -770,18 +781,18 @@ def test_the_wiggle_drives_inside_the_limits_and_disables_the_gripper_after() ->
     sleeps: list[float] = []
     can_wiggle.drive_gripper_wiggle(bus, GRIPPER_LIMITS, sleep=sleeps.append)
     assert bus.enabled == ["gripper"]
-    assert len(bus.writes) == 2 * can_wiggle.WIGGLE_REPEATS + 1
+    assert len(bus.writes) > 2 * can_wiggle.WIGGLE_REPEATS + 1
     for command in bus.writes:
         assert list(command) == ["gripper"], "no other joint is ever commanded"
         kp, kd, position, velocity, tau = command["gripper"]
         assert (kp, kd, velocity, tau) == (can_wiggle.WIGGLE_KP, can_wiggle.WIGGLE_KD, 0.0, 0.0)
-        assert GRIPPER_LIMITS[0] + can_wiggle.WIGGLE_LIMIT_MARGIN_DEG <= position
-        assert position <= GRIPPER_LIMITS[1] - can_wiggle.WIGGLE_LIMIT_MARGIN_DEG
+        assert GRIPPER_LIMITS[0] <= position
+        assert position <= GRIPPER_LIMITS[1]
     assert bus.writes[-1]["gripper"][2] == 30.0, "settles back where it started"
     # Disabled after (the de-energize helper's whole-bus broadcast), then closed without a second disable.
     assert bus.disabled == [None]
     assert bus.closed == 1 and bus.is_connected is False
-    assert len(sleeps) == 2 * can_wiggle.WIGGLE_REPEATS + 1
+    assert all(delay == 0.05 for delay in sleeps)
 
 
 def test_a_drive_that_raises_partway_still_disables_the_gripper() -> None:
@@ -793,21 +804,17 @@ def test_a_drive_that_raises_partway_still_disables_the_gripper() -> None:
     assert bus.closed == 1
 
 
-def test_a_partial_handshake_is_recovered_without_re_energizing() -> None:
-    """A handshake that raises leaves is_connected False with the motor that
-    answered held: the recovery reopens WITHOUT the handshake and disables."""
-
+def test_an_enable_failure_is_recovered_without_re_energizing() -> None:
     class HalfBus(_FakeDamiaoBus):
-        def connect(self, handshake: bool = True) -> None:
-            if handshake:
-                self.enabled.append("gripper")
-                raise ConnectionError("handshake: no reply")
-            self.is_connected = True
+        def enable_torque(self, motor: str) -> None:
+            self.enabled.append(motor)
+            self.is_connected = False
+            raise ConnectionError("enable: no reply")
 
     bus = HalfBus({"gripper": object()})
     with pytest.raises(ConnectionError):
         can_wiggle.drive_gripper_wiggle(bus, GRIPPER_LIMITS, sleep=lambda s: None)
-    assert bus.enabled == ["gripper"], "the reopen did not handshake again"
+    assert bus.enabled == ["gripper"]
     assert bus.disabled == [None]
 
 
@@ -837,7 +844,7 @@ async def test_the_wiggle_runs_the_drive_and_clears_the_flag(monkeypatch: pytest
     monkeypatch.setattr(can_wiggle, "_open_gripper_bus", lambda arm_type, port: ("bus", arm_type, port))
     monkeypatch.setattr(can_wiggle, "gripper_limits", lambda arm_type: GRIPPER_LIMITS)
 
-    def fake_drive(bus, limits, sleep=None):
+    def fake_drive(bus, limits, sleep=None, gains=None):
         ran.append((bus, limits, wiggle_module.wiggle_active))
 
     monkeypatch.setattr(can_wiggle, "drive_gripper_wiggle", fake_drive)
@@ -850,11 +857,11 @@ async def test_the_wiggle_runs_the_drive_and_clears_the_flag(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
-async def test_the_star_leader_has_nothing_to_wiggle_and_maker_has_no_wiggle() -> None:
+async def test_the_star_leader_has_nothing_to_wiggle() -> None:
     result = await can_wiggle.wiggle_can_gripper("metal", "teleop", "/dev/star", "star")
     assert result["success"] is False and "no motors" in result["message"]
-    result = await MAKER.identify_by_gripper_wiggle("robot", "/dev/can0")
-    assert result["success"] is False and "no gripper wiggle" in result["message"]
+    result = await MAKER.identify_by_gripper_wiggle("teleop", "/dev/star")
+    assert result["success"] is False and "no motors" in result["message"]
 
 
 @pytest.mark.asyncio

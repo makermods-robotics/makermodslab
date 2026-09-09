@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Activity } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import { cn } from "@/lib/utils";
+import { orderedJointEntries } from "@/lib/jointOrder";
 
 interface JointAngleMessage {
   type: "joint_update";
@@ -111,7 +112,7 @@ const JointAngleReadout: React.FC<JointAngleReadoutProps> = ({
     };
   }, [wsBaseUrl, jointsKey]);
 
-  const entries = Object.entries(joints);
+  const entries = orderedJointEntries(joints);
 
   return (
     // Centred and width-capped rather than stretched: this panel occupies the

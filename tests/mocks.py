@@ -104,8 +104,12 @@ class FakeCanBus:
     def __init__(self, log: list | None = None) -> None:
         self.log = log if log is not None else []
 
-    def connect(self) -> None:
-        self.log.append(("bus", "connect"))
+    def connect(self, handshake: bool = True) -> None:
+        self.log.append(("bus", "connect", handshake))
+
+    def read(self, register: str, motor: str) -> float:
+        assert register == "Present_Position"
+        return 1.0
 
     def disable_torque(self) -> None:
         self.log.append(("bus", "disable_torque"))
@@ -146,6 +150,9 @@ class FakeUartBus:
 
     def __init__(self, log: list | None = None) -> None:
         self.log = log if log is not None else []
+
+    def read_raw_angle(self, motor_id: int) -> float:
+        return 1.0
 
     def unlock(self, motor_id: int) -> None:
         self.log.append(("bus", "unlock", motor_id))
