@@ -1202,9 +1202,7 @@ def test_run_cli_writes_sidecar_after_merge(tmp_lerobot_home: Path, monkeypatch)
     ]
 
 
-def test_run_cli_writes_sidecar_for_a_plain_unweighted_merge(
-    tmp_lerobot_home: Path, monkeypatch
-) -> None:
+def test_run_cli_writes_sidecar_for_a_plain_unweighted_merge(tmp_lerobot_home: Path, monkeypatch) -> None:
     """Every merge gets a sidecar: a plain library merge records temporary=false."""
     from makermodslab import merge
     from makermodslab.merge_manifest import read_merge_manifest
