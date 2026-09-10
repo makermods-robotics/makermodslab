@@ -479,7 +479,7 @@ export async function renameDataset(
   });
 }
 
-export type MergeState = "idle" | "running" | "done" | "error";
+export type MergeState = "idle" | "running" | "done" | "error" | "cancelled";
 
 export interface MergeStatus {
   state: MergeState;
@@ -554,6 +554,18 @@ export async function getDatasetMergeStatus(
 ): Promise<MergeStatus> {
   return apiRequest<MergeStatus>(baseUrl, fetcher, "/api/v1/datasets/merge/status", {
     action: "Merge status",
+  });
+}
+
+/** Stop the running merge (SIGTERM -> SIGKILL) and reclaim its partial output.
+ * `cancelled` is false when nothing was running to stop. */
+export async function cancelDatasetMerge(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<{ cancelled: boolean; message: string }> {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/merge/cancel", {
+    method: "POST",
+    action: "Cancel merge",
   });
 }
 

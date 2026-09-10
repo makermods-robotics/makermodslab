@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 
-import { runTemporaryMerge } from "./combineMerge";
+import { runTemporaryMerge, MergeAborted } from "./combineMerge";
 import type { MergeStatus, MergeStartResult } from "@/lib/replayApi";
 
 const noSleep = () => Promise.resolve();
@@ -93,5 +93,150 @@ describe("runTemporaryMerge", () => {
     });
 
     expect(out).toBe("ns/mix-cd34");
+  });
+
+  it("throws MergeAborted when the signal is already aborted", async () => {
+    const startMerge = vi.fn<() => Promise<MergeStartResult>>(async () => ({
+      started: true,
+      message: "",
+    }));
+    const ac = new AbortController();
+    ac.abort();
+
+    await expect(
+      runTemporaryMerge({
+        startMerge,
+        getStatus: async () => status({}),
+        sleep: noSleep,
+        signal: ac.signal,
+      }),
+    ).rejects.toBeInstanceOf(MergeAborted);
+    // Aborted before it even asked the backend to start.
+    expect(startMerge).not.toHaveBeenCalled();
+  });
+
+  it("stops polling once the signal aborts mid-merge", async () => {
+    const ac = new AbortController();
+    let n = 0;
+    const getStatus = vi.fn<() => Promise<MergeStatus>>(async () => {
+      n += 1;
+      if (n === 2) ac.abort();
+      return status({ state: "running" });
+    });
+
+    await expect(
+      runTemporaryMerge({
+        startMerge: async () => ({ started: true, message: "" }),
+        getStatus,
+        sleep: noSleep,
+        signal: ac.signal,
+      }),
+    ).rejects.toBeInstanceOf(MergeAborted);
+    expect(getStatus.mock.calls.length).toBe(2);
+  });
+
+  it("does not return a completed merge's id once aborted on the same tick", async () => {
+    const ac = new AbortController();
+    const getStatus = vi.fn<() => Promise<MergeStatus>>(async () => {
+      ac.abort();
+      return status({ state: "done", output_repo_id: "ns/mix-race" });
+    });
+
+    await expect(
+      runTemporaryMerge({
+        startMerge: async () => ({ started: true, message: "" }),
+        getStatus,
+        sleep: noSleep,
+        signal: ac.signal,
+      }),
+    ).rejects.toBeInstanceOf(MergeAborted);
+  });
+
+  it("asks the backend to cancel the merge when aborted mid-merge", async () => {
+    const cancelMerge = vi.fn(async () => ({ cancelled: true, message: "" }));
+    const ac = new AbortController();
+    let n = 0;
+    const getStatus = vi.fn<() => Promise<MergeStatus>>(async () => {
+      n += 1;
+      if (n === 2) ac.abort();
+      return status({ state: "running" });
+    });
+
+    await expect(
+      runTemporaryMerge({
+        startMerge: async () => ({ started: true, message: "" }),
+        getStatus,
+        sleep: noSleep,
+        signal: ac.signal,
+        cancelMerge,
+      }),
+    ).rejects.toBeInstanceOf(MergeAborted);
+    expect(cancelMerge).toHaveBeenCalledOnce();
+  });
+
+  it("asks the backend to cancel when aborted on the same tick as done", async () => {
+    const cancelMerge = vi.fn(async () => ({ cancelled: true, message: "" }));
+    const ac = new AbortController();
+    const getStatus = vi.fn<() => Promise<MergeStatus>>(async () => {
+      ac.abort();
+      return status({ state: "done", output_repo_id: "ns/mix-race" });
+    });
+
+    await expect(
+      runTemporaryMerge({
+        startMerge: async () => ({ started: true, message: "" }),
+        getStatus,
+        sleep: noSleep,
+        signal: ac.signal,
+        cancelMerge,
+      }),
+    ).rejects.toBeInstanceOf(MergeAborted);
+    expect(cancelMerge).toHaveBeenCalledOnce();
+  });
+
+  it("does not cancel a merge that never started (aborted up front)", async () => {
+    const cancelMerge = vi.fn(async () => ({ cancelled: false, message: "" }));
+    const startMerge = vi.fn<() => Promise<MergeStartResult>>(async () => ({
+      started: true,
+      message: "",
+    }));
+    const ac = new AbortController();
+    ac.abort();
+
+    await expect(
+      runTemporaryMerge({
+        startMerge,
+        getStatus: async () => status({}),
+        sleep: noSleep,
+        signal: ac.signal,
+        cancelMerge,
+      }),
+    ).rejects.toBeInstanceOf(MergeAborted);
+    expect(startMerge).not.toHaveBeenCalled();
+    expect(cancelMerge).not.toHaveBeenCalled();
+  });
+
+  it("does not cancel the backend on normal completion or error", async () => {
+    const cancelMerge = vi.fn();
+
+    const out = await runTemporaryMerge({
+      startMerge: async () => ({ started: true, message: "" }),
+      getStatus: async () =>
+        status({ state: "done", output_repo_id: "ns/mix-ok" }),
+      sleep: noSleep,
+      cancelMerge,
+    });
+    expect(out).toBe("ns/mix-ok");
+
+    await expect(
+      runTemporaryMerge({
+        startMerge: async () => ({ started: true, message: "" }),
+        getStatus: async () => status({ state: "error", error: "boom" }),
+        sleep: noSleep,
+        cancelMerge,
+      }),
+    ).rejects.toThrow(/boom/);
+
+    expect(cancelMerge).not.toHaveBeenCalled();
   });
 });

@@ -40,6 +40,7 @@ import {
   DatasetItem,
   MAX_SOURCE_WEIGHT,
   MergeStatus,
+  cancelDatasetMerge,
   getDatasetInfo,
   getDatasetMergeStatus,
   saveCustomDataset,
@@ -59,7 +60,7 @@ import { useJobsData } from "@/components/jobs/JobsDataContext";
 import DatasetPicker from "@/components/landing/DatasetPicker";
 import { DatasetWeightPicker } from "@/components/landing/DatasetWeightPicker";
 import { MergeProgress } from "@/components/landing/MergeProgress";
-import { runTemporaryMerge } from "@/components/studio/combineMerge";
+import { runTemporaryMerge, MergeAborted } from "@/components/studio/combineMerge";
 import {
   LibrarySection,
   PanelEntryControl,
@@ -256,6 +257,9 @@ const TrainPanel: React.FC = () => {
   >({});
   const [merge, setMerge] = useState<MergeStatus | null>(null);
   const merging = merge?.state === "running";
+  // Set while a combine merge (phase one) is polling, so closing the form or a
+  // Cancel click can abort it instead of leaving it to finish and launch a run.
+  const mergeAbortRef = useRef<AbortController | null>(null);
 
   const toggleForm = (open: boolean) => {
     setFormOpen(open);
@@ -263,6 +267,7 @@ const TrainPanel: React.FC = () => {
     // A launch (or a manual close) starts the next run from scratch — drop any
     // half-built combine selection and the finished merge's progress panel.
     if (!open) {
+      mergeAbortRef.current?.abort();
       setCombine(false);
       setCombineSources([]);
       setCombineWeights({});
@@ -627,6 +632,8 @@ const TrainPanel: React.FC = () => {
       .map((d) => d.repo_id)
       .filter((id) => combineSources.includes(id));
     const weights = sources.map((id) => combineWeights[id] ?? 1);
+    const controller = new AbortController();
+    mergeAbortRef.current = controller;
     setMerge({ state: "running", error: null, output_repo_id: null, logs: [] });
     try {
       const outputRepoId = await runTemporaryMerge({
@@ -642,11 +649,20 @@ const TrainPanel: React.FC = () => {
             true /* temporary */,
           ),
         getStatus: () => getDatasetMergeStatus(baseUrl, fetchWithHeaders),
+        cancelMerge: () => cancelDatasetMerge(baseUrl, fetchWithHeaders),
         onStatus: setMerge,
+        signal: controller.signal,
       });
       refreshDatasets();
       return outputRepoId;
     } catch (e) {
+      if (e instanceof MergeAborted) {
+        // The user closed the form or hit Cancel — clear the panel and submit
+        // nothing. runTemporaryMerge has already asked the backend to stop the
+        // merge (cancelMerge above), so it won't jam the next one.
+        setMerge(null);
+        return null;
+      }
       const message = e instanceof Error ? e.message : String(e);
       setMerge((prev) => ({
         state: "error",
@@ -660,6 +676,8 @@ const TrainPanel: React.FC = () => {
         variant: "destructive",
       });
       return null;
+    } finally {
+      if (mergeAbortRef.current === controller) mergeAbortRef.current = null;
     }
   }, [
     combinableDatasets,
@@ -814,9 +832,19 @@ const TrainPanel: React.FC = () => {
                     {merge && merge.state !== "idle" ? (
                       <div className="space-y-1.5">
                         {merging ? (
-                          <p className="text-xs font-medium text-foreground">
-                            {t("studio.train.combine.merging")}
-                          </p>
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-xs font-medium text-foreground">
+                              {t("studio.train.combine.merging")}
+                            </p>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 shrink-0 px-2 text-xs"
+                              onClick={() => mergeAbortRef.current?.abort()}
+                            >
+                              {t("studio.train.combine.cancel")}
+                            </Button>
+                          </div>
                         ) : null}
                         <MergeProgress
                           logs={merge.logs.map((l) => l.message)}

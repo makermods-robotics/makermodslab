@@ -220,6 +220,7 @@ export default {
       toggle: "Combine multiple datasets",
       hint: "Fine-tune on a weighted blend of several datasets. They're merged into a temporary dataset for this run.",
       merging: "Merging the datasets — training starts once it's done.",
+      cancel: "Cancel",
       mergeFailed: "Couldn't combine the datasets",
       sourcesRequired: "Pick at least two datasets to combine.",
     },

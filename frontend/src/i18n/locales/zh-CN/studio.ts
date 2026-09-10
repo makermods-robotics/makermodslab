@@ -157,6 +157,7 @@ export default {
       toggle: "合并多个数据集",
       hint: "在多个数据集的加权组合上进行微调。它们会被合并成一个仅用于本次训练的临时数据集。",
       merging: "正在合并数据集 — 合并完成后即开始训练。",
+      cancel: "取消",
       mergeFailed: "无法合并这些数据集",
       sourcesRequired: "至少选择两个数据集进行合并。",
     },
