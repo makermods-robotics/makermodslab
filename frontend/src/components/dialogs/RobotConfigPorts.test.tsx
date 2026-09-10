@@ -155,3 +155,11 @@ describe("Star to Metal port controls", () => {
     expect(screen.getByRole("button", { name: "Wiggle" })).toBeInTheDocument();
   });
 });
+
+
+it("shows the saved Star vertical grip choice and its closed calibration hint", async () => {
+  await setup("single", false, "star_vertical");
+  expect(screen.getByRole("combobox", { name: "Leader arm" })).toHaveTextContent("Star arm vertical grip");
+  expect(screen.getByText(/41.2° of grip travel/)).toBeInTheDocument();
+  expect(screen.queryByText(/This leader supports its own weight/)).not.toBeInTheDocument();
+});
