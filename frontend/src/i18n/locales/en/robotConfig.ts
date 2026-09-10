@@ -515,6 +515,12 @@ export default {
   // ---- Advanced parameters (auto-calibration torque) ---------------------
   advanced: {
     title: "Advanced parameters",
+    holdingLabel: "Holding torque (N·m)",
+    holdingDefault: "Default: 0.5 N·m",
+    holdingHint: "Adjusts the sustained squeeze after gripping an object. Save applies live during teleoperation or recording and remembers the value. Both follower grippers use this setting on a bimanual robot. This is not an instantaneous torque ceiling.",
+    holdingDisabled: "Holding control is disabled. Choose a value or use the default, then Save to enable it with the session stopped.",
+    holdingApplied: "Holding torque applied and saved",
+    holdingSaved: "Holding torque saved for the next session",
     subtitle: "Auto-calibration torque",
     torqueLabel: "Auto-calibration torque",
     // "Torque_Limit" is the servo register name — never translated.

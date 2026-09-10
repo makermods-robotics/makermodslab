@@ -27,12 +27,10 @@ dependencies = [
     "livekit-api>=1.0",
     # Pinned to makermods-robotics/lerobot @ arm/makermods-combined (0efbaf55b):
     # the trigger-gripper Star leader presets (rebot_102_leader_maker_trigger,
-    # merged from robot/makermods-maker-arm b780f78e3) and the Metal follower
-    # gain/feedforward tuning (a86385a0f), on top of eaab69339 (the previous
-    # pin: the Star-leader unwrap fix over the two-parent merge of
-    # robot/makermods-maker-arm and arm/makermods-metal). Upstream v0.6.2 base.
-    # Pinned by SHA, not branch name — a moving pin makes every unrelated failure
-    # a bisect.
+    # merged from robot/makermods-maker-arm b780f78e3) on top of 5ce2fe41a, the
+    # previous pin (settled Metal follower gains and velocity feedforward
+    # smoothing over eaab69339). Maker Arm support and the upstream v0.6.2 base
+    # are unchanged. Pin by SHA so dependency updates stay reproducible.
     # Extras beyond the SO-101 set: `maker` = RobStride over CAN (python-can +
     # pyserial for the slcan transport, the only one that works on macOS);
     # `damiao` = the Metal arm's CAN follower stack (same python-can/pyserial

@@ -207,6 +207,7 @@ from .schemas.datasets import (
     UploadStartResponse,
     UploadStatusResponse,
 )
+from .schemas.gripper import GripperStatusResponse
 from .schemas.jobs import (
     CheckpointPolicyConfigResponse,
     HubJobDismissResponse,
@@ -5090,6 +5091,41 @@ def upsert_robot(name: str, data: dict, create: bool = False):
     body = data or {}
     existing = get_robot_record(name) or {}
 
+    if "gripper_hold_torque_nm" in body or "gripper_current_limit_a" in body:
+        from .gripper_settings import supports_gripper_effort_control, validate_gripper_hold_torque
+
+        try:
+            merged = {**existing, **body}
+            if not existing and not create:
+                return JSONResponse(
+                    status_code=404, content={"status": "error", "message": "Robot not found"}
+                )
+            if "gripper_hold_torque_nm" in body:
+                validate_gripper_hold_torque(body["gripper_hold_torque_nm"])
+                if not supports_gripper_effort_control(merged.get("arm_type")):
+                    raise ValueError("Holding torque is supported only for Metal followers")
+            if (
+                merged.get("gripper_current_limit_a") is not None
+                and merged.get("gripper_hold_torque_nm") is not None
+            ):
+                raise ValueError("Choose holding torque or current limiting, not both")
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"status": "error", "message": str(exc)})
+
+    if "gripper_current_limit_a" in body:
+        from .gripper_settings import validate_gripper_current
+
+        try:
+            if not existing and not create:
+                return JSONResponse(
+                    status_code=404, content={"status": "error", "message": "Robot not found"}
+                )
+            validate_gripper_current(body["gripper_current_limit_a"])
+            if not supports_gripper_effort_control(body.get("arm_type") or existing.get("arm_type")):
+                raise ValueError("Gripper current limiting is supported only for Metal followers")
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"status": "error", "message": str(exc)})
+
     # An arm type nothing registered is refused on BOTH the create and the
     # patch path — the whole body, so a record is never left half-switched
     # (the disk layer would otherwise ignore the key and merge the rest). An
@@ -5171,6 +5207,21 @@ def upsert_robot(name: str, data: dict, create: bool = False):
             )
 
     try:
+        gripper_application = None
+        if "gripper_hold_torque_nm" in body and not create:
+            from .metal_gripper import GripperSafetyError, apply_live_hold_torque
+
+            try:
+                gripper_application = apply_live_hold_torque(name, body["gripper_hold_torque_nm"])
+            except GripperSafetyError as exc:
+                return JSONResponse(status_code=409, content={"status": "error", "message": str(exc)})
+        if "gripper_current_limit_a" in body and not create and body.get("gripper_hold_torque_nm") is None:
+            from .metal_gripper import GripperSafetyError, apply_live_current
+
+            try:
+                gripper_application = apply_live_current(name, body["gripper_current_limit_a"])
+            except GripperSafetyError as exc:
+                return JSONResponse(status_code=409, content={"status": "error", "message": str(exc)})
         if create:
             if get_robot_record(name) is not None:
                 return JSONResponse(
@@ -5183,10 +5234,28 @@ def upsert_robot(name: str, data: dict, create: bool = False):
         record = get_robot_record(name)
         if record is None:
             return {"status": "success", "robot": None}
-        return {"status": "success", "robot": _record_with_clean(record)}
+        return {
+            "status": "success",
+            "robot": _record_with_clean(record),
+            "gripper_application": gripper_application,
+        }
     except Exception as e:
         logger.error(f"Error upserting robot {name}: {e}")
+        if gripper_application == "live":
+            from .metal_gripper import stop_live_grippers
+
+            stop_live_grippers(
+                name,
+                "Could not save applied gripper limit; grip released. Restart after fixing the save error.",
+            )
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
+@v1_router.get("/robots/{name}/gripper-status", response_model=GripperStatusResponse, tags=["robots"])
+def get_gripper_status(name: str):
+    from .metal_gripper import gripper_status
+
+    return {"grippers": gripper_status(name)}
 
 
 @router.post("/robots/{name}/rename")

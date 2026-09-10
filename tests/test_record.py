@@ -3985,3 +3985,100 @@ def test_recording_status_naming_phase_locks_every_control_but_the_task_submit(
     assert controls["rerecord_episode"] is False
     assert controls["pause_recording"] is False
     assert status["current_episode_task_default"] == "pick the cube"
+
+
+def test_episode_preparation_precedes_timer_and_record_loop(monkeypatch, tmp_lerobot_home):
+    from makermodslab import record
+
+    calls = []
+
+    def prepare(*args, **kwargs):
+        assert record.current_phase == "preparing"
+        assert record.phase_start_time is None
+        calls.append("prepare")
+        return True
+
+    def loop(events):
+        assert record.current_phase == "recording"
+        assert record.phase_start_time is not None
+        calls.append("record")
+        events.update(stop_recording=True)
+
+    monkeypatch.setattr("makermodslab.recording_preparation.prepare_recording_episode", prepare)
+    monkeypatch.setattr(
+        "makermodslab.utils.robot_factory.setup_calibration_files", lambda *a, **k: ("l", "f")
+    )
+    _, robot, error, dataset_calls = _run_record_session(
+        monkeypatch, _RecRobot(_RecReturnBus()), record_loop_side_effect=loop
+    )
+    assert error is None
+    assert calls == ["prepare", "record"]
+    assert robot.disconnected
+    assert "save_episode" not in dataset_calls
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_preparation_failure_or_cancel_never_records_and_cleans_up(monkeypatch, tmp_lerobot_home, cancel):
+    calls = []
+    encoder = type("Encoder", (), {"close": lambda self, **kwargs: calls.append("encoder_closed")})()
+    monkeypatch.setattr("makermodslab.recording_preparation.install_episode_preparation", lambda _: encoder)
+
+    def prepare(*args, **kwargs):
+        if cancel:
+            return False
+        raise RuntimeError("codec preparation failed")
+
+    monkeypatch.setattr("makermodslab.recording_preparation.prepare_recording_episode", prepare)
+    monkeypatch.setattr(
+        "makermodslab.utils.robot_factory.setup_calibration_files", lambda *a, **k: ("l", "f")
+    )
+    _, robot, error, dataset_calls = _run_record_session(
+        monkeypatch, _RecRobot(_RecReturnBus()), record_loop_side_effect=lambda _: calls.append("record")
+    )
+    assert (error is None) is cancel
+    assert robot.disconnected
+    assert calls == ["encoder_closed"]
+    assert "save_episode" not in dataset_calls
+
+
+def test_strict_preparation_refuses_failed_can_alignment(monkeypatch):
+    from makermodslab import record
+
+    monkeypatch.setattr(record, "return_maker_arms_to_rest", lambda *a, **k: [(False, "stalled")])
+    with pytest.raises(RuntimeError, match="did not settle"):
+        record._realign_follower_to_leader(
+            _RealignRobot(),
+            _RealignTeleop({"shoulder_pan.pos": 10}),
+            "maker",
+            _identity,
+            _identity,
+            require_settled=True,
+        )
+    # The reset phase keeps its existing fail-soft behavior.
+    assert record._realign_follower_to_leader(
+        _RealignRobot(), _RealignTeleop({"shoulder_pan.pos": 10}), "maker", _identity, _identity
+    )
+
+
+def test_strict_preparation_finishes_pending_startup_sync_with_measured_hold(monkeypatch):
+    from types import SimpleNamespace
+
+    from makermodslab import record
+
+    robot = _RealignRobot()
+    robot._synced = False
+    robot.config = SimpleNamespace(startup_sync_speed_deg=1)
+    robot.bus = SimpleNamespace(motors={"shoulder_pan": object()})
+    robot.get_observation = lambda: {"shoulder_pan.pos": 9.5}
+    sent = []
+
+    def send(action):
+        sent.append(action)
+        robot._synced = True
+
+    robot.send_action = send
+    _capture_realign(monkeypatch)
+    assert record._realign_follower_to_leader(
+        robot, _RealignTeleop({"shoulder_pan.pos": 10}), "maker", _identity, _identity, require_settled=True
+    )
+    assert sent == [{"shoulder_pan.pos": 9.5}]

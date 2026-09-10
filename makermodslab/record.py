@@ -639,6 +639,8 @@ def create_record_config(request: RecordingRequest, cameras: dict | None = None)
         display_data=False,  # Don't display data in API mode
         play_sounds=False,  # Don't play sounds in API mode
     )
+    # Local application context, not a LeRobot configuration/CLI field.
+    record_config._makermodslab_robot_name = request.robot_name
 
     return record_config
 
@@ -1792,12 +1794,14 @@ class _LeaderTargetSource:
         teleop_action_processor,
         robot_action_processor,
         ttl_s: float = 1.0 / MAKER_RETURN_FPS,
+        strict: bool = False,
     ) -> None:
         self._robot = robot
         self._teleop = teleop
         self._teleop_action_processor = teleop_action_processor
         self._robot_action_processor = robot_action_processor
         self._ttl_s = ttl_s
+        self._strict = strict
         self._lock = threading.Lock()
         self._split: list[tuple[object, dict[str, float]]] = []
         self._read_at: float | None = None
@@ -1823,6 +1827,8 @@ class _LeaderTargetSource:
             processed = self._teleop_action_processor((action, observation))
             robot_action = self._robot_action_processor((processed, observation))
         except Exception as e:
+            if self._strict:
+                raise RuntimeError("Cannot read the leader during recording preparation") from e
             if not self._warned:
                 logger.warning(f"Could not read the leader to re-align the follower: {e}")
                 self._warned = True
@@ -1854,6 +1860,7 @@ def _realign_follower_to_leader(
     teleop_action_processor,
     robot_action_processor,
     abort_event=None,
+    require_settled: bool = False,
 ) -> bool:
     """Walk a CAN follower to the leader's CURRENT pose at a bounded rate.
 
@@ -1883,9 +1890,9 @@ def _realign_follower_to_leader(
     first passthrough tick. ``maker_targets_from_action`` carries the full
     rationale for the two callers differing.
 
-    Never raises and never aborts the session: the return reports ``(ok,
-    reason)``, a failure is logged, and the caller drops back into ordinary
-    passthrough (today's behaviour).
+    By default, failures are logged and passthrough may resume. Episode
+    preparation sets ``require_settled=True`` instead: a failed move or leader
+    read raises before any recorded frames, and the startup ramp must be ready.
 
     Returns True when passthrough may resume — the move finished, settled,
     stopped short, or there was nothing to do. False ONLY when the abort event
@@ -1906,6 +1913,8 @@ def _realign_follower_to_leader(
         return True
 
     if teleop is None:
+        if require_settled:
+            raise RuntimeError("Cannot prepare CAN follower without a leader")
         logger.warning("No leader to re-align the CAN follower to; resuming passthrough as-is")
         return True
 
@@ -1913,9 +1922,13 @@ def _realign_follower_to_leader(
     # says both that it meant to and why it didn't.
     logger.info("Re-aligning the follower to the leader before passthrough resumes")
 
-    source = _LeaderTargetSource(robot, teleop, teleop_action_processor, robot_action_processor)
+    source = _LeaderTargetSource(
+        robot, teleop, teleop_action_processor, robot_action_processor, strict=require_settled
+    )
     targets = source.split()
     if not targets:
+        if require_settled:
+            raise RuntimeError("No leader targets for recording preparation")
         logger.warning("No leader target to re-align the CAN follower to; resuming passthrough unaligned")
         return True
 
@@ -1934,7 +1947,25 @@ def _realign_follower_to_leader(
             continue
         if ok:
             continue
+        if require_settled:
+            raise RuntimeError(f"Follower did not settle before recording: {reason}")
         logger.warning(f"The follower did not fully re-align to the leader ({reason}); continuing")
+    if require_settled and not cut_short:
+        # Already-aligned arms can return without a send, leaving the pinned
+        # follower's connect-time startup ramp armed. Send its CURRENT measured
+        # pose once so the stock follower finishes that ramp without motion.
+        for device, _pose in targets:
+            if abort_event is not None and abort_event.is_set():
+                return False
+            if (
+                getattr(device, "_synced", None) is False
+                and getattr(device.config, "startup_sync_speed_deg", None) is not None
+            ):
+                observation = device.get_observation()
+                hold = {f"{motor}.pos": observation[f"{motor}.pos"] for motor in device.bus.motors}
+                device.send_action(hold)
+                if device._synced is False:
+                    raise RuntimeError("Follower startup synchronization is not ready for recording")
     return not cut_short
 
 
@@ -2128,6 +2159,11 @@ def record_with_web_events(
     # Everything below that touches a Feetech register by name is gated on it.
     family = arm_registry.family_for_robot_config_type(getattr(cfg.robot, "type", None))
     feetech = family.uses_feetech_bus
+
+    if family.supports_gripper_effort_control:
+        from .metal_gripper import install_metal_gripper
+
+        install_metal_gripper(robot, getattr(cfg, "_makermodslab_robot_name", ""))
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
     publish_preview = observation_tap(robot, family)
@@ -2417,8 +2453,28 @@ def record_with_web_events(
     # release is attempted immediately: the bus may already be unreachable.
     ended_normally = False
 
+    from .recording_preparation import install_episode_preparation, prepare_recording_episode
+
+    prepared_encoder = None
+
+    def cancelled():
+        return bool(web_events.get("stop_recording") or _release_now.is_set())
+
+    prepare_alignment = partial(realign, require_settled=True)
     try:
+        prepared_encoder = install_episode_preparation(dataset)
         while saved_episodes < cfg.dataset.num_episodes:
+            _set_phase("preparing")
+            phase_start_time = None
+            if not prepare_recording_episode(
+                robot,
+                dataset,
+                prepared_encoder,
+                prepare_alignment,
+                cancelled,
+                observation_processor=process_observation,
+            ):
+                break
             # RECORDING PHASE - with dataset (matches original record.py exactly)
             _set_phase("recording")
             phase_start_time = time.time()
@@ -2728,6 +2784,8 @@ def record_with_web_events(
                 teleop.disconnect()
         finally:
             releasing = False
+            if prepared_encoder is not None:
+                prepared_encoder.close(preserve_failure=not ended_normally)
 
     if cfg.dataset.push_to_hub:
         # Same bare-id hazard as the UploadManager path, and the same single
