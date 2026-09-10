@@ -78,8 +78,8 @@ describe("Spotlight", () => {
         },
         {
           target: "[data-tour=step-b]",
-          titleKey: "onboarding.launchpad.skills.title",
-          descriptionKey: "onboarding.launchpad.skills.description",
+          titleKey: "onboarding.launchpad.policies.title",
+          descriptionKey: "onboarding.launchpad.policies.description",
         },
       ],
     };
@@ -104,7 +104,7 @@ describe("Spotlight", () => {
       );
 
       expect(screen.getByText("Step 1 of 2")).toBeInTheDocument();
-      expect(screen.getByText("Find a skill")).toBeInTheDocument();
+      expect(screen.getByText("Find a policy")).toBeInTheDocument();
     } finally {
       document.body.removeChild(targetA);
       document.body.removeChild(targetB);

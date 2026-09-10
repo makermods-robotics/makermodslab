@@ -53,6 +53,12 @@ export default {
     owner: "所有者",
     image: "镜像",
     updated: "更新于",
+    base: "基础模型",
+  },
+  kind: {
+    finetune: "微调",
+    resume: "续训",
+    unknownBase: "已上传的检查点",
   },
   actions: {
     run: "运行",
@@ -116,6 +122,8 @@ export default {
     queueMoveDownAria: "在队列中下移",
     resumeLatest: "从最新检查点继续",
     resumeStep: "从第 {{step}} 步继续",
+    continues: "\u21b3 续训自 {{parent}}",
+    continuesTitle: "本次运行是对更早一次运行的续训。链路：{{chain}}",
     resumeHint:
       "打开训练表单，从该检查点继续训练。算力默认沿用该检查点所属运行的位置，开始前可以改选。",
     install: "安装 {{target}}",
@@ -135,9 +143,9 @@ export default {
     },
   },
   importModal: {
-    title: "导入技能",
+    title: "导入策略",
     description:
-      "指向一个本地目录或一个 Hugging Face 仓库。它会出现在你的技能中，可直接用于推理。",
+      "指向一个本地目录或一个 Hugging Face 仓库。它会出现在你的策略中，可直接用于推理。",
     sourceLabel: "本地路径或 Hugging Face 仓库 id",
     // 示例路径与仓库 id 是数据，保持原样；只翻译中间的连接词。
     sourcePlaceholder: "/path/to/pretrained_model  或  user/my-policy",
@@ -244,13 +252,14 @@ export default {
     },
   },
   modelsLibrary: {
-    title: "你的技能",
-    importSkill: "导入技能",
-    searchPlaceholder: "搜索技能",
-    empty: "还没有技能。训练一个，或用“导入技能”从 Hub 或本地文件夹添加一个。",
+    title: "你的策略",
+    importPolicy: "导入策略",
+    searchPlaceholder: "搜索策略",
+    empty: "还没有策略。训练一个，或用“导入策略”从 Hub 或本地文件夹添加一个。",
     noMatch: "没有匹配的模型。",
     filters: {
       all: "全部",
+      trained: "已训练",
       imported: "已导入",
       uploaded: "已上传",
     },

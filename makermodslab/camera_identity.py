@@ -1,4 +1,5 @@
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,7 +25,13 @@ whenever cameras were plugged/unplugged after startup. Opening by such an
 index then silently hits the wrong physical device — e.g. the built-in
 webcam instead of a robot camera, poisoning previews AND recordings.
 
-The stable link between the two index spaces is AVFoundation's ``uniqueID``.
+The link between the two index spaces is AVFoundation's ``uniqueID``. It is
+stable against *reordering* — that is what makes it usable here — but it is
+not a device serial: measured on the SO-101 rig it is the USB ``locationID``
+with a per-model constant appended (locationID ``0x132200`` -> uniqueID
+``0x1322002c7f4a60``), so it identifies (model, port), not the unit. That is
+exactly why the same-port replug below keeps its id, and why moving a camera
+to another port changes it.
 :func:`resolve_cv2_index` maps a camera's uniqueID to the index cv2 will
 actually open *in this process*, by walking the same in-process device list
 cv2 walks (video + muxed devices, uniqueID-sorted — mirrors OpenCV's
@@ -51,6 +58,10 @@ handle opened for the device that was index 0 stays bound to that device after
 another camera sorts ahead of it and becomes index 0. Callers that cache
 therefore use :func:`identify_cv2_index`, which returns the index to open
 *and* the key to file it under.
+
+Provenance: the AVFoundation device enumeration in ``list_cameras_in_process``
+(the device-type list and the discovery-session call) came from leLab's
+``server.py``, hence the HuggingFace line in the header.
 """
 
 import asyncio

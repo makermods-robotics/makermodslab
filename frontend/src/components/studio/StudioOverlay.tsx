@@ -3,9 +3,7 @@ import { useTranslation } from "react-i18next";
 import { ChevronDown, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import BrandMark from "@/components/BrandMark";
-import RobotCorner from "@/components/launchpad/RobotCorner";
-import LanguageSwitcher from "@/components/LanguageSwitcher";
-import HfAuthChip from "@/components/landing/HfAuthChip";
+import RobotToolbar from "@/components/launchpad/RobotToolbar";
 import CollectPanel from "@/components/studio/CollectPanel";
 import TrainPanel from "@/components/studio/TrainPanel";
 import DeployPanel from "@/components/studio/DeployPanel";
@@ -18,8 +16,8 @@ import { useEyebrowClass } from "@/components/studio/panel/primitives";
 import { cn } from "@/lib/utils";
 
 /**
- * The fullscreen skill studio — slides up over the Launchpad when the
- * "+ New Skill" banner (or any Run-on-robot / Fine-tune action) opens it.
+ * The fullscreen policy studio — slides up over the Launchpad when the
+ * "+ New Policy" banner (or any Run-on-robot / Fine-tune action) opens it.
  * Stays mounted so panel state survives close/reopen within a visit.
  */
 const StudioOverlay: React.FC = () => {
@@ -78,7 +76,7 @@ const StudioOverlay: React.FC = () => {
         open ? "translate-y-0" : "pointer-events-none translate-y-full",
       )}
     >
-      <header className="relative flex items-center gap-3 border-b border-border px-4 py-3 sm:px-6">
+      <header className="relative flex flex-wrap items-center gap-3 border-b border-border px-4 py-3 sm:px-6">
         <BrandMark size="md" />
         <span className="hidden rounded border border-border px-1.5 py-0.5 font-orbitron text-[11px] font-black uppercase tracking-[0.08em] text-muted-foreground sm:inline">
           by MakerMods
@@ -86,32 +84,6 @@ const StudioOverlay: React.FC = () => {
         <span className={cn(eyebrow, "ml-2 hidden md:inline")}>
           {t("studio.overlay.title")}
         </span>
-        <span className="flex-1" />
-        {/* Pull down to return to the main menu — mirrors the Launchpad's
-            "pull up" arrow at the very bottom of that page. Absolutely
-            centered on the header itself (not via flanking flex-1 spacers,
-            which only center when the left/right groups happen to be equal
-            width — they aren't here), so it's centered regardless of how
-            many of the surrounding chips are hidden at the current
-            breakpoint. */}
-        <Button
-          variant="ghost"
-          size="sm"
-          aria-label={t("studio.overlay.backToMenu")}
-          title={t("studio.overlay.backToMenu")}
-          onClick={closeStudio}
-          className="absolute left-1/2 top-1/2 z-10 h-8 w-8 -translate-x-1/2 -translate-y-1/2 p-0 text-muted-foreground hover:text-foreground"
-        >
-          <ChevronDown className="h-5 w-5 animate-bounce" />
-        </Button>
-        <span className="hidden sm:inline-flex">
-          <HfAuthChip />
-        </span>
-        {/* Mounted here as well as on the Launchpad: this overlay is
-            `fixed inset-0` and covers the viewport, so the header switcher
-            would otherwise be unreachable while the studio is open. */}
-        <LanguageSwitcher />
-        <RobotCorner />
         <Button
           variant="ghost"
           size="sm"
@@ -121,6 +93,22 @@ const StudioOverlay: React.FC = () => {
         >
           <X className="h-4 w-4" />
         </Button>
+        <span className="flex-1" />
+        {/* Center the return arrow on wide screens; keep it in the normal
+            flow on smaller screens so it never covers a robot control. */}
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label={t("studio.overlay.backToMenu")}
+          title={t("studio.overlay.backToMenu")}
+          onClick={closeStudio}
+          className="h-8 w-8 shrink-0 p-0 text-muted-foreground hover:text-foreground xl:absolute xl:left-1/2 xl:top-1/2 xl:z-10 xl:-translate-x-1/2 xl:-translate-y-1/2"
+        >
+          <ChevronDown className="h-5 w-5 animate-bounce" />
+        </Button>
+        <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-3">
+          <RobotToolbar />
+        </div>
       </header>
 
       {/* Train's jobs library and Deploy's model library share one jobs

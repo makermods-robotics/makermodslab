@@ -1316,6 +1316,32 @@ def test_rename_sets_display_name_and_persists(tmp_path) -> None:
     assert reg2.get(rec.id).display_name == "pick-and-place v2"
 
 
+def test_set_hf_repo_id_does_not_persist_a_stamped_queue_position(tmp_path) -> None:
+    """set_hf_repo_id follows the same derived-field protocol as rename:
+    queue_position is zeroed before the persist and restamped after, so a
+    position a read stamped onto the live record never freezes into job.json."""
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    _make_pretrained(model)
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    # Simulate a queue read having stamped the live record.
+    rec.queue_position = 7
+
+    updated = reg.set_hf_repo_id(rec.id, "user/repo")
+    assert updated.hf_repo_id == "user/repo"
+    assert updated.queue_position == 0  # restamped; not queued ⇒ 0
+
+    # The RAW persisted file must not carry the stale stamp — reads re-annotate
+    # in memory, so only the file itself can prove the zero-before-persist.
+    from makermodslab.jobs import _job_meta_path
+
+    on_disk = _json.loads(_job_meta_path(reg._output_root, rec.id).read_text())
+    assert on_disk["queue_position"] == 0
+    assert on_disk["hf_repo_id"] == "user/repo"
+
+
 def test_rename_rejects_empty_and_path_characters(tmp_path) -> None:
     from makermodslab.jobs import JobRegistry
 
@@ -4714,6 +4740,181 @@ def test_start_allows_matching_feature_space(tmp_path) -> None:
     assert record.state == "running"
 
 
+def test_policy_config_summary_reports_the_training_arm(tmp_path, tmp_lerobot_home) -> None:
+    """The fine-tune panel's cross-arm warning needs the arm a checkpoint was
+    trained on — recovered via train_config.json's dataset repo id → that
+    dataset's meta/info.json robot_type."""
+    from makermodslab.jobs import JobRegistry
+
+    ds_meta = tmp_lerobot_home / "user" / "corrections" / "meta"
+    ds_meta.mkdir(parents=True)
+    (ds_meta / "info.json").write_text(_json.dumps({"robot_type": "maker_follower", "features": {}}))
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(
+        _json.dumps(
+            {
+                "type": "act",
+                "input_features": {"observation.state": {"type": "STATE", "shape": [7]}},
+                "output_features": {"action": {"type": "ACTION", "shape": [7]}},
+            }
+        )
+    )
+    (model / "train_config.json").write_text(_json.dumps({"dataset": {"repo_id": "user/corrections"}}))
+
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    summary = reg.get_policy_config_summary(rec.id, 0)
+    assert summary["trained_on_robot_type"] == "maker_follower"
+    assert summary["state_dim"] == 7
+
+
+def test_policy_config_summary_arm_is_none_when_unrecoverable(
+    tmp_path, tmp_lerobot_home, monkeypatch
+) -> None:
+    """No train_config.json and only the "(imported)" placeholder to fall back
+    on → None, with NO network attempt (it's a display nicety on a sync GET)."""
+    import makermodslab.jobs as jobs_mod
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    _make_pretrained(model)  # config.json only
+
+    monkeypatch.setattr(
+        jobs_mod,
+        "read_dataset_robot_type",
+        lambda repo_id: pytest.fail(f"unexpected lookup for {repo_id!r}"),
+    )
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    assert reg.get_policy_config_summary(rec.id, 0)["trained_on_robot_type"] is None
+
+
+@pytest.mark.parametrize(
+    ("policy_type", "expected"),
+    [("act", False), ("smolvla", True), ("some_future_policy", None)],
+)
+def test_policy_config_summary_reports_rtc_support(tmp_path, tmp_lerobot_home, policy_type, expected) -> None:
+    """The launch UI gates its inference-engine choice on this, so the key is
+    always present — null meaning "unknown type", not "no"."""
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(_json.dumps({"type": policy_type}))
+
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    summary = reg.get_policy_config_summary(rec.id, 0)
+    assert "supports_rtc" in summary
+    assert summary["supports_rtc"] is expected
+
+
+def test_policy_config_summary_rtc_is_none_when_the_type_is_unreadable(tmp_path, tmp_lerobot_home) -> None:
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(_json.dumps({"input_features": {}}))
+
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    summary = reg.get_policy_config_summary(rec.id, 0)
+    assert summary["policy_type"] is None
+    assert summary["supports_rtc"] is None
+
+
+def test_policy_config_summary_reports_which_gpu_knobs_apply(tmp_path, tmp_lerobot_home) -> None:
+    """So the remote panel can disable a select with a reason instead of
+    sending a value the launcher would drop — the bench failure this exists
+    for is a precision remembered from a MolmoAct2 run still being selected
+    for a SmolVLA one, which cost a cold start."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+
+    def _summary(cfg: dict) -> dict:
+        model = tmp_path / f"model{len(cfg)}{cfg.get('type')}"
+        model.mkdir()
+        (model / "config.json").write_text(_json.dumps(cfg))
+        return reg.get_policy_config_summary(reg.register_imported(str(model)).id, 0)
+
+    molmo = _summary({"type": "molmoact2", "model_dtype": "float32", "num_inference_steps": None})
+    assert molmo["supports_model_dtype"] is True
+    # The knob applies, and the number the panel shows beside "Checkpoint
+    # default" is 10 even though the config saved null: the container resolves
+    # `num_steps or flow_matching_num_steps` against the backbone config, whose
+    # default is 10. (8 is `num_flow_timesteps`, a TRAINING knob.)
+    assert molmo["supports_flow_steps"] is True
+    assert molmo["flow_steps_default"] == 10
+
+    smol = _summary({"type": "smolvla", "num_steps": 10})
+    assert smol["supports_model_dtype"] is False
+    assert smol["supports_flow_steps"] is True
+    assert smol["flow_steps_default"] == 10
+
+    act = _summary({"type": "act", "n_action_steps": 100})
+    assert act["supports_model_dtype"] is False
+    assert act["supports_flow_steps"] is False
+    assert act["flow_steps_default"] is None
+
+    # And the third knob (S3.8g), which is the one the panel FAILS CLOSED on:
+    # it is an OFFER to add a camera, and offering it for a policy whose vision
+    # tower is fixed buys a shape error inside a paid container.
+    assert molmo["supports_extra_image_roles"] is True
+    assert smol["supports_extra_image_roles"] is False
+    assert act["supports_extra_image_roles"] is False
+
+
+def test_policy_config_summary_reports_the_chunk_geometry(tmp_path, tmp_lerobot_home) -> None:
+    """n_action_steps is the CEILING on a remote-inference horizon: declare
+    more than the policy returns and the two Portal peers disagree about the
+    action-chunk shape, so every packet is dropped in silence. MolmoAct2's
+    published checkpoint is 30 where the panel's default is 50, which is the
+    case this field exists to stop the operator walking into."""
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(
+        _json.dumps({"type": "molmoact2", "chunk_size": 30, "n_action_steps": 30})
+    )
+
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    summary = reg.get_policy_config_summary(rec.id, 0)
+    assert summary["n_action_steps"] == 30
+    assert summary["chunk_size"] == 30
+    # MolmoAct2 joined the language-conditioned set: it renders a missing task
+    # as the literal prompt "The task is to ." and degrades silently.
+    assert summary["requires_task"] is True
+
+
+def test_policy_config_summary_chunk_geometry_is_none_when_unusable(tmp_path, tmp_lerobot_home) -> None:
+    """Absent, non-integral or non-positive all answer null. Every policy config
+    validates these itself at construction, so a bad value here means a corrupt
+    or hand-edited config.json — "unknown" is the honest answer, not a number
+    somebody derives a horizon from."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+
+    absent = tmp_path / "absent"
+    absent.mkdir()
+    (absent / "config.json").write_text(_json.dumps({"type": "act"}))
+    summary = reg.get_policy_config_summary(reg.register_imported(str(absent)).id, 0)
+    assert summary["n_action_steps"] is None
+    assert summary["chunk_size"] is None
+
+    junk = tmp_path / "junk"
+    junk.mkdir()
+    (junk / "config.json").write_text(_json.dumps({"type": "act", "n_action_steps": "50", "chunk_size": 0}))
+    summary = reg.get_policy_config_summary(reg.register_imported(str(junk)).id, 0)
+    assert summary["n_action_steps"] is None
+    assert summary["chunk_size"] is None
+
+
 # --- Deliberate stop vs genuine failure -------------------------------------
 #
 # Regression cover for the defect where every press of Stop landed in run
@@ -6585,6 +6786,144 @@ def test_rewind_steps_guard_reads_the_chosen_checkpoint(tmp_path) -> None:
         )
 
 
+# -- shutdown: local runs end deliberately, cloud runs are left alone --------
+
+
+def test_shutdown_stops_local_run_and_explains_why(tmp_path) -> None:
+    """The whole point of the feature: a run the server takes down with it is
+    `interrupted` with a reason, not `failed` with "exited with code 1"."""
+    from makermodslab.jobs import STOPPED_BY_SERVER_SHUTDOWN_MESSAGE, JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeSignallingRunner(on_stop_code=-15)
+    record = _start_with(reg, runner)
+
+    assert reg.stop_local_for_shutdown() == [record.id]
+
+    assert runner.stopped is True
+    assert record.state == "interrupted"
+    assert record.exit_code == -15
+    assert record.error_message == STOPPED_BY_SERVER_SHUTDOWN_MESSAGE
+    # Not the "at your request" wording — nobody requested a reload.
+    assert "your request" not in record.error_message
+
+
+def test_shutdown_leaves_cloud_runs_alone(tmp_path) -> None:
+    """Cloud runs execute on HF's GPUs and do not care that we are exiting.
+    Cancelling one because somebody saved a .py file under --dev would throw
+    away a paid run."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cloud_runner = MagicMock()
+    cloud_runner.hf_job_id.return_value = "job-xyz"
+    cloud_runner.hf_job_url.return_value = "https://hf.co/jobs/job-xyz"
+    with (
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "user/ds", "status": "on_hub", "url": "u"},
+        ),
+        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: cloud_runner),
+    ):
+        record = reg.start(
+            TrainingRequest(dataset_repo_id="user/ds"),
+            JobTarget(runner="hf_cloud", flavor="t4-small"),
+        )
+
+    assert reg.stop_local_for_shutdown() == []
+
+    cloud_runner.stop.assert_not_called()
+    assert record.state == "running"
+    assert record.error_message is None
+
+
+def test_shutdown_verdict_survives_a_restart(tmp_path) -> None:
+    """Persisted, not just in-memory: the watchdog may never tick again, so the
+    record has to be right on disk before the process exits."""
+    from makermodslab.jobs import STOPPED_BY_SERVER_SHUTDOWN_MESSAGE, JobRegistry
+
+    root = tmp_path / "root"
+    reg = JobRegistry(root)
+    record = _start_with(reg, _FakeSignallingRunner(on_stop_code=-15))
+    reg.stop_local_for_shutdown()
+    reg.shutdown()
+
+    reloaded = JobRegistry(root).get(record.id)
+    assert reloaded.state == "interrupted"
+    assert reloaded.error_message == STOPPED_BY_SERVER_SHUTDOWN_MESSAGE
+
+
+def test_shutdown_does_not_relabel_a_run_that_just_finished(tmp_path) -> None:
+    """A run that completed in the window between our intent and our signal was
+    never stopped — it must stay `done`, and must not carry a stop message."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    # Reports a clean exit the moment it is asked to stop.
+    record = _start_with(reg, _FakeSignallingRunner(on_stop_code=0))
+
+    reg.stop_local_for_shutdown()
+
+    assert record.state == "done"
+    assert record.error_message is None
+
+
+def test_shutdown_without_a_confirmable_code_is_interrupted_not_failed(tmp_path) -> None:
+    """A runner killed before it could report a code leaves no evidence.
+    classify_terminal_state falls through to `failed` on a missing code; that
+    is an assertion we cannot back up, so this path must not use it."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    # on_stop_code stays None => returncode() keeps answering None.
+    record = _start_with(reg, _FakeSignallingRunner())
+
+    reg.stop_local_for_shutdown()
+
+    assert record.state == "interrupted"
+    assert record.exit_code is None
+
+
+def test_shutdown_is_a_no_op_with_nothing_running(tmp_path) -> None:
+    """The common case — the server restarts far more often than it trains."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    assert reg.stop_local_for_shutdown() == []
+
+
+def test_shutdown_reconciles_a_racing_tick_verdict(tmp_path) -> None:
+    """A watchdog tick already in flight when shutdown starts classifies with
+    stop_signalled()==False — the normal case under systemd, where the cgroup
+    TERM reaches the trainer at the same instant it reaches us — and files
+    `failed`. The record must not be left saying `failed` under a message that
+    says the server stopped it."""
+    from makermodslab.jobs import STOPPED_BY_SERVER_SHUTDOWN_MESSAGE, JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    box: dict = {}
+
+    class _RacingRunner(_FakeSignallingRunner):
+        def stop(self) -> None:
+            super().stop()
+            racing = box["record"]  # stand in for the in-flight tick
+            racing.state = "failed"
+            racing.exit_code = -15
+            racing.error_message = "Subprocess exited with code -15"
+
+    runner = _RacingRunner(on_stop_code=-15)
+    record = _start_with(reg, runner)
+    box["record"] = record
+
+    reg.stop_local_for_shutdown()
+
+    assert record.state == "interrupted"
+    assert record.error_message == STOPPED_BY_SERVER_SHUTDOWN_MESSAGE
+
+
 # ---------------------------------------------------------------------------
 # The local training queue.
 #
@@ -8085,6 +8424,12 @@ def test_each_feature_refuses_to_start_while_training_runs(monkeypatch) -> None:
     [
         ("record", "recording_active", True, "a recording session"),
         ("rollout", "inference_active", True, "an inference session"),
+        (
+            "remote_inference",
+            "remote_inference_active",
+            True,
+            "a remote inference session",
+        ),
         ("teleoperate", "teleoperation_active", True, "teleoperation"),
         ("replay", "replay_active", True, "a replay"),
         ("calibrate", "calibration_is_active", lambda: True, "calibration"),
@@ -8095,7 +8440,7 @@ def test_each_feature_refuses_to_start_while_training_runs(monkeypatch) -> None:
 def test_every_robot_activity_holds_the_queue(
     monkeypatch, tmp_path, module_name, attr, busy_value, label
 ) -> None:
-    """`_robot_busy`'s seven legs, one case each — the queue side of the mutex.
+    """`_robot_busy`'s eight legs, one case each — the queue side of the mutex.
 
     Only the `recording_active` leg was exercised; the other four could be
     deleted outright with a green suite, which matters because they are read from

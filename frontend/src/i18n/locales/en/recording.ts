@@ -27,7 +27,7 @@ export default {
     // part of the separator.
     alreadyAddedSuffix: " · already added",
     alreadyUsedSuffix: " · already used",
-    nameLabel: "Camera Name",
+    nameLabel: "Name",
     namePlaceholder: "Select a name",
     customNameOption: "Custom name…",
     customNamePlaceholder: "e.g., workspace_cam",

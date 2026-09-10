@@ -18,6 +18,8 @@ import MockHubBanner from "@/components/MockHubBanner";
 import { TooltipProvider } from "@radix-ui/react-tooltip";
 import { ApiProvider } from "./contexts/ApiContext";
 import { HfAuthProvider } from "./contexts/HfAuthContext";
+import { ModelsDataProvider } from "@/contexts/ModelsDataContext";
+import { ArmsProvider } from "@/contexts/ArmsContext";
 import { SessionProvider } from "./contexts/SessionContext";
 
 const queryClient = new QueryClient();
@@ -29,8 +31,17 @@ function App() {
         <ThemeProvider>
           <LanguageProvider>
           <ApiProvider>
+           {/* The arms manifest outranks everything that reads a robot
+               record: the corner, the studio, the dialogs and the teleop
+               page all resolve arm_type through it. Needs ApiProvider's
+               baseUrl, nothing else. */}
+           <ArmsProvider>
            <SessionProvider>
             <HfAuthProvider>
+             {/* Above the router: the launchpad's skill slider and library
+                 sheet read this listing, and so does the studio overlay's
+                 Deploy/Train panel, so its one owner has to outrank both. */}
+             <ModelsDataProvider>
               <UrdfProvider>
                 <DragAndDropProvider>
                   <BrowserRouter>
@@ -77,8 +88,10 @@ function App() {
                   </BrowserRouter>
                 </DragAndDropProvider>
               </UrdfProvider>
+             </ModelsDataProvider>
             </HfAuthProvider>
            </SessionProvider>
+           </ArmsProvider>
           </ApiProvider>
           </LanguageProvider>
         </ThemeProvider>

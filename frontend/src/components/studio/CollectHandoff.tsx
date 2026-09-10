@@ -1,42 +1,34 @@
 import React, { useEffect, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-import { useLocation, useNavigate } from "react-router-dom";
 import { CheckCircle, Loader2, Trash2, Upload as UploadIcon, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { useStudio } from "@/contexts/StudioContext";
+import { useStudio, type RecordedInfo } from "@/contexts/StudioContext";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { useDatasetUpload } from "@/hooks/useDatasetUpload";
 import UploadDatasetDialog from "@/components/landing/UploadDatasetDialog";
 import MilestoneReveal from "@/components/onboarding/MilestoneReveal";
 import { useOnceFlag } from "@/lib/onboarding/storage";
 
-/** Router-state payload left by the Recording page when a session ends (see
- * Recording.tsx). Replaces the old /upload page hop. */
-interface RecordedInfo {
-  repo_id: string;
-  saved_episodes?: number;
-  // Set when the session saved zero episodes and the backend discarded the
-  // (empty) dataset directory — nothing is on disk.
-  discarded_empty?: boolean;
-}
-
 /**
- * Post-recording handoff banner on the Launchpad. Reads the `recorded` payload
- * the Recording page leaves in router state and offers the two next steps that
- * used to live on the /upload page + home info card: train on the just-recorded
- * dataset, or upload it to the Hub. Dismissible; clears the router state so it
- * doesn't resurrect on re-render.
+ * Post-recording handoff banner, rendered at the top of the studio's Collect
+ * panel. Offers the two next steps that used to live on the /upload page + home
+ * info card: train on the just-recorded dataset, or upload it to the Hub. It
+ * also carries two side effects that are the real payload — preselecting the
+ * dataset for Train, and kicking off the automatic Hub push — so it has to
+ * mount after every saved session, not just when someone is looking at it.
+ *
+ * The `recorded` payload comes from StudioContext. It used to arrive in router
+ * state, stamped by a navigate("/") that also closed the studio; a session now
+ * leaves the user in the studio, so there is no navigation to hang it on.
  */
-const CollectHandoff: React.FC = () => {
+const CollectHandoff: React.FC<{
+  recorded: RecordedInfo | null;
+  onDismiss: () => void;
+}> = ({ recorded, onDismiss }) => {
   const { t } = useTranslation();
-  const location = useLocation();
-  const navigate = useNavigate();
   const { setSelectedDataset } = useSelectedDataset();
   const { openStudio, collectForm } = useStudio();
-
-  const recorded = location.state?.recorded as RecordedInfo | undefined;
-  const [dismissed, setDismissed] = useState(false);
 
   const discardedEmpty = recorded?.discarded_empty ?? false;
   // A discarded (empty) session left nothing on disk, so there's no repo id to
@@ -56,28 +48,30 @@ const CollectHandoff: React.FC = () => {
     if (repoId) setSelectedDataset(repoId);
   }, [repoId, setSelectedDataset]);
 
+  // Keyed on the payload, NOT on mount. This banner used to remount for each
+  // session (it was driven by router state on a page the user navigated back
+  // to), so an empty dep array fired exactly once per recording. It now lives
+  // in the always-mounted Collect panel, where a mount-only effect would run
+  // once with no payload and never again — the milestone would never show.
+  // markSeen flips `seen` synchronously, so this settles after one pass.
   useEffect(() => {
     if (
+      recorded &&
       !discardedEmpty &&
-      (recorded?.saved_episodes ?? 0) > 0 &&
+      (recorded.saved_episodes ?? 0) > 0 &&
       !hasSeenRecordingMilestone
     ) {
       setShowRecordingMilestone(true);
       markRecordingMilestoneSeen();
     }
-    // Runs once for this recorded payload — hasSeenRecordingMilestone and
-    // markRecordingMilestoneSeen are stable for the component's lifetime.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [
+    recorded,
+    discardedEmpty,
+    hasSeenRecordingMilestone,
+    markRecordingMilestoneSeen,
+  ]);
 
-  if (!recorded || dismissed) return null;
-
-  const dismiss = () => {
-    setDismissed(true);
-    // Clear the router state so a reload / re-render doesn't bring the banner
-    // back for a session already handled.
-    navigate(".", { replace: true, state: null });
-  };
+  if (!recorded) return null;
 
   const trainOnThis = () => {
     if (!repoId) return;
@@ -156,7 +150,7 @@ const CollectHandoff: React.FC = () => {
             variant="ghost"
             size="icon"
             aria-label={t("studio.common.dismiss")}
-            onClick={dismiss}
+            onClick={onDismiss}
             className="h-7 w-7 shrink-0 text-muted-foreground"
           >
             <X className="h-4 w-4" />

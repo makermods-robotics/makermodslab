@@ -66,7 +66,7 @@ import {
 const WarningBadge: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => (
-  <span className="inline-flex items-center gap-1 rounded border border-red-500/40 bg-red-500/15 px-1.5 py-0.5 text-xs font-medium text-destructive">
+  <span className="inline-flex items-center gap-1 rounded border border-destructive/40 bg-destructive/15 px-1.5 py-0.5 text-xs font-medium text-destructive">
     <AlertTriangle className="h-3 w-3 shrink-0" />
     {children}
   </span>

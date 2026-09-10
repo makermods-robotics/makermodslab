@@ -72,17 +72,17 @@ export default {
     title: "My library",
     close: "Close library",
     tabs: {
-      skills: "My skills",
+      policies: "My policies",
       datasets: "My datasets",
     },
     // Checkpoint step count, pre-formatted ("16k") — see `frames` above for
     // why this is not a `count` plural.
     steps: "{{steps}} steps",
     private: "private",
-    skills: {
-      loading: "Loading skills…",
-      empty: "No skills of yours yet — create one below.",
-      // aria-labels. {{name}} is the skill's display title.
+    policies: {
+      loading: "Loading policies…",
+      empty: "No policies of yours yet — create one below.",
+      // aria-labels. {{name}} is the policy's display title.
       manage: "Manage {{name}}",
       run: "Run {{name}}",
     },
@@ -100,7 +100,7 @@ export default {
       addFromHub: "Add from Hub",
       importFromDisk: "Import from disk",
       manageCaches: "Manage caches",
-      newSkill: "New Skill",
+      newPolicy: "New Policy",
       mergeDatasets: "Merge datasets",
     },
     // Toast titles. Their descriptions are always a repo id or the backend's

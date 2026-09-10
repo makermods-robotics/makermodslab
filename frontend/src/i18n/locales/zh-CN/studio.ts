@@ -1,5 +1,5 @@
 /**
- * "studio" namespace — 技能工作室及其三个面板。
+ * "studio" namespace — 策略工作室及其三个面板。
  *
  * Key tree must match the other language exactly (see i18n/catalogs.test.ts).
  *
@@ -9,7 +9,7 @@
  */
 export default {
   overlay: {
-    title: "技能工作室",
+    title: "策略工作室",
     backToMenu: "返回主菜单",
     close: "关闭工作室",
     sections: {
@@ -97,7 +97,7 @@ export default {
       hubUpload: {
         title: "已上传到 Hub！",
         description:
-          "你的数据集现已公开且可分享 — 在 MakerLab 的任何位置引用它的 repo id，或在「训练」面板中基于它微调技能。",
+          "你的数据集现已公开且可分享 — 在 MakerLab 的任何位置引用它的 repo id，或在「训练」面板中基于它微调策略。",
       },
     },
   },
@@ -122,27 +122,24 @@ export default {
       episodeSubsetOfTotal:
         "将使用 {{total}} 个回合中的 {{used}} 个进行训练 — 可在「我的库」中该数据集的查看器里调整。",
       choose: "选择数据集",
+      pick: "选择数据集",
       useHub: "使用 Hub 上的 <0>{{repoId}}</0>",
       useHubHint: "公开数据集 — 训练时按需拉取。",
       noMatches:
         "没有匹配的数据集。输入完整的 <0>org/name</0> id 即可使用任意公开的 Hugging Face 数据集。",
       hint: "你自己的数据集，或任意公开的 Hugging Face 数据集。",
-      row: {
-        episodes: "{{episodes}} 片段",
-        hub: "Hub",
-      },
     },
     startingPoint: {
       label: "起点",
       scratch: "从零开始训练",
       fromBase: "基于基础模型训练",
       loading: "正在加载检查点…",
-      finetuneHint: "基于该技能的最新检查点进行微调。",
-      hint: "微调已有技能，或从零开始。",
-      foundationHint: "微调已有技能，或基于其公开的基础模型训练。",
+      finetuneHint: "基于该策略的最新检查点进行微调。",
+      hint: "微调已有策略，或从零开始。",
+      foundationHint: "微调已有策略，或基于其公开的基础模型训练。",
     },
     toast: {
-      noCheckpointsTitle: "该技能没有检查点",
+      noCheckpointsTitle: "该策略没有检查点",
       noCheckpointsBody: "它没有可用于微调的已保存检查点。",
       baseFailedTitle: "无法加载起点",
     },
@@ -153,27 +150,103 @@ export default {
     },
   },
 
+  // 指导结束后的交接卡片，与 Launchpad 上的 CollectHandoff 并列：
+  // 产出了数据的会话，应该把下一步放在操作者真正会看到的地方。
+  coachHandoff: {
+    saved_other: "已保存 {{count}} 次纠正到 <0>{{dataset}}</0>",
+    next: "把它们与 <0>{{dataset}}</0>（该技能最近一次训练所用的数据集）合并，然后基于合并结果微调它。训练只接受一个数据集，所以合并这一步不能省。",
+    manual:
+      "要把它们变成更好的策略，请与该检查点<0>最近一次</0>训练所用的数据集合并，然后基于同一个检查点在合并结果上微调。两个步骤分别在数据集库和训练面板中。",
+    action: "合并并微调",
+  },
+
   deploy: {
     title: "运行",
+    entry: "运行策略",
+    policy: {
+      label: "策略 *",
+    },
     picker: {
-      placeholder: "选择技能",
-      loading: "正在加载技能…",
-      empty: "还没有已训练或已导入的技能",
-      import: "导入技能",
-      hint: "选择一个已训练的检查点，或已从 Hub 导入的技能，在机器人上运行。",
+      placeholder: "选择策略",
+      loading: "正在加载策略…",
+      empty: "还没有已训练或已导入的策略",
+      error: "无法加载策略。请检查服务器后重试。",
+      hubDegraded: "无法连接 Hub — 正在显示本地策略和上次的 Hub 列表。",
+      import: "导入策略",
     },
     source: {
       hub: "hub",
       local: "本地",
       both: "本地 · hub",
     },
-    intro: "在机器人上运行该技能，然后开始推理。",
+    // 运行表单的一句话说明，位置和语气与「训练」面板一致。
+    intro: "选择策略及其检查点，设置运行时长，检查摄像头 — 然后开始。",
     noRobot: "选择要运行的机器人 — 使用本窗口右上角的机器人菜单。",
     robotNotReady_other:
       "<0>{{name}}</0>{{gap}}。请先打开机器人设置，然后再运行推理。（推理只使用从臂 — 无需配置主臂。）",
+    // 指导模式的变体：它要通过主臂遥操作，所以这里的 {{gap}} 是全部机械臂的
+    // 缺项，括号里说明主臂为什么也必须配好。
+    robotNotReadyCoach_other:
+      "<0>{{name}}</0>{{gap}}。请先打开机器人设置，然后再运行推理。（指导还会用到主臂 — 接管时你要用它遥操作，因此它也需要端口和标定。）",
+    // 本次运行的形态。选项的取值（"single"/"eval"/"coach"）是前端据以分支的
+    // 标识符 — 只有这些标签会被翻译。
+    runMode: {
+      label: "你想用这个技能做什么？",
+      // 每一行在被选中之前就先说明它要你付出什么：它们并不是可以随手互换的
+      // 菜单项，而选错往往要等到人站在机械臂前才发现。
+      single: {
+        title: "运行",
+        what: "尝试一次，然后停止。",
+        commitment: "无需上手",
+      },
+      eval: {
+        title: "给它打分",
+        what: "反复执行该任务，由你为每次尝试评判，汇总为成功率。",
+        commitment: "片段之间需要上手 — 由你复位现场并为每次尝试评分",
+      },
+      coach: {
+        title: "人在回路",
+        what: "在它快要失败时接管。每次挽救都会保存为可用于微调的训练数据。",
+        commitment: "当它快要失败时，用主臂接管从臂并采集数据",
+      },
+    },
+    // 策略在哪里运行 —— 标签栏上方的分段控件。选项 VALUE（"local"/"remote"）
+    // 是面板用来判断的标识符，只翻译这些标签。
+    runsOn: {
+      label: "运行位置",
+      local: "本机",
+      remote: "远程 GPU",
+      localHint: "由本机加载检查点并驱动机械臂。",
+      remoteHint:
+        "机械臂在本机运行，策略在远程 GPU 上运行，二者在一个 LiveKit 房间中会合。本机不会加载检查点。",
+    },
+    // 仅在运行模式为 “指导” 时显示的参数。
+    coaching: {
+      correctionsLabel: "计划采集的纠正次数",
+      correctionsHint:
+        "保存到这个数量后会话就会结束。你也可以随时提前停止，此前录到的内容都会保留。",
+      datasetLabel: "纠正数据集",
+      datasetPlaceholder: "例如：fold_shirt_fixes",
+      // 输入框为空时，名称中由用户输入的那一半的替代文字。
+      datasetFallback: "correction",
+      // <0> 包住 {{prefix}}，即磁盘上的实际名称 —— 它是标识符，
+      // 无论什么语言都保持拉丁字母。
+      datasetHint:
+        "保存为 <0>{{prefix}}</0> 加一个时间戳。留空即使用灰显的名称，它取自该模型训练所用的数据集；你输入的内容会替换它，清空输入框则会恢复。",
+      leaderLabel: "主臂",
+      leaderNoRobot: "请先在上方选择一台机器人。",
+      leaderMissing:
+        "这台机器人没有配置主臂。请在机器人设置中补上它的端口和标定 — 没有主臂就无法进行指导。",
+      // {{configs}} 是一到两个标定文件名 —— 属于数据，不做翻译。
+      leaderFrom: "取自 {{name}}：{{configs}}。接管时你将用它进行遥操作。",
+      bimanualWarning:
+        "双臂注意：接管前请先把两条主臂停到接近机器人当前姿态的位置。双臂模式下是机器人去迎合主臂，而不是反过来，因此从工作台另一头接管会让两条机械臂横扫整个场景。移动距离过大的接管会被拒绝。",
+    },
     checkpoint: {
       label: "检查点",
-      none: "该技能暂无可用的检查点。",
+      none: "该策略暂无可用的检查点。",
+      // 未选择策略前，禁用状态下拉框里的占位文字。
+      pickPolicyFirst: "请先选择策略",
     },
     armMismatch: {
       bimanualCheckpoint:
@@ -185,27 +258,55 @@ export default {
       label: "任务描述",
       placeholder: "例如：拿起红色方块",
       hint: "该策略以语言为条件（{{policyType}}）。",
+      hintUnknown:
+        "只有以语言为条件的策略才会使用该字段 — 选择策略后即可确认。",
+      hintNotConditioned:
+        "该策略（{{policyType}}）不以语言为条件 — 会忽略该字段。",
+      // 当任务描述是从该检查点自己的训练数据集自动填入时，追加在 hint 之后。
+      // 前面的空格由调用方补上。
+      prefilled: "已根据它训练所用的数据集自动填入。",
+      // 当血缘里根本没有任务时使用的占位文字。绝不编造示例：把假任务灰显在
+      // 真正继承来的任务所用的同一位置，二者将无法区分。
+      placeholderNone: "训练数据集里没有找到任务 — 请手动输入一个",
+      // 用于不读取任务的策略。指导仍会保存这个字符串。
+      hintCoach: "它会随每次纠正一起保存，方便你日后知道这次会话教的是什么。",
+      leaveEmpty: "留空即使用灰显的任务，它取自该模型训练所用的数据集。",
+      multiTaskHint_other:
+        "它的训练数据集里有 {{count}} 个任务，按出现次数从多到少排列 — 请选择你要执行的那个：",
     },
     duration: {
       label: "最长时长（秒）",
       hint: "按单个片段计。片段跑满该时长而你没有判定成功，即记为失败。",
+      singleHint: "运行到这个时长后就停止。",
+      coachHint: "按单次尝试计。一次尝试跑满该时长且既没有被挽救也没有完成，就会自行结束。",
+      // 仅用于远程运行：那里的 0 是后端“不限时长”的约定，而不是一启动就结束。
+      remoteHint: "运行到这个时长后就停止。填 0 表示一直运行到你停止它。",
+      remoteUnbounded: "0 — 一直运行，直到你停止它。",
     },
     episodes: {
       label: "片段数",
       evalHint:
         "评测运行：共 {{episodes}} 个片段，每个之间会复位，最终统计为准确率。",
       hint: "保持为 1 即单次运行。大于 1 则启动带评分的评测。",
+      scoreHint: "要计入准确率的片段数量。",
     },
     engine: {
       label: "推理引擎",
-      sync: "Sync（默认）",
-      rtc: "RTC — 实验性，控制更平滑",
-      syncHint:
-        "每个控制步执行一次策略前向推理。机械臂在动作块之间会短暂停顿。",
-      rtcHint:
-        "Real-Time Chunking 让推理与运动重叠进行，消除动作块之间的停顿。它也改变了动作的生成方式 — 在采信结果之前请先与 Sync 对比。",
+      sync: "Sync",
+      rtc: "实时分块",
+      // 两条说明文案位于 `remoteInference.form.engine` —— 一个字段、一对解释，
+      // 无论策略在哪台机器上运行都一样。
+      // 只要无法确认所选检查点的架构支持 RTC，就显示在选择器下方，同时该选项
+      // 也会被禁用 —— 本机运行与远程运行适用同一条规则。“不支持”同时涵盖两种
+      // 情况：服务端明确否定的检查点，以及尚无人归类的检查点。
+      rtcUnavailable: "该检查点的策略不支持 Real-Time Chunking。",
+      // 指导模式固定使用 sync，因此显示这句话来代替引擎选择器。
+      coachingNote:
+        "指导始终使用 Sync 引擎。Real-Time Chunking 会让策略恢复时机械臂朝纠正前的姿态弹回，手就在旁边时这并不安全。",
     },
     cameras: {
+      automaticHint: "摄像头输入按此顺序匹配。请在机器人设置中编辑。",
+      unused: "此策略不使用该摄像头",
       title: "摄像头",
       loading: "正在读取策略配置…",
       configError: "无法加载策略配置：{{error}}",
@@ -217,13 +318,21 @@ export default {
       disconnected: "已断开 — 请重新连接后再开始",
       select: "选择摄像头",
       robotHasNone: "该机器人没有摄像头 — 请在机器人设置中添加",
+      noRobot: "请选择机器人以查看其摄像头。",
+      unmatched:
+        "策略需要摄像头 <0>{{name}}</0>，但该机器人没有名为“{{name}}”的摄像头 — 请在机器人设置中重命名。",
+      unmatchedRemote:
+        "请在机器人设置中添加摄像头 <0>{{name}}</0>。",
+      resolutionMismatch:
+        "<0>{{name}}</0> 在机器人设置中为 {{robotWidth}}×{{robotHeight}}，而策略是在 {{policyWidth}}×{{policyHeight}} 下训练的 — 运行时按策略的分辨率采集。",
     },
     thumbnail: {
       released: "已释放",
       noPreview: "无预览",
     },
+    // ACT 的动作选择参数。它不再收在“高级参数”折叠里 —— 它占据了 ACT 用不到
+    // 的引擎下拉框的位置，因此折叠标题那一行的文案也随之删除。
     advanced: {
-      summary: "ACT 的时序集成",
       actionSelection: "动作选择",
       temporalEnsemble: "时序集成",
       temporalEnsembleHint:
@@ -234,25 +343,56 @@ export default {
       coeffHint:
         "权重为 exp(-系数 × 时间差)：系数越大越偏向最新的预测，越小则平均得越均匀。ACT 论文取 {{value}}。",
     },
+    // 摄像头上方的运行方式标签栏。标签文字取自 `runMode.<mode>.title`；
+    // 这里是标签栏的无障碍名称。
+    tabs: {
+      groupLabel: "你要做什么",
+    },
+    // 某个动词无法运行的原因；以键的形式提供，好让 deployGuards.ts 不含文案。
+    blocked: {
+      noRobot: "请先在上方选择一台机器人。",
+      followerNotReady: "这台机器人的从臂尚未就绪。",
+      noCheckpoint: "请选择一个策略和一个检查点。",
+      armMismatch: "该检查点与这台机器人的机械臂数量不匹配。",
+      camerasUnbound: "请为检查点所需的每个摄像头完成绑定。",
+      temporalEnsemble: "请先修正时间集成设置。",
+      runInProgress: "已有一次运行正在进行中。",
+      // 仅限本地运行：0 对远程运行意味着“直到你停止我”，对本地运行则意味着
+      // 一启动就结束。
+      durationRequired: "请把最长时长设为至少 1 秒。",
+      taskRequired: "请先描述任务 — 该策略以语言为条件。",
+      leaderMissing: "指导需要一条主臂 — 请在机器人设置中补上它的端口和标定。",
+      coachTaskRequired: "请先描述任务 — 它会随每次纠正一起保存。",
+      // 很少见：面板会用探测自身的那句话来回答它
+      //（remoteInference.transport.summary.*），那句话会指出该修哪一步。
+      // 这里的文案只是万一单独显示时的兜底。
+      transportNotReady: "远程传输尚未就绪。",
+      remoteArmUnsupported:
+        "远程运行目前仅支持单臂 SO-101。双臂配置和 CAN 机械臂尚不支持。",
+      remoteEngineUnsupported:
+        "实时分块只适用于流式策略。请把动作块引擎切换回“自适应同步”。",
+    },
     actions: {
       start: "开始推理",
       startEval: "开始评测（{{episodes}}）",
+      // 与 startEval 同理，用 {{corrections}} 而不是 {{count}}。
+      startCoach: "开始指导（{{corrections}}）",
       starting: "正在启动…",
       checking: "正在检查…",
       stop: "停止推理",
       stopping: "正在停止…",
     },
     toast: {
-      loadSkillFailed: "无法加载该技能",
+      loadPolicyFailed: "无法加载该策略",
       startFailed: "无法启动推理",
       stoppingTitle: "正在停止推理",
       stoppingBody: "该次运行正在收尾。",
       stopFailed: "停止失败",
     },
     milestone: {
-      title: "首个技能已部署！",
+      title: "首个策略已部署！",
       description:
-        "你的机器人刚刚运行了一个训练好的策略。随时回到这里重新部署、切换检查点，或运行其他技能。",
+        "你的机器人刚刚运行了一个训练好的策略。随时回到这里重新部署、切换检查点，或运行其他策略。",
     },
   },
 } as const;

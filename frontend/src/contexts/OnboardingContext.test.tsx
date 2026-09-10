@@ -13,8 +13,8 @@ const tour: Tour = {
     },
     {
       target: "[data-tour=b]",
-      titleKey: "onboarding.launchpad.skills.title",
-      descriptionKey: "onboarding.launchpad.skills.description",
+      titleKey: "onboarding.launchpad.policies.title",
+      descriptionKey: "onboarding.launchpad.policies.description",
     },
   ],
 };

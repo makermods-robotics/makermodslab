@@ -24,6 +24,7 @@ local lerobot run.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import inspect
 import logging
@@ -41,6 +42,7 @@ from queue import Empty, Queue
 from huggingface_hub import get_token
 from packaging.requirements import Requirement
 
+from .. import sampling as _sampling, train_weighted as _train_weighted
 from ..datasets import resolve_hub_repo_id
 from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
 from ..train import TrainingRequest, build_training_command, parse_hf_duration
@@ -70,10 +72,9 @@ LEROBOT_IMAGE = "huggingface/lerobot-gpu:latest"
 #   Bad Request: `tags` must be 1-256 characters and contain only
 #   alphanumeric characters, '-', '_', or '='
 _RUN_LABEL = "makermodslab_run"
-
-# Read-only: the dotted key every job submitted before that rename carries.
-# Dropping it would un-name the entire existing cloud backlog in the jobs UI.
-_LEGACY_RUN_LABELS = ("makermodslab.run",)
+# The dotted key every job submitted before the rename carries is read back
+# (never written) on the server side — see `_HUB_RUN_LABELS` in server.py, which
+# is what un-names the existing cloud backlog if dropped.
 
 # The charset the Hub accepts in the "key=value" tag a label becomes. Checked
 # BEFORE submission (see _run_job_naming_kwargs) so a non-conforming label is
@@ -567,7 +568,32 @@ if trainer_argv and trainer_argv[0] == "python":
 # trainer_argv is passed to Popen as a LIST (never joined and re-split), so
 # values with spaces stay one argument; shlex.join is only for a faithful log.
 print(f"[wrapper] launching trainer: {shlex.join(trainer_argv)}", flush=True)
-proc = subprocess.Popen(list(trainer_argv), env=os.environ.copy())
+# Weighted sampling: the trainer module is ours, not lerobot's, and this image
+# has only lerobot installed. Materialize the two modules it needs into a temp
+# package and put it on PYTHONPATH. Their sources ride in as base64 so no
+# quoting in this template can corrupt them.
+trainer_env = os.environ.copy()
+# Key on the trainer MODULE token (`python -m makermodslab.train_weighted ...`,
+# from _WEIGHTED_TRAINER_MODULE), not on any argv token that merely contains the
+# string — a plain `--dataset.repo_id makermodslab/foo` would otherwise trip it.
+if "makermodslab.train_weighted" in trainer_argv:
+    import base64 as _b64, tempfile as _tmp
+
+    _pkg_root = _tmp.mkdtemp(prefix="makermodslab_pkg_")
+    _pkg = Path(_pkg_root) / "makermodslab"
+    _pkg.mkdir()
+    (_pkg / "__init__.py").write_text("")
+    for _name, _b64src in (
+        ("sampling.py", "__SAMPLING_B64__"),
+        ("train_weighted.py", "__TRAIN_WEIGHTED_B64__"),
+    ):
+        (_pkg / _name).write_text(_b64.b64decode(_b64src).decode("utf-8"))
+    trainer_env["PYTHONPATH"] = (
+        _pkg_root + os.pathsep + trainer_env.get("PYTHONPATH", "")
+    ).rstrip(os.pathsep)
+    print(f"[wrapper] weighted sampling: materialized makermodslab into {_pkg_root}", flush=True)
+
+proc = subprocess.Popen(list(trainer_argv), env=trainer_env)
 try:
     rc = proc.wait()
 finally:
@@ -582,9 +608,25 @@ print(f"[wrapper] trainer exited with rc={rc}", flush=True)
 sys.exit(rc)
 '''
 
-WRAPPER_SOURCE = _WRAPPER_TEMPLATE.replace(
-    "__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan)
-).replace("__CHECKPOINT_READY_SOURCE__", inspect.getsource(_checkpoint_step_ready))
+
+def _module_b64(module) -> str:
+    """A module's own source, base64'd for safe embedding in the wrapper.
+
+    Read from the LIVE module via `inspect.getsource`, exactly like
+    `_install_plan` above — so there is no second copy of the sampler to drift
+    from `makermodslab/sampling.py`. Base64 rather than raw interpolation
+    because these modules contain triple-quoted docstrings that would terminate
+    the template's own string literal.
+    """
+    return base64.b64encode(inspect.getsource(module).encode("utf-8")).decode("ascii")
+
+
+WRAPPER_SOURCE = (
+    _WRAPPER_TEMPLATE.replace("__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan))
+    .replace("__CHECKPOINT_READY_SOURCE__", inspect.getsource(_checkpoint_step_ready))
+    .replace("__SAMPLING_B64__", _module_b64(_sampling))
+    .replace("__TRAIN_WEIGHTED_B64__", _module_b64(_train_weighted))
+)
 
 # HF Jobs' platform default timeout has killed legitimate runs that pushed the
 # model successfully but were still uploading auxiliary files — that is why a
@@ -825,7 +867,18 @@ class HfCloudJobRunner:
         else:
             config.policy_repo_id = f"{username}/{job_id}"
 
-        trainer_argv = build_training_command(config, _CONTAINER_OUTPUT_DIR)
+        # Local import, mirroring JobRegistry: `datasets` pulls in httpx/pyarrow
+        # that this module otherwise never needs.
+        from ..datasets import dataset_is_weighted
+
+        # A weighted dataset launches OUR trainer module; the wrapper puts the
+        # sampler package on PYTHONPATH pod-side (see _WRAPPER_TEMPLATE).
+        # Resolved from the dataset itself, never the request.
+        trainer_argv = build_training_command(
+            config,
+            _CONTAINER_OUTPUT_DIR,
+            weighted=dataset_is_weighted(config.dataset_repo_id),
+        )
         # The wrapper expects `python -c WRAPPER_SOURCE <spec> [directives] -- <trainer argv>`.
         # `python -c` consumes the first non-option argument as the script,
         # so we prepend a "--" sentinel of our own; the pinned-lerobot spec and

@@ -3,7 +3,8 @@ import { useTranslation } from "react-i18next";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import MetaRows from "@/components/library/MetaRows";
-import { HubJob, isHubJobActive } from "@/lib/jobsApi";
+import RunKindChip from "@/components/jobs/RunKindChip";
+import { HubJob, formatBaseModel, isHubJobActive } from "@/lib/jobsApi";
 import {
   ExternalLink,
   AlertTriangle,
@@ -109,6 +110,15 @@ const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
   // LABELS are translated — the values are data (policy type, repo id) or a
   // pre-formatted number.
   const metaRows: Array<[string, string]> = [];
+  // What the run started from, ahead of the identity rows: on an account where
+  // every run ships the same image and flavor, this is often the row that tells
+  // two cards apart. A fine-tune whose source we could not name still says so.
+  const baseModel = formatBaseModel(job);
+  if (baseModel || job.kind === "finetune")
+    metaRows.push([
+      t("jobs.meta.base"),
+      baseModel ?? t("jobs.kind.unknownBase"),
+    ]);
   if (job.policy_type) metaRows.push([t("jobs.meta.policy"), job.policy_type]);
   if (job.dataset) metaRows.push([t("jobs.meta.dataset"), job.dataset]);
   if (job.total_steps)
@@ -128,13 +138,16 @@ const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
     >
       <CardContent className="flex h-full flex-col gap-2.5 p-3">
         <div className="flex items-start justify-between gap-2">
-          <div
-            className={`flex items-center gap-1.5 text-xs font-semibold ${present.color}`}
-          >
-            <Icon
-              className={`w-3.5 h-3.5 ${present.spin ? "animate-spin" : ""}`}
-            />
-            {stageLabel}
+          <div className="flex min-w-0 items-center gap-2">
+            <div
+              className={`flex items-center gap-1.5 text-xs font-semibold ${present.color}`}
+            >
+              <Icon
+                className={`w-3.5 h-3.5 ${present.spin ? "animate-spin" : ""}`}
+              />
+              {stageLabel}
+            </div>
+            <RunKindChip kind={job.kind} />
           </div>
           <div className="flex items-center gap-0.5">
             <Button

@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -68,8 +68,11 @@ from .schemas.sessions import (
     OWNER_MAX_LENGTH,
     AutoCalibrationOptions,
     CalibrationOptions,
+    HostingOptions,
     InferenceOptions,
     RecordingOptions,
+    RemoteInferenceOptions,
+    RemoteTeleoperationOptions,
     ReplayOptions,
     SessionStartBody,
     TeleoperationOptions,
@@ -79,6 +82,7 @@ from .utils.config import (
     get_robot_record,
     is_robot_record_clean,
     is_valid_robot_name,
+    record_cameras_by_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -93,12 +97,22 @@ STARTABLE_KINDS = (
     "replay",
     "calibration",
     "auto_calibration",
+    "hosting",
+    "remote_inference",
+    "remote_teleoperation",
 )
 
 # Kinds that never open the leader bus, mirroring the frontend's robotSetupGap
 # distinction: an unassigned leader port / missing leader calibration must not
-# block them (bimanual = both followers, still no leaders).
-_FOLLOWER_ONLY_KINDS = frozenset({"inference", "replay"})
+# block them (bimanual = both followers, still no leaders). remote_inference is
+# in unconditionally — unlike inference it has no coaching exception, because a
+# remote session has no handover to a leader arm at all.
+_FOLLOWER_ONLY_KINDS = frozenset({"inference", "replay", "hosting", "remote_inference"})
+
+# Kinds that never open the FOLLOWER bus: remote teleoperation drives a
+# station's follower with this node's leader, so a laptop record with no
+# follower fields at all is the expected shape.
+_LEADER_ONLY_KINDS = frozenset({"remote_teleoperation"})
 
 # Setup kinds: calibration CREATES the record's calibrations (and writes the
 # port back on success), so the record-clean readiness gate the driving kinds
@@ -110,9 +124,12 @@ _OPTIONS_MODELS = {
     "teleoperation": TeleoperationOptions,
     "recording": RecordingOptions,
     "inference": InferenceOptions,
+    "remote_inference": RemoteInferenceOptions,
     "replay": ReplayOptions,
     "calibration": CalibrationOptions,
     "auto_calibration": AutoCalibrationOptions,
+    "hosting": HostingOptions,
+    "remote_teleoperation": RemoteTeleoperationOptions,
 }
 
 
@@ -427,7 +444,18 @@ def _held_by() -> str | None:
     BEFORE robot resolution because exclusivity is a property of the node's
     one set of hardware, not of the robot named in the request (pinned by
     tests/test_api_errors.py::test_sessions_surface_uses_reserved_codes)."""
-    from . import auto_calibrate, calibrate, record, replay, rollout, teleoperate, wiggle
+    from . import (
+        auto_calibrate,
+        calibrate,
+        record,
+        remote_host,
+        remote_inference,
+        remote_teleoperate,
+        replay,
+        rollout,
+        teleoperate,
+        wiggle,
+    )
 
     if teleoperate.teleoperation_active:
         return "teleoperation"
@@ -435,6 +463,8 @@ def _held_by() -> str | None:
         return "recording"
     if rollout.inference_active:
         return "inference"
+    if remote_inference.remote_inference_active:
+        return "remote_inference"
     if replay.replay_active:
         return "replay"
     if calibrate.calibration_is_active():
@@ -443,6 +473,10 @@ def _held_by() -> str | None:
         return "auto_calibration"
     if wiggle.wiggle_active:
         return "wiggle"
+    if remote_host.hosting_active:
+        return "hosting"
+    if remote_teleoperate.remote_teleoperation_active:
+        return "remote_teleoperation"
     return None
 
 
@@ -482,6 +516,44 @@ def _build_teleoperation_request(record: dict, opts: TeleoperationOptions):
         right_follower_config=record["right_follower_config"],
         robot_name=record["name"],
         arm_type=record["arm_type"],
+        leader_kind=record["leader_kind"],
+        skip_identity_check=opts.skip_identity_check,
+    )
+
+
+def _build_hosting_request(record: dict, opts: HostingOptions):
+    from .remote_host import HostingRequest
+
+    return HostingRequest(
+        follower_port=record["follower_port"],
+        follower_config=record["follower_config"],
+        mode=record["mode"],
+        right_follower_port=record["right_follower_port"],
+        right_follower_config=record["right_follower_config"],
+        robot_name=record["name"],
+        arm_type=record["arm_type"],
+        # Cameras resolve from the record here, exactly like recording: the
+        # options never carry devices.
+        cameras=record_cameras_by_name(record.get("cameras") or []),
+        fps=opts.fps,
+        video_codec=opts.video_codec,
+        skip_identity_check=opts.skip_identity_check,
+    )
+
+
+def _build_remote_teleoperation_request(record: dict, opts: RemoteTeleoperationOptions):
+    from .remote_teleoperate import RemoteTeleoperateRequest
+
+    return RemoteTeleoperateRequest(
+        leader_port=record["leader_port"],
+        leader_config=record["leader_config"],
+        mode=record["mode"],
+        right_leader_port=record["right_leader_port"],
+        right_leader_config=record["right_leader_config"],
+        robot_name=record["name"],
+        arm_type=record["arm_type"],
+        leader_kind=record["leader_kind"],
+        station=opts.station,
         skip_identity_check=opts.skip_identity_check,
     )
 
@@ -503,6 +575,7 @@ def _build_recording_request(record: dict, opts: RecordingOptions):
         right_follower_config=record["right_follower_config"],
         robot_name=record["name"],
         arm_type=record["arm_type"],
+        leader_kind=record["leader_kind"],
         dataset_repo_id=opts.dataset_repo_id,
         single_task=opts.single_task,
         num_episodes=opts.num_episodes,
@@ -524,6 +597,20 @@ def _build_inference_request(record: dict, opts: InferenceOptions):
 
     # Follower-only: inference never opens the leader bus, so only the
     # follower half of the record travels (right follower iff bimanual).
+    # COACHING is the one exception — the operator takes over THROUGH the
+    # leader — so its arms come off the same record, and only then. Sending
+    # them unconditionally would hand every plain rollout a leader port it has
+    # no business holding.
+    leader = (
+        {
+            "leader_port": record["leader_port"],
+            "leader_config": record["leader_config"],
+            "right_leader_port": record["right_leader_port"],
+            "right_leader_config": record["right_leader_config"],
+        }
+        if opts.coaching
+        else {}
+    )
     return InferenceRequest(
         follower_port=record["follower_port"],
         follower_config=record["follower_config"],
@@ -542,6 +629,10 @@ def _build_inference_request(record: dict, opts: InferenceOptions):
         skip_identity_check=opts.skip_identity_check,
         inference_engine=opts.inference_engine,
         temporal_ensemble_coeff=opts.temporal_ensemble_coeff,
+        coaching=opts.coaching,
+        target_corrections=opts.target_corrections,
+        coaching_dataset_name=opts.coaching_dataset_name,
+        **leader,
     )
 
 
@@ -555,6 +646,58 @@ def _build_replay_request(record: dict, opts: ReplayOptions):
         follower_config=record["follower_config"],
         robot_name=record["name"],
         arm_type=record["arm_type"],
+        skip_identity_check=opts.skip_identity_check,
+    )
+
+
+def _build_remote_inference_request(record: dict, opts: RemoteInferenceOptions):
+    from .remote_inference import RemoteInferenceRequest
+
+    # Follower-only, unconditionally: the GPU is the policy, and no leader arm
+    # is ever opened. Unlike inference there is no coaching exception — a
+    # remote session has no handover.
+    #
+    # There are no right_follower_* fields to forward: remote inference REFUSES
+    # bimanual outright (arm_capabilities.supports_remote_inference — the
+    # first-action ease-in is single-Feetech-bus only), so the request model
+    # carries no right half at all. `mode` still travels, because that refusal
+    # and rollout's arm-count guard are what read it.
+    #
+    # Cameras are NOT plumbed here: `robot_name` makes remote_inference resolve
+    # them from this same record via rollout's `_session_cameras` /
+    # `bind_robot_cameras`, exactly as recording and inference do. The two
+    # dicts below are the POLICY's side of that binding, nothing more —
+    # resolving a device here would be the one way to break Portal's schema
+    # fingerprint (a run that connects, looks healthy and gets zero chunks).
+    return RemoteInferenceRequest(
+        follower_port=record["follower_port"],
+        follower_config=record["follower_config"],
+        mode=record["mode"],
+        robot_name=record["name"],
+        arm_type=record["arm_type"],
+        policy_ref=opts.policy_ref,
+        policy_hub_id=opts.policy_hub_id,
+        task=opts.task,
+        camera_bindings=opts.camera_bindings,
+        camera_dims=opts.camera_dims,
+        checkpoint_state_dim=opts.checkpoint_state_dim,
+        duration_s=opts.duration_s,
+        horizon=opts.horizon,
+        fps=opts.fps,
+        video_codec=opts.video_codec,
+        # Which chunk player drives the arm, and its one engine-specific knob.
+        # Threaded, never defaulted here: the request model's default is `sync`
+        # and silently dropping a caller's `rtc` would run the arm under a
+        # different regime than they asked for — the same reason
+        # InferenceOptions had to grow `inference_engine`.
+        engine=opts.engine,
+        s_min=opts.s_min,
+        lpf_hz=opts.lpf_hz,
+        lpf_order=opts.lpf_order,
+        video_quality=opts.video_quality,
+        video_bitrate_kbps=opts.video_bitrate_kbps,
+        camera_send_hz=opts.camera_send_hz,
+        latency_k=opts.latency_k,
         skip_identity_check=opts.skip_identity_check,
     )
 
@@ -606,16 +749,29 @@ def _resolve_slot(record: dict, device_type: str, arm: str, port: str | None, co
 def _build_calibration_request(record: dict, opts: CalibrationOptions):
     """Build the calibration request matching this robot's arm type.
 
+    The family's calibration_kind picks the procedure: ``range_sweep`` is the
+    SO-101 sweep manager's request, ``steps`` the step wizard's, and ``panel``
+    has no server-side procedure at all (the extension's own page runs it).
     The two request models share their common fields on purpose — only the
     class differs, and _dispatch_start reads that class to pick the manager.
-    The zero request additionally carries the record's arm_type: the flow
-    serves BOTH CAN families, and it decides which device configs to build,
-    which pose text to show, and which library the name-collision check reads.
+    The step request additionally carries the record's arm_type: the wizard
+    serves every ``steps`` family, and the arm type decides which family's
+    procedure runs and which library the name-collision check reads.
     """
-    from .arm_capabilities import uses_zero_calibration
+    from .arm_capabilities import calibration_kind
     from .calibrate import CalibrationRequest
-    from .zero_calibrate import ZeroCalibrationRequest
+    from .step_calibrate import StepCalibrationRequest
 
+    kind = calibration_kind(record["arm_type"])
+    if kind == "panel":
+        raise ApiError(
+            status_code=400,
+            detail=(
+                "This arm is calibrated through its extension's own panel; "
+                "open it from the robot's config window."
+            ),
+            code=ErrorCode.ROBOT_NOT_READY,
+        )
     port, config_file = _resolve_slot(record, opts.device_type, opts.arm, opts.port, opts.config_file)
     common = {
         "device_type": opts.device_type,
@@ -625,8 +781,10 @@ def _build_calibration_request(record: dict, opts: CalibrationOptions):
         "overwrite": opts.overwrite,
         "arm": opts.arm,
     }
-    if uses_zero_calibration(record["arm_type"]):
-        return ZeroCalibrationRequest(arm_type=record["arm_type"], **common)
+    if kind == "steps":
+        return StepCalibrationRequest(
+            arm_type=record["arm_type"], leader_kind=record["leader_kind"], **common
+        )
     return CalibrationRequest(**common)
 
 
@@ -677,31 +835,57 @@ _REQUEST_BUILDERS = {
     "teleoperation": _build_teleoperation_request,
     "recording": _build_recording_request,
     "inference": _build_inference_request,
+    "remote_inference": _build_remote_inference_request,
     "replay": _build_replay_request,
     "calibration": _build_calibration_request,
     "auto_calibration": _build_auto_calibration_request,
+    "hosting": _build_hosting_request,
+    "remote_teleoperation": _build_remote_teleoperation_request,
 }
 
 
 def _dispatch_start(kind: str, request, websocket_manager) -> dict[str, Any]:
-    from . import auto_calibrate, calibrate, record, replay, rollout, teleoperate, zero_calibrate
+    from . import (
+        auto_calibrate,
+        calibrate,
+        record,
+        remote_host,
+        remote_inference,
+        remote_teleoperate,
+        replay,
+        rollout,
+        step_calibrate,
+        teleoperate,
+    )
 
     if kind == "teleoperation":
         return teleoperate.handle_start_teleoperation(request, websocket_manager)
+    if kind == "hosting":
+        return remote_host.handle_start_hosting(request, websocket_manager)
+    if kind == "remote_teleoperation":
+        return remote_teleoperate.handle_start_remote_teleoperation(request, websocket_manager)
     if kind == "recording":
         return record.handle_start_recording(request)
     if kind == "inference":
         return rollout.handle_start_inference(request)
     if kind == "calibration":
-        # One session kind, two procedures. The SO-101 sweeps each joint's
-        # range; the Maker arm only has to be told where zero is (its limits
-        # are fixed constants). _build_calibration_request has already built
-        # the matching request type, so this only picks the manager.
-        if isinstance(request, zero_calibrate.ZeroCalibrationRequest):
-            return zero_calibrate.zero_calibration_manager.start(request)
+        # One session kind, two managers. The SO-101 sweeps each joint's
+        # range; a "steps" family (the CAN arms' zero pose) runs its own
+        # procedure through the step wizard. _build_calibration_request has
+        # already built the matching request type, so this only picks the
+        # manager.
+        if isinstance(request, step_calibrate.StepCalibrationRequest):
+            return step_calibrate.step_calibration_manager.start(request)
         return calibrate.calibration_manager.start_calibration(request)
     if kind == "auto_calibration":
         return auto_calibrate.auto_calibration_batch_manager.start(request)
+    if kind == "remote_inference":
+        # EXPLICIT, and it must stay above the fall-through: replay is this
+        # function's implicit default, so a kind added without its own branch
+        # silently replays somebody's dataset onto the arm instead. The handler
+        # takes the request alone — remote inference deliberately does not feed
+        # broadcast_joint_data_sync (its telemetry is the 1 Hz status poll).
+        return remote_inference.handle_start_remote_inference(request)
     return replay.handle_start_replay(request, websocket_manager)
 
 
@@ -725,6 +909,15 @@ def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict
     kind = body.kind
 
     held = _held_by()
+    if held == "hosting" and kind != "hosting":
+        # Station mode's "local wins when idle": a PARKED, UNSEATED hosting
+        # session yields to a flow started at the station (and the station
+        # supervisor re-arms hosting once that flow ends). Engaged or seated,
+        # it is a held session like any other.
+        from . import remote_host
+
+        if remote_host.yield_for_local():
+            held = _held_by()
     if held is not None:
         _raise_held(
             held,
@@ -739,12 +932,42 @@ def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict
             code=ErrorCode.ROBOT_NOT_FOUND,
         )
 
+    # BEFORE the readiness gate: a record whose arm type nothing registered
+    # (an extension not installed, a hand-edited file) can never be ready, and
+    # the 400 must name THAT reason — not "needs ports and calibrations". Every
+    # builder below resolves the family from this value, so this is also what
+    # keeps the registry's UnknownArmType unreachable from here.
+    from .arm_capabilities import require_known_arm_type, require_leader_available, require_leader_kind
+
+    require_known_arm_type(record["arm_type"])
+    # And a leader kind the family offers — for every kind, calibration
+    # included (it opens the leader the record names, so a hand-edited
+    # unknown one must not reach the family).
+    require_leader_kind(record["arm_type"], record["leader_kind"])
+
     # The setup kinds skip the record-clean gate (they exist to make records
     # clean); their builders below still refuse a slot with no port.
     if kind not in _SETUP_KINDS:
-        arms = "follower" if kind in _FOLLOWER_ONLY_KINDS else "all"
+        # Inference is normally follower-only, but a COACHING inference session
+        # DRIVES THE LEADER ARM — the operator takes over through it and the
+        # runner enables torque on it during the handover — so it needs the same
+        # "all arms" readiness the non-follower-only kinds get.
+        #
+        # This exception was lost when the branch was restacked, and losing it is
+        # not cosmetic: a coaching session then starts with only the follower
+        # checked and reserved, so the leader arm is never verified present and
+        # never held against another feature grabbing its port.
+        follower_only = kind in _FOLLOWER_ONLY_KINDS and not (
+            kind == "inference" and bool(body.options.get("coaching"))
+        )
+        arms = "follower" if follower_only else ("leader" if kind in _LEADER_ONLY_KINDS else "all")
+        # A leader this install cannot drive (the Metal leader without its
+        # extra) is named BEFORE the readiness gate, which would otherwise
+        # blame the ports and calibrations for a missing dependency.
+        if arms in {"leader", "all"}:
+            require_leader_available(record["arm_type"], record["leader_kind"])
         if not is_robot_record_clean(record, arms=arms):
-            needs = "follower arm" if arms == "follower" else "arms"
+            needs = {"follower": "follower arm", "leader": "leader arm"}.get(arms, "arms")
             raise ApiError(
                 status_code=400,
                 detail=f"Robot {body.robot!r} is not fully set up for {kind}: "
@@ -893,22 +1116,42 @@ def handle_heartbeat_session(session_id: str, owner: str) -> dict[str, Any]:
 
 
 def _dispatch_stop(kind: str) -> dict[str, Any]:
-    from . import auto_calibrate, calibrate, record, replay, rollout, teleoperate, zero_calibrate
+    from . import (
+        auto_calibrate,
+        calibrate,
+        record,
+        remote_host,
+        remote_inference,
+        remote_teleoperate,
+        replay,
+        rollout,
+        step_calibrate,
+        teleoperate,
+    )
 
     if kind == "teleoperation":
         return teleoperate.handle_stop_teleoperation()
+    if kind == "hosting":
+        return remote_host.handle_stop_hosting()
+    if kind == "remote_teleoperation":
+        return remote_teleoperate.handle_stop_remote_teleoperation()
     if kind == "recording":
         return record.handle_stop_recording()
     if kind == "inference":
         return rollout.handle_stop_inference()
+    if kind == "remote_inference":
+        # The safety path: check_expiry routes an abandoned session through
+        # here, and this stop is a STOP on the child's stdin (return to the
+        # captured start pose, THEN release torque) — never a signal.
+        return remote_inference.handle_stop_remote_inference()
     if kind == "replay":
         return replay.handle_stop_replay()
     if kind == "calibration":
         # Stopping is never owner-gated and the tracker only knows the KIND,
         # not which manager is live — so stop whichever one actually is
         # (mirroring the auto_calibration arm just below).
-        if zero_calibrate.zero_calibration_is_active():
-            return zero_calibrate.zero_calibration_manager.stop()
+        if step_calibrate.step_calibration_is_active():
+            return step_calibrate.step_calibration_manager.stop()
         return calibrate.calibration_manager.stop_calibration_process()
     if kind == "auto_calibration":
         # The aggregate spans the single-arm manager and the batch manager —
@@ -964,3 +1207,35 @@ def handle_stop_session(session_id: str) -> dict[str, Any]:
         if ended is not None and ended["id"] == before["id"]:
             session = dict(before, phase=ended["phase"])
     return {"session": _public_session(session), "result": result}
+
+
+def handle_coaching_command_for_session(session_id: str, command: str) -> dict[str, Any]:
+    """Forward one coaching (DAgger) command to the current inference session.
+
+    Session-scoped like `handle_stop_session`: `session_id` must name the
+    session that is actually running (404 `session.not_found` otherwise), so a
+    stale command can never hit a session it did not mean. Whether it is a
+    coaching session, and which phase each verb is legal from, is the runner's
+    call — `rollout.handle_coaching_command` returns a coded 409 for a plain
+    inference session, so no kind check is duplicated here.
+
+    Deliberately NOT owner-gated, exactly like stop: a physical arm must stay
+    controllable by whoever can reach the API.
+    """
+    from . import rollout
+
+    before = tracker.current()
+    if before is None or before["id"] != session_id:
+        raise ApiError(
+            status_code=404,
+            detail=f"No active session with id {session_id!r}.",
+            code=ErrorCode.SESSION_NOT_FOUND,
+        )
+    result = rollout.handle_coaching_command(command)
+    if not result.get("success"):
+        raise ApiError(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "The coaching command failed."),
+            code=result.get("code"),
+        )
+    return {"result": result}

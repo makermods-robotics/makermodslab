@@ -283,6 +283,9 @@ class CalibrationManager:
                 from . import (
                     auto_calibrate as _auto_calibrate,
                     record as _record,
+                    remote_host as _remote_host,
+                    remote_inference as _remote_inference,
+                    remote_teleoperate as _remote_teleoperate,
                     replay as _replay,
                     rollout as _rollout,
                     teleoperate as _teleoperate,
@@ -307,6 +310,12 @@ class CalibrationManager:
                         "message": "Inference is currently active. Stop it first.",
                         "code": ErrorCode.ROBOT_BUSY_INFERENCE,
                     }
+                if _remote_inference.remote_inference_is_active():
+                    return {
+                        "success": False,
+                        "message": "Remote inference is currently active. Stop it first.",
+                        "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
+                    }
                 if _auto_calibrate.auto_calibration_is_active():
                     return {
                         "success": False,
@@ -318,6 +327,18 @@ class CalibrationManager:
                         "success": False,
                         "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
                         "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+                    }
+                if _remote_host.hosting_active:
+                    return {
+                        "success": False,
+                        "message": "This robot is hosted for remote teleoperation. Stop hosting first.",
+                        "code": ErrorCode.ROBOT_BUSY_HOSTING,
+                    }
+                if _remote_teleoperate.remote_teleoperation_active:
+                    return {
+                        "success": False,
+                        "message": "Remote teleoperation is currently active. Stop it first.",
+                        "code": ErrorCode.ROBOT_BUSY_REMOTE_TELEOPERATION,
                     }
                 if _replay.replay_active:
                     return {
@@ -878,13 +899,14 @@ def calibration_is_active() -> bool:
     feature modules' reciprocal mutex checks (see CLAUDE.md) can't drift from
     the managers' own status.
 
-    Covers both calibration flows: the SO-101's step-by-step range sweep in
-    this module, and the Maker arm's zero-pose flow in ``zero_calibrate``.
-    They are separate managers because the procedures share nothing, but from
-    the mutual-exclusion standpoint they are one fact — "a calibration owns
-    this bus" — so every existing reciprocal check gets the Maker flow for
-    free, with no new ``robot.busy.*`` discriminant to register.
+    Covers both calibration managers: the SO-101's step-by-step range sweep
+    in this module, and the generic step wizard in ``step_calibrate`` that
+    runs a ``steps`` family's own procedure (the CAN arms' zero pose). They
+    are separate managers because the procedures share nothing, but from the
+    mutual-exclusion standpoint they are one fact — "a calibration owns this
+    bus" — so every existing reciprocal check gets the wizard for free, with
+    no new ``robot.busy.*`` discriminant to register.
     """
-    from .zero_calibrate import zero_calibration_is_active
+    from .step_calibrate import step_calibration_is_active
 
-    return calibration_manager.status.calibration_active or zero_calibration_is_active()
+    return calibration_manager.status.calibration_active or step_calibration_is_active()

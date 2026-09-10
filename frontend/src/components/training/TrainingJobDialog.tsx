@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
@@ -9,7 +9,7 @@ import TrainingLogs from "@/components/training/monitoring/TrainingLogs";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { Loader2, Play, Square, Trash2, ArrowLeft, XCircle } from "lucide-react";
+import { Loader2, Play, Square, ArrowLeft, XCircle } from "lucide-react";
 
 import {
   JobRecord,
@@ -19,11 +19,11 @@ import {
   jobDisplayName,
   jobStateLabel,
   stopJob,
-  deleteJob,
 } from "@/lib/jobsApi";
 import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import { useEyebrowClass } from "@/components/studio/panel/primitives";
+import PublishToHubRow from "@/components/training/PublishToHubRow";
 import { useStudio } from "@/contexts/StudioContext";
 
 const POLL_INTERVAL_MS = 1000;
@@ -273,23 +273,18 @@ const TrainingJobDialog: React.FC<{
     }
   };
 
-  const handleDelete = async () => {
-    if (!job) return;
-    // English for the same reason as handleStop's confirm above.
-    if (!window.confirm("Delete this run? This wipes the output directory."))
-      return;
+  /** Re-read the job after a publish — the first one pins hf_repo_id, which the
+   * header renders as "View on Hub". A refetch blip is swallowed: the publish
+   * already reported its own outcome, so a failure here must not read as a
+   * failed upload. The header picks the repo up on the next reopen. */
+  const refreshJob = useCallback(async () => {
     try {
-      await deleteJob(baseUrl, fetchWithHeaders, job.id);
-      toast({ title: t("training.jobDialog.toast.removedTitle") });
-      onExit();
-    } catch (e) {
-      toast({
-        title: t("training.jobDialog.toast.deleteFailedTitle"),
-        description: e instanceof Error ? e.message : String(e),
-        variant: "destructive",
-      });
+      const next = await getJob(baseUrl, fetchWithHeaders, jobId);
+      setJob(next);
+    } catch {
+      // transient — see above
     }
-  };
+  }, [baseUrl, fetchWithHeaders, jobId]);
 
   const isRunning = job?.state === "running";
   const isQueued = job?.state === "queued";
@@ -402,9 +397,11 @@ const TrainingJobDialog: React.FC<{
                         {t("training.jobDialog.runnerLocal")}
                       </span>
                     )}
-                    {job.runner === "hf_cloud" &&
-                      job.hf_repo_id &&
-                      job.state === "done" && (
+                    {/* A cloud run's repo exists only once it finishes; a local
+                        run's hf_repo_id is pinned only after a checkpoint has
+                        actually been published, so its presence is enough. */}
+                    {job.hf_repo_id &&
+                      (job.runner !== "hf_cloud" || job.state === "done") && (
                         <a
                           href={`https://huggingface.co/${job.hf_repo_id}`}
                           target="_blank"
@@ -460,16 +457,10 @@ const TrainingJobDialog: React.FC<{
                   <XCircle className="mr-2 h-4 w-4" />{" "}
                   {t("training.jobDialog.cancelQueued")}
                 </Button>
-              ) : (
-                <Button
-                  onClick={handleDelete}
-                  variant="ghost"
-                  size="sm"
-                  className="text-muted-foreground hover:text-foreground"
-                >
-                  <Trash2 className="mr-2 h-4 w-4" /> {t("training.jobDialog.delete")}
-                </Button>
-              )}
+              ) : // A terminal run gets no delete here: destructive run deletion
+              // was removed from the UI (the backend routes remain for a future
+              // management surface).
+              null}
             </div>
 
             {/* One line, always — whatever the trainer prints. `truncate` on
@@ -541,6 +532,9 @@ const TrainingJobDialog: React.FC<{
                 </>
               )}
             </div>
+            {!isRunning && (
+              <PublishToHubRow jobId={jobId} onPublished={refreshJob} />
+            )}
             <TrainingLogs logs={logs} logContainerRef={logContainerRef} />
           </div>
         )}

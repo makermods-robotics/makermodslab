@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -43,7 +43,19 @@ DOMAINS = frozenset(
         "checkpoint",
         "session",
         "node",
+        # The LiveKit path remote inference runs over (the SFU and the room).
+        # Its own level-1 domain by the same argument that earned `hub` one: it
+        # is an external service this node depends on. Folding it into
+        # `hardware.connect_failed` would lie (that is the serial bus), and so
+        # would `system.*` (it is not this process).
+        "transport",
         "system",
+        "sfu",
+        # The remote GPU the policy runs on (modal_launcher.py), reached
+        # through the `modal` CLI. A second external service, with a remedy
+        # set of its own — see the ErrorCode comment for why neither
+        # `transport.*` nor `system.*` fits.
+        "gpu",
         "internal",
     ]
 )
@@ -60,12 +72,19 @@ BUSY_DISCRIMINANTS = frozenset(
         "recording",
         "teleoperation",
         "inference",
+        # Remote inference: a policy on a remote GPU driving this node's arm.
+        # Its own discriminant, not a flavour of `inference` — the two have
+        # different stop machinery, and the frontend's HOLDER_ACTIVITY_KEYS map
+        # points each discriminant at its own status endpoint.
+        "remote_inference",
         "replay",
         "calibration",
         "auto_calibration",
         "wiggle",
         "releasing",
         "training",
+        "hosting",
+        "remote_teleoperation",
     ]
 )
 
@@ -76,6 +95,35 @@ def test_error_codes_follow_grammar():
     for code in ErrorCode:
         assert CODE_GRAMMAR.match(code.value), f"malformed code: {code.value!r}"
         assert code.value.split(".")[0] in DOMAINS, f"unknown domain: {code.value!r}"
+
+
+def test_arm_type_unavailable_is_a_robot_domain_code():
+    """TB5's one new code: an `arm_type` the registry does not know. It is a
+    fact about the persisted robot record (domain `robot`), three levels
+    deep like the busy family, and 400 wherever it is raised."""
+    from makermodslab.api_errors import ErrorCode
+
+    code = ErrorCode.ROBOT_ARM_TYPE_UNAVAILABLE
+    assert code.value == "robot.arm_type.unavailable"
+    assert CODE_GRAMMAR.match(code.value)
+    assert code.value.split(".")[0] == "robot"
+
+
+def test_require_known_arm_type_raises_the_400_every_gate_uses():
+    """ONE helper raises the refusal so every gate (sessions, the legacy
+    starts, the record upsert, the calibration-config queries, the CAN-only
+    routes) speaks the same status, code and remedy."""
+    from makermodslab.api_errors import ApiError, ErrorCode
+    from makermodslab.arm_capabilities import require_known_arm_type
+
+    for known in ("so101", "maker", "metal"):
+        assert require_known_arm_type(known) is None
+    with pytest.raises(ApiError) as excinfo:
+        require_known_arm_type("nope")
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.code == ErrorCode.ROBOT_ARM_TYPE_UNAVAILABLE
+    assert "'nope'" in excinfo.value.detail
+    assert "extension" in excinfo.value.detail
 
 
 def test_busy_discriminants_cover_mutex_matrix():
@@ -99,8 +147,14 @@ def _teleop_request():
         ("makermodslab.teleoperate.teleoperation_active", "robot.busy.teleoperation"),
         ("makermodslab.record.recording_active", "robot.busy.recording"),
         ("makermodslab.rollout.inference_active", "robot.busy.inference"),
+        (
+            "makermodslab.remote_inference.remote_inference_active",
+            "robot.busy.remote_inference",
+        ),
         ("makermodslab.replay.replay_active", "robot.busy.replay"),
         ("makermodslab.wiggle.wiggle_active", "robot.busy.wiggle"),
+        ("makermodslab.remote_host.hosting_active", "robot.busy.hosting"),
+        ("makermodslab.remote_teleoperate.remote_teleoperation_active", "robot.busy.remote_teleoperation"),
     ],
 )
 def test_teleop_start_refusals_carry_codes(monkeypatch, patch_target, expected_code):

@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -38,17 +38,20 @@ from pydantic import BaseModel
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
+from . import rest_pose as _rest_pose
 from .api_errors import ErrorCode
-from .arm_capabilities import uses_feetech_bus
-from .arm_identity import verify_devices
-from .datasets import get_episode_action_series
-from .maker_rest_pose import capture_maker_pose, return_maker_to_pose
-from .motor_power import clear_goal_velocity, reset_torque_limit
-from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
+from .arm_capabilities import ARM_TYPE_LABEL, arm_type_from_robot_type, require_known_arm_type
+from .arms import registry as arm_registry
+from .datasets import get_episode_action_series, read_dataset_robot_type
+from .maker_rest_pose import return_maker_to_pose
+from .motor_power import FOLLOWER, clear_goal_velocity
+from .rest_pose import (
+    RETURN_CEILING_S,
+    _clamp_to_representable_range,
+)
 from .session_events import notify_session_changed
-from .teleoperate import _cleanup_after_setup_failure, force_disable_torque
-from .torque import release_maker_torque
-from .utils.config import get_robot_record, setup_follower_calibration_file
+from .teleoperate import _cleanup_after_setup_failure
+from .utils.config import get_robot_record, normalize_arm_type, setup_follower_calibration_file
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +80,27 @@ EASE_ARRIVE_TOLERANCE = 2.0
 # docstring). Keeps the same 0.5x-of-arrival-tolerance ratio as the raw-ticks
 # defaults (RETURN_STALL_MIN_PROGRESS=10 is half of RETURN_ARRIVE_TOLERANCE=20).
 EASE_STALL_MIN_PROGRESS = 1.0
+
+# How far a *settled* ease-in may still be from frame 0 and still be good
+# enough to start playback, in the same normalized units as
+# EASE_ARRIVE_TOLERANCE (~9-10 deg on the arm joints).
+#
+# EASE_ARRIVE_TOLERANCE's 2.0 units is ~22-39 ticks (~2-3 deg), which sits
+# INSIDE the standing error an STS3215 holds in position mode at lerobot's
+# P=16 — and frame 0 of a recorded episode routinely parks joints against
+# their calibrated endpoints (shoulder_lift recorded at -103 and clamped to
+# the -100 hard stop, elbow near +96, a gripper under a torque cap), which is
+# exactly where that error is largest. Teleop and record run the same return
+# loop and merely LOG a "settled" verdict; replay's ease-in was the one place
+# it was fatal, and exactness doesn't matter here: the ease-in exists only so
+# frame 0 doesn't snap the arm from wherever it happened to be, so a joint a
+# few units short just means the first send_action moves it a few more
+# degrees. A `settled` whose largest per-joint |present - target| is at or
+# under this bound is therefore accepted (loudly) and playback starts; a
+# `settled` with a LARGER residual — and every `stalled` / `ceiling` /
+# `comm-error` / `no-pose` verdict — stays fatal, because those mean a stuck
+# or latched joint, or an arm posed genuinely far from frame 0.
+EASE_SETTLED_MAX_RESIDUAL = 10.0
 
 # How far behind real time a frame may be before it is dropped rather than
 # fired late. Below this, ordinary jitter is absorbed by the pacing wait; above
@@ -128,6 +152,14 @@ _replay_started_at: float | None = None
 # set left a stop pressed during the ease-in with nothing to notice it. Reset
 # at the start of every new session (see handle_start_replay).
 _stop_event = threading.Event()
+# The second-stop-press event, mirroring teleoperate.py's _release_now. It is
+# NOT _stop_event: by the time the stopping-phase return runs, _stop_event is
+# already set by the stop that ended playback, so handing it to the return as
+# its abort_event cut the return short on its first frame — on a CAN arm that
+# released torque wherever playback stopped and dropped the arm under gravity
+# (seen on a Maker arm, 2026-09-07). The return only aborts on THIS event,
+# which a second Stop press sets.
+_release_now = threading.Event()
 # {phase, episode_index, elapsed_s, duration_s, error, hint} — see
 # handle_replay_status. phase is one of: idle | easing_in | playing |
 # stopping | done | error.
@@ -151,10 +183,18 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
         auto_calibrate as _auto_calibrate,
         calibrate as _calibrate,
         record as _record,
+        remote_host as _remote_host,
+        remote_inference as _remote_inference,
+        remote_teleoperate as _remote_teleoperate,
         rollout as _rollout,
         teleoperate as _teleoperate,
         wiggle as _wiggle,
     )
+
+    # Argument validation first: an arm type nothing registered is refused
+    # (400 robot.arm_type.unavailable) before the record and the episode are
+    # loaded or the follower connected.
+    require_known_arm_type(request.arm_type)
 
     with _state_lock:
         if _teleoperate.teleoperation_active:
@@ -178,6 +218,13 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
                 "message": "Inference is currently active. Stop it first.",
                 "code": ErrorCode.ROBOT_BUSY_INFERENCE,
             }
+        if _remote_inference.remote_inference_is_active():
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Remote inference is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
+            }
         if _calibrate.calibration_is_active():
             return {
                 "success": False,
@@ -198,6 +245,20 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
                 "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
                 "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+            }
+        if _remote_host.hosting_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "This robot is hosted for remote teleoperation. Stop hosting first.",
+                "code": ErrorCode.ROBOT_BUSY_HOSTING,
+            }
+        if _remote_teleoperate.remote_teleoperation_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Remote teleoperation is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REMOTE_TELEOPERATION,
             }
         if replay_active:
             return {
@@ -242,6 +303,29 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
                 "message": "Could not read this episode's recorded actions — it may not be downloaded locally yet.",
             }
 
+        # Joint NAMES can match while the arm family doesn't: Maker and Metal
+        # share all seven, and only their units differ, so neither the
+        # action_features comparison below nor the frame-0 bus keying can tell
+        # them apart. lerobot tags the recording robot in the dataset's
+        # meta/info.json, so check that FIRST — before _connect_follower, so a
+        # refused replay never energizes the arm.
+        #
+        # An untagged, imported or community dataset resolves to None, and that
+        # stays SILENT (same rule the merge / cross-arm fine-tune warnings
+        # follow): "not established" is not "mismatched", and the joint-name
+        # checks below remain the guard for those, exactly as before.
+        dataset_arm = arm_type_from_robot_type(read_dataset_robot_type(request.repo_id))
+        if dataset_arm is not None and dataset_arm != request.arm_type:
+            robot_label = ARM_TYPE_LABEL.get(request.arm_type, f"a {request.arm_type} arm")
+            return {
+                "success": False,
+                "status_code": 400,
+                "message": (
+                    f"This dataset was recorded on {ARM_TYPE_LABEL[dataset_arm]}, but the "
+                    f"connected robot is {robot_label} — replay it on a matching robot."
+                ),
+            }
+
         try:
             robot, identity_warnings = _connect_follower(request)
         except Exception as e:
@@ -277,6 +361,9 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
 
         replay_active = True
         _stop_event.clear()
+        # A stale release-now from a previous session's double-stop must not
+        # skip this session's return (same guard as teleoperate.py).
+        _release_now.clear()
         _replay_started_at = time.time()
         _replay_meta = {
             "phase": "easing_in",
@@ -324,13 +411,11 @@ def _connect_can_follower(request: ReplayRequest):
     from lerobot.robots import make_robot_from_config
 
     from .torque import de_energize_can_device
-    from .utils.robot_factory import maker_follower_config, metal_follower_config
 
-    is_metal = request.arm_type == "metal"
-    family = "Metal" if is_metal else "Maker"
-    builder = metal_follower_config if is_metal else maker_follower_config
+    arm_family = arm_registry.get(normalize_arm_type(request.arm_type))
+    family = arm_family.short_label
     follower_id = setup_follower_calibration_file(request.follower_config, request.arm_type)
-    robot = make_robot_from_config(builder(request.follower_port, follower_id))
+    robot = make_robot_from_config(arm_family.single_follower_config(request.follower_port, follower_id))
     try:
         robot.connect(calibrate=False)
     except Exception as e:
@@ -353,7 +438,8 @@ def _connect_follower(request: ReplayRequest):
     configure → reset_torque_limit → clear_goal_velocity), follower-only.
     Raises on a connection or hard identity-mismatch failure; the caller
     (handle_start_replay) is responsible for cleanup on that path."""
-    if not uses_feetech_bus(request.arm_type):
+    family = arm_registry.get(normalize_arm_type(request.arm_type))
+    if not family.uses_feetech_bus:
         return _connect_can_follower(request)
 
     follower_id = setup_follower_calibration_file(request.follower_config, request.arm_type)
@@ -366,7 +452,7 @@ def _connect_follower(request: ReplayRequest):
             "Make sure it's plugged in and powered on, then try again."
         ) from e
 
-    identity_warnings = verify_devices(((robot, "follower"),), skip=request.skip_identity_check)
+    identity_warnings = family.verify_identity(((robot, "follower"),), skip=request.skip_identity_check)
 
     # A dropped serial packet during configure() ("Failed to write 'Lock' ...
     # no status packet") turned roughly one start in twenty into a hard 500,
@@ -389,8 +475,7 @@ def _connect_follower(request: ReplayRequest):
             )
             time.sleep(_CONNECT_RETRY_DELAY_S)
 
-    identity_warnings += reset_torque_limit(robot, "follower arm")
-    identity_warnings += clear_goal_velocity(robot, "follower arm")
+    identity_warnings += family.prepare_follower_registers(robot)
     return robot, identity_warnings
 
 
@@ -415,6 +500,35 @@ def _bus_keyed(action: dict[str, float], bus) -> dict[str, float]:
     return keyed
 
 
+def _ease_in_residual(bus, targets: dict[str, float]) -> dict[str, float] | None:
+    """Per-joint |present - target| after a `settled` ease-in, normalized units.
+
+    Read fresh rather than parsed out of return_to_rest_pose's reason string:
+    the reason is prose meant for humans, and (bool, str) is the contract every
+    teleop/record caller of return_to_rest_pose depends on, so the verdict is
+    not the place to smuggle numbers through. Compares against the SAME clamped
+    targets the return itself drove to (_clamp_to_representable_range) — a
+    recorded action beyond a motor's calibrated span is clamped on both the
+    write and the read path, so an unclamped comparison would measure a joint
+    resting perfectly on its hard stop as several units off.
+
+    Returns None when the read fails or reports no motor we have a target for;
+    the caller must treat that as "unknown", i.e. keep the fatal path.
+    """
+    clamped = _clamp_to_representable_range(getattr(bus, "motors", None) or {}, targets)
+    try:
+        positions = bus.sync_read("Present_Position", normalize=True)
+    except Exception as e:
+        logger.warning(f"Could not measure how far the ease-in settled from the first frame: {e}")
+        return None
+    residual = {
+        motor: abs(float(positions[motor]) - float(target))
+        for motor, target in clamped.items()
+        if motor in positions
+    }
+    return residual or None
+
+
 def _ensure_uncapped(robot: SO101Follower, label: str) -> None:
     """Clear the RAM Goal_Velocity profile cap and verify it actually took.
 
@@ -425,7 +539,7 @@ def _ensure_uncapped(robot: SO101Follower, label: str) -> None:
     survives, rather than replaying at a fraction of the recorded speed with no
     indication why.
     """
-    clear_goal_velocity(robot, label)
+    clear_goal_velocity(robot, FOLLOWER, label)
     try:
         caps = robot.bus.sync_read("Goal_Velocity", normalize=False)
     except Exception as e:
@@ -435,7 +549,7 @@ def _ensure_uncapped(robot: SO101Follower, label: str) -> None:
     if not stuck:
         return
     logger.warning(f"Speed cap survived on the {label} ({stuck}) — retrying before playback")
-    clear_goal_velocity(robot, label)
+    clear_goal_velocity(robot, FOLLOWER, label)
     try:
         still = {m: v for m, v in robot.bus.sync_read("Goal_Velocity", normalize=False).items() if v}
         if still:
@@ -482,17 +596,15 @@ def _replay_worker(
     # gripper, matching what capture_rest_pose does here for the SO-101 —
     # replay drives the gripper from the dataset, so its start width is part of
     # the pose being restored.
-    feetech = uses_feetech_bus(arm_type)
-    if feetech:
-        start_pose = capture_rest_pose(robot.bus, normalize=False)
-    else:
-        start_pose = capture_maker_pose(robot, include_gripper=True)
+    family = arm_registry.get(normalize_arm_type(arm_type))
+    feetech = family.uses_feetech_bus
+    rest_poses = family.capture_rest_poses(robot, include_gripper=True)
 
     try:
         if frames:
             frame0 = dict(zip(action_names, frames[0], strict=True))
             if feetech:
-                arrived, reason = return_to_rest_pose(
+                arrived, reason = _rest_pose.return_to_rest_pose(
                     robot.bus,
                     _bus_keyed(frame0, robot.bus),
                     abort_event=_stop_event,
@@ -513,6 +625,31 @@ def _replay_worker(
                     abort_event=_stop_event,
                     label="follower arm",
                 )
+            # A `settled` verdict says every motor STOPPED short of target, which
+            # on this arm is the ordinary outcome of easing into a frame 0 that
+            # parks joints on their endpoints — not a fault. Measure how short it
+            # actually stopped and start playback anyway when that is within
+            # EASE_SETTLED_MAX_RESIDUAL (Feetech only: the CAN return already
+            # judges by convergence and has no equivalent verdict).
+            settled_too_far: tuple[str, float] | None = None
+            if not arrived and feetech and reason.startswith("settled"):
+                residual = _ease_in_residual(robot.bus, _bus_keyed(frame0, robot.bus))
+                if residual is not None:
+                    worst_joint, worst = max(residual.items(), key=lambda item: item[1])
+                    if worst <= EASE_SETTLED_MAX_RESIDUAL:
+                        logger.warning(
+                            "Ease-in settled %.1f normalized units short of the episode's first "
+                            "frame on %s (%s), within the %.1f-unit bound — starting playback; the "
+                            "first frames will carry those joints the rest of the way",
+                            worst,
+                            worst_joint,
+                            ", ".join(f"{m}={d:.1f}" for m, d in sorted(residual.items())),
+                            EASE_SETTLED_MAX_RESIDUAL,
+                        )
+                        arrived = True
+                    else:
+                        settled_too_far = (worst_joint, worst)
+
             if not arrived and reason != "cut-short":
                 with _state_lock:
                     _replay_meta["phase"] = "error"
@@ -522,10 +659,19 @@ def _replay_worker(
                     # generic guess — the frontend shows hint in preference to
                     # error, so a static "may be posed too far" message was
                     # hiding the real diagnosis from the user.
-                    _replay_meta["hint"] = (
-                        f"The arm didn't settle at this episode's starting position ({reason}). "
-                        "Try again, or reposition it closer first."
-                    )
+                    if settled_too_far is not None:
+                        worst_joint, worst = settled_too_far
+                        _replay_meta["hint"] = (
+                            "The arm didn't settle at this episode's starting position: "
+                            f"{worst_joint} stopped {worst:.1f} normalized units away, past the "
+                            f"{EASE_SETTLED_MAX_RESIDUAL:.0f}-unit bound for starting playback "
+                            f"({reason}). Try again, or reposition it closer first."
+                        )
+                    else:
+                        _replay_meta["hint"] = (
+                            f"The arm didn't settle at this episode's starting position ({reason}). "
+                            "Try again, or reposition it closer first."
+                        )
                 # Fall through to the graceful return below instead of
                 # returning here — an ease-in that didn't arrive still left
                 # the arm mid-air under torque, and the drop straight to
@@ -630,10 +776,10 @@ def _replay_worker(
         # Playback is over but the arm is still energized for the return —
         # a phase of this session, not idle yet.
         notify_session_changed("replay", True, phase=_replay_meta.get("phase"))
-        if feetech:
-            return_to_rest_pose(robot.bus, start_pose, label="follower arm")
-        else:
-            return_maker_to_pose(robot, start_pose, abort_event=_stop_event, label="follower arm")
+        # Every family returns to the session-start pose before torque is
+        # released; only a second Stop press (_release_now) cuts it short.
+        # Never _stop_event here — it is already set, see its definition.
+        family.return_to_rest(rest_poses, abort_event=_release_now)
     except Exception as e:
         logger.error(f"Replay worker error: {e}")
         with _state_lock:
@@ -641,13 +787,13 @@ def _replay_worker(
             _replay_meta["error"] = str(e)
     finally:
         if feetech:
-            force_disable_torque(robot, "follower arm")
+            family.release_torque(robot, "follower arm")
             try:
                 robot.bus.disconnect(disable_torque=False)
             except Exception as e:
                 logger.warning(f"Could not disconnect the follower after replay: {e}")
         else:
-            release_maker_torque(robot, "CAN follower arm")
+            family.release_torque(robot, "CAN follower arm")
             try:
                 # disconnect() (not bus.disconnect(disable_torque=False)):
                 # MakerFollower.disconnect honours disable_torque_on_disconnect,
@@ -689,14 +835,32 @@ def handle_replay_status() -> dict[str, Any]:
 
 
 def handle_stop_replay() -> dict[str, Any]:
+    """Stop playback; the worker then returns the arm and releases it.
+
+    A SECOND stop while that return is still running (the worker is alive
+    but playback is over) releases the arm now instead — the same two-press
+    contract as teleoperation. A stop with nothing running is a 409.
+    """
     global replay_active
     with _state_lock:
-        if not replay_active:
-            return {"success": False, "status_code": 409, "message": "No replay is active"}
-        replay_active = False
-        _stop_event.set()
-        _replay_meta["phase"] = "stopping"
-    return {"success": True, "message": "Replay stopping"}
+        if replay_active:
+            replay_active = False
+            _stop_event.set()
+            _replay_meta["phase"] = "stopping"
+            return {
+                "success": True,
+                "releasing": True,
+                "message": (
+                    "Replay stopping — the arm returns to its starting position, "
+                    "then goes limp. Press Stop again to release it now."
+                ),
+            }
+        worker = replay_thread
+    if worker is not None and worker.is_alive():
+        logger.info("Second stop during the replay rest-pose return — releasing the arm now")
+        _release_now.set()
+        return {"success": True, "message": "Releasing the arm now"}
+    return {"success": False, "status_code": 409, "message": "No replay is active"}
 
 
 def stop_and_wait(timeout: float = _STOP_AND_WAIT_TIMEOUT_S) -> None:
@@ -710,5 +874,12 @@ def stop_and_wait(timeout: float = _STOP_AND_WAIT_TIMEOUT_S) -> None:
     if worker is None or not worker.is_alive():
         return
     worker.join(timeout=timeout)
+    if not worker.is_alive():
+        return
+    logger.warning(
+        "Replay worker did not finish its graceful release within %.0fs; forcing release now", timeout
+    )
+    _release_now.set()
+    worker.join(timeout=5.0)
     if worker.is_alive():
-        logger.warning("Replay worker did not finish releasing within %.0fs", timeout)
+        logger.warning("Replay worker still alive after forcing release; giving up the wait")

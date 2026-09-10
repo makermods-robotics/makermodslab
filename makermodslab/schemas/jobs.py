@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -99,7 +99,11 @@ class JobMetricsHistoryResponse(BaseModel):
 
 class JobCheckpointsResponse(BaseModel):
     """server.py get_job_checkpoints — JobRegistry.list_checkpoints, ascending
-    by step."""
+    by step.
+
+    ``?lineage=true`` serves the same shape from list_chain_checkpoints (the
+    whole resume chain); those rows are the ones that carry JobCheckpoint's
+    owner_* stamps, which a single-run listing leaves null."""
 
     checkpoints: list[JobCheckpoint]
 
@@ -116,13 +120,66 @@ class CheckpointPolicyConfigResponse(BaseModel):
     """jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice
     of a checkpoint's pretrained_model/config.json. policy_type passes through
     from the file's "type" key (null when absent); state_dim/action_dim are
-    null when the checkpoint omits the feature."""
+    null when the checkpoint omits the feature. trained_on_robot_type is the
+    raw lerobot robot_type of the checkpoint's training dataset (recovered via
+    train_config.json), null when it can't be established — the fine-tune
+    panel compares it against the selected dataset's arm.
+
+    supports_rtc says whether this architecture can run the Real-Time Chunking
+    inference engine; null means the policy type isn't one the server knows
+    (a fork newer than jobs.policy_type_supports_rtc's table), which the client
+    must read as "offer it and let the server decide", not as "no". The route
+    declares no exclude_none/exclude_unset, so the key is always present.
+
+    n_action_steps / chunk_size are the checkpoint's chunk geometry, null when
+    the config omits them. n_action_steps is the CEILING on a remote-inference
+    horizon — a declared horizon above it makes the two Portal peers disagree
+    about the action-chunk shape, and every packet is then dropped in silence."""
 
     policy_type: str | None
     image_features: dict[str, CheckpointImageFeature]
     requires_task: bool
+    supports_rtc: bool | None
+    # Whether the two GPU-launch knobs apply to THIS checkpoint (S3.8f), so a
+    # launch panel can disable a select with a reason instead of sending a
+    # value that will be dropped.
+    #
+    # supports_model_dtype is "this config carries a `model_dtype` field" —
+    # answered from the saved config rather than a table of policy types,
+    # because a config.json is a dataclass dump and key presence IS the class
+    # having the field. In this pin only MolmoAct2 does.
+    supports_model_dtype: bool
+    # Whether the checkpoint's family samples its actions in steps at all
+    # (smolvla, pi0, pi05, MolmoAct2 do; ACT and pi0_fast do not). A SEPARATE
+    # field from the default below on purpose: null there is both "no such
+    # knob" and "the knob exists and this checkpoint saved nothing this side
+    # can resolve" — a pi05 with a null `num_inference_steps` is the second.
+    supports_flow_steps: bool
+    # Whether extra camera views may be DECLARED on this checkpoint at launch
+    # (S3.8g) — true only for a family whose image-view count is a property of
+    # its lerobot wrapper rather than of its architecture
+    # (`utils.system.VARIABLE_VIEW_POLICY_TYPES`; in this pin, MolmoAct2 alone).
+    #
+    # Answered from a TABLE of policy types rather than from key presence the
+    # way `supports_model_dtype` is, because there is no field in a config.json
+    # that says "this vision tower takes any number of pictures" — it is a fact
+    # about the family's processor, established by reading it. False for a type
+    # this pin has never heard of, which is the safe direction: the checkpoint
+    # then runs with the views it was published with.
+    supports_extra_image_roles: bool
+    # The steps-per-chunk the checkpoint would run with, when it can be known.
+    # Null both for a policy with no such knob (ACT, pi0_fast) and for one that
+    # saved no value whose applying default is not readable from here.
+    # MolmoAct2 is NOT the latter: it saves `num_inference_steps: null` and
+    # then runs at 10 — the pin's own backbone default — so it answers 10.
+    # "Unknown" stays the honest answer for the rest, and a client must read
+    # null as "do not print a number", never as "no default".
+    flow_steps_default: int | None
     state_dim: int | None
     action_dim: int | None
+    n_action_steps: int | None
+    chunk_size: int | None
+    trained_on_robot_type: str | None
 
 
 class HubJobStatus(BaseModel):
@@ -139,13 +196,19 @@ class HubJobItem(BaseModel):
     and space_id are mutually exclusive on the Hub side, status/owner can be
     absent objects → null, name is _hub_job_run_name's best effort).
 
-    The trailing four are the run's identity, recovered from the job's own argv
-    by _hub_job_identity so a run launched on another machine reads like a
-    tracked one. Each is independently nullable and for a real reason: a RESUMED
-    cloud run carries `--config_path` instead of `--policy.type` /
-    `--dataset.repo_id`, so it reports a repo and a step target with no policy
-    or dataset. They are decoration on a listing — never identity — so a row
-    that answers none of them still renders."""
+    `policy_type` / `dataset` / `total_steps` / `hf_repo_id` are the run's
+    identity, recovered from the job's own argv by _hub_job_identity so a run
+    launched on another machine reads like a tracked one. Each is independently
+    nullable and for a real reason: a RESUMED cloud run carries `--config_path`
+    instead of `--policy.type` / `--dataset.repo_id`, so it reports a repo and a
+    step target with no policy or dataset.
+
+    `kind` and the `base_*` / `dataset_repo_id` / `steps` fields are what the run
+    started FROM, parsed by _hub_job_provenance off the same argv (kind chip +
+    base-checkpoint row on the card). `kind` is always one of
+    scratch/foundation/finetune/resume; the rest are null when the argv doesn't
+    answer them. All of it is decoration on a listing — never identity — so a
+    row that answers none of them still renders."""
 
     id: str
     name: str | None
@@ -160,6 +223,13 @@ class HubJobItem(BaseModel):
     dataset: str | None
     total_steps: int | None
     hf_repo_id: str | None
+    kind: Literal["scratch", "foundation", "finetune", "resume"] | None = None
+    base_ref: str | None = None
+    base_repo: str | None = None
+    base_step: str | None = None
+    base_job_id: str | None = None
+    dataset_repo_id: str | None = None
+    steps: str | None = None
 
 
 class HubModelItem(BaseModel):

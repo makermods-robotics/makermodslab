@@ -5,7 +5,7 @@ import { isCaselessScript } from "@/i18n/config";
 import { EpisodeJointSeries, EpisodeSummary } from "@/lib/replayApi";
 
 // Six SO-101 joints, in the dataset's fixed column order — a validated
-// categorical set (see dataviz skill palette) so adjacent lines stay
+// categorical set (see dataviz policy palette) so adjacent lines stay
 // distinguishable; cycles defensively if a feature set ever carries more.
 const JOINT_COLORS = [
   "#2a78d6",

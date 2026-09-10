@@ -4,8 +4,8 @@ import type { SessionKind } from "@/hooks/useActiveSession";
 
 /**
  * Client for the /api/v1/sessions surface — the named-session start/stop the
- * robot flows (teleoperation, recording, inference, replay, calibration,
- * auto-calibration) go through.
+ * robot flows (teleoperation, recording, inference, remote inference, replay,
+ * calibration, auto-calibration) go through.
  *
  * The frontend sends the robot's NAME plus kind-specific options only; ports,
  * configs, mode, right-arm fields and cameras all resolve server-side from
@@ -22,9 +22,12 @@ export type StartableSessionKind =
   | "teleoperation"
   | "recording"
   | "inference"
+  | "remote_inference"
   | "replay"
   | "calibration"
-  | "auto_calibration";
+  | "auto_calibration"
+  | "hosting"
+  | "remote_teleoperation";
 
 export interface SessionLeaseInfo {
   owner: string;
@@ -86,8 +89,83 @@ export interface InferenceSessionOptions {
   duration_s?: number;
   checkpoint_state_dim?: number;
   eval_episodes?: number;
+  // "rtc" is also refused (400) when the checkpoint's ARCHITECTURE can't run
+  // Real-Time Chunking — read `supports_rtc` off the checkpoint's policy-config
+  // summary and don't offer the engine for it (PolicyConfigSummary).
   inference_engine?: "sync" | "rtc";
   temporal_ensemble_coeff?: number;
+  skip_identity_check?: boolean;
+  // COACHING (DAgger) mode — the third session shape. The policy drives while
+  // the operator watches; each takeover through the leader arm is recorded as
+  // one episode of a new dataset. Mutually exclusive with `eval_episodes > 1`
+  // (400) and refused alongside `inference_engine: "rtc"` (400). The LEADER
+  // arms it needs are NOT sent from here: like the followers, they resolve
+  // server-side from the named robot record.
+  coaching?: boolean;
+  // How many corrections to collect before the session ends on its own.
+  // Clamped server-side to [1, 100].
+  target_corrections?: number;
+  // Dataset name for the corrections, WITHOUT the mandatory `rollout_` prefix
+  // (applied server-side). lerobot then appends its own timestamp, so the name
+  // on disk is NOT predictable from here — read `coaching_dataset` off the
+  // status payload once the session reports it.
+  coaching_dataset_name?: string;
+}
+
+/** Remote inference (DRTC) — mirrors schemas/sessions.py's
+ * `RemoteInferenceOptions` field for field.
+ *
+ * The arm is driven by THIS machine; the policy runs on a remote GPU and the
+ * two meet in a LiveKit room. Everything hardware-shaped still resolves
+ * server-side from the named robot record, exactly as for `inference`.
+ *
+ * `policy_ref` and `policy_hub_id` are two different vocabularies and are
+ * deliberately not collapsed: `policy_ref` is the opaque Lab ref the
+ * checkpoint picker yields (and what `checkpoint_state_dim` / `camera_dims`
+ * come from), while `policy_hub_id` is the "<owner>/<repo>" the GPU container
+ * resolves with `from_pretrained`. The backend never reads `policy_hub_id` in
+ * this slice — it is here so the panel can generate the other terminal's
+ * `modal run` line from this same object.
+ *
+ * horizon / fps / video_codec MUST match the GPU side. Portal fingerprints the
+ * wire schema and SILENTLY DROPS packets whose fingerprint differs, so a
+ * disagreement presents as a healthy-looking session with zero chunks rather
+ * than as an error — which is exactly why they are options here and not
+ * constants buried in the backend. */
+export interface RemoteInferenceSessionOptions {
+  policy_ref: string;
+  policy_hub_id?: string;
+  task?: string;
+  camera_bindings?: Record<string, string>;
+  camera_dims?: Record<string, { width: number; height: number }>;
+  checkpoint_state_dim?: number;
+  /** 0 = unbounded. */
+  duration_s?: number;
+  horizon?: number;
+  fps?: number;
+  /** Codec IDENTIFIERS — sent verbatim, never translated. */
+  video_codec?: "H264" | "MJPEG";
+  /** Which chunk player runs on the arm, and therefore which GPU wrapper the
+   * other terminal must be running: `sync` pairs `robot_sync` with
+   * `modal_policy.py`, `rtc` pairs `robot_rtc` with `modal_policy_rtc.py`.
+   *
+   * `rtc` ships the still-to-execute prefix so the server can GUIDE denoising,
+   * which only a flow/diffusion policy (smolvla, pi0, pi05, diffusion) can act
+   * on. The BACKEND DOES NOT CHECK THIS — it never loads the checkpoint — so
+   * the client is the gate (`deployGuards.remoteEngineSupported`). Distinct
+   * from `InferenceSessionOptions.inference_engine`, which names lerobot's
+   * LOCAL rollout engine. */
+  engine?: "sync" | "rtc";
+  /** RTC only. Minimum execution budget in action steps; MUST equal the GPU
+   * side's `--s-min` (the robot computes `overlap_end = H - max(s_min, d)` and
+   * the server trusts that field). Ignored by the sync engine. */
+  s_min?: number;
+  lpf_hz?: number;
+  lpf_order?: number;
+  video_quality?: number;
+  video_bitrate_kbps?: number;
+  camera_send_hz?: number;
+  latency_k?: number;
   skip_identity_check?: boolean;
 }
 
@@ -127,10 +205,34 @@ export interface AutoCalibrationSessionOptions {
   overwrite?: boolean;
 }
 
+/** Station side of remote teleoperation: publish this robot's follower and
+ * cameras into the node's LiveKit room and execute the active operator's
+ * actions. Follower-only readiness (like inference/replay). `video_codec` is
+ * a wire identifier — data, never a display label. */
+export interface HostingSessionOptions {
+  /** Paces the whole loop (frames, state, action application); 5-60. */
+  fps?: number;
+  video_codec?: "H264" | "MJPEG" | "PNG" | "RAW";
+  skip_identity_check?: boolean;
+}
+
+/** Operator side: drive a STATION's follower with this robot's leader.
+ * Leader-only readiness — a record with no follower is fine. */
+export interface RemoteTeleoperationSessionOptions {
+  /** The station's instance id from the node registry (data). Everything
+   * else — room, codec, fps, motors, cameras — comes from the station's live
+   * hosting descriptor. */
+  station: string;
+  skip_identity_check?: boolean;
+}
+
 export type SessionOptions =
   | TeleoperationSessionOptions
+  | HostingSessionOptions
+  | RemoteTeleoperationSessionOptions
   | RecordingSessionOptions
   | InferenceSessionOptions
+  | RemoteInferenceSessionOptions
   | ReplaySessionOptions
   | CalibrationSessionOptions
   | AutoCalibrationSessionOptions;
@@ -216,6 +318,44 @@ export async function stopSession(
   );
 }
 
+export type CoachingCommand =
+  | "takeover"
+  | "handback"
+  | "cancel"
+  | "hold"
+  | "resume"
+  | "reset"
+  | "recovered"
+  | "drop_last";
+
+/** One coaching (DAgger) command for the current inference session, by id.
+ *
+ * Session-scoped and never owner-gated, exactly like `stopSession` — a
+ * physical arm must stay controllable by whoever can reach the API. 404 once
+ * the session is gone; the runner returns a 409 for a plain (non-coaching)
+ * inference session or one that is still starting up. The verb is NOT
+ * phase-checked client-side: the runner's phase is authoritative and the
+ * browser only holds a copy that is one poll stale, so a mistimed command is a
+ * harmless no-op the runner logs.
+ *
+ * The id is the whole point, and it is what a restack quietly dropped: without
+ * it the dialog posts to a session-agnostic verb, so a dialog left open across
+ * a session change commands whichever session happens to be current rather
+ * than failing with a 404 the UI can report. */
+export async function sendCoachingCommand(
+  baseUrl: string,
+  fetcher: Fetcher,
+  sessionId: string,
+  command: CoachingCommand
+): Promise<{ result: Record<string, unknown> }> {
+  return apiRequest(
+    baseUrl,
+    fetcher,
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/coaching`,
+    { method: "POST", body: { command }, action: "Coaching command" }
+  );
+}
+
 // --- 409 session.held rendering ---------------------------------------------
 
 /** The holder named by a 409 session.held error, or null when `e` is any
@@ -234,10 +374,13 @@ const HOLDER_ACTIVITY_KEYS: Record<string, string> = {
   teleoperation: "shared.sessionBusy.activity.teleoperation",
   recording: "shared.sessionBusy.activity.recording",
   inference: "shared.sessionBusy.activity.inference",
+  remote_inference: "shared.sessionBusy.activity.remote_inference",
   replay: "shared.sessionBusy.activity.replay",
   calibration: "shared.sessionBusy.activity.calibration",
   auto_calibration: "shared.sessionBusy.activity.auto_calibration",
   wiggle: "shared.sessionBusy.activity.wiggle",
+  hosting: "shared.sessionBusy.activity.hosting",
+  remote_teleoperation: "shared.sessionBusy.activity.remote_teleoperation",
 };
 
 /**

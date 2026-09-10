@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -52,7 +52,9 @@ re-read every tick and the setpoint steps toward wherever it is now, still
 rate-bounded. See ``_chase_to_pose``.
 """
 
+import contextlib
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -88,9 +90,91 @@ MAKER_RETURN_SETTLE_DEG = 6.0
 MAKER_RETURN_STALL_PROGRESS_DEG = 0.25
 MAKER_RETURN_STALL_POLLS = 15
 
-# Share of the ceiling the interpolation ramp may use, leaving the rest for the
-# settle check. See return_maker_to_pose.
-_RAMP_CEILING_FRACTION = 0.6
+
+# MIT gains the energized-leader return drives with: the fork's own
+# hold_kp_on_disconnect / hold_kd_on_disconnect defaults (MetalLeaderConfig),
+# the gains its author judged enough to hold the arm's weight in place — firm
+# enough to carry it home at MAKER_RETURN_SPEED_DEG_S, far softer than the
+# follower's follow gains.
+LEADER_RETURN_KP = 50.0
+LEADER_RETURN_KD = 1.0
+
+# How long the gravity thread gets to exit before the return drives the bus
+# without it (the fork's own disconnect() join timeout).
+_GRAVITY_STOP_TIMEOUT_S = 1.0
+
+
+def stop_gravity_compensation(device) -> bool:
+    """Stop an energized leader's gravity-compensation thread, if it has one.
+
+    The fork's MetalLeader streams kp=0 gravity torque from a background
+    thread at 100 Hz; any setpoint the return writes to that bus would be
+    overwritten on the next tick, and a release under it would leave the
+    thread hammering a disabled bus with failed ticks. So the thread is
+    stopped BEFORE the return and before the release. Reaches the fork's
+    private stop event on purpose:
+    lerobot is pinned by SHA, the attribute names are part of what the pin
+    fixes, and a device without them (any other leader) answers False and is
+    left alone. Idempotent; never raises.
+    """
+    event = getattr(device, "_gravity_stop_event", None)
+    if event is None:
+        return False
+    try:
+        event.set()
+        thread = getattr(device, "_gravity_thread", None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=_GRAVITY_STOP_TIMEOUT_S)
+            if thread.is_alive():
+                logger.warning(
+                    "The leader's gravity-compensation thread did not stop within its timeout; "
+                    "it may still be writing to the bus."
+                )
+    except Exception as e:
+        logger.warning(f"Could not stop the leader's gravity compensation: {e}")
+    return True
+
+
+class EnergizedLeaderDrive:
+    """A MetalLeader (one sub-arm) presented the way ``return_maker_to_pose`` drives an arm.
+
+    The leader has ``get_action`` and no ``send_action``: it reads positions
+    and streams torque, it never commands a pose. For the stop path it has to
+    be DRIVEN like a follower — it holds torque and has no brakes, so it must
+    be walked to its start pose before that torque is released. This adapter
+    gives it the two methods the return loop uses, over its own Damiao bus and
+    under its own bus lock (the gravity thread shares that bus until it is
+    stopped, which the first ``send_action`` does).
+    """
+
+    def __init__(self, leader) -> None:
+        self.leader = leader
+        self._gravity_stopped = False
+
+    @property
+    def bus(self):
+        return self.leader.bus
+
+    def _locked(self):
+        lock = getattr(self.leader, "_bus_lock", None)
+        return lock if lock is not None else contextlib.nullcontext()
+
+    def get_observation(self) -> dict[str, float]:
+        with self._locked():
+            positions = self.leader.bus.sync_read("Present_Position")
+        return {f"{motor}.pos": float(value) for motor, value in positions.items()}
+
+    def send_action(self, action: dict[str, float]) -> None:
+        if not self._gravity_stopped:
+            stop_gravity_compensation(self.leader)
+            self._gravity_stopped = True
+        commands = {
+            key[: -len(".pos")]: (LEADER_RETURN_KP, LEADER_RETURN_KD, float(value), 0.0, 0.0)
+            for key, value in action.items()
+            if key.endswith(".pos")
+        }
+        with self._locked():
+            self.leader.bus.sync_write_metal(commands)
 
 
 def maker_follower_arms(robot) -> list[tuple[object, str]]:
@@ -264,13 +348,10 @@ def return_maker_to_pose(
     # Distance sets duration, so the RATE is what stays bounded. A fixed
     # duration (lerobot's 3s) would make a long return fast and a short one
     # slow; capping the rate instead means every return feels the same.
-    # Capped at a FRACTION of the ceiling, not the whole of it: the ramp only
-    # commands the setpoints, and the settle check afterwards is what decides
-    # whether the arm actually landed. A ramp allowed to consume the entire
-    # budget would leave nothing for that check, so a blocked joint would
-    # report a bare "timed out" instead of naming itself.
-    duration_s = min(max_delta / max(speed_deg_s, 1e-6), ceiling_s * _RAMP_CEILING_FRACTION)
-    steps = max(int(duration_s * MAKER_RETURN_FPS), 1)
+    # A distant pose must not speed up to fit the stop deadline. The deadline
+    # can cut the return short; it cannot authorize faster MIT setpoints.
+    duration_s = max_delta / max(speed_deg_s, 1e-6)
+    steps = max(math.ceil(duration_s * MAKER_RETURN_FPS), 1)
     period = 1.0 / MAKER_RETURN_FPS
     deadline = time.monotonic() + ceiling_s
 
@@ -328,6 +409,14 @@ def return_maker_to_pose(
             logger.warning("The %s stopped short of %s: %s", label, target_label, described)
             return False, described
 
+        if not described:
+            # A long ramp can exhaust the deadline before the settle loop.
+            # Report the remaining joint error without sending another goal.
+            current = _read_pose(device)
+            deltas = {m: abs(current[m] - v) for m, v in targets.items() if m in current}
+            if deltas:
+                motor, delta = max(deltas.items(), key=lambda kv: kv[1])
+                described = f"{motor} still {delta:.1f} deg away"
         return False, described or "timed out"
     except Exception as e:
         # Documented never-raises: the caller is about to cut torque and must
@@ -464,6 +553,43 @@ def _chase_to_pose(
         return False, str(e)
 
 
+class _LiveArmGroup:
+    """Drive live targets in one tick loop so all arms finish together.
+
+    Internal index prefixes keep equal motor names on separate devices apart.
+    An arm that arrives early must keep tracking while another catches up;
+    otherwise its next passthrough command can jump to a stale leader target.
+    """
+
+    def __init__(self, rest_poses, target_fns) -> None:
+        self.rest_poses = rest_poses
+        self.target_fns = target_fns
+
+    def get_observation(self):
+        return {
+            f"{index}/{key}": value
+            for index, (device, _pose) in enumerate(self.rest_poses)
+            for key, value in device.get_observation().items()
+            if key.endswith(".pos")
+        }
+
+    def send_action(self, action):
+        for index, (device, _pose) in enumerate(self.rest_poses):
+            prefix = f"{index}/"
+            device.send_action(
+                {key[len(prefix) :]: value for key, value in action.items() if key.startswith(prefix)}
+            )
+
+    def target(self):
+        combined = {}
+        for index, (_device, pose) in enumerate(self.rest_poses):
+            fn = self.target_fns[index] if index < len(self.target_fns) else None
+            fresh = fn() if fn is not None else pose
+            if fresh:
+                combined.update({f"{index}/{motor}": value for motor, value in fresh.items()})
+        return combined
+
+
 def return_maker_arms_to_rest(
     rest_poses: list[tuple[object, dict[str, float]]],
     abort_event: threading.Event | None = None,
@@ -483,15 +609,11 @@ def return_maker_arms_to_rest(
     outcome, and a thread whose join timed out must not be mistaken for a
     success, so the verdicts are collected rather than discarded.
 
-    ``target_fns`` is index-aligned with ``rest_poses`` (entries may be None)
-    and turns each arm's move into a chase — see ``return_maker_to_pose``. One
-    fn PER ARM rather than one fn returning the whole split, because the arms
-    run on separate threads: a single shared fn would be called concurrently by
-    both and would read one UART leader from two threads at once. Each arm's fn
-    asks the caller only for its own device's pose, which keeps
-    ``maker_targets_from_action`` the one place that knows how a robot-level
-    action splits (the caller builds the fns from it — see
-    ``record._LeaderTargetSource``).
+    ``target_fns`` is index-aligned with ``rest_poses`` (entries may be None).
+    Live targets use ONE tick loop across all arms, so an early-arriving side
+    keeps following its leader until both sides converge. Its verdict describes
+    the group and is repeated for each arm. Fixed teardown targets retain the
+    independent threaded returns below.
     """
     if not rest_poses:
         return []
@@ -512,6 +634,23 @@ def return_maker_arms_to_rest(
                 target_fn=_fn_for(0),
             )
         ]
+
+    if target_fns is not None and any(fn is not None for fn in target_fns):
+        group = _LiveArmGroup(rest_poses, target_fns)
+        targets = {
+            f"{index}/{motor}": value
+            for index, (_device, pose) in enumerate(rest_poses)
+            for motor, value in pose.items()
+        }
+        verdict = return_maker_to_pose(
+            group,
+            targets,
+            abort_event=abort_event,
+            label="follower arms",
+            target_label=target_label,
+            target_fn=group.target,
+        )
+        return [verdict] * len(rest_poses)
 
     results: list[tuple[bool, str]] = [(False, "did not finish")] * len(rest_poses)
 

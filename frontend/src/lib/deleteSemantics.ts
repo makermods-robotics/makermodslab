@@ -10,6 +10,12 @@
  *    the row flips to a plain hub row and stays listed, and the selection is
  *    kept (the dataset/model still exists). A second press (now hub-only)
  *    hides it.
+ *  - EXCEPT a "both" row whose local side is a training RUN (`local_kind`).
+ *    The two-press rule rests on the local copy being replaceable from the Hub,
+ *    which holds for a downloaded model but not for a run: publishing uploads
+ *    the checkpoints the user chose, so a run's unpublished checkpoints exist
+ *    nowhere else and "the Hub copy stays" would understate the loss. Such a
+ *    row gets the destructive local delete instead.
  *  - Pinned custom hub rows are unpinned (existing behavior).
  *  - Own-namespace hub-only rows are hidden via the persistent hidden-list
  *    (they'd otherwise resurface on every Hub listing).
@@ -37,6 +43,10 @@ export type DeletableKind = "dataset" | "model";
 export interface DeletableItem {
   source: "local" | "hub" | "both";
   saved_custom?: boolean;
+  /** What the LOCAL side of this row is: a training run (holds every checkpoint
+   * it saved, only some of which may be published) or a copy pulled from the
+   * Hub / imported from disk. Absent for datasets and for hub-only rows. */
+  local_kind?: "run" | "downloaded";
 }
 
 export interface DeleteResolution {
@@ -82,6 +92,18 @@ export function resolveDeleteAction(
   kind: DeletableKind,
   item: DeletableItem,
 ): DeleteResolution {
+  // A published training run is "both", but its local side is not a replaceable
+  // copy — only the checkpoints the user chose to publish are on the Hub, so
+  // this is a destructive delete (the `local` copy: "including its checkpoints
+  // … a Hub copy is not affected") rather than the two-press "remove local
+  // copy" flow, whose "the Hub copy stays" wording would understate the loss.
+  if (item.source === "both" && item.local_kind === "run") {
+    return {
+      action: "delete-local",
+      ...copyFor("delete-local", kind),
+      clearsSelection: true,
+    };
+  }
   // "both" outranks saved_custom: the first press always removes the local
   // copy; the (possibly pinned) hub row survives for a second press.
   if (item.source === "both") {

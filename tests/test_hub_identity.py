@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -274,7 +274,11 @@ def test_push_dataset_to_hub_pushes_under_the_resolved_id() -> None:
         landed = ds.push_dataset_to_hub("pick_place", tags=["t"], private=False)
 
     # The LOCAL cache is addressed by the bare id; the Hub by the resolved one.
-    ctor.assert_called_once_with("pick_place")
+    # Positional args only: the ctor also takes a `video_backend` whose value is
+    # this HOST's (whether torchcodec's dylibs load here), which is nothing to
+    # do with repo identity and must not make this test host-dependent.
+    assert ctor.call_count == 1
+    assert ctor.call_args.args == ("pick_place",)
     assert fake_dataset.repo_id == "alice/pick_place"
     assert landed == "alice/pick_place"
 

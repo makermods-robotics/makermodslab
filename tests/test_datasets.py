@@ -1890,7 +1890,7 @@ def test_excluded_episodes_endpoints_round_trip(client: TestClient, excluded_epi
 
 
 # ---------------------------------------------------------------------------
-# is_dataset_private — the marketplace-visibility gate for a skill's
+# is_dataset_private — the marketplace-visibility gate for a policy's
 # dataset_episodes (see models._gate_dataset_episodes).
 # ---------------------------------------------------------------------------
 
@@ -3061,6 +3061,118 @@ def test_get_hub_dataset_info_caches_under_the_resolved_id(tmp_path: Path) -> No
     assert ds._HUB_DATASET_INFO_CACHE == {}
 
 
+# ---------------------------------------------------------------------------
+# Per-episode sampling weights (weighted sampling, step 1.2).
+# ---------------------------------------------------------------------------
+
+
+def _write_episodes_dataset(root: Path, repo_id: str, columns: dict[str, Any], n_episodes: int) -> Path:
+    """A viewable v3.0 dataset whose episodes parquet carries `columns`."""
+    d = _write_info(
+        root,
+        repo_id,
+        {"fps": 30, "features": {"observation.images.front": {"dtype": "video"}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": list(range(n_episodes)),
+                "tasks": [["task"]] * n_episodes,
+                "length": [30] * n_episodes,
+                "videos/observation.images.front/from_timestamp": [0.0] * n_episodes,
+                "videos/observation.images.front/to_timestamp": [1.0] * n_episodes,
+                **columns,
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+    return d
+
+
+def test_list_episode_summaries_defaults_missing_weight_column_to_one(
+    tmp_lerobot_home: Path,
+) -> None:
+    """R3, and the trap this feature could have walked into: a dataset recorded
+    before `sampling_weight` existed must return the SAME episodes it always did,
+    each at weight 1.0 — not an empty list, which callers read as "not viewable"
+    and which would have blanked the viewer for every existing dataset."""
+    from makermodslab import datasets as ds
+
+    _write_episodes_dataset(tmp_lerobot_home, "alice/pre_feature", {}, n_episodes=3)
+
+    result = ds.list_episode_summaries("alice/pre_feature")
+
+    assert result is not None
+    assert [e["episode_index"] for e in result] == [0, 1, 2]
+    assert [e["sampling_weight"] for e in result] == [1.0, 1.0, 1.0]
+
+
+def test_list_episode_summaries_reads_the_weight_column(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+
+    _write_episodes_dataset(
+        tmp_lerobot_home,
+        "alice/weighted",
+        {"sampling_weight": [1.0, 3.0, 1.5]},
+        n_episodes=3,
+    )
+
+    result = ds.list_episode_summaries("alice/weighted")
+
+    assert result is not None
+    assert [e["sampling_weight"] for e in result] == [1.0, 3.0, 1.5]
+
+
+def test_list_episode_summaries_treats_a_null_weight_as_one(tmp_lerobot_home: Path) -> None:
+    """A null cell is a missing weight (1.0), never 0.0 — which would silently
+    drop the episode from training."""
+    from makermodslab import datasets as ds
+
+    _write_episodes_dataset(
+        tmp_lerobot_home,
+        "alice/partly_weighted",
+        {"sampling_weight": [None, 3.0]},
+        n_episodes=2,
+    )
+
+    result = ds.list_episode_summaries("alice/partly_weighted")
+
+    assert result is not None
+    assert [e["sampling_weight"] for e in result] == [1.0, 3.0]
+
+
+def test_dataset_is_weighted_detects_a_non_unit_weight(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+
+    _write_episodes_dataset(tmp_lerobot_home, "alice/weighted", {"sampling_weight": [1.0, 3.0]}, n_episodes=2)
+    assert ds.dataset_is_weighted("alice/weighted") is True
+
+
+def test_dataset_is_weighted_is_false_without_the_column(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+
+    _write_episodes_dataset(tmp_lerobot_home, "alice/pre_feature", {}, n_episodes=2)
+    assert ds.dataset_is_weighted("alice/pre_feature") is False
+
+
+def test_dataset_is_weighted_is_false_when_every_weight_is_one(tmp_lerobot_home: Path) -> None:
+    """R2: an all-1 column is not a weighted dataset — it must take the untouched
+    lerobot training path."""
+    from makermodslab import datasets as ds
+
+    _write_episodes_dataset(tmp_lerobot_home, "alice/ones", {"sampling_weight": [1.0, 1.0]}, n_episodes=2)
+    assert ds.dataset_is_weighted("alice/ones") is False
+
+
+def test_dataset_is_weighted_is_false_for_an_unknown_dataset(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+
+    with patch("makermodslab.datasets._ensure_hub_episodes_root", return_value=None):
+        assert ds.dataset_is_weighted("alice/nowhere") is False
+
+
 # --- half-finished uploads --------------------------------------------------
 #
 # A repo can exist on the Hub and hold nothing: an upload is create-then-send,
@@ -3389,3 +3501,39 @@ def test_dataset_in_use_sees_every_active_run_not_a_page(tmp_lerobot_home: Path)
     with _patch.object(jobs, "job_registry", reg):
         assert _dataset_in_use("user/held") is not None
         assert _dataset_in_use("user/untouched") is None
+
+
+# --- read_dataset_robot_type ------------------------------------------------
+
+
+def test_read_dataset_robot_type_reads_the_local_info_json(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import read_dataset_robot_type
+
+    _write_info(tmp_lerobot_home, "alice/pick", {"robot_type": "maker_follower", "features": {}})
+    assert read_dataset_robot_type("alice/pick") == "maker_follower"
+
+
+def test_read_dataset_robot_type_is_none_when_absent_or_blank(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import read_dataset_robot_type
+
+    _write_info(tmp_lerobot_home, "alice/no_tag", {"features": {}})
+    _write_info(tmp_lerobot_home, "alice/blank_tag", {"robot_type": "  ", "features": {}})
+    assert read_dataset_robot_type("alice/no_tag") is None
+    assert read_dataset_robot_type("alice/blank_tag") is None
+    assert read_dataset_robot_type("alice/not_local_and_offline") is None
+
+
+def test_read_dataset_robot_type_is_local_only_never_hits_the_hub() -> None:
+    """Deliberately no Hub fallback — the one caller is a synchronous GET
+    handler and this is a display nicety, so a not-cached dataset is just
+    "can't tell"."""
+    from makermodslab import datasets as ds
+
+    with (
+        patch("makermodslab.datasets._resolve_local_dataset_path", return_value=None),
+        patch(
+            "makermodslab.datasets.hf_hub_download",
+            side_effect=AssertionError("must not download"),
+        ),
+    ):
+        assert ds.read_dataset_robot_type("bob/not-cached") is None

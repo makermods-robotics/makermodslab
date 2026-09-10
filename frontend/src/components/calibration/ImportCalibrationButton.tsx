@@ -14,6 +14,7 @@ import {
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import type { ArmType } from "@/hooks/useRobots";
+import { libraryQuery } from "@/lib/calibrationLibraryQuery";
 
 interface ImportCalibrationButtonProps {
   /** API device vocabulary: "teleop" (leader) or "robot" (follower). */
@@ -22,8 +23,19 @@ interface ImportCalibrationButtonProps {
    * keep separate directories, so a file imported for one arm type is
    * invisible to the other. */
   armType: ArmType;
+  /** Which leader library, for a multi-leader family's teleop side (see
+   * CalibrationLibrary). Omitted otherwise. */
+  leaderKind?: string;
   /** Called with the saved config name after a successful import. */
   onImported?: (name: string) => void;
+  /**
+   * When set, no trigger button renders; instead the file-picker opener is
+   * written into this ref so the caller can trigger it from its own control
+   * (a menu item). The hidden input and the name dialog stay mounted HERE —
+   * inside a dropdown menu they would unmount the moment the menu closed,
+   * which is exactly when the dialog needs to appear.
+   */
+  pickRef?: React.MutableRefObject<(() => void) | null>;
 }
 
 /**
@@ -34,7 +46,9 @@ interface ImportCalibrationButtonProps {
 const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
   device,
   armType,
+  leaderKind,
   onImported,
+  pickRef,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
@@ -48,6 +62,7 @@ const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
   const [busy, setBusy] = useState(false);
 
   const pickFile = () => fileInputRef.current?.click();
+  if (pickRef) pickRef.current = pickFile;
 
   const handleFileChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -81,12 +96,12 @@ const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
     setError(null);
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/api/v1/calibration-configs/${device}/upload?arm_type=${armType}`,
+        `${baseUrl}/api/v1/calibration-configs/${device}/upload${libraryQuery(armType, leaderKind)}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name: trimmed, data }),
-        }
+        },
       );
       const body = await res.json().catch(() => ({}));
       if (res.ok && body.success) {
@@ -130,16 +145,18 @@ const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
         className="hidden"
         onChange={handleFileChosen}
       />
-      <Button
-        size="icon"
-        variant="ghost"
-        className="shrink-0 text-muted-foreground hover:text-foreground"
-        onClick={pickFile}
-        aria-label={importLabel}
-        title={importLabel}
-      >
-        <Upload className="h-4 w-4" />
-      </Button>
+      {!pickRef && (
+        <Button
+          size="icon"
+          variant="ghost"
+          className="shrink-0 text-muted-foreground hover:text-foreground"
+          onClick={pickFile}
+          aria-label={importLabel}
+          title={importLabel}
+        >
+          <Upload className="h-4 w-4" />
+        </Button>
+      )}
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
@@ -166,16 +183,10 @@ const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
           />
           {error && <p className="text-sm text-destructive">{error}</p>}
           <DialogFooter className="flex gap-2 justify-end">
-            <Button
-              variant="outline"
-              onClick={() => setOpen(false)}
-            >
+            <Button variant="outline" onClick={() => setOpen(false)}>
               {t("common.cancel")}
             </Button>
-            <Button
-              disabled={busy || !name.trim()}
-              onClick={submit}
-            >
+            <Button disabled={busy || !name.trim()} onClick={submit}>
               {busy
                 ? t("calibration.import.submitting")
                 : t("calibration.import.submit")}

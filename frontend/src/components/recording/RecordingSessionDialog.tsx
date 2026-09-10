@@ -28,6 +28,8 @@ import { useLanguage } from "@/contexts/LanguageContext";
 import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
 import LogPanel from "@/components/LogPanel";
+import SessionLiveView from "@/components/control/SessionLiveView";
+import { useRobots } from "@/hooks/useRobots";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   AlertDialog,
@@ -126,6 +128,8 @@ const RecordingSessionDialog: React.FC<{
    * (quit, discard, start failure). */
   onExit: (recorded?: RecordedInfo) => void;
 }> = ({ config: recordingConfig, onExit }) => {
+  const { records } = useRobots();
+  const recordingRobot = records[recordingConfig.robot];
   const { toast } = useToast();
   const { t } = useTranslation();
   const { language } = useLanguage();
@@ -830,7 +834,7 @@ const RecordingSessionDialog: React.FC<{
         onEscapeKeyDown={(e) => e.preventDefault()}
         onPointerDownOutside={(e) => e.preventDefault()}
         onInteractOutside={(e) => e.preventDefault()}
-        className="max-h-[92vh] max-w-2xl gap-0 overflow-y-auto p-6"
+        className="max-h-[94vh] w-[94vw] max-w-[1200px] gap-0 overflow-y-auto p-4"
         aria-describedby={undefined}
       >
         <DialogTitle className="sr-only">
@@ -848,7 +852,7 @@ const RecordingSessionDialog: React.FC<{
             {/* Two explicit exits, LIVE-only. Once the session has ended these
                 unmount — no control may imply the session is still alive. */}
             {!sessionEnded && (
-              <div className="mb-6 flex justify-end gap-3">
+              <div className="mb-3 flex justify-end gap-3">
                 <Button
                   onClick={requestDone}
                   disabled={!backendStatus.available_controls.stop_recording}
@@ -867,12 +871,17 @@ const RecordingSessionDialog: React.FC<{
               </div>
             )}
 
-            <div className="bg-card rounded-lg border border-border p-8">
+            {!sessionEnded && (
+              <div className="mb-3">
+                <SessionLiveView robot={recordingRobot} recording paused={backendStatus.paused} />
+              </div>
+            )}
+            <div className="bg-card rounded-lg border border-border p-4">
               {/* LIVE session chrome: episode HUD, phase pill, timers, Advance.
                   Replaced wholesale by the end-state UI once the session ends. */}
               {!sessionEnded && (
                 <>
-                  <div className="flex justify-end items-center gap-4 mb-6 text-sm text-muted-foreground">
+                  <div className="flex justify-end items-center gap-4 mb-2 text-sm text-muted-foreground">
                     <span
                       aria-label={t(
                         "recording.session.hud.episodeCounterLabel",
@@ -913,7 +922,7 @@ const RecordingSessionDialog: React.FC<{
                     </Button>
                   </div>
 
-                  <div className="text-center mb-6">
+                  <div className="text-center mb-2">
                     <div
                       role="status"
                       aria-live="polite"
@@ -932,7 +941,7 @@ const RecordingSessionDialog: React.FC<{
                   </div>
 
                   <div className="text-center mb-4">
-                    <div className={`text-7xl font-mono font-bold leading-none ${phaseColor.timer}`}>
+                    <div className={`text-4xl font-mono font-bold leading-none ${phaseColor.timer}`}>
                       {formatTime(phaseElapsedTime)}
                     </div>
                     <div className="text-sm text-muted-foreground mt-2">
@@ -940,7 +949,7 @@ const RecordingSessionDialog: React.FC<{
                     </div>
                   </div>
 
-                  <div className="w-full bg-muted rounded-full h-1.5 mb-8">
+                  <div className="w-full bg-muted rounded-full h-1.5 mb-3">
                     <div
                       className={`h-1.5 rounded-full transition-all duration-500 ${phaseColor.bar}`}
                       style={{

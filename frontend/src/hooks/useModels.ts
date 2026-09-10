@@ -1,25 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
-import { useApi } from "@/contexts/ApiContext";
-import { ModelItem, getModels } from "@/lib/modelsApi";
+import { useModelsData } from "@/contexts/ModelsDataContext";
 
-/** The merged /models listing (local runs + Hub repos), with a manual `refresh`
- * so a mutation (upload/delete) can re-pull immediately. Mirrors useDatasets. */
-export const useModels = () => {
-  const { baseUrl, fetchWithHeaders } = useApi();
-  const [models, setModels] = useState<ModelItem[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  const refresh = useCallback(() => {
-    setLoading(true);
-    getModels(baseUrl, fetchWithHeaders)
-      .then(setModels)
-      .catch(() => setModels([]))
-      .finally(() => setLoading(false));
-  }, [baseUrl, fetchWithHeaders]);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
-
-  return { models, loading, refresh };
-};
+/** The merged `/models` listing (local runs + imports + Hub repos).
+ *
+ * A thin read of `ModelsDataProvider`, kept as a hook because every consumer
+ * already imports it under this name. It used to own a fetch per caller, which
+ * is exactly how two surfaces reading one endpoint ended up showing different
+ * listings — the provider now owns the single fetch, its cache, and its
+ * `jobs_changed` subscription. `refresh` stays for the callers that want to
+ * re-pull after a mutation of their own. */
+export const useModels = () => useModelsData();

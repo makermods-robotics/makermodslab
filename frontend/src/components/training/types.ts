@@ -110,7 +110,7 @@ export const POLICY_TYPE_OPTIONS: {
 // Not localized, and deliberately not a `t`-taking function: `value` is a wire
 // identifier and every `display` above is a product/algorithm name (ACT,
 // SmolVLA, Diffusion Policy) that reads the same in every language. Callers
-// outside this directory (SkillCard, JobsDropdown, ModelInfoCard…) depend on
+// outside this directory (PolicyCard, JobsDropdown, ModelInfoCard…) depend on
 // this plain signature.
 export function policyTypeDisplayName(value: string): string {
   return (

@@ -33,12 +33,12 @@ import AddModelFromHubDialog from "@/components/landing/AddModelFromHubDialog";
 import ImportModelFromDiskDialog from "@/components/landing/ImportModelFromDiskDialog";
 import {
   formatCount,
-  isMineSkill,
-  skillDisplayTitle,
-} from "@/components/launchpad/SkillCard";
+  isMinePolicy,
+  policyDisplayTitle,
+} from "@/components/launchpad/PolicyCard";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import DatasetDetailDialog from "@/components/dialogs/DatasetDetailDialog";
-import SkillManageDialog from "@/components/dialogs/SkillManageDialog";
+import PolicyManageDialog from "@/components/dialogs/PolicyManageDialog";
 
 /** The backend's dataset `source` enum → its label KEY for the mono subtitle
  * line. The enum values are data; the map holds keys, not resolved copy, so it
@@ -54,7 +54,7 @@ export interface LibrarySheetProps {
   onOpenChange: (open: boolean) => void;
 }
 
-type Tab = "skills" | "datasets";
+type Tab = "policies" | "datasets";
 
 const SegButton: React.FC<{
   active: boolean;
@@ -76,9 +76,9 @@ const SegButton: React.FC<{
 
 /**
  * "My library" slide-over — a right-anchored sheet (Radix Dialog primitive) with
- * My skills / My datasets tabs. Skill rows Run on the corner robot (→ Deploy,
+ * My policies / My datasets tabs. Policy rows Run on the corner robot (→ Deploy,
  * prefilled); dataset rows open the dataset detail dialog. Footer offers a new
- * skill (→ studio Collect) and Merge datasets (the existing MergeDatasetsDialog,
+ * policy (→ studio Collect) and Merge datasets (the existing MergeDatasetsDialog,
  * reused unmodified).
  */
 const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
@@ -92,11 +92,11 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
     useModels();
   const { datasets, loading: datasetsLoading, refresh: refreshDatasets } =
     useDatasets();
-  const [tab, setTab] = useState<Tab>("skills");
+  const [tab, setTab] = useState<Tab>("policies");
   const [mergeOpen, setMergeOpen] = useState(false);
   const [detailRepo, setDetailRepo] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
-  const [manageSkill, setManageSkill] = useState<ModelItem | null>(null);
+  const [managePolicy, setManagePolicy] = useState<ModelItem | null>(null);
   const [manageOpen, setManageOpen] = useState(false);
   const [addDatasetOpen, setAddDatasetOpen] = useState(false);
   const [importDatasetOpen, setImportDatasetOpen] = useState(false);
@@ -182,8 +182,8 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
     });
   };
 
-  const mySkills = useMemo(
-    () => models.filter((m) => isMineSkill(m, username)),
+  const myPolicies = useMemo(
+    () => models.filter((m) => isMinePolicy(m, username)),
     [models, username],
   );
 
@@ -202,7 +202,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
     [videoFilteredDatasets, username],
   );
 
-  const runSkill = (model: ModelItem) => {
+  const runPolicy = (model: ModelItem) => {
     // Only a Hub-ONLY model goes through the repo-id lazy-import path; a model
     // with a local copy (`local`/`both`) deploys through its existing job
     // registry entry (the run id is its job id) — re-importing would duplicate
@@ -241,10 +241,10 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
             <div className="flex-1 overflow-y-auto p-4">
               <div className="mb-4 flex gap-1 rounded-lg border border-border bg-muted p-1">
                 <SegButton
-                  active={tab === "skills"}
-                  onClick={() => setTab("skills")}
+                  active={tab === "policies"}
+                  onClick={() => setTab("policies")}
                 >
-                  {t("library.sheet.tabs.skills")}
+                  {t("library.sheet.tabs.policies")}
                 </SegButton>
                 <SegButton
                   active={tab === "datasets"}
@@ -254,18 +254,18 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                 </SegButton>
               </div>
 
-              {tab === "skills" ? (
+              {tab === "policies" ? (
                 <div className="flex flex-col gap-2">
                   {modelsLoading ? (
                     <p className="px-1 py-6 text-center text-sm text-muted-foreground">
-                      {t("library.sheet.skills.loading")}
+                      {t("library.sheet.policies.loading")}
                     </p>
-                  ) : mySkills.length === 0 ? (
+                  ) : myPolicies.length === 0 ? (
                     <p className="px-1 py-6 text-center text-sm text-muted-foreground">
-                      {t("library.sheet.skills.empty")}
+                      {t("library.sheet.policies.empty")}
                     </p>
                   ) : (
-                    mySkills.map((m) => (
+                    myPolicies.map((m) => (
                       <div
                         key={m.id}
                         className="flex items-center gap-2 rounded-md border border-border bg-card p-3 transition-colors hover:border-ring"
@@ -273,17 +273,17 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                         <button
                           type="button"
                           onClick={() => {
-                            setManageSkill(m);
+                            setManagePolicy(m);
                             setManageOpen(true);
                           }}
                           className="min-w-0 flex-1 text-left"
-                          aria-label={t("library.sheet.skills.manage", {
-                            name: skillDisplayTitle(t, m),
+                          aria-label={t("library.sheet.policies.manage", {
+                            name: policyDisplayTitle(t, m),
                           })}
                         >
                           <div className="flex items-center gap-2">
                             <span className="truncate font-medium">
-                              {skillDisplayTitle(t, m)}
+                              {policyDisplayTitle(t, m)}
                             </span>
                           </div>
                           <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
@@ -309,10 +309,10 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                         </button>
                         <Button
                           size="sm"
-                          onClick={() => runSkill(m)}
+                          onClick={() => runPolicy(m)}
                           className="shrink-0"
-                          aria-label={t("library.sheet.skills.run", {
-                            name: skillDisplayTitle(t, m),
+                          aria-label={t("library.sheet.policies.run", {
+                            name: policyDisplayTitle(t, m),
                           })}
                         >
                           <Play className="h-3.5 w-3.5" />
@@ -360,7 +360,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
             </div>
 
             <div className="flex flex-col gap-2 border-t border-border p-4">
-              {tab === "skills" ? (
+              {tab === "policies" ? (
                 <div className="flex gap-2">
                   <Button
                     variant="ghost"
@@ -423,7 +423,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                 className="w-full gap-2"
               >
                 <Plus className="h-4 w-4" />
-                {t("library.sheet.actions.newSkill")}
+                {t("library.sheet.actions.newPolicy")}
               </Button>
               <Button
                 variant="ghost"
@@ -454,14 +454,14 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
         onStudioAction={() => onOpenChange(false)}
       />
 
-      <SkillManageDialog
-        model={manageSkill}
+      <PolicyManageDialog
+        model={managePolicy}
         open={manageOpen}
         onOpenChange={setManageOpen}
         onChanged={refreshModels}
         onRun={(m) => {
           setManageOpen(false);
-          runSkill(m);
+          runPolicy(m);
         }}
       />
 

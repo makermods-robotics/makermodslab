@@ -1,5 +1,5 @@
 /**
- * "studio" namespace — the skill studio overlay and its three panels
+ * "studio" namespace — the policy studio overlay and its three panels
  * (1 · Collect, 2 · Train, 3 · Run/Deploy) plus the shared panel primitives.
  *
  * Key tree must match the other language exactly (see i18n/catalogs.test.ts).
@@ -16,7 +16,7 @@ export default {
     // One key for the overlay's dialog aria-label AND the header eyebrow: the
     // same two words naming the same surface, so two keys could only drift.
     // The "by MakerMods" mark beside it is branding and stays English.
-    title: "Skill studio",
+    title: "Policy studio",
     // aria-label and title on the same button — one key, two attributes.
     backToMenu: "Back to main menu",
     close: "Close studio",
@@ -135,7 +135,7 @@ export default {
       hubUpload: {
         title: "Uploaded to the Hub!",
         description:
-          "Your dataset is public and shareable — reference its repo id anywhere in MakerLab, or fine-tune a skill on it from the Train panel.",
+          "Your dataset is public and shareable — reference its repo id anywhere in MakerLab, or fine-tune a policy on it from the Train panel.",
       },
     },
   },
@@ -167,6 +167,8 @@ export default {
         "Training on {{used}} of {{total}} episodes — adjust which ones from this dataset's viewer in My Library.",
       // aria-label and title on the same button.
       choose: "Choose dataset",
+      // Placeholder on the picker trigger before a dataset is chosen.
+      pick: "Pick a dataset",
       // <0> is the mono repo-id span; {{repoId}} is the typed Hub id.
       useHub: "Use <0>{{repoId}}</0> from the Hub",
       useHubHint: "Public dataset — training fetches it on demand.",
@@ -174,14 +176,8 @@ export default {
       noMatches:
         "No matching datasets. Type a full <0>org/name</0> id to use any public Hugging Face dataset.",
       hint: "Yours, or any public Hugging Face dataset.",
-      row: {
-        // Abbreviated episode count on a search result. {{episodes}} rather
-        // than {{count}}: this is a compact badge with no plural form.
-        episodes: "{{episodes}} ep",
-        // Source marker for a Hub-only row. Product name — same in every
-        // language, keyed so the two markers have one uniform shape.
-        hub: "Hub",
-      },
+      // The per-row markers (episode count / weighted / Hub) live with the
+      // picker that renders them now: `landing.datasetPicker.row.*`.
     },
     startingPoint: {
       label: "Starting point",
@@ -193,14 +189,14 @@ export default {
       // public base checkpoint rather than training random weights.
       fromBase: "Train from base",
       loading: "Loading checkpoints…",
-      finetuneHint: "Fine-tunes from this skill's latest checkpoint.",
-      hint: "Fine-tune an existing skill, or start fresh.",
+      finetuneHint: "Fine-tunes from this policy's latest checkpoint.",
+      hint: "Fine-tune an existing policy, or start fresh.",
       // The `hint` counterpart for those same foundation policies.
       foundationHint:
-        "Fine-tune an existing skill, or train from its public base.",
+        "Fine-tune an existing policy, or train from its public base.",
     },
     toast: {
-      noCheckpointsTitle: "No checkpoints in this skill",
+      noCheckpointsTitle: "No checkpoints in this policy",
       noCheckpointsBody: "It has no saved checkpoint to fine-tune from.",
       // Body is the caught error's own message and stays as thrown.
       baseFailedTitle: "Couldn't load the starting point",
@@ -213,23 +209,48 @@ export default {
   },
 
   // ── Panel 3 · Run (Deploy) ────────────────────────────────────────────────
+  // The post-coaching handoff, a sibling of CollectHandoff on the Launchpad:
+  // a session that produced data puts the next step where the operator LANDS.
+  coachHandoff: {
+    saved_one: "{{count}} correction saved to <0>{{dataset}}</0>",
+    saved_other: "{{count}} corrections saved to <0>{{dataset}}</0>",
+    next: "Merge them with <0>{{dataset}}</0> — what this skill was last trained on — then fine-tune it on the result. Training takes one dataset, so the merge isn't optional.",
+    manual:
+      "To turn these into a better policy, merge them with the dataset this checkpoint was <0>last</0> trained on, then fine-tune from the same checkpoint on the merged result. Both steps are in the dataset library and the training panel.",
+    action: "Merge & fine-tune",
+  },
+
   deploy: {
     title: "Run",
-    picker: {
-      placeholder: "Pick a skill",
-      loading: "Loading skills…",
-      empty: "No trained or imported skills yet",
-      // aria-label and title on the same button.
-      import: "Import skill",
-      hint: "Pick a trained checkpoint or an imported Hub skill to run on your robot.",
+    // The panel's entry control — the opener that slides the run form open,
+    // matching collect.entry / train.entry.
+    entry: "Run a policy",
+    policy: {
+      label: "Policy *",
     },
-    // Where a skill lives. Rendered as a small marker beside its name.
+    picker: {
+      placeholder: "Pick a policy",
+      loading: "Loading policies…",
+      empty: "No trained or imported policies yet",
+      // Shown INSTEAD of `empty` when the listing could not be fetched —
+      // an outage must not read as "you have no policies".
+      error: "Couldn’t load policies. Check the server and try again.",
+      // The "failed run" row badge lives with the picker that renders it now:
+      // `landing.modelPicker.failedBadge`.
+      hubDegraded:
+        "Hub unreachable — showing your local policies and the last Hub listing.",
+      // aria-label and title on the same button.
+      import: "Import policy",
+    },
+    // Where a policy lives. Rendered as a small marker beside its name.
     source: {
       hub: "hub",
       local: "local",
       both: "local · hub",
     },
-    intro: "Run this skill on your robot, then start inference.",
+    // The run form's one-line brief, in the slot and voice Train uses.
+    intro:
+      "Pick a policy and its checkpoint, set how long it runs, and check the cameras — then start.",
     noRobot:
       "Select a robot to run on — use the robot menu in the top-right corner of this window.",
     // <0> wraps the robot name; {{gap}} is the rendered follower-scoped setup
@@ -239,9 +260,77 @@ export default {
       "<0>{{name}}</0> {{gap}}. Open Robot settings before running inference. (Inference only uses the follower arm — leader setup isn't needed.)",
     robotNotReady_other:
       "<0>{{name}}</0> {{gap}}. Open Robot settings before running inference. (Inference only uses the follower arms — leader setup isn't needed.)",
+    // Coaching's variant: it teleoperates through the leader, so {{gap}} here
+    // is the ALL-arms gap and the parenthetical says why the leader matters.
+    robotNotReadyCoach_one:
+      "<0>{{name}}</0> {{gap}}. Open Robot settings before running inference. (Coaching also uses the leader arm — you teleoperate with it during takeovers, so it needs a port and a calibration.)",
+    robotNotReadyCoach_other:
+      "<0>{{name}}</0> {{gap}}. Open Robot settings before running inference. (Coaching also uses the leader arms — you teleoperate with them during takeovers, so they need a port and a calibration.)",
+    // Which shape the run takes. Option VALUES ("single"/"eval"/"coach") are
+    // identifiers the frontend switches on — only these labels are translated.
+    // `eval` is no longer offered as a verb in the panel; its copy stays for
+    // the scored-evaluation path that other entry points still drive.
+    runMode: {
+      label: "What do you want to do with this skill?",
+      // Each row states its COMMITMENT before it is chosen: these are not
+      // interchangeable menu items, and picking wrong is discovered at the arm.
+      single: {
+        title: "Run",
+        what: "One attempt, then stop.",
+        commitment: "hands off",
+      },
+      eval: {
+        title: "Score it",
+        what: "Repeat the task, and you judge every attempt into a success rate.",
+        commitment:
+          "hands on between episodes — you reset the scene and score each one",
+      },
+      coach: {
+        title: "Human in the loop",
+        what: "Take over when it's about to fail. Each rescue is saved as training data you can fine-tune on.",
+        commitment:
+          "take control of the follower with the leader when it's failing, and gather data",
+      },
+    },
+    // WHERE the policy runs — the segmented control above the tab strip. The
+    // option VALUES ("local"/"remote") are identifiers the panel switches on;
+    // only these labels are translated.
+    runsOn: {
+      label: "Runs on",
+      local: "This machine",
+      remote: "Remote GPU",
+      localHint: "This machine loads the checkpoint and drives the arm.",
+      remoteHint:
+        "The GPU runs the policy. This machine controls the arm.",
+    },
+    // Coaching-only parameters, shown when run mode is "coach".
+    coaching: {
+      correctionsLabel: "Corrections to collect",
+      correctionsHint:
+        "The session ends once you've saved this many. You can stop early at any point and keep everything recorded so far.",
+      datasetLabel: "Corrections dataset",
+      datasetPlaceholder: "e.g., fold_shirt_fixes",
+      // Stand-in for the typed half of the name while the box is empty.
+      datasetFallback: "correction",
+      // <0> wraps {{prefix}}, the literal on-disk name — an identifier, so it
+      // stays in the Latin script whatever the language.
+      datasetHint:
+        "Saved as <0>{{prefix}}</0> plus a timestamp. Leave it empty to use the greyed name, taken from the dataset this model was trained on; anything you type replaces it, and clearing the box brings it back.",
+      leaderLabel: "Leader arm",
+      leaderNoRobot: "Select a robot above.",
+      leaderMissing:
+        "This robot has no leader arm configured. Add its port and calibration in Robot settings — coaching can't run without one.",
+      // {{configs}} is one or two calibration file names — data, never translated.
+      leaderFrom:
+        "Taken from {{name}}: {{configs}}. You'll teleoperate with it during takeovers.",
+      bimanualWarning:
+        "Bimanual: park the leader arms near the robot's pose before taking over. With two arms the robot moves to meet the leaders rather than the other way round, so a takeover from across the bench sweeps both arms through the scene. Takeovers that would travel too far are refused.",
+    },
     checkpoint: {
       label: "Checkpoint",
-      none: "No checkpoints available for this skill yet.",
+      none: "No checkpoints available for this policy yet.",
+      // Placeholder on the disabled dropdown shown before a policy is picked.
+      pickPolicyFirst: "Pick a policy first",
     },
     // Checkpoint/robot arm-count mismatch. Each branch is one complete
     // sentence pair so word order is the translator's to choose. <0> is the
@@ -257,11 +346,40 @@ export default {
       label: "Task description",
       placeholder: "e.g., pick up the red block",
       // {{policyType}} is the policy identifier (act, smolvla, …) — data.
-      hint: "This policy is language-conditioned ({{policyType}}).",
+      // The field is always shown, so the helper answers "is this even read?"
+      // in all three states: no policy picked yet, conditioned, not conditioned.
+      hint: "Task for {{policyType}}.",
+      hintUnknown:
+        "Select a policy to check task support.",
+      hintNotConditioned:
+        "{{policyType}} does not use a task.",
+      // Appended to `hint` when the task was auto-filled from the checkpoint's
+      // own training dataset. Leading space is added by the caller.
+      prefilled: "Filled in from the dataset it was trained on.",
+      // Placeholder when the lineage offered no task at all. Never an invented
+      // example: a fake task greyed into the slot the REAL inherited one uses
+      // is indistinguishable from one.
+      placeholderNone: "Describe the task",
+      // Shown for a policy that does NOT read the task. Coaching still saves it.
+      hintCoach:
+        "Saved with every correction, so you can tell later what this session was teaching.",
+      leaveEmpty:
+        "Leave blank to use the suggested task.",
+      multiTaskHint_one:
+        "Its training dataset has {{count}} task — pick the one you're running:",
+      multiTaskHint_other:
+        "Its training dataset has {{count}} tasks, most common first — pick the one you're running:",
     },
     duration: {
       label: "Max duration (s)",
       hint: "Per episode. An episode that runs this long without you calling it a success counts as a failure.",
+      singleHint: "The run stops after this long.",
+      coachHint:
+        "Per attempt. An attempt that runs this long without a rescue or a finish ends on its own.",
+      // Remote only, where 0 is the backend's own unbounded contract rather
+      // than a run that ends the instant it starts.
+      remoteHint: "0 runs until you stop it.",
+      remoteUnbounded: "Runs until you stop it.",
     },
     episodes: {
       label: "Episodes",
@@ -270,19 +388,30 @@ export default {
       evalHint:
         "Evaluation run: {{episodes}} episodes with a reset between each, scored into an accuracy.",
       hint: "Leave at 1 for a single run. More than 1 starts a scored evaluation.",
+      scoreHint: "How many episodes to score into the accuracy.",
     },
     engine: {
       label: "Inference engine",
       // Option labels only — the submitted values ("sync" / "rtc") are
       // identifiers the backend parses and are never translated.
-      sync: "Sync (default)",
-      rtc: "RTC — experimental, smoother control",
-      syncHint:
-        "One policy forward per control step. The arm pauses briefly between action chunks.",
-      rtcHint:
-        "Real-Time Chunking overlaps inference with motion, removing the pause between action chunks. It also changes how actions are generated — compare against Sync before trusting a result.",
+      sync: "Sync",
+      rtc: "Real-time chunking",
+      // The two hints live in `remoteInference.form.engine` — one field, one
+      // pair of explanations, whichever machine the policy runs on.
+      // Shown under the picker whenever the selected checkpoint's architecture
+      // isn't KNOWN to support RTC, which also disables the option — one rule
+      // for a local rollout and a remote run alike. "isn't available" covers
+      // both halves of that on purpose: a checkpoint the server ruled out and
+      // one nobody has classified are the same answer here.
+      rtcUnavailable:
+        "Real-Time Chunking isn't available for this checkpoint's policy.",
+      // Shown INSTEAD of the picker in coaching mode, which is pinned to sync.
+      coachingNote:
+        "Coaching always uses the Sync engine. Real-Time Chunking makes the arm jump back toward its pre-correction pose when the policy resumes, which isn't safe with a hand nearby.",
     },
     cameras: {
+      automaticHint: "Inputs match automatically. Edit cameras in Robot settings.",
+      unused: "Not used by this policy",
       title: "Cameras",
       loading: "Reading policy config…",
       // {{error}} is the backend's own message and is shown as sent.
@@ -297,14 +426,32 @@ export default {
       disconnected: "Disconnected — reconnect it before starting",
       select: "Select a camera",
       robotHasNone: "This robot has no cameras — add them in Robot settings",
+      // Empty state of the read-only camera list when no robot is selected.
+      noRobot: "Select a robot to see its cameras.",
+      // A camera the checkpoint names that the robot has nothing matching.
+      // <0> emphasises the name; the name itself is DATA (the robot record's
+      // own key), interpolated, never translated.
+      unmatched:
+        "The policy expects camera <0>{{name}}</0> but this robot has no camera named “{{name}}” — rename one in Robot settings.",
+      // The same fact for a REMOTE run, which has a role picker and therefore a
+      // different remedy: a robot camera's name is its identity and is never
+      // renamed to suit a checkpoint.
+      unmatchedRemote:
+        "Add camera <0>{{name}}</0> in Robot settings.",
+      // Matched by name, but the robot captures at a different size than the
+      // checkpoint trained at. All four numbers are raw pixel dimensions.
+      resolutionMismatch:
+        "<0>{{name}}</0> is set to {{robotWidth}}×{{robotHeight}} in Robot settings, but the policy trained at {{policyWidth}}×{{policyHeight}} — the run captures at the policy's size.",
     },
     thumbnail: {
       // The preview tile's two placeholder states.
       released: "Released",
       noPreview: "No preview",
     },
+    // ACT's action-selection knob. No longer behind an Advanced disclosure —
+    // it takes the slot the engine select leaves empty for ACT, which is why
+    // the disclosure's own summary line is gone.
     advanced: {
-      summary: "Temporal ensembling for ACT",
       actionSelection: "Action selection",
       temporalEnsemble: "Temporal ensembling",
       temporalEnsembleHint:
@@ -316,10 +463,44 @@ export default {
       coeffHint:
         "Weights are exp(-coeff × age): higher favours the newest prediction, lower averages more evenly. The ACT paper uses {{value}}.",
     },
+    // The run-type tab strip above the cameras. The tab labels are
+    // `runMode.<mode>.title`; this is the strip's accessible name.
+    tabs: {
+      groupLabel: "What you do",
+    },
+    // Why a verb can't run, keyed so deployGuards.ts stays pure prose-free.
+    blocked: {
+      noRobot: "Select a robot above.",
+      followerNotReady: "This robot's follower arm isn't ready.",
+      noCheckpoint: "Pick a policy and a checkpoint.",
+      armMismatch: "This checkpoint doesn't match the robot's arm count.",
+      camerasUnbound: "Bind every camera the checkpoint expects.",
+      temporalEnsemble: "Fix the temporal-ensemble setting.",
+      runInProgress: "A run is already in progress.",
+      // Local runs only: 0 is the remote run's "until you stop me" and a local
+      // run that ends the instant it starts.
+      durationRequired: "Set a max duration of at least 1 second.",
+      taskRequired:
+        "Describe the task first — this policy is language-conditioned.",
+      leaderMissing:
+        "Coaching needs a leader arm — add its port and calibration in Robot settings.",
+      coachTaskRequired:
+        "Describe the task first — it's saved with every correction.",
+      // Rarely seen: the panel answers this one with the probe's own sentence
+      // (remoteInference.transport.summary.*), which names WHICH step is the
+      // one to fix. This is the fallback wording if that is ever shown alone.
+      transportNotReady: "The remote transport isn't ready yet.",
+      remoteArmUnsupported:
+        "Remote runs need a single SO-101 arm. Bimanual rigs and the CAN arms aren't supported yet.",
+      remoteEngineUnsupported:
+        "Real-time chunking only works for flow policies. Switch the chunk engine back to Adaptive sync.",
+    },
     actions: {
       start: "Start inference",
       // {{episodes}} rather than {{count}} — the branch is picked in code.
       startEval: "Start evaluation ({{episodes}})",
+      // {{corrections}} rather than {{count}} — same reason as startEval.
+      startCoach: "Start coaching ({{corrections}})",
       starting: "Starting…",
       checking: "Checking…",
       stop: "Stop inference",
@@ -328,16 +509,16 @@ export default {
     toast: {
       // Every *Failed title below is paired with the caught error's own
       // message, which stays exactly as thrown.
-      loadSkillFailed: "Couldn't load the skill",
+      loadPolicyFailed: "Couldn't load the policy",
       startFailed: "Couldn't start inference",
       stoppingTitle: "Stopping inference",
       stoppingBody: "The rollout is winding down.",
       stopFailed: "Stop failed",
     },
     milestone: {
-      title: "First skill deployed!",
+      title: "First policy deployed!",
       description:
-        "Your robot just ran a trained policy. Come back here anytime to redeploy it, swap checkpoints, or run a different skill.",
+        "Your robot just ran a trained policy. Come back here anytime to redeploy it, swap checkpoints, or run a different policy.",
     },
   },
 } as const;

@@ -18,6 +18,8 @@ export default {
     renameTooltip: "重命名",
     deleteAria: "删除所选配置",
     deleteTooltip: "删除",
+    moreAria: "更多操作",
+    importShort: "导入",
     rename: {
       title: "重命名配置",
       description:

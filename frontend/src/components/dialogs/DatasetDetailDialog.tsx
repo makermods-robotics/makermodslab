@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -30,6 +31,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
+import { lastFramePosition, previewPosition } from "@/lib/episodePreview";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import JointPositionChart from "@/components/dialogs/JointPositionChart";
 import EpisodeReplayPanel from "@/components/dialogs/EpisodeReplayPanel";
@@ -108,6 +110,20 @@ const EpisodeViewer: React.FC<{
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [videoErrors, setVideoErrors] = useState<Record<string, boolean>>({});
+  // True while the viewer sits at `previewT` and the user hasn't chosen a
+  // position yet — pressing play rewinds to the episode's real start rather
+  // than resuming from the preview frame, so the first half-second is never
+  // skipped. Cleared by an explicit scrub, and by the first play.
+  const [parkedAtPreview, setParkedAtPreview] = useState(true);
+  // True once playback has reached this episode's end and auto-stopped, so
+  // the next play restarts the episode instead of resuming. Explicit state
+  // rather than comparing currentTime against the end: the corrective seek in
+  // handlePrimaryTimeUpdate fires a timeupdate carrying the frame's ACTUAL
+  // presentation time, and a seek resolves to the frame at-or-before its
+  // target — so that value can land just under any threshold, leaving a
+  // float comparison reading "not at the end" and replay silently resuming
+  // for a single frame instead of restarting.
+  const [atEpisodeEnd, setAtEpisodeEnd] = useState(false);
 
   const episode = episodes.find((e) => e.episode_index === selectedEpisode) ?? null;
   const videoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
@@ -126,6 +142,10 @@ const EpisodeViewer: React.FC<{
     (camera: string) => episode?.video_offsets?.[camera]?.from ?? 0,
     [episode],
   );
+  // Positions within this episode's slice of the packed v3.0 mp4. The
+  // geometry — and why neither one is the episode's exact start or end — is
+  // documented in lib/episodePreview.ts.
+  const previewT = episode ? previewPosition(episode.duration) : 0;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -178,6 +198,8 @@ const EpisodeViewer: React.FC<{
 
   useEffect(() => {
     setPlaying(false);
+    setParkedAtPreview(true);
+    setAtEpisodeEnd(false);
     setCurrentTime(0);
     setVideoErrors({});
   }, [selectedEpisode]);
@@ -191,24 +213,38 @@ const EpisodeViewer: React.FC<{
       forEachVideo((v) => v.pause());
       setPlaying(false);
     } else {
+      // Rewind to this episode's real start before playing, in two cases.
+      //
+      // Parked at the preview frame: that position is half a second in (see
+      // previewT), and playing from there would silently skip the opening of
+      // every episode.
+      //
       // Parked at (or past) the episode's own end: the underlying mp4 keeps
       // going into the next episode's frames past this point (see the
       // v3.0-packing note on offsetFor above), so resuming here would spill
       // into that footage before the boundary check in
       // handlePrimaryTimeUpdate catches up. Loop back to this episode's
       // start instead.
-      if (episode && currentTime >= episode.duration - 0.02) {
+      // `atEpisodeEnd` covers auto-stop; the position test covers arriving
+      // at the end by scrubbing, which clears both flags. Without it, play
+      // from a fully-right scrubber runs forward into the NEXT episode's
+      // packed footage until the ~4Hz boundary check catches up.
+      const atEnd =
+        episode && currentTime >= lastFramePosition(episode.length, episode.duration);
+      if (episode && (parkedAtPreview || atEpisodeEnd || atEnd)) {
         for (const [camera, v] of Object.entries(videoRefs.current)) {
           if (v) v.currentTime = offsetFor(camera);
         }
         setCurrentTime(0);
       }
+      setParkedAtPreview(false);
+      setAtEpisodeEnd(false);
       forEachVideo((v) => {
         v.play().catch(() => {});
       });
       setPlaying(true);
     }
-  }, [playing, forEachVideo, episode, currentTime, offsetFor]);
+  }, [playing, forEachVideo, episode, currentTime, offsetFor, parkedAtPreview, atEpisodeEnd]);
 
   // Drives currentTime/scrubber from the primary camera's raw (file-relative)
   // playback position, and is the one place that notices the episode's own
@@ -216,12 +252,38 @@ const EpisodeViewer: React.FC<{
   // underlying file usually keeps going into the next episode's frames.
   const handlePrimaryTimeUpdate = (rawTime: number) => {
     if (!episode) return;
+    // Parked at the preview frame: the seek that painted it fires a
+    // timeupdate at previewT, but the scrubber must keep reading 0 — that is
+    // where play actually begins (handlePlayPause rewinds to the episode's
+    // start). Reporting 0.5s here would misstate where playback would resume,
+    // and drag the joint chart's cursor off the episode's start with it.
+    // Also frozen once the episode has ended: the corrective seek below fires
+    // a further timeupdate, and letting it through would drag the scrubber
+    // back off the end it just settled on.
+    if (parkedAtPreview || atEpisodeEnd) return;
     const offset = offsetFor(primaryCamera);
     const t = Math.max(0, Math.min(episode.duration, rawTime - offset));
     setCurrentTime(t);
-    if (rawTime >= offset + episode.duration - 0.02) {
+    // `timeupdate` only fires at roughly 4Hz, so by the time this notices the
+    // episode is over, playback has already run up to ~250ms — several
+    // frames — into the NEXT episode's footage, and pausing here would freeze
+    // the viewer on a frame that isn't this episode's. Pause, then snap back
+    // onto this episode's final frame. The target is that frame's own
+    // timestamp: a boundary, so an engine may resolve it to the last or
+    // second-to-last frame, and both are inside this episode — which is the
+    // only property that matters here.
+    // `playing` gates the snap so it can't re-trigger itself: the seek below
+    // fires another timeupdate that is still past the threshold, and without
+    // this the handler would re-pause and re-seek on every one of them.
+    if (playing && rawTime >= offset + lastFramePosition(episode.length, episode.duration)) {
       forEachVideo((v) => v.pause());
+      for (const [camera, v] of Object.entries(videoRefs.current)) {
+        if (v) v.currentTime =
+          offsetFor(camera) + lastFramePosition(episode.length, episode.duration);
+      }
+      setCurrentTime(episode.duration);
       setPlaying(false);
+      setAtEpisodeEnd(true);
     }
   };
 
@@ -235,10 +297,24 @@ const EpisodeViewer: React.FC<{
   const handlePrimaryEnded = () => {
     forEachVideo((v) => v.pause());
     setPlaying(false);
+    // Same contract as the boundary check above — however playback stopped,
+    // the next play restarts the episode rather than resuming from the end,
+    // and the transport settles at the end rather than wherever the last
+    // ~4Hz timeupdate happened to land (which reads as "12.7 / 12.9" with the
+    // scrubber and joint cursor stuck short of the end).
+    setCurrentTime(episode?.duration ?? 0);
+    setAtEpisodeEnd(true);
   };
 
   const handleSeek = (t: number) => {
-    const clamped = Math.max(0, Math.min(episode?.duration ?? 0, t));
+    // Clamped to the last frame, not to `duration`: `duration` IS the
+    // boundary shared with the next episode, so dragging the scrubber fully
+    // right would land on the same coin-flip seek that episodePreview.ts
+    // exists to keep the viewer off.
+    const end = episode ? lastFramePosition(episode.length, episode.duration) : 0;
+    const clamped = Math.max(0, Math.min(end, t));
+    setParkedAtPreview(false);
+    setAtEpisodeEnd(false);
     for (const [camera, v] of Object.entries(videoRefs.current)) {
       if (v) v.currentTime = offsetFor(camera) + clamped;
     }
@@ -382,7 +458,18 @@ const EpisodeViewer: React.FC<{
                     muted
                     playsInline
                     onLoadedMetadata={(e) => {
-                      e.currentTarget.currentTime = offsetFor(camera);
+                      // Only claim the position if the viewer is still parked.
+                      // These are Range-backed (sometimes Hub-fetched) videos
+                      // and play is enabled as soon as `episode` resolves, so
+                      // a user can press play or scrub BEFORE metadata lands.
+                      // A currentTime write before metadata only sets the
+                      // default start position, which this would overwrite —
+                      // starting playback 0.5s in and skipping the opening,
+                      // the exact bug previewT exists to avoid. With several
+                      // cameras only the slow ones would jump, desyncing the
+                      // grid for the rest of the episode.
+                      e.currentTarget.currentTime =
+                        offsetFor(camera) + (parkedAtPreview ? previewT : currentTime);
                     }}
                     onTimeUpdate={
                       camera === primaryCamera
@@ -500,6 +587,31 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
 
   const [episodes, setEpisodes] = useState<EpisodeSummary[] | null>(null);
   const [episodesLoading, setEpisodesLoading] = useState(true);
+
+  // Per-weight training-mix tiers, newest-lever-first. Share is measured in
+  // FRAMES (length x weight), not episodes: episodes differ in length, so an
+  // episode count would misstate how much of training each tier actually is.
+  // Returns a single tier for an unweighted dataset, which the panel uses as
+  // its "nothing to show" signal.
+  const weightTiers = useMemo(() => {
+    if (!episodes || episodes.length === 0) return [];
+    const byWeight = new Map<number, { episodes: number; frames: number }>();
+    for (const ep of episodes) {
+      const weight = ep.sampling_weight ?? 1;
+      const tier = byWeight.get(weight) ?? { episodes: 0, frames: 0 };
+      tier.episodes += 1;
+      tier.frames += ep.length * weight;
+      byWeight.set(weight, tier);
+    }
+    const total = [...byWeight.values()].reduce((sum, t) => sum + t.frames, 0);
+    return [...byWeight.entries()]
+      .sort((a, b) => b[0] - a[0])
+      .map(([weight, t]) => ({
+        weight,
+        episodes: t.episodes,
+        share: total > 0 ? Math.round((t.frames / total) * 100) : 0,
+      }));
+  }, [episodes]);
   const [cameras, setCameras] = useState<string[]>([]);
   const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -678,6 +790,41 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                   </p>
                 )}
               </div>
+              {/* Training mix. Rendered only for a weighted dataset, and only
+                  here — the share is computed from the episode list this panel
+                  already holds, so it needs no extra request and no prop
+                  threading through DatasetInfoCard (which only receives totals).
+
+                  The SHARE is the number worth showing: "×3" is the lever, but
+                  "60% of sampled frames" is the thing being tuned. Frames, not
+                  episodes, because episodes differ in length. */}
+              {weightTiers.length > 1 ? (
+                <div className="mb-2 rounded-md border border-border bg-muted/40 p-2">
+                  <div className="mb-1 text-[11px] font-medium text-foreground">
+                    {t("dialogs.datasetDetail.mixTitle")}
+                  </div>
+                  <div className="space-y-0.5">
+                    {weightTiers.map((tier) => (
+                      <div
+                        key={tier.weight}
+                        className="flex items-baseline justify-between gap-2 font-mono text-[10.5px] tabular-nums"
+                      >
+                        <span className={tier.weight !== 1 ? "text-info" : "text-muted-foreground"}>
+                          {t("dialogs.datasetDetail.mixTier", {
+                            weight: String(tier.weight),
+                            count: tier.episodes,
+                          })}
+                        </span>
+                        <span className="text-muted-foreground">
+                          {t("dialogs.datasetDetail.mixShare", {
+                            percent: tier.share,
+                          })}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               <div className="min-h-0 flex-1 overflow-y-auto">
                 {episodes && episodes.length > 0 ? (
                   <div className="space-y-0.5">
@@ -713,6 +860,22 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                               index: ep.episode_index,
                             })}
                           </span>
+                          {/* Oversampled episodes only. A weight of 1 is the
+                              default for every episode ever recorded, so showing
+                              "×1" on every row would be noise on the common case.
+                              `?? 1` because an older backend omits the field. */}
+                          {(ep.sampling_weight ?? 1) !== 1 ? (
+                            <span
+                              className="shrink-0 font-mono text-[10.5px] tabular-nums text-info"
+                              title={t("dialogs.datasetDetail.weightTitle", {
+                                weight: String(ep.sampling_weight ?? 1),
+                              })}
+                            >
+                              {t("dialogs.datasetDetail.weightTimes", {
+                                weight: String(ep.sampling_weight ?? 1),
+                              })}
+                            </span>
+                          ) : null}
                           <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-muted-foreground">
                             {ep.duration.toFixed(1)}s
                           </span>
@@ -755,7 +918,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                 className="w-full gap-2"
               >
                 <Boxes className="h-4 w-4" />
-                {t("dialogs.datasetDetail.trainSkill")}
+                {t("dialogs.datasetDetail.trainPolicy")}
               </Button>
             </div>
           </div>

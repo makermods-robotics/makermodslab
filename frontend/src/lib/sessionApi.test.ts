@@ -111,6 +111,12 @@ describe("formatSessionHeld", () => {
     expect(formatSessionHeld(t, heldError("auto_calibration"))).toBe(
       "The robot is busy — an auto-calibration is running. Stop it first."
     );
+    expect(formatSessionHeld(t, heldError("hosting"))).toBe(
+      "The robot is busy — remote-teleop hosting is running. Stop it first."
+    );
+    expect(formatSessionHeld(t, heldError("remote_teleoperation"))).toBe(
+      "The robot is busy — remote teleoperation is running. Stop it first."
+    );
   });
 
   it("falls back to the generic line for an unnamed or unknown holder", () => {

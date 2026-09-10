@@ -48,7 +48,7 @@ If you remember nothing else, remember the test in [§6](#6-is-this-string-copy-
 // 1. Add the English text to the namespace catalog for your area.
 //    frontend/src/i18n/locales/en/launchpad.ts
 export default {
-  hero: { searchLabel: "Search skills" },
+  hero: { searchLabel: "Search policies" },
 } as const;
 
 // 2. Add the same key to every other language.
@@ -128,7 +128,7 @@ calibration   calibration library
 jobs          job cards, dropdowns, libraries
 library       dataset library, library sheet, delete semantics
 landing       hub dialogs, pickers, auth, info cards
-dialogs       dataset detail, replay, teleop, skill dialogs
+dialogs       dataset detail, replay, teleop, policy dialogs
 inference     the inference session dialog
 training      configurator, config cards, monitoring
 pages         NotFound, Teleoperation
@@ -146,14 +146,14 @@ These are the 90% you can convert without thinking hard.
 **Plain JSX text**
 
 ```diff
-- <p>No skills match your search.</p>
-+ <p>{t("launchpad.skills.empty")}</p>
+- <p>No policies match your search.</p>
++ <p>{t("launchpad.policies.empty")}</p>
 ```
 
 **Attributes** — `aria-label`, `title`, `alt`, `placeholder`
 
 ```diff
-- <input placeholder="Clean my desk…" aria-label="Search skills" />
+- <input placeholder="Clean my desk…" aria-label="Search policies" />
 + <input
 +   placeholder={t("launchpad.hero.searchPlaceholder")}
 +   aria-label={t("launchpad.hero.searchLabel")}
@@ -206,8 +206,8 @@ Keep the array at module scope but store **keys**, and resolve during render:
 <!-- prettier-ignore -->
 ```tsx
 const STEPS = [
-  { labelKey: "launchpad.newSkill.steps.collect.label",
-    subKey:   "launchpad.newSkill.steps.collect.sub" },
+  { labelKey: "launchpad.newPolicy.steps.collect.label",
+    subKey:   "launchpad.newPolicy.steps.collect.sub" },
 ] as const;
 
 const { t } = useTranslation();
@@ -356,23 +356,23 @@ comparison), do not translate it in place. Split it:
 
 ```ts
 /** UNTRANSLATED. Search matches against this, so "sock" keeps working in any language. */
-export function skillTitle(m: ModelItem): string { … }
+export function policyTitle(m: ModelItem): string { … }
 
 /** What the user reads. */
-export function skillDisplayTitle(t: TFunction, m: ModelItem): string { … }
+export function policyDisplayTitle(t: TFunction, m: ModelItem): string { … }
 ```
 
-`SkillSlider`'s filter then matches the English title **and** the translated one — a
+`PolicySlider`'s filter then matches the English title **and** the translated one — a
 strict superset, so nothing that matched before stops matching:
 
 <!-- prettier-ignore -->
 ```tsx
-skillTitle(m).toLowerCase().includes(q) ||
-skillDisplayTitle(t, m).toLowerCase().includes(q) ||
+policyTitle(m).toLowerCase().includes(q) ||
+policyDisplayTitle(t, m).toLowerCase().includes(q) ||
 m.id.toLowerCase().includes(q)
 ```
 
-Same pattern: `skillAuthorLabel` / `skillDisplayAuthorLabel`.
+Same pattern: `policyAuthorLabel` / `policyDisplayAuthorLabel`.
 
 > Translating a title that search reads is the classic way to "only change pixels" and
 > still break a feature. Check every consumer before you translate a shared helper.
@@ -456,7 +456,7 @@ stylesheet:
 ```tsx
 <div
   className="media-slot"
-  data-label={t("launchpad.skills.previewPlaceholder")}
+  data-label={t("launchpad.policies.previewPlaceholder")}
 />
 ```
 
@@ -495,6 +495,16 @@ Real examples from this codebase, all deliberately untranslated:
 | `SPACE`, `ENTER`, `DEL` legends                                                      | Names of physical keys.                                                                                                                                                   |
 | `HF_HUB_OFFLINE`, `Torque_Limit`, `job.read`                                         | Identifiers quoted inside a sentence. Keep them literal inside the `<Trans>` slot.                                                                                        |
 | Product names — MakerMods, LeRobot, Hugging Face, W&B, ACT, SmolVLA, GitHub, Discord | Names.                                                                                                                                                                    |
+
+**Manifest-provided prose is backend text.** The arms manifest (`GET /api/v1/arms`, read
+through `useArms()`) carries each arm family's `label` and its zero-pose instruction text.
+Like every other server string, that prose renders in English in every language. The
+built-ins are localized through per-id catalog **overrides** — `robot.corner.armType.<id>`,
+`landing.createRobot.armTypes.<id>.*`, `robotConfig.calib.zeroPose.instructionsFor.<id>.*`,
+`robotConfig.port.detectLiveFor.<id>` — resolved with `t(key, { defaultValue })` so an id the
+catalog does not know (an extension's arm) falls through to the manifest text. Add an
+override when a family ships in the core; never translate the manifest's own strings, and
+never add a catalog entry for an id that is not a built-in.
 
 **The label/value split.** Where a constant currently serves as both, split it — translate
 the label, keep the value:
@@ -669,7 +679,8 @@ With DevTools open, do the same action in both languages and diff:
 - **Network** — request bodies and headers must be identical.
 - **Application → Local Storage** — the only difference is `makerlab:language`.
 - **On disk** — after recording a dataset or saving a robot config while in another
-  language, files under `~/.cache/huggingface/lerobot/` must still be pure ASCII.
+  language, files under `~/.makermods/makermodslab/` (robot records, ports) and
+  `~/.cache/huggingface/lerobot/` (datasets, calibrations) must still be pure ASCII.
 
 ---
 

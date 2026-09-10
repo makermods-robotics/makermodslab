@@ -71,6 +71,17 @@ export default {
     owner: "Owner",
     image: "Image",
     updated: "Updated",
+    base: "Base",
+  },
+  // What a run started FROM. The chip says what the run IS at a glance; a run
+  // started from random weights gets none, because a chip on every card carries
+  // no information. `foundation` is deliberately chip-less too: it is the
+  // DEFAULT starting point for the VLA policies, not a choice the user made.
+  kind: {
+    finetune: "Fine-tune",
+    resume: "Continuation",
+    // Shown in the Base row when a fine-tune's source could not be named.
+    unknownBase: "an uploaded checkpoint",
   },
   // Card action controls, shared between the job card, the model card and the
   // Hub model card. Where an aria-label and a title carry the same words they
@@ -160,6 +171,9 @@ export default {
     // {{step}} arrives pre-formatted (toLocaleString) — deliberately not an
     // i18next `count`, which would try to re-derive a plural from a string.
     resumeStep: "Resume from step {{step}}",
+    // {{parent}} is a run number like "#33" — data, formatted by the caller.
+    continues: "\u21b3 continues {{parent}}",
+    continuesTitle: "Continues an earlier run. Chain: {{chain}}",
     resumeHint:
       "Opens the training form to continue from this checkpoint. Compute defaults to where this checkpoint's run executed, and can be retargeted before you start.",
     // {{target}} is the pip install target the backend named — data.
@@ -182,9 +196,9 @@ export default {
     },
   },
   importModal: {
-    title: "Import a skill",
+    title: "Import a policy",
     description:
-      "Point at a local directory or a Hugging Face repo. It appears in your skills, ready to run inference on.",
+      "Point at a local directory or a Hugging Face repo. It appears in your policies, ready to run inference on.",
     sourceLabel: "Local path or Hugging Face repo id",
     // The example path and repo id are illustrative data — keep them verbatim
     // in every language; only the joining word is translated.
@@ -325,15 +339,16 @@ export default {
     },
   },
   modelsLibrary: {
-    title: "Your skills",
-    importSkill: "Import skill",
-    searchPlaceholder: "Search skills",
-    // Names the "Import skill" button above it — keep the two in step.
+    title: "Your policies",
+    importPolicy: "Import policy",
+    searchPlaceholder: "Search policies",
+    // Names the "Import policy" button above it — keep the two in step.
     empty:
-      "No skills yet. Train one, or use Import skill to add one from the Hub or a local folder.",
+      "No policies yet. Train one, or use Import policy to add one from the Hub or a local folder.",
     noMatch: "No models match.",
     filters: {
       all: "All",
+      trained: "Trained",
       imported: "Imported",
       uploaded: "Uploaded",
     },

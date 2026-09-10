@@ -22,6 +22,9 @@ export default {
     renameTooltip: "Rename",
     deleteAria: "Delete selected config",
     deleteTooltip: "Delete",
+    // The overflow menu that holds rename, import and delete.
+    moreAria: "More actions",
+    importShort: "Import",
     rename: {
       title: "Rename config",
       description:
