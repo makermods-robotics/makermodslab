@@ -55,6 +55,7 @@ __all__ = [
     "EpisodeSummary",
     "ExcludedEpisodesResponse",
     "ImportResponse",
+    "MergeCancelResponse",
     "MergeLogEntry",
     "MergeStartResponse",
     "MergeStatusResponse",
@@ -258,11 +259,19 @@ class MergeStatusResponse(BaseModel):
     """merge.py MergeManager.get_status — error/output_repo_id/log_path are
     null (not absent) outside their states, so None must NOT be excluded."""
 
-    state: Literal["idle", "running", "done", "error"]
+    state: Literal["idle", "running", "done", "error", "cancelled"]
     error: str | None
     output_repo_id: str | None
     log_path: str | None
     logs: list[MergeLogEntry]
+
+
+class MergeCancelResponse(BaseModel):
+    """merge.py MergeManager.cancel — `cancelled` is False (with the reason in
+    `message`) when no merge was running to stop."""
+
+    cancelled: bool
+    message: str
 
 
 class UploadStartResponse(BaseModel):

@@ -118,7 +118,12 @@ from .jobs import (
     job_registry,
     training_is_active,
 )
-from .merge import MergeRequest, handle_merge_status, handle_start_merge
+from .merge import (
+    MergeRequest,
+    handle_merge_cancel,
+    handle_merge_status,
+    handle_start_merge,
+)
 from .motor_power import read_supply_voltage
 from .nodes import (
     NodeNotFoundError,
@@ -200,6 +205,7 @@ from .schemas.datasets import (
     EpisodeSummary,
     ExcludedEpisodesResponse,
     ImportResponse,
+    MergeCancelResponse,
     MergeStartResponse,
     MergeStatusResponse,
     SetExcludedEpisodesResponse,
@@ -2191,8 +2197,17 @@ def datasets_merge(request: MergeRequest):
 
 @router.get("/datasets/merge/status", response_model=MergeStatusResponse, tags=["datasets"])
 def datasets_merge_status():
-    """Current merge state + drained log lines (idle | running | done | error)."""
+    """Current merge state + drained log lines (idle | running | done | error | cancelled)."""
     return handle_merge_status()
+
+
+@v1_router.post("/datasets/merge/cancel", response_model=MergeCancelResponse, tags=["datasets"])
+def datasets_merge_cancel():
+    """Stop the running merge (SIGTERM -> SIGKILL) and reclaim its partial output.
+
+    A no-op when nothing is running. A stalled merge is also stopped on its own
+    after 10 minutes of no output — see merge.MERGE_STUCK_AFTER_S."""
+    return handle_merge_cancel()
 
 
 @router.websocket("/ws/joint-data")

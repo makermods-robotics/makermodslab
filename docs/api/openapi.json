@@ -3942,6 +3942,25 @@
         "title": "MakerProbePortsResponse",
         "type": "object"
       },
+      "MergeCancelResponse": {
+        "description": "merge.py MergeManager.cancel — `cancelled` is False (with the reason in\n`message`) when no merge was running to stop.",
+        "properties": {
+          "cancelled": {
+            "title": "Cancelled",
+            "type": "boolean"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cancelled",
+          "message"
+        ],
+        "title": "MergeCancelResponse",
+        "type": "object"
+      },
       "MergeLogEntry": {
         "description": "One drained line of the merge subprocess log (merge.py _enqueue).",
         "properties": {
@@ -4084,7 +4103,8 @@
               "idle",
               "running",
               "done",
-              "error"
+              "error",
+              "cancelled"
             ],
             "title": "State",
             "type": "string"
@@ -9617,9 +9637,31 @@
         ]
       }
     },
+    "/api/v1/datasets/merge/cancel": {
+      "post": {
+        "description": "Stop the running merge (SIGTERM -> SIGKILL) and reclaim its partial output.\n\nA no-op when nothing is running. A stalled merge is also stopped on its own\nafter 10 minutes of no output — see merge.MERGE_STUCK_AFTER_S.",
+        "operationId": "datasets_merge_cancel",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergeCancelResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Datasets Merge Cancel",
+        "tags": [
+          "datasets"
+        ]
+      }
+    },
     "/api/v1/datasets/merge/status": {
       "get": {
-        "description": "Current merge state + drained log lines (idle | running | done | error).",
+        "description": "Current merge state + drained log lines (idle | running | done | error | cancelled).",
         "operationId": "datasets_merge_status",
         "responses": {
           "200": {
@@ -15422,7 +15464,7 @@
     },
     "/datasets/merge/status": {
       "get": {
-        "description": "Current merge state + drained log lines (idle | running | done | error).",
+        "description": "Current merge state + drained log lines (idle | running | done | error | cancelled).",
         "operationId": "datasets_merge_status_datasets_merge_status_get",
         "responses": {
           "200": {

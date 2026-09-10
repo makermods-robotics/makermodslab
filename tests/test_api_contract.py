@@ -315,6 +315,10 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         "POST /api/v1/jobs/queue/reorder",
         # Skills: the deployable projection of the /models build (PR #94).
         "GET /api/v1/skills",
+        # Cancel a running dataset merge (SIGTERM -> SIGKILL + partial cleanup).
+        # Born versioned; POST /datasets/merge{,/status} keep their flat mirror
+        # only because they predate the freeze.
+        "POST /api/v1/datasets/merge/cancel",
         # Sessions: identity + server-side robot resolution (sessions.py).
         "GET /api/v1/sessions/current",
         "POST /api/v1/sessions",
