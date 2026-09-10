@@ -115,9 +115,9 @@ export default {
       unmute: "Unmute",
     },
     button: {
-      done: "Done",
+      done: "Finish session",
       quit: "Quit",
-      endEpisode: "End Episode",
+      endEpisode: "Done",
       startNextEpisode: "Start Next Episode",
       advance: "Advance",
       pause: "Pause",
@@ -126,16 +126,18 @@ export default {
       keepEpisodes: "Keep episodes & continue",
       discardExit: "Discard & exit",
       backHome: "Back to home",
-      saveEpisodeTask: "Save task & continue",
+      saveEpisodeTask: "Start recording",
     },
-    // The blocking card shown between the recording phase and the reset gap
-    // when the session records a per-episode task (the Collect form checkbox).
+    // The blocking card shown before each episode while resetting the environment
+    // while the operator enters the next task.
     naming: {
-      title: "What was episode {{index}}'s task?",
+      title: "What is the next task?",
       description:
-        "Describe what this episode did. It is saved as the task for every frame of episode {{index}}. The session continues once you save.",
+        "Enter the task description and reset the environment. Start when you are ready.",
       inputLabel: "Task description for episode {{index}}",
       placeholder: "e.g., fold the left sleeve inward",
+      keyboardHint: "Press Enter to finish editing, then Space to start recording.",
+      rerecordPrevious: "Re-record previous task",
     },
     ended: {
       complete: "Recording complete — returning home…",

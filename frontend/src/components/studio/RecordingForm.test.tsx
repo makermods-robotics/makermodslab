@@ -14,60 +14,53 @@ vi.mock("@/components/recording/CameraConfiguration", () => ({
 }));
 
 import RecordingForm from "./RecordingForm";
+import { StudioProvider, useStudio } from "@/contexts/StudioContext";
 
 const baseProps = {
   robot: null,
   datasetName: "sock_sort",
   setDatasetName: vi.fn(),
-  singleTask: "sort the socks",
+  singleTask: "sort socks",
   setSingleTask: vi.fn(),
+  perEpisodeTask: false,
+  setPerEpisodeTask: vi.fn(),
+  resetTimeS: 15,
+  setResetTimeS: vi.fn(),
   numEpisodes: 5,
   setNumEpisodes: vi.fn(),
   episodeTimeS: 60,
   setEpisodeTimeS: vi.fn(),
-  resetTimeS: 15,
-  setResetTimeS: vi.fn(),
   streamingEncoding: true,
   setStreamingEncoding: vi.fn(),
   pushToHub: true,
   setPushToHub: vi.fn(),
-  perEpisodeTask: false,
-  setPerEpisodeTask: vi.fn(),
 };
 
-describe("the recording form's per-episode-task checkbox", () => {
-  it("is offered unchecked next to the task description", () => {
-    render(<RecordingForm {...baseProps} />);
-    const box = screen.getByRole("checkbox", {
-      name: /name each episode's task after recording it/i,
-    });
-    expect(box).toHaveAttribute("data-state", "unchecked");
-  });
+function FormWithDraft() {
+  const { collectForm, updateCollectForm } = useStudio();
+  return <RecordingForm {...baseProps} {...collectForm}
+    setPerEpisodeTask={(perEpisodeTask) => updateCollectForm({ perEpisodeTask })}
+    setSingleTask={(singleTask) => updateCollectForm({ singleTask })}
+  />;
+}
 
-  it("turns the mode on when the operator ticks it", () => {
-    const setPerEpisodeTask = vi.fn();
-    render(
-      <RecordingForm {...baseProps} setPerEpisodeTask={setPerEpisodeTask} />,
-    );
-    fireEvent.click(
-      screen.getByRole("checkbox", {
-        name: /name each episode's task after recording it/i,
-      }),
-    );
-    expect(setPerEpisodeTask).toHaveBeenCalledWith(true);
-  });
+describe("recording setup", () => {
+  it("defaults to one task and enables the per-episode flow only when toggled", () => {
+    render(<StudioProvider><FormWithDraft /></StudioProvider>);
+    const toggle = screen.getByRole("switch", { name: "Describe each episode" });
+    expect(toggle).not.toBeChecked();
+    const task = screen.getByLabelText(/task description/i);
+    fireEvent.change(task, { target: { value: "sort socks" } });
+    expect(screen.getByLabelText(/reset duration/i)).toBeInTheDocument();
 
-  it("shows the dataset-level task field only while the mode is off", () => {
-    const { rerender } = render(<RecordingForm {...baseProps} />);
-    expect(screen.getByLabelText(/task description/i)).toBeInTheDocument();
-
-    rerender(<RecordingForm {...baseProps} perEpisodeTask={true} />);
+    fireEvent.click(toggle);
+    expect(toggle).toBeChecked();
     expect(screen.queryByLabelText(/task description/i)).not.toBeInTheDocument();
-    // The checkbox itself stays put.
-    expect(
-      screen.getByRole("checkbox", {
-        name: /name each episode's task after recording it/i,
-      }),
-    ).toBeInTheDocument();
+    expect(screen.queryByLabelText(/reset duration/i)).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(toggle).not.toBeChecked();
+    expect(screen.getByLabelText(/task description/i)).toHaveValue("sort socks");
+    expect(screen.getByLabelText(/reset duration/i)).toBeInTheDocument();
   });
 });

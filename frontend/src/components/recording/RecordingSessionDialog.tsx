@@ -50,7 +50,7 @@ export interface RecordingConfig {
   robot: string;
   dataset_repo_id: string;
   single_task: string;
-  /** Pause after each episode to name its task (the "naming" phase). */
+  /** Wait before each episode to enter its task (the "naming" phase). */
   per_episode_task: boolean;
   num_episodes: number;
   episode_time_s: number;
@@ -117,7 +117,7 @@ interface BackendStatus {
     rerecord_episode: boolean;
     pause_recording: boolean;
     resume_recording: boolean;
-    // True only during the "naming" phase — the one control that phase offers.
+    // True only during the "naming" phase.
     submit_episode_task?: boolean;
   };
 }
@@ -150,6 +150,8 @@ const RecordingSessionDialog: React.FC<{
     null
   );
   const [recordingSessionStarted, setRecordingSessionStarted] = useState(false);
+  const [initialTask, setInitialTask] = useState<string | null>(null);
+  const pendingInitialTaskRef = useRef<string | null>(null);
   const [logs, setLogs] = useState("");
 
   const [optimisticPhase, setOptimisticPhase] = useState<Phase | null>(null);
@@ -215,10 +217,11 @@ const RecordingSessionDialog: React.FC<{
   useSessionHeartbeat(sessionId, tabOwnerId(), sessionLive);
   useUnloadWarning(sessionLive);
 
-  // Start recording session when the dialog mounts. The ref guard prevents
+  // Collect the first task before starting the hardware session. The ref prevents
   // React StrictMode (and any future re-renders) from POSTing the session
   // start twice — the second call returns 409 and bounces the user out.
   useEffect(() => {
+    if (recordingConfig.per_episode_task && initialTask === null) return;
     if (!startInitiatedRef.current) {
       startInitiatedRef.current = true;
       startRecordingSession();
@@ -226,7 +229,7 @@ const RecordingSessionDialog: React.FC<{
     // startRecordingSession is intentionally omitted: re-running this effect
     // on its identity change would re-fire the session start.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [initialTask, recordingConfig.per_episode_task]);
 
   // Refs so the poll interval below stays stable and reads the latest values
   // without tearing itself down on every state change.
@@ -314,7 +317,7 @@ const RecordingSessionDialog: React.FC<{
         if (prev !== real) {
           if (real === "recording" && prev !== null) {
             playRecordingStartCue();
-          } else if (real === "resetting") {
+          } else if (real === "resetting" || (real === "naming" && prev === "recording")) {
             playResetStartCue();
           }
           prevRealPhaseRef.current = real;
@@ -396,7 +399,7 @@ const RecordingSessionDialog: React.FC<{
         kind: "recording",
         robot,
         owner: tabOwnerId(),
-        options,
+        options: { ...options, single_task: initialTask ?? options.single_task },
       });
       setSessionId(session.id);
       setRecordingSessionStarted(true);
@@ -440,16 +443,12 @@ const RecordingSessionDialog: React.FC<{
     const realPhase = backendStatus.current_phase as Phase;
     const next: Phase | null =
       realPhase === "recording"
-        ? // A per-episode-task session stops at the naming prompt before the
-          // reset gap; every other session goes straight to resetting.
-          recordingConfig.per_episode_task
-          ? "naming"
-          : "resetting"
+        ? "resetting"
         : realPhase === "resetting" ? "recording" : null;
 
     if (!next) return;
 
-    setOptimisticPhase(next);
+    if (!recordingConfig.per_episode_task) setOptimisticPhase(next);
 
     try {
       const response = await fetchWithHeaders(
@@ -479,10 +478,8 @@ const RecordingSessionDialog: React.FC<{
     }
   }, [backendStatus, optimisticPhase, recordingConfig, baseUrl, fetchWithHeaders, toast, t]);
 
-  // Name the just-recorded episode's task and let the session continue. This
-  // is the only way out of the "naming" phase — the backend withdraws every
-  // other control — so a refusal (empty task, phase raced past) only re-enables
-  // the button, it never exits the phase.
+  // Submit the upcoming task and start its recording. A refused request
+  // leaves the prompt open so the operator can correct it and retry.
   const handleSubmitEpisodeTask = useCallback(
     async (task: string) => {
       if (submittingTask) return;
@@ -520,6 +517,15 @@ const RecordingSessionDialog: React.FC<{
     },
     [submittingTask, baseUrl, fetchWithHeaders, toast, t]
   );
+
+  // The first Space already requested capture. Submit once the backend is ready.
+  useEffect(() => {
+    if (backendStatus?.current_phase !== "naming") return;
+    const task = pendingInitialTaskRef.current;
+    if (task === null) return;
+    pendingInitialTaskRef.current = null;
+    void handleSubmitEpisodeTask(task);
+  }, [backendStatus?.current_phase, handleSubmitEpisodeTask]);
 
   const handlePauseRecording = useCallback(async () => {
     if (!backendStatus?.available_controls.pause_recording) return;
@@ -623,14 +629,14 @@ const RecordingSessionDialog: React.FC<{
       );
       const data = await response.json();
 
-      if (response.ok) {
+      if (response.ok && data.success) {
         setRerecordTick((t) => t + 1);
         toast({
           title: t("recording.session.toast.rerecordTitle"),
           description: t("recording.session.toast.rerecordBody", {
             // Same `?? 1` default the HUD's episode counter uses; the field is
             // always populated on the re-record path.
-            index: backendStatus.current_episode ?? 1,
+            index: (backendStatus.current_episode ?? 1) - (backendStatus.current_phase === "naming" ? 1 : 0),
           }),
         });
       } else {
@@ -786,8 +792,9 @@ const RecordingSessionDialog: React.FC<{
     if (!keyboardActive) return;
 
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.repeat) return;
       const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "BUTTON" || target.isContentEditable)) {
         return;
       }
       if (e.key === " " || e.code === "Space" || e.key === "ArrowRight") {
@@ -923,7 +930,22 @@ const RecordingSessionDialog: React.FC<{
         </DialogTitle>
 
         {/* Loading state while waiting for the first backend status */}
-        {!backendStatus ? (
+        {recordingConfig.per_episode_task && initialTask === null ? (
+          <div className="space-y-4 py-6">
+            <EpisodeTaskPrompt
+              episode={1}
+              defaultTask={recordingConfig.single_task}
+              submitting={false}
+              onSubmit={(task) => {
+                pendingInitialTaskRef.current = task;
+                setInitialTask(task);
+              }}
+            />
+            <Button variant="ghost" onClick={() => onExit()}>
+              {t("common.cancel")}
+            </Button>
+          </div>
+        ) : !backendStatus ? (
           <div className="flex flex-col items-center justify-center py-16 text-center">
             <div className="mb-4 h-12 w-12 animate-spin rounded-full border-b-2 border-red-500" />
             <p className="text-lg">{t("recording.session.connecting")}</p>
@@ -932,10 +954,7 @@ const RecordingSessionDialog: React.FC<{
           <>
             {/* Two explicit exits, LIVE-only. Once the session has ended these
                 unmount — no control may imply the session is still alive. */}
-            {/* The naming phase is a hard gate — naming the episode is the
-                only way forward — so the session exits are withdrawn along
-                with every other control while it is open. */}
-            {!sessionEnded && currentPhase !== "naming" && (
+            {!sessionEnded && (
               <div className="mb-3 flex justify-end gap-3">
                 <Button
                   onClick={requestDone}
@@ -961,9 +980,8 @@ const RecordingSessionDialog: React.FC<{
               </div>
             )}
             <div className="bg-card rounded-lg border border-border p-4">
-              {/* Per-episode-task naming: blocks here between the recording
-                  phase and the reset gap. Replaces the live HUD outright —
-                  there is nothing to advance until the task is named. */}
+              {/* Reset the environment and describe the upcoming episode.
+                  Recording waits for the operator; there is no countdown. */}
               {!sessionEnded && currentPhase === "naming" && (
                 <EpisodeTaskPrompt
                   key={currentEpisode}
@@ -972,8 +990,10 @@ const RecordingSessionDialog: React.FC<{
                     backendStatus.current_episode_task_default ??
                     recordingConfig.single_task
                   }
-                  submitting={submittingTask}
+                  submitting={submittingTask || anyExitDialogOpen}
                   onSubmit={handleSubmitEpisodeTask}
+                  onRerecord={backendStatus.available_controls.rerecord_episode
+                    ? handleRerecordEpisode : undefined}
                 />
               )}
 
@@ -1087,7 +1107,7 @@ const RecordingSessionDialog: React.FC<{
                       )}
                     </Button>
                     <div className="flex gap-3">
-                      {(currentPhase === "recording" || currentPhase === "resetting") && (
+                      {!recordingConfig.per_episode_task && (currentPhase === "recording" || currentPhase === "resetting") && (
                         <Button
                           onClick={isPauseActive ? handleResumeRecording : handlePauseRecording}
                           disabled={

@@ -27,9 +27,7 @@ export interface CollectFormState {
   formOpen: boolean;
   datasetName: string;
   singleTask: string;
-  /** Pause after every episode to name that episode's task description
-   * (record.py's "naming" phase). `singleTask` stays the baseline / first
-   * prompt's prefill. */
+  /** Ask for each episode's task before capture and wait for Space to start. */
   perEpisodeTask: boolean;
   numEpisodes: number;
   episodeTimeS: number;
