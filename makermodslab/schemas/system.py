@@ -302,6 +302,7 @@ class ArmCapabilities(BaseModel):
     # when neither the probe nor the gesture can tell two arms apart.
     supports_gripper_current_limit: bool
     supports_gripper_soft_limit: bool
+    supports_gripper_leader_hold: bool
     supports_gripper_wiggle: bool
 
 

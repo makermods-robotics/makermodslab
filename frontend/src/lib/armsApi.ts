@@ -45,6 +45,7 @@ export interface ArmCapabilities {
   /** Absent on older servers; never assume support. */
   supports_gripper_soft_limit?: boolean;
   supports_gripper_current_limit?: boolean;
+  supports_gripper_leader_hold?: boolean;
 }
 
 /**

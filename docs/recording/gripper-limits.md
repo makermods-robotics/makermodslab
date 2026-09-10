@@ -1,10 +1,16 @@
 # Metal gripper limits
 
-Robot Settings provides two independent, opt-in controls for local Metal teleoperation and recording. Both are disabled by default and take effect on the next session. A bimanual robot uses the same settings for both grippers. Neither setting applies to policy inference, replay, remote sessions, or standalone vendor tools.
+Robot Settings provides three independent, opt-in controls for local Metal teleoperation and recording. All are disabled by default and take effect on the next session. A bimanual robot uses the same settings for both grippers, except the leader gripper hold, which is single-arm only for now. None of them apply to policy inference, replay, remote sessions, or standalone vendor tools.
 
 ## Soft squeeze limit
 
 Set a positive closing error in motor degrees. The driver limits how far the closing target can move beyond the measured jaws, and disables gripper velocity and torque feedforward. Opening remains responsive. Smaller errors reduce the position controller's nominal sustained squeezing effort; this is not a motor-current or jaw-force guarantee. A fresh gripper response is required for every action, adding an unmeasured round trip to the control loop.
+
+## Leader gripper hold
+
+Set a positive engage gap in follower motor degrees. While the operator commands the gripper at least this many degrees more-closed than the follower physically reaches — i.e. an object is in the follower's jaws and the operator keeps squeezing — the driver energizes the **leader** gripper servo rigid, so the operator feels a wall instead of driving the follower into a stall. The hold is not steady: it re-asserts a few times a second and briefly releases every ~0.4 s to sense the operator's hand; pull the handle open during one of those windows to release it. It also releases on its own once the follower catches up (the object is gone) and on every session stop.
+
+Requires a **motorized** Star Arm 102 leader. There is no way to detect a motorless leader in software, so this is opt-in and does nothing (beyond a logged warning) on a leader whose gripper has no servo. Single-arm only for now. Layers on top of the soft squeeze limit but does not require it — the engage signal is the leader-command vs follower-position gap, not the soft limiter's clamp.
 
 ## Experimental motor current limit
 

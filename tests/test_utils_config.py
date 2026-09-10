@@ -1383,3 +1383,66 @@ def test_current_limit_pair_forwarded_to_local_session_requests():
     for request in requests:
         assert request.gripper_current_limit_ratio == 0.1
         assert request.gripper_max_velocity_deg_s == 30
+
+
+# --- gripper leader hold (motorized Star leader haptic wall) -------------------
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "2", float("nan"), float("inf")])
+def test_invalid_leader_hold_gap_leaves_no_record_or_directory(tmp_path, monkeypatch, value):
+    directory = tmp_path / "not-created"
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(directory))
+    with pytest.raises(ValueError, match="finite positive"):
+        cfg.save_robot_record("grip", {"gripper_leader_hold_gap_deg": value})
+    assert not directory.exists()
+
+
+def test_leader_hold_gap_patch_preserves_and_explicit_null_disables():
+    cfg.save_robot_record("grip", {"arm_type": "metal", "gripper_leader_hold_gap_deg": 6.0})
+    cfg.save_robot_record("grip", {"follower_port": "/dev/example"})
+    assert cfg.get_robot_record("grip")["gripper_leader_hold_gap_deg"] == 6.0
+    cfg.save_robot_record("grip", {"gripper_leader_hold_gap_deg": None})
+    assert cfg.get_robot_record("grip")["gripper_leader_hold_gap_deg"] is None
+
+
+def test_leader_hold_gap_cleared_on_arm_family_change():
+    cfg.save_robot_record("grip", {"arm_type": "metal", "gripper_leader_hold_gap_deg": 6.0})
+    cfg.save_robot_record("grip", {"arm_type": "so101"})
+    assert cfg.get_robot_record("grip")["gripper_leader_hold_gap_deg"] is None
+
+
+def test_leader_hold_gap_reaches_both_local_session_request_builders():
+    from makermodslab.schemas.sessions import RecordingOptions, TeleoperationOptions
+    from makermodslab.sessions import _build_recording_request, _build_teleoperation_request
+
+    cfg.save_robot_record("grip", {"arm_type": "metal", "gripper_leader_hold_gap_deg": 6.0})
+    record = cfg.get_robot_record("grip")
+    assert _build_teleoperation_request(record, TeleoperationOptions()).gripper_leader_hold_gap_deg == 6.0
+    options = RecordingOptions(dataset_repo_id="local/test", single_task="grasp")
+    assert _build_recording_request(record, options).gripper_leader_hold_gap_deg == 6.0
+
+
+def test_leader_hold_gap_api_rejects_invalid_patch_atomically():
+    from makermodslab.server import upsert_robot
+
+    cfg.save_robot_record("grip", {"arm_type": "metal", "gripper_leader_hold_gap_deg": 6.0})
+    response = upsert_robot("grip", {"gripper_leader_hold_gap_deg": -1, "follower_port": "/dev/new"})
+    assert response.status_code == 400
+    record = cfg.get_robot_record("grip")
+    assert record["gripper_leader_hold_gap_deg"] == 6.0
+    assert record["follower_port"] == ""
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"gripper_leader_hold_gap_deg": 6},
+        {"arm_type": "so101", "gripper_leader_hold_gap_deg": 6},
+    ],
+)
+def test_leader_hold_gap_api_refuses_unsupported_family(body):
+    from makermodslab.server import upsert_robot
+
+    response = upsert_robot("new-grip", body, create=True)
+    assert response.status_code == 400
+    assert cfg.get_robot_record("new-grip") is None

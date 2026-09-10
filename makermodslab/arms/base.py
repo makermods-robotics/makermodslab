@@ -367,6 +367,9 @@ class ArmFamily(ABC):
     # one port's gripper a visible stroke to tell two look-alike arms apart.
     supports_gripper_current_limit: bool = False
     supports_gripper_soft_limit: bool = False
+    # True when a MOTORIZED Star Arm 102 leader can hold its gripper servo rigid
+    # as a haptic wall while the operator over-squeezes the follower.
+    supports_gripper_leader_hold: bool = False
     supports_gripper_wiggle: bool = False
 
     def leader_options(self) -> tuple[LeaderOption, ...]:

@@ -340,6 +340,7 @@ from .utils.config import (
     set_excluded_episodes,
     validate_gripper_closing_error,
     validate_gripper_current_limit,
+    validate_gripper_leader_hold_gap,
 )
 from .utils.hf_auth import (
     cached_whoami,
@@ -5094,6 +5095,20 @@ def upsert_robot(name: str, data: dict, create: bool = False):
                 family = arm_registry.get(effective_arm_type)
                 if family is None or not family.supports_gripper_soft_limit:
                     raise ValueError("This arm does not support the gripper soft squeeze limit.")
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"status": "error", "message": str(exc)})
+
+    if "gripper_leader_hold_gap_deg" in body:
+        try:
+            validate_gripper_leader_hold_gap(body["gripper_leader_hold_gap_deg"])
+            if body["gripper_leader_hold_gap_deg"] is not None:
+                effective_arm_type = (
+                    body.get("arm_type") or existing.get("arm_type") or arm_registry.DEFAULT_ID
+                )
+                require_known_arm_type(effective_arm_type)
+                family = arm_registry.get(effective_arm_type)
+                if family is None or not family.supports_gripper_leader_hold:
+                    raise ValueError("This arm does not support the leader gripper hold.")
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"status": "error", "message": str(exc)})
 

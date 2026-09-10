@@ -922,6 +922,27 @@ def validate_gripper_closing_error(value: object) -> float | None:
     return float(value)
 
 
+def validate_gripper_leader_hold_gap(value: object) -> float | None:
+    """Validate the optional leader-gripper hold engage gap, in follower degrees.
+
+    The motorized Star leader's gripper is held rigid once the operator commands
+    this many degrees more-closed than the Metal follower can physically reach.
+    ``None`` disables the feature.
+    """
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError(
+            "Gripper leader hold gap must be a finite positive number of degrees, or null to disable."
+        )
+    return float(value)
+
+
 def validate_gripper_current_limit(ratio: object, velocity: object) -> tuple[float | None, float | None]:
     """Validate paired experimental force-position current/speed settings."""
     if ratio is None and velocity is None:
@@ -960,6 +981,7 @@ def _empty_record(name: str) -> dict:
         "leader_kind": "",
         "motor_power": DEFAULT_MOTOR_POWER,
         "gripper_closing_error_deg": None,
+        "gripper_leader_hold_gap_deg": None,
         "gripper_current_limit_ratio": None,
         "gripper_max_velocity_deg_s": None,
     }
@@ -1046,6 +1068,8 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
 
     if "gripper_closing_error_deg" in data:
         validate_gripper_closing_error(data["gripper_closing_error_deg"])
+    if "gripper_leader_hold_gap_deg" in data:
+        validate_gripper_leader_hold_gap(data["gripper_leader_hold_gap_deg"])
     existing = get_robot_record(name)
     if existing is None and not allow_create:
         logger.info(f"save_robot_record no-op: {name} does not exist (allow_create=False)")
@@ -1092,6 +1116,10 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
         record["gripper_closing_error_deg"] = validate_gripper_closing_error(
             data["gripper_closing_error_deg"]
         )
+    if "gripper_leader_hold_gap_deg" in data:
+        record["gripper_leader_hold_gap_deg"] = validate_gripper_leader_hold_gap(
+            data["gripper_leader_hold_gap_deg"]
+        )
     if any(field in data for field in current_fields):
         ratio, velocity = validate_gripper_current_limit(
             *(data.get(field, record.get(field)) for field in current_fields)
@@ -1119,6 +1147,8 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
             record["gripper_max_velocity_deg_s"] = None
         if "gripper_closing_error_deg" not in data:
             record["gripper_closing_error_deg"] = None
+        if "gripper_leader_hold_gap_deg" not in data:
+            record["gripper_leader_hold_gap_deg"] = None
         record["arm_type"] = data["arm_type"]
         for stale in _ROBOT_STRING_FIELDS:
             if stale not in data:
