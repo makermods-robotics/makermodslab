@@ -630,7 +630,8 @@ const RobotConfigWindow = ({
   const gripperWiggle = supportsGripperWiggle(armInfo);
   // Which of the family's leaders drives this robot. Only a family with a
   // choice (the Metal arm: its Star Arm 102, or a second gravity-compensated
-  // Metal arm) renders the picker and sends `leader_kind` with its port
+  // Metal arm; the Maker arm: the lever- or the trigger-gripper Star Arm
+  // 102) renders the picker and sends `leader_kind` with its port
   // detection and library requests; every other family's requests are what
   // they always were. An ENERGIZED leader (holds torque while the human
   // moves it) answers the follower's protocol, so the probe cannot tell the
