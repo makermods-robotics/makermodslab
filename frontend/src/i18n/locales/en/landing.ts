@@ -240,6 +240,9 @@ export default {
     merging: "Merging into <0>{{repoId}}</0>…",
     created: "Created <0>{{repoId}}</0>",
     failed: "Merge failed",
+    cancelled: "Merge cancelled",
+    cancel: "Cancel merge",
+    cancelling: "Cancelling…",
     done: "Done",
     // --- Per-source weights ---------------------------------------------
     // Incompatibility reasons. Camera lists are DATA — the names come from the
