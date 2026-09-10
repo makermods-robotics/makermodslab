@@ -144,7 +144,7 @@ class RecordingOptions(BaseModel):
     resume: bool = False
     streaming_encoding: bool = True
     skip_identity_check: bool = False
-    # Pause after every episode to let the operator name THAT episode's task
+    # Wait before every episode for the operator to enter its task
     # description (record.py's "naming" phase). `single_task` stays the
     # required baseline / first-episode prefill.
     per_episode_task: bool = False

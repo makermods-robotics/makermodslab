@@ -3856,8 +3856,8 @@ def test_teleop_connect_failure_releases_both_devices(
 
 # ---------------------------------------------------------------------------
 # Per-episode task naming — the operator names each episode's task description
-# right after recording it (a checkbox on the Collect form). The session pauses
-# in a dedicated "naming" phase between the recording phase and the reset gap.
+# before recording it. The session waits in a dedicated "naming" phase
+# while the operator resets the environment and describes the next task.
 # ---------------------------------------------------------------------------
 
 
@@ -3878,23 +3878,6 @@ def test_recording_request_per_episode_task_defaults_off() -> None:
 
     ticked = req.model_copy(update={"per_episode_task": True})
     assert ticked.per_episode_task is True
-
-
-def test_apply_episode_task_rewrites_every_frame_in_the_pending_buffer() -> None:
-    """record_loop appended the captured frames with the session's placeholder
-    task; _apply_episode_task swaps in the operator-named string before
-    save_episode() reads the buffer."""
-    from makermodslab.record import _apply_episode_task
-
-    dataset = type(
-        "FakeDataset",
-        (),
-        {"writer": type("W", (), {"episode_buffer": {"task": ["placeholder"] * 4, "size": 4}})()},
-    )()
-
-    _apply_episode_task(dataset, "fold the left sleeve")
-
-    assert dataset.writer.episode_buffer["task"] == ["fold the left sleeve"] * 4
 
 
 def test_handle_submit_episode_task_stashes_the_task_during_the_naming_phase(
@@ -3952,12 +3935,10 @@ def test_handle_submit_episode_task_refused_outside_the_naming_phase(
     assert events["episode_task_submitted"] is None
 
 
-def test_recording_status_naming_phase_locks_every_control_but_the_task_submit(
+def test_recording_status_naming_phase_allows_stop_but_blocks_unnamed_recording(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """While the session waits for an episode task there is no bypass: Stop,
-    skip-to-next, re-record and pause are all withdrawn, and the status carries
-    the prefill for the prompt (the previous episode's task)."""
+    """Naming gates capture, while Done/Quit remain available."""
     import makermodslab.record as record
 
     monkeypatch.setattr(record, "recording_active", True)
@@ -3980,7 +3961,7 @@ def test_recording_status_naming_phase_locks_every_control_but_the_task_submit(
 
     controls = status["available_controls"]
     assert controls["submit_episode_task"] is True
-    assert controls["stop_recording"] is False
+    assert controls["stop_recording"] is True
     assert controls["exit_early"] is False
     assert controls["rerecord_episode"] is False
     assert controls["pause_recording"] is False
@@ -4082,3 +4063,147 @@ def test_strict_preparation_finishes_pending_startup_sync_with_measured_hold(mon
         robot, _RealignTeleop({"shoulder_pan.pos": 10}), "maker", _identity, _identity, require_settled=True
     )
     assert sent == [{"shoulder_pan.pos": 9.5}]
+
+
+@pytest.mark.parametrize("action", ["next", "rerecord", "done", "quit", "lease_expiry", "timeout"])
+def test_task_workflow_labels_before_capture_and_handles_pending_take(monkeypatch, action):
+    """Exercise the real gate/record/save loop without hardware or disk I/O."""
+    from types import SimpleNamespace
+
+    import makermodslab.record as record
+
+    events = {"stop_recording": False}
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "saved_episodes", 0)
+    monkeypatch.setattr(record, "discard_requested", False)
+    monkeypatch.setattr(record, "last_episode_task", "")
+    monkeypatch.setattr(record.time, "sleep", lambda _: None)
+    buffer = []
+    saved = []
+    captured = []
+    prompts = []
+    alignments = []
+
+    def save():
+        saved.append(buffer.copy())
+        buffer.clear()
+
+    dataset = SimpleNamespace(save_episode=save, clear_episode_buffer=buffer.clear)
+    cfg = SimpleNamespace(dataset=SimpleNamespace(num_episodes=2))
+
+    def prompt():
+        assert record.current_phase == "naming"
+        prompts.append(record.current_episode)
+        if len(prompts) == 1:
+            assert not captured  # The first prompt precedes ALL recording.
+            assert record.handle_exit_early()["success"] is False
+            assert record.handle_submit_episode_task("pick cube")["success"]
+        elif len(prompts) == 2:
+            assert not saved  # Completed take still available to re-record.
+            if action == "rerecord":
+                assert record.handle_rerecord_episode()["success"]
+            elif action in ("done", "quit"):
+                record.handle_stop_recording(discard=action == "quit")
+            elif action == "lease_expiry":
+                events["stop_recording"] = True
+            else:
+                assert record.handle_submit_episode_task("fold towel")["success"]
+        else:
+            assert record.handle_submit_episode_task("fold towel")["success"]
+
+    def capture(task):
+        assert record.current_phase == "recording"
+        assert len(alignments) == len(captured) + 1
+        captured.append(task)
+        buffer.extend([task] * 3)
+        events["_exit_early_triggered"] = not (action == "timeout" and len(captured) == 1)
+
+    record._record_task_episodes(
+        cfg, dataset, events, capture, lambda: alignments.append(True) or True, prompt
+    )
+
+    if action in ("done", "lease_expiry"):
+        assert saved == [["pick cube"] * 3]
+    elif action == "quit":
+        assert saved == []
+    elif action in ("rerecord", "timeout"):
+        assert saved == [["fold towel"] * 3, ["fold towel"] * 3]
+        assert prompts == ([1, 2, 1, 2] if action == "rerecord" else [1, 1, 2])
+    else:
+        assert saved == [["pick cube"] * 3, ["fold towel"] * 3]
+        assert prompts == [1, 2]
+    assert record.saved_episodes == len(saved)
+    assert not buffer
+
+
+def test_task_prompt_keeps_waiting_without_recording(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import makermodslab.record as record
+
+    events = {"stop_recording": False}
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "saved_episodes", 0)
+    monkeypatch.setattr(record, "discard_requested", False)
+    monkeypatch.setattr(record.time, "sleep", lambda _: None)
+    ticks = []
+
+    def preview():
+        ticks.append(True)
+        assert not record.handle_submit_episode_task("   ")["success"]
+        if len(ticks) == 5:
+            record.handle_stop_recording()
+
+    capture, realign, dataset = Mock(), Mock(), Mock()
+    record._record_task_episodes(
+        SimpleNamespace(dataset=SimpleNamespace(num_episodes=2)), dataset, events, capture, realign, preview
+    )
+    assert len(ticks) == 5
+    capture.assert_not_called()
+    realign.assert_not_called()
+    dataset.save_episode.assert_not_called()
+
+
+@pytest.mark.parametrize("prepare_result", [True, False])
+def test_task_workflow_prepares_only_after_description_and_before_timer(monkeypatch, prepare_result):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import makermodslab.record as record
+
+    events = {"stop_recording": False}
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "saved_episodes", 0)
+    monkeypatch.setattr(record, "discard_requested", False)
+    monkeypatch.setattr(record.time, "sleep", lambda _: None)
+    calls = []
+
+    def prompt():
+        assert calls == []
+        assert record.handle_submit_episode_task("pick cube")["success"]
+        calls.append("task")
+
+    def prepare():
+        assert calls == ["task"]
+        assert record.current_phase == "preparing"
+        assert record.phase_start_time is None
+        calls.append("prepare")
+        return prepare_result
+
+    def capture(task):
+        assert task == "pick cube"
+        assert record.current_phase == "recording"
+        assert record.phase_start_time is not None
+        calls.append("capture")
+        events["_exit_early_triggered"] = True
+
+    dataset = Mock()
+    record._record_task_episodes(
+        SimpleNamespace(dataset=SimpleNamespace(num_episodes=1)), dataset, events, capture, prepare, prompt
+    )
+    assert calls == (["task", "prepare", "capture"] if prepare_result else ["task", "prepare"])
+    assert dataset.save_episode.call_count == int(prepare_result)

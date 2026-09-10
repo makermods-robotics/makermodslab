@@ -213,24 +213,6 @@ def _set_phase(phase: str) -> None:
     notify_session_changed("recording", recording_active, phase=phase)
 
 
-def _apply_episode_task(dataset, task: str) -> None:
-    """Overwrite every captured frame's task in the pending episode buffer.
-
-    In a per-episode-task session `record_loop` appended the frames with the
-    session's placeholder `single_task`; this swaps in the operator-named
-    string just before `save_episode()` reads the buffer. lerobot's
-    `save_episode()` maps any task string it hasn't seen to a fresh task
-    index, so a distinct per-episode string needs no metadata prep here.
-
-    Tolerant of a buffer that isn't shaped as expected (a lerobot refactor, an
-    empty episode) — a missing task list just means nothing to rewrite."""
-    writer = getattr(dataset, "writer", None)
-    buffer = getattr(writer, "episode_buffer", None)
-    if not buffer or not buffer.get("task"):
-        return
-    buffer["task"] = [task] * len(buffer["task"])
-
-
 # Set only while current_phase == "reconnecting_robot" (the teardown and
 # backoff sleep between connect retries below); 0 otherwise — including on a
 # successful connect and on the terminal failure, so a reader can treat
@@ -431,10 +413,9 @@ class RecordingRequest(BaseModel):
     leader_kind: str | None = None
     dataset_repo_id: str
     single_task: str
-    # When true, the session pauses in a "naming" phase after every episode's
-    # recording phase and blocks until the operator names THAT episode's task
-    # description (handle_submit_episode_task). `single_task` stays required —
-    # it is the baseline task and the prefill for the first episode's prompt.
+    # When true, wait for a task before recording each episode. Between takes
+    # the operator resets the environment and can re-record the pending take.
+    # `single_task` may be empty; the first prompt then starts blank.
     # Off ⇒ every episode records under `single_task`, exactly as before.
     per_episode_task: bool = False
     num_episodes: int = 5
@@ -1104,6 +1085,8 @@ def handle_exit_early() -> dict[str, Any]:
     """Handle exit early request - replaces right arrow key"""
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
+    if current_phase == "naming":
+        return {"success": False, "message": "Enter the episode task before recording"}
     if _reset_paused():
         # Design decision: skip-to-next-episode is disabled while paused (the
         # operator must explicitly resume first). Enforced here, not just in
@@ -1133,6 +1116,12 @@ def handle_rerecord_episode() -> dict[str, Any]:
     """Handle rerecord episode request - replaces left arrow key"""
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
+    if current_phase != "recording" and not (
+        current_phase == "naming" and recording_events.get("pending_episode", False)
+    ):
+        return {"success": False, "message": "No episode is available to re-record"}
+    if recording_events.get("episode_task_submitted"):
+        return {"success": False, "message": "The next episode is already starting"}
     recording_events["rerecord_episode"] = True
     recording_events["exit_early"] = True
     logger.info("Re-record episode triggered")
@@ -1204,8 +1193,8 @@ def handle_submit_episode_task(task: str) -> dict[str, Any]:
     """Name the task for the episode the session is holding in the "naming"
     phase (per-episode-task sessions only — see RecordingRequest).
 
-    This is the ONLY way the naming phase advances: there is no timeout and no
-    bypass, so a blank description is refused (the phase keeps waiting) and a
+    Recording only starts with a non-empty description: there is no timeout
+    or skip. Done/Quit can end the session without starting another take. A
     submission outside the naming phase is refused rather than applied to the
     wrong episode. A refusal comes back as HTTP 200 + {success: False}, the
     same shape the pause/exit-early controls use — the frontend reads
@@ -1220,6 +1209,8 @@ def handle_submit_episode_task(task: str) -> dict[str, Any]:
             "message": "The session is not waiting for an episode task",
             "current_phase": current_phase,
         }
+    if recording_events.get("episode_task_submitted") or recording_events.get("rerecord_episode"):
+        return {"success": False, "message": "An episode transition is already pending"}
     cleaned = (task or "").strip()
     if not cleaned:
         return {"success": False, "message": "An episode task description is required"}
@@ -1297,19 +1288,23 @@ def handle_recording_status() -> dict[str, Any]:
         # which is available in both phases.
         "pause_armed": _pause_armed(),
         "available_controls": {
-            # The "naming" phase (per-episode-task sessions) is a hard gate:
-            # every control below is withdrawn so there is no way past it but
-            # to name the task. submit_episode_task is the only control it
-            # offers.
-            # ESC key replacement.
-            "stop_recording": recording_active and current_phase != "naming",
+            # Naming gates the next recording, but the operator can still
+            # finish the session or discard and re-record the pending take.
+            "stop_recording": recording_active,
             "exit_early": recording_active
             and current_phase != "naming"
             and not _reset_paused(),  # Right arrow key replacement; disabled while paused
             "rerecord_episode": recording_active
-            and current_phase == "recording",  # Only during recording phase
+            and (
+                current_phase == "recording"
+                or (
+                    current_phase == "naming"
+                    and bool(recording_events and recording_events.get("pending_episode"))
+                )
+            ),
             "pause_recording": recording_active
             and current_phase in ("recording", "resetting")
+            and not getattr(recording_config, "per_episode_task", False)
             and not _pause_armed(),
             "resume_recording": recording_active
             and current_phase in ("recording", "resetting")
@@ -2120,6 +2115,87 @@ def _reset_loop_with_pause(
         reset_phase_elapsed_s = None
 
 
+def _record_task_episodes(
+    cfg: RecordConfig,
+    dataset: LeRobotDataset,
+    events: dict,
+    capture: Callable[[str], None],
+    prepare: Callable[[], bool],
+    preview: Callable[[], None],
+) -> None:
+    """Manually gated episodes. Hold the completed buffer until Next or Done
+    so Re-record can discard it without deleting an already saved episode.
+    Task strings are passed into capture, never rewritten after recording.
+    """
+    global current_episode, saved_episodes, phase_start_time
+    global paused_accum_seconds, pause_started_at, reset_phase_elapsed_s
+
+    pending = False
+    while saved_episodes < cfg.dataset.num_episodes:
+        events.update(episode_task_submitted=None, exit_early=False, rerecord_episode=False, paused=False)
+        events["pending_episode"] = pending
+        current_episode = saved_episodes + (2 if pending else 1)
+        phase_start_time = time.time()
+        paused_accum_seconds = 0.0
+        pause_started_at = None
+        reset_phase_elapsed_s = None
+        _set_phase("naming")
+        while recording_active and not events.get("stop_recording"):
+            if events.get("episode_task_submitted") or events.get("rerecord_episode"):
+                break
+            # Keep camera previews fresh without teleoperating or writing frames.
+            preview()
+            time.sleep(0.1)
+
+        if events.get("stop_recording") or not recording_active:
+            if pending and not discard_requested:
+                dataset.save_episode()
+                saved_episodes += 1
+            else:
+                dataset.clear_episode_buffer()
+            events["pending_episode"] = False
+            return
+
+        if events.get("rerecord_episode"):
+            _set_phase("preparing")
+            dataset.clear_episode_buffer()
+            pending = False
+            continue
+
+        # Close the gate before consuming the submission, including during
+        # slow disk I/O or alignment; duplicate requests must stay refused.
+        _set_phase("preparing")
+        task = events.pop("episode_task_submitted")
+        events["pending_episode"] = False
+        if pending:
+            dataset.save_episode()
+            saved_episodes += 1
+            pending = False
+        current_episode = saved_episodes + 1
+        events["exit_early"] = False
+        events["_exit_early_triggered"] = False
+        phase_start_time = None
+        if not prepare():
+            return
+        if events.get("stop_recording") or not recording_active:
+            return
+        phase_start_time = time.time()
+        _set_phase("recording")
+        capture(task)
+        if events.get("stop_recording"):
+            dataset.clear_episode_buffer()
+            return
+        # Preserve the existing timeout policy: unfinished takes are discarded.
+        if events.get("rerecord_episode") or not events.get("_exit_early_triggered"):
+            dataset.clear_episode_buffer()
+            continue
+        pending = True
+        if saved_episodes + 1 == cfg.dataset.num_episodes:
+            dataset.save_episode()
+            saved_episodes += 1
+            return
+
+
 def record_with_web_events(
     cfg: RecordConfig,
     web_events: dict,
@@ -2463,7 +2539,40 @@ def record_with_web_events(
     prepare_alignment = partial(realign, require_settled=True)
     try:
         prepared_encoder = install_episode_preparation(dataset)
-        while saved_episodes < cfg.dataset.num_episodes:
+        per_episode_task = getattr(recording_config, "per_episode_task", False)
+        if per_episode_task:
+
+            def capture_task(task):
+                record_loop(
+                    robot=robot,
+                    events=web_events,
+                    fps=cfg.dataset.fps,
+                    teleop_action_processor=teleop_action_processor,
+                    robot_action_processor=robot_action_processor,
+                    robot_observation_processor=process_observation,
+                    teleop=teleop,
+                    dataset=dataset,
+                    control_time_s=cfg.dataset.episode_time_s,
+                    single_task=task,
+                    display_data=cfg.display_data,
+                )
+
+            _record_task_episodes(
+                cfg,
+                dataset,
+                web_events,
+                capture_task,
+                lambda: prepare_recording_episode(
+                    robot,
+                    dataset,
+                    prepared_encoder,
+                    prepare_alignment,
+                    cancelled,
+                    observation_processor=process_observation,
+                ),
+                lambda: publish_preview(robot.get_observation()),
+            )
+        while not per_episode_task and saved_episodes < cfg.dataset.num_episodes:
             _set_phase("preparing")
             phase_start_time = None
             if not prepare_recording_episode(
@@ -2624,44 +2733,6 @@ def record_with_web_events(
 
                 # Don't increment current_episode or saved_episodes - we're re-recording the same episode
                 continue
-
-            # PER-EPISODE TASK NAMING PHASE. The episode's frames are captured
-            # (record_loop ran with the placeholder single_task); block here
-            # until the operator names THIS episode's task, then rewrite the
-            # buffer's per-frame task before the save below reads it. No
-            # timeout and no bypass — the frontend withdraws every other
-            # control (available_controls) so naming is the only way forward.
-            # The exits are: a submitted task (handle_submit_episode_task), or
-            # a teardown that trips stop_recording (lease-expiry safety stop,
-            # a disconnect) — that abandons the unnamed episode and ends the
-            # session, mirroring a stop mid-recording.
-            if getattr(recording_config, "per_episode_task", False) and not web_events["stop_recording"]:
-                _set_phase("naming")
-                phase_start_time = time.time()
-                web_events["episode_task_submitted"] = None
-                logger.info(f"⏸️  Waiting for the operator to name episode {current_episode}'s task")
-                print(f"⏸️  STATUS CHANGE: Naming the task for episode {current_episode}")
-                log_say(f"Name the task for episode {current_episode}", cfg.play_sounds)
-
-                while recording_active and not web_events["episode_task_submitted"]:
-                    if web_events["stop_recording"]:
-                        break
-                    time.sleep(0.1)
-
-                named_task = web_events["episode_task_submitted"]
-                if not named_task:
-                    logger.info(
-                        "Naming phase ended without a task — discarding unnamed episode %s and ending session",
-                        current_episode,
-                    )
-                    print(
-                        f"🛑 STATUS CHANGE: Session ended before episode {current_episode} was named — episode discarded"
-                    )
-                    dataset.clear_episode_buffer()
-                    break
-
-                _apply_episode_task(dataset, named_task)
-                logger.info(f"Episode {current_episode} task set to {named_task!r}")
 
             # Save episode immediately after recording phase (matches expected flow)
             logger.info(f"💾 Saving episode {current_episode}...")

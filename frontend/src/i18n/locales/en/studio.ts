@@ -68,11 +68,10 @@ export default {
       savedAs: "Will be saved as <0>{{repoId}}</0>",
       loginHint: "Log in to Hugging Face to set the repository owner.",
       task: "Task description *",
+      perEpisodeTaskLabel: "Describe each episode",
+      perEpisodeTaskHint: "Enter a task before each episode. Reset when needed, then press Space to record.",
       taskPlaceholder:
         "e.g., pick up the red block and place it on the blue square",
-      perEpisodeTaskLabel: "Name each episode's task after recording it",
-      perEpisodeTaskHint:
-        "After every episode the session pauses and asks you to describe that episode's task, just before the reset. Use it when the episodes in this dataset do different things. There is no single task for the whole dataset.",
       numEpisodes: "Number of episodes",
       episodeTime: "Episode duration (s)",
       resetTime: "Reset duration (s)",
@@ -92,7 +91,7 @@ export default {
       noRobotBody:
         "Select or create a robot first — use the robot menu in the top-right corner.",
       missingDetailsTitle: "Missing dataset details",
-      missingDetailsBody: "Please enter a dataset name and task description.",
+      missingDetailsBody: "Please enter a dataset name.",
       // The body is validateDatasetName's own message — client-side, but owned
       // by lib/datasetName.ts, so only this title is a key.
       invalidNameTitle: "Invalid dataset name",

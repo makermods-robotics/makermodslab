@@ -68,7 +68,7 @@ export interface TeleoperationSessionOptions {
 export interface RecordingSessionOptions {
   dataset_repo_id: string;
   single_task: string;
-  /** Pause after each episode to name that episode's task (record.py's
+  /** Wait before each episode for its task (record.py's
    * "naming" phase). `single_task` stays required — the baseline task and the
    * first prompt's prefill. */
   per_episode_task?: boolean;

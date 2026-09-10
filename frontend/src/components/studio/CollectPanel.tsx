@@ -181,7 +181,7 @@ const CollectPanel: React.FC = () => {
     // disables on the same condition as a courtesy.
     // With per-episode tasks there is no dataset-level task to require — each
     // episode names its own during the session.
-    if (!datasetName || (!perEpisodeTask && !singleTask)) {
+    if (!datasetName || (!perEpisodeTask && !singleTask.trim())) {
       toast({
         title: t("studio.collect.toast.missingDetailsTitle"),
         description: t("studio.collect.toast.missingDetailsBody"),
@@ -234,7 +234,7 @@ const CollectPanel: React.FC = () => {
       per_episode_task: perEpisodeTask,
       num_episodes: numEpisodes,
       episode_time_s: episodeTimeS,
-      reset_time_s: resetTimeS,
+      reset_time_s: perEpisodeTask ? 0 : resetTimeS,
       fps: 30,
       video: true,
       push_to_hub: false,

@@ -2315,10 +2315,9 @@ class RecordingControlResponse(BaseModel):
     tags=["recording"],
 )
 def recording_episode_task(body: EpisodeTaskBody):
-    """Name the task for the episode a per-episode-task session is holding in
-    its "naming" phase. Mandatory and un-bypassable: an empty description or a
-    submission outside the naming phase comes back 200 + {success: false} —
-    see handle_submit_episode_task."""
+    """Set the upcoming episode's task and start recording after environment
+    reset. An empty description or a submission outside the naming phase
+    comes back 200 + {success: false}."""
     return handle_submit_episode_task(body.task)
 
 
