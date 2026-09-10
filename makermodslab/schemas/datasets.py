@@ -44,6 +44,7 @@ __all__ = [
     "DatasetHubStatusResponse",
     "DatasetInfoResponse",
     "DatasetListItem",
+    "DatasetMergeInfo",
     "DatasetRenameResponse",
     "DatasetTagsResponse",
     "DatasetTaskCount",
@@ -56,6 +57,9 @@ __all__ = [
     "ExcludedEpisodesResponse",
     "ImportResponse",
     "MergeCancelResponse",
+    "MergeCleanupHubFailure",
+    "MergeCleanupResponse",
+    "MergeCleanupSkip",
     "MergeLogEntry",
     "MergeStartResponse",
     "MergeStatusResponse",
@@ -64,6 +68,17 @@ __all__ = [
     "UploadStartResponse",
     "UploadStatusResponse",
 ]
+
+
+class DatasetMergeInfo(BaseModel):
+    """Present on a GET /datasets row when the local dataset has a
+    `meta/makermodslab_merge.json` sidecar (it was produced by a MakerMods
+    merge). The full recipe is on GET /datasets/info, not here — the row only
+    needs enough to group and badge."""
+
+    temporary: bool
+    weighted: bool
+    source_count: int
 
 
 class DatasetListItem(BaseModel):
@@ -81,6 +96,12 @@ class DatasetListItem(BaseModel):
     private: bool
     source: Literal["local", "hub", "both"]
     saved_custom: bool | None = None
+    # Per-episode sampling weights present (local rows only; absent = unknown,
+    # i.e. a Hub-only row, NOT false). Previously computed but filtered out by
+    # this model — declared now so the "weighted merge" badge actually resolves.
+    weighted: bool | None = None
+    # Set on a local row whose dataset carries a merge sidecar.
+    merge: DatasetMergeInfo | None = None
 
 
 class DatasetTaskCount(BaseModel):
@@ -302,3 +323,28 @@ class DeleteDatasetResponse(BaseModel):
 
     success: bool
     message: str
+    # True when a merge sidecar recorded a MakerMods-created Hub copy and it was
+    # deleted along with the local directory. Absent/False otherwise.
+    hub_deleted: bool = False
+
+
+class MergeCleanupSkip(BaseModel):
+    repo_id: str
+    reason: str
+
+
+class MergeCleanupHubFailure(BaseModel):
+    repo_id: str
+    reason: str
+
+
+class MergeCleanupResponse(BaseModel):
+    """server.py datasets_merge_cleanup — what the manual "clean up temporary
+    merges" action removed. `skipped` names datasets left in place because they
+    are in use; `hub_failed` names Hub repos the guard refused or the API
+    rejected."""
+
+    deleted: list[str]
+    skipped: list[MergeCleanupSkip]
+    hub_deleted: list[str]
+    hub_failed: list[MergeCleanupHubFailure]

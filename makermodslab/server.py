@@ -206,6 +206,7 @@ from .schemas.datasets import (
     ExcludedEpisodesResponse,
     ImportResponse,
     MergeCancelResponse,
+    MergeCleanupResponse,
     MergeStartResponse,
     MergeStatusResponse,
     SetExcludedEpisodesResponse,
@@ -2208,6 +2209,18 @@ def datasets_merge_cancel():
     A no-op when nothing is running. A stalled merge is also stopped on its own
     after 10 minutes of no output — see merge.MERGE_STUCK_AFTER_S."""
     return handle_merge_cancel()
+
+
+class MergeCleanupRequest(BaseModel):
+    repo_ids: list[str] | None = None
+
+
+@v1_router.post("/datasets/merge/cleanup", response_model=MergeCleanupResponse, tags=["datasets"])
+def datasets_merge_cleanup(request: MergeCleanupRequest):
+    """Delete temporary merged datasets — the local directory and any
+    MakerMods-created Hub copy. Manual only; nothing here runs on a schedule. A
+    dataset a training run is using (or queued to) is skipped and reported."""
+    return dataset_browser.cleanup_temporary_merges(request.repo_ids)
 
 
 @router.websocket("/ws/joint-data")

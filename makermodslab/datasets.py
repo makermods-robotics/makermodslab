@@ -35,8 +35,10 @@ from huggingface_hub import (
 )
 from huggingface_hub.errors import HfHubHTTPError
 
+from .merge_manifest import MergeManifest, read_merge_manifest
 from .sampling import SAMPLING_WEIGHT_COLUMN
 from .utils.config import (
+    MAKERMODSLAB_TAG,
     get_hidden_datasets,
     get_saved_custom_datasets,
     validate_dataset_name,
@@ -908,6 +910,37 @@ def _has_sampling_weight_column(path: Path) -> bool:
     return False
 
 
+def _merge_sidecar_block(path: Path) -> dict[str, Any] | None:
+    """The listing-row ``merge`` block for a local dataset dir, or None.
+
+    Just enough of ``meta/makermodslab_merge.json`` to group and badge the row;
+    the full recipe is on GET /datasets/info, not the listing.
+    """
+    manifest = read_merge_manifest(path)
+    if manifest is None:
+        return None
+    return {
+        "temporary": manifest.temporary,
+        "weighted": manifest.weighted,
+        "source_count": len(manifest.sources),
+    }
+
+
+def _local_listing_row(repo_id: str, path: Path) -> dict[str, Any]:
+    """One local ``list_local_datasets`` row, with a ``merge`` block when the
+    dataset carries a merge sidecar."""
+    row: dict[str, Any] = {
+        "repo_id": repo_id,
+        "last_modified": _dir_mtime_iso(path),
+        "private": False,
+        "weighted": _has_sampling_weight_column(path),
+    }
+    merge = _merge_sidecar_block(path)
+    if merge is not None:
+        row["merge"] = merge
+    return row
+
+
 def list_local_datasets() -> list[dict[str, Any]]:
     """Scan the LeRobot cache for local datasets (dirs containing meta/info.json).
 
@@ -937,14 +970,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
             # It IS a dataset (empty or not) — record it only if non-empty, but
             # don't descend into its subdirs either way.
             if _dataset_has_episodes(top):
-                out.append(
-                    {
-                        "repo_id": top.name,
-                        "last_modified": _dir_mtime_iso(top),
-                        "private": False,
-                        "weighted": _has_sampling_weight_column(top),
-                    }
-                )
+                out.append(_local_listing_row(top.name, top))
             continue
 
         # Not a dataset itself — descend one level.
@@ -959,14 +985,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
             except OSError:
                 continue
             if _is_dataset_dir(sub) and _dataset_has_episodes(sub):
-                out.append(
-                    {
-                        "repo_id": f"{top.name}/{sub.name}",
-                        "last_modified": _dir_mtime_iso(sub),
-                        "private": False,
-                        "weighted": _has_sampling_weight_column(sub),
-                    }
-                )
+                out.append(_local_listing_row(f"{top.name}/{sub.name}", sub))
 
     out.sort(key=lambda d: d["last_modified"] or "", reverse=True)
     return out
@@ -1287,6 +1306,18 @@ def list_episode_summaries(repo_id: str) -> list[dict[str, Any]] | None:
         )
     out.sort(key=lambda e: e["episode_index"])
     return out
+
+
+def read_merge_sidecar(repo_id: str) -> MergeManifest | None:
+    """The merge manifest for a LOCAL dataset, or None.
+
+    Local path only: the sidecar does not travel to the Hub, so a Hub-only row
+    has no recipe to show here.
+    """
+    path = _resolve_local_dataset_path(repo_id)
+    if path is None:
+        return None
+    return read_merge_manifest(path)
 
 
 def dataset_is_weighted(repo_id: str) -> bool:
@@ -1774,6 +1805,123 @@ def _dataset_in_use(repo_id: str) -> str | None:
     return None
 
 
+def _may_delete_hub_repo(hub_repo: str) -> bool:
+    """Guard for deleting a Hub DATASET repo during merge cleanup.
+
+    True only when ALL hold:
+      * `hub_repo` is `<namespace>/<name>`;
+      * `<namespace>` is a namespace the authenticated token can write to
+        (own account or a writable org);
+      * the repo carries the MakerModsLab tag (our pushes stamp it).
+
+    Any lookup failure — no Hub identity, a 404, a network error — returns
+    False. A repo we cannot positively vouch for is never deleted.
+    """
+    if "/" not in hub_repo:
+        return False
+    try:
+        ident = resolve_hub_dataset_id(hub_repo, cached_whoami())
+        if not ident.writable:
+            logger.info("_may_delete_hub_repo(%s): refusing, namespace not writable", hub_repo)
+            return False
+        tags = getattr(shared_hf_api().dataset_info(ident.repo_id), "tags", None) or []
+        if MAKERMODSLAB_TAG not in tags:
+            logger.info("_may_delete_hub_repo(%s): refusing, no MakerModsLab tag", hub_repo)
+            return False
+        return True
+    except Exception as exc:
+        logger.info("_may_delete_hub_repo(%s): refusing, lookup failed: %s", hub_repo, exc)
+        return False
+
+
+def _delete_hub_dataset_repo(hub_repo: str) -> None:
+    """Delete a Hub dataset repo. Caller MUST have cleared `_may_delete_hub_repo`
+    first — this does no checking of its own."""
+    ident = resolve_hub_dataset_id(hub_repo, cached_whoami())
+    shared_hf_api().delete_repo(ident.repo_id, repo_type="dataset", missing_ok=True)
+
+
+def cleanup_temporary_merges(repo_ids: list[str] | None = None) -> dict[str, Any]:
+    """Delete temporary merged datasets (local dir + a MakerMods-created Hub
+    copy). Manual action only — nothing here runs on a timer.
+
+    Scope: local datasets whose `meta/makermodslab_merge.json` sidecar says
+    `temporary: true`. `repo_ids`, when given, narrows to that set (still
+    sidecar-gated). A dataset `_dataset_in_use` reports busy is skipped and
+    reported. A non-temporary dataset with a sidecar is NEVER touched.
+
+    Returns ``{deleted, skipped, hub_deleted, hub_failed}``.
+    """
+    cache_root = _lerobot_cache_root()
+    root_resolved = cache_root.resolve()
+    deleted: list[str] = []
+    skipped: list[dict[str, str]] = []
+    hub_deleted: list[str] = []
+    hub_failed: list[dict[str, str]] = []
+
+    candidates = list(repo_ids) if repo_ids is not None else [r["repo_id"] for r in list_local_datasets()]
+
+    for repo_id in candidates:
+        dataset_dir = cache_root / repo_id
+        manifest = read_merge_manifest(dataset_dir)
+        if manifest is None or not manifest.temporary:
+            continue  # not a temporary merge — never a candidate
+
+        busy = _dataset_in_use(repo_id)
+        if busy is not None:
+            skipped.append({"repo_id": repo_id, "reason": busy})
+            continue
+
+        # Traversal guard, mirroring handle_delete_dataset: the target must stay
+        # strictly inside the cache root.
+        try:
+            target = dataset_dir.resolve()
+        except OSError:
+            skipped.append({"repo_id": repo_id, "reason": "Invalid dataset path"})
+            continue
+        if target == root_resolved or root_resolved not in target.parents:
+            skipped.append({"repo_id": repo_id, "reason": "Invalid dataset path"})
+            continue
+
+        hub_repo = manifest.hub_repo
+        try:
+            shutil.rmtree(target)
+        except Exception as exc:
+            skipped.append({"repo_id": repo_id, "reason": f"Could not delete: {exc}"})
+            continue
+        deleted.append(repo_id)
+
+        # Best-effort Hub cleanup — only for a sidecar-recorded back-ref, and
+        # only when the guard positively vouches for the repo. Never undoes or
+        # fails the local delete above.
+        if hub_repo:
+            try:
+                if _may_delete_hub_repo(hub_repo):
+                    _delete_hub_dataset_repo(hub_repo)
+                    hub_deleted.append(hub_repo)
+                else:
+                    hub_failed.append(
+                        {
+                            "repo_id": hub_repo,
+                            "reason": "Not a MakerModsLab-created repo this account can write to.",
+                        }
+                    )
+            except Exception as exc:
+                hub_failed.append({"repo_id": hub_repo, "reason": str(exc)})
+
+    if deleted:
+        invalidate_dataset_listing_cache()
+        for repo_id in deleted:
+            invalidate_hub_status(repo_id)
+
+    return {
+        "deleted": deleted,
+        "skipped": skipped,
+        "hub_deleted": hub_deleted,
+        "hub_failed": hub_failed,
+    }
+
+
 def _invalidate_rename_caches(*ids: str | None) -> None:
     """Drop every cached Hub-existence answer a rename could have touched,
     plus the dataset listing. Called on BOTH the success path and the
@@ -2102,6 +2250,8 @@ def list_all_datasets() -> list[dict[str, Any]]:
             # likely to have been merged and pushed.
             if "weighted" in item:
                 existing["weighted"] = item["weighted"]
+            if "merge" in item:
+                existing["merge"] = item["merge"]
         else:
             merged[rid] = {**item, "source": "local"}
 

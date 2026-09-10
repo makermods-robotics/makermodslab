@@ -15,6 +15,8 @@ import { useDatasets } from "@/hooks/useDatasets";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Collapsible,
@@ -34,7 +36,21 @@ import { ModelItem } from "@/lib/modelsApi";
 import { useModels } from "@/hooks/useModels";
 import { JobRecord, getJob, importModel, jobDisplayName } from "@/lib/jobsApi";
 import { listJobCheckpoints } from "@/lib/checkpointsApi";
-import { getDatasetInfo, saveCustomDataset } from "@/lib/replayApi";
+import {
+  DatasetInfo,
+  DatasetItem,
+  MAX_SOURCE_WEIGHT,
+  MergeStatus,
+  cancelDatasetMerge,
+  getDatasetInfo,
+  getDatasetMergeStatus,
+  saveCustomDataset,
+  startDatasetMerge,
+} from "@/lib/replayApi";
+import { HUB_REPO_ID_RE } from "@/lib/repoId";
+import { cn } from "@/lib/utils";
+import { ArmType, armTypeFromRobotType, armLabel } from "@/lib/armTypes";
+import { useArms } from "@/hooks/useArms";
 import TrainingConfigurator, {
   FinetuneSeed,
   ResumeSeed,
@@ -43,6 +59,9 @@ import TrainingJobDialog from "@/components/training/TrainingJobDialog";
 import JobsLibrary from "@/components/jobs/JobsLibrary";
 import { useJobsData } from "@/components/jobs/JobsDataContext";
 import DatasetPicker from "@/components/landing/DatasetPicker";
+import { DatasetWeightPicker } from "@/components/landing/DatasetWeightPicker";
+import { MergeProgress } from "@/components/landing/MergeProgress";
+import { runTemporaryMerge, MergeAborted } from "@/components/studio/combineMerge";
 import {
   LibrarySection,
   PanelEntryControl,
@@ -105,6 +124,8 @@ const TrainPanel: React.FC = () => {
   // mutation the studio performs (stop, delete, rename, hub dismiss) already
   // pulls the list afterwards rather than trusting the broadcast.
   const { refresh: refreshJobs } = useJobsData();
+  // The arms manifest, for the cross-arm advisory on a combine selection.
+  const { arms, byId } = useArms();
 
   const {
     seen: hasSeenTrainingMilestone,
@@ -156,9 +177,39 @@ const TrainPanel: React.FC = () => {
   // and the configurator switches to resume mode.
   const [resumeSeed, setResumeSeed] = useState<ResumeSeed | null>(null);
 
+  // ── Combine multiple datasets ─────────────────────────────────────────────
+  // A blended fine-tune: pick several datasets + per-source weights, and Start
+  // merges them into a throwaway dataset (phase one) that the run then trains
+  // on (phase two). The two phases are one click — see combineMergeAndTrain.
+  const [combine, setCombine] = useState(false);
+  const [combineSources, setCombineSources] = useState<string[]>([]);
+  const [combineWeights, setCombineWeights] = useState<Record<string, number>>(
+    {},
+  );
+  // Info for the selected sources: episode counts feed the mix preview, robot
+  // type feeds the cross-arm advisory. null = a lookup that failed.
+  const [combineInfos, setCombineInfos] = useState<
+    Record<string, DatasetInfo | null>
+  >({});
+  const [merge, setMerge] = useState<MergeStatus | null>(null);
+  const merging = merge?.state === "running";
+  // Set while a combine merge (phase one) is polling, so closing the form or a
+  // Cancel click can abort it instead of leaving it to finish and launch a run.
+  const mergeAbortRef = useRef<AbortController | null>(null);
+
   const toggleForm = (open: boolean) => {
     setFormOpen(open);
     setJobsOpen(!open);
+    // A launch (or a manual close) starts the next run from scratch — drop any
+    // half-built combine selection and the finished merge's progress panel.
+    if (!open) {
+      mergeAbortRef.current?.abort();
+      setCombine(false);
+      setCombineSources([]);
+      setCombineWeights({});
+      setCombineInfos({});
+      setMerge(null);
+    }
     // Closing the form is the way out of a resume: resume mode hides the
     // dataset and starting-point controls (both are the parent run's and not
     // editable), so unlike a fine-tune — which can be dropped by setting
@@ -414,6 +465,147 @@ const TrainPanel: React.FC = () => {
       });
   };
 
+  // ── Combine mode: source list, weights, the two-phase launch ──────────────
+  // A temporary merge must never itself become a merge source.
+  const combinableDatasets = useMemo(
+    () => datasets.filter((d) => !d.merge?.temporary),
+    [datasets],
+  );
+  // Selected sources in list order (stable regardless of click order), so the
+  // weight rows and the merge request line up with what is on screen.
+  const orderedCombineSources = useMemo(
+    () =>
+      combinableDatasets
+        .map((d) => d.repo_id)
+        .filter((id) => combineSources.includes(id)),
+    [combinableDatasets, combineSources],
+  );
+
+  const toggleCombineSource = (repoId: string) =>
+    setCombineSources((prev) =>
+      prev.includes(repoId)
+        ? prev.filter((id) => id !== repoId)
+        : [...prev, repoId],
+    );
+
+  // Fetch info for the selected sources (mix preview + cross-arm advisory).
+  // Only the selected ones, so ticking the box is what triggers the lookup.
+  useEffect(() => {
+    if (!combine) return;
+    const missing = orderedCombineSources.filter((id) => !(id in combineInfos));
+    if (missing.length === 0) return;
+    const controller = new AbortController();
+    let cancelled = false;
+    void (async () => {
+      const entries = await Promise.all(
+        missing.map(async (repoId) => {
+          try {
+            const info = await getDatasetInfo(
+              baseUrl,
+              fetchWithHeaders,
+              repoId,
+              controller.signal,
+            );
+            return [repoId, info] as const;
+          } catch {
+            return [repoId, null] as const;
+          }
+        }),
+      );
+      if (!cancelled)
+        setCombineInfos((prev) => ({
+          ...prev,
+          ...Object.fromEntries(entries),
+        }));
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [combine, orderedCombineSources, combineInfos, baseUrl, fetchWithHeaders]);
+
+  // Advisory (never a block): the selected sources span more than one arm
+  // family. Mirrors MergeDatasetsDialog's armMismatchWarning — the merge still
+  // proceeds (acknowledge_warnings), the point is the operator sees it first.
+  const combineArmMismatch = useMemo<string | null>(() => {
+    const byArm = new Map<ArmType, string[]>();
+    for (const repoId of orderedCombineSources) {
+      const arm = armTypeFromRobotType(arms, combineInfos[repoId]?.robot_type);
+      if (arm) byArm.set(arm, [...(byArm.get(arm) ?? []), repoId]);
+    }
+    if (byArm.size < 2) return null;
+    const groups = [...byArm.entries()]
+      .map(([arm, ids]) => `${ids.join(", ")} (${armLabel(byId(arm), arm, t)})`)
+      .join("; ");
+    return t("landing.mergeDatasets.armMismatchWarning", { groups });
+  }, [orderedCombineSources, combineInfos, arms, byId, t]);
+
+  // Phase one of a combine launch: merge the selected sources into a throwaway
+  // dataset and resolve to the repo id the backend minted. Passed to the
+  // configurator as `prepareDatasetRepoId`, so a single Start does merge → train.
+  const combineMergeAndTrain = useCallback(async (): Promise<string | null> => {
+    const sources = combinableDatasets
+      .map((d) => d.repo_id)
+      .filter((id) => combineSources.includes(id));
+    const weights = sources.map((id) => combineWeights[id] ?? 1);
+    const controller = new AbortController();
+    mergeAbortRef.current = controller;
+    setMerge({ state: "running", error: null, output_repo_id: null, logs: [] });
+    try {
+      const outputRepoId = await runTemporaryMerge({
+        startMerge: () =>
+          startDatasetMerge(
+            baseUrl,
+            fetchWithHeaders,
+            sources,
+            "",
+            weights,
+            [],
+            true /* acknowledge cross-arm warnings — the operator chose these */,
+            true /* temporary */,
+          ),
+        getStatus: () => getDatasetMergeStatus(baseUrl, fetchWithHeaders),
+        cancelMerge: () => cancelDatasetMerge(baseUrl, fetchWithHeaders),
+        onStatus: setMerge,
+        signal: controller.signal,
+      });
+      refreshDatasets();
+      return outputRepoId;
+    } catch (e) {
+      if (e instanceof MergeAborted) {
+        // The user closed the form or hit Cancel — clear the panel and submit
+        // nothing. runTemporaryMerge has already asked the backend to stop the
+        // merge (cancelMerge above), so it won't jam the next one.
+        setMerge(null);
+        return null;
+      }
+      const message = e instanceof Error ? e.message : String(e);
+      setMerge((prev) => ({
+        state: "error",
+        error: message,
+        output_repo_id: prev?.output_repo_id ?? null,
+        logs: prev?.logs ?? [],
+      }));
+      toast({
+        title: t("studio.train.combine.mergeFailed"),
+        description: message,
+        variant: "destructive",
+      });
+      return null;
+    } finally {
+      if (mergeAbortRef.current === controller) mergeAbortRef.current = null;
+    }
+  }, [
+    combinableDatasets,
+    combineSources,
+    combineWeights,
+    baseUrl,
+    fetchWithHeaders,
+    refreshDatasets,
+    toast,
+    t,
+  ]);
+
   // Both the <Select> placeholder and the "no base model" option's label. The
   // submitted option VALUE ("__none__") is untouched.
   const noStartingPointLabel = FOUNDATION_POLICY_TYPES.has(policyType)
@@ -470,69 +662,168 @@ const TrainPanel: React.FC = () => {
                 </p>
               </div>
             ) : (
-            <div className="space-y-2">
-              <Label htmlFor="train-dataset">
-                {t("studio.train.dataset.label")}
-              </Label>
-              {/* One way in, not two: the whole control is the picker's
-                  trigger, and DatasetPicker's own search box is the only
-                  search — including the "use any public org/name" row, which
-                  moved into it (onPickHubId) rather than living in a second
-                  results list out here. The trigger wears SelectTrigger's own
-                  classes so it reads as the same kind of control as Starting
-                  point below it; it can't BE a SelectTrigger, because what it
-                  opens is a Popover. */}
-              <DatasetPicker
-                datasets={datasets}
-                loading={datasetsLoading}
-                onPickExisting={(item) => pickDataset(item.repo_id)}
-                onPickHubId={addHubDataset}
-              >
-                <button
-                  id="train-dataset"
-                  type="button"
-                  className="flex h-10 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {selectedId ? (
-                    // Repo ids outrun a half-panel trigger routinely, so the
-                    // full id stays one hover away — and only then (the hook
-                    // measures the span and leaves `title` undefined while the
-                    // id fits whole).
-                    <span
-                      className="min-w-0 truncate font-mono text-xs"
-                      {...selectedIdHover}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <Label htmlFor="train-dataset">
+                    {t("studio.train.dataset.label")}
+                  </Label>
+                  <label
+                    className={cn(
+                      "flex items-center gap-1.5 text-xs",
+                      merging
+                        ? "opacity-50"
+                        : "cursor-pointer text-muted-foreground",
+                    )}
+                  >
+                    <Checkbox
+                      checked={combine}
+                      disabled={merging}
+                      onCheckedChange={(v) => setCombine(v === true)}
+                    />
+                    {t("studio.train.combine.toggle")}
+                  </label>
+                </div>
+                {combine ? (
+                  <div className="space-y-3">
+                    <p className="text-xs text-muted-foreground">
+                      {t("studio.train.combine.hint")}
+                    </p>
+                    <div className="max-h-48 divide-y divide-border overflow-auto rounded-md border border-border">
+                      {combinableDatasets.length === 0 ? (
+                        <p className="px-3 py-4 text-sm text-muted-foreground">
+                          {t("studio.train.dataset.hint")}
+                        </p>
+                      ) : (
+                        combinableDatasets.map((d) => (
+                          <label
+                            key={d.repo_id}
+                            className={cn(
+                              "flex items-center gap-2 px-3 py-2 text-sm",
+                              merging
+                                ? "cursor-not-allowed opacity-60"
+                                : "cursor-pointer hover:bg-muted/50",
+                            )}
+                          >
+                            <Checkbox
+                              className="shrink-0"
+                              checked={combineSources.includes(d.repo_id)}
+                              disabled={merging}
+                              onCheckedChange={() =>
+                                toggleCombineSource(d.repo_id)
+                              }
+                            />
+                            <span className="min-w-0 flex-1 truncate font-mono text-foreground">
+                              {d.repo_id}
+                            </span>
+                          </label>
+                        ))
+                      )}
+                    </div>
+                    {orderedCombineSources.length >= 2 ? (
+                      <DatasetWeightPicker
+                        value={orderedCombineSources.map((id) => ({
+                          repo_id: id,
+                          weight: combineWeights[id] ?? 1,
+                          baseEpisodes:
+                            combineInfos[id]?.total_episodes ?? null,
+                        }))}
+                        onChange={(rows) =>
+                          setCombineWeights(
+                            Object.fromEntries(
+                              rows.map((r) => [r.repo_id, r.weight]),
+                            ),
+                          )
+                        }
+                        maxWeight={MAX_SOURCE_WEIGHT}
+                        disabled={merging}
+                      />
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        {t("studio.train.combine.sourcesRequired")}
+                      </p>
+                    )}
+                    {combineArmMismatch ? (
+                      <p className="text-xs text-warn">{combineArmMismatch}</p>
+                    ) : null}
+                    {merge && merge.state !== "idle" ? (
+                      <div className="space-y-1.5">
+                        {merging ? (
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-xs font-medium text-foreground">
+                              {t("studio.train.combine.merging")}
+                            </p>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 shrink-0 px-2 text-xs"
+                              onClick={() => mergeAbortRef.current?.abort()}
+                            >
+                              {t("studio.train.combine.cancel")}
+                            </Button>
+                          </div>
+                        ) : null}
+                        <MergeProgress
+                          logs={merge.logs.map((l) => l.message)}
+                          state={merge.state}
+                          error={merge.error}
+                          outputRepoId={merge.output_repo_id}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <>
+                    {/* One way in, not two: the whole control is the picker's
+                        trigger, and DatasetPicker's own search box is the only
+                        search — including the "use any public org/name" row,
+                        which moved into it (onPickHubId) rather than living in
+                        a second results list out here. */}
+                    <DatasetPicker
+                      datasets={datasets}
+                      loading={datasetsLoading}
+                      onPickExisting={(item) => pickDataset(item.repo_id)}
+                      onPickHubId={addHubDataset}
                     >
-                      {selectedId}
-                    </span>
-                  ) : (
-                    <span className="truncate text-muted-foreground">
-                      {t("studio.train.dataset.pick")}
-                    </span>
-                  )}
-                  <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />
-                </button>
-              </DatasetPicker>
-              {/* The prefill's episode subset, reported against the selection
-                  the trigger above now shows (it used to hang off the removed
-                  chip). */}
-              {trainingEpisodeIndices && (
-                <p className="text-xs text-muted-foreground">
-                  {datasetTotalEpisodes != null
-                    ? t("studio.train.dataset.episodeSubsetOfTotal", {
-                        used: trainingEpisodeIndices.length,
-                        total: datasetTotalEpisodes,
-                      })
-                    : t("studio.train.dataset.episodeSubset", {
-                        used: trainingEpisodeIndices.length,
-                      })}
-                </p>
-              )}
-              {!selectedId ? (
-                <p className="text-xs text-muted-foreground">
-                  {t("studio.train.dataset.hint")}
-                </p>
-              ) : null}
-            </div>
+                      <button
+                        id="train-dataset"
+                        type="button"
+                        className="flex h-10 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {selectedId ? (
+                          <span
+                            className="min-w-0 truncate font-mono text-xs"
+                            {...selectedIdHover}
+                          >
+                            {selectedId}
+                          </span>
+                        ) : (
+                          <span className="truncate text-muted-foreground">
+                            {t("studio.train.dataset.pick")}
+                          </span>
+                        )}
+                        <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />
+                      </button>
+                    </DatasetPicker>
+                    {trainingEpisodeIndices && (
+                      <p className="text-xs text-muted-foreground">
+                        {datasetTotalEpisodes != null
+                          ? t("studio.train.dataset.episodeSubsetOfTotal", {
+                              used: trainingEpisodeIndices.length,
+                              total: datasetTotalEpisodes,
+                            })
+                          : t("studio.train.dataset.episodeSubset", {
+                              used: trainingEpisodeIndices.length,
+                            })}
+                      </p>
+                    )}
+                    {!selectedId ? (
+                      <p className="text-xs text-muted-foreground">
+                        {t("studio.train.dataset.hint")}
+                      </p>
+                    ) : null}
+                  </>
+                )}
+              </div>
             )}
 
             {/* Starting point — the optional fine-tune base. Sits directly
@@ -628,8 +919,17 @@ const TrainPanel: React.FC = () => {
               }::${finetuneSeed?.jobId ?? "fresh"}`}
               policyType={policyType}
               onPolicyTypeChange={setPolicyType}
-              datasetRepoId={trainingDatasetRepoId}
-              episodeIndices={trainingEpisodeIndices}
+              // Combine mode mints the dataset at launch (prepareDatasetRepoId),
+              // so the controlled id is blank and `datasetReady` gates Start on
+              // the source selection instead.
+              datasetRepoId={combine ? "" : trainingDatasetRepoId}
+              episodeIndices={combine ? undefined : trainingEpisodeIndices}
+              prepareDatasetRepoId={combine ? combineMergeAndTrain : undefined}
+              datasetReady={
+                combine
+                  ? orderedCombineSources.length >= 2 && !merging
+                  : undefined
+              }
               finetuneSeed={finetuneSeed}
               // The seed owns the chosen base checkpoint, so the pick survives
               // a remount of the form below. `checkpointSource` moves with it:

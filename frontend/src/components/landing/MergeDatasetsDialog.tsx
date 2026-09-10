@@ -11,9 +11,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { NumberInput } from "@/components/ui/number-input";
+import { DatasetWeightPicker } from "@/components/landing/DatasetWeightPicker";
+import { MergeProgress } from "@/components/landing/MergeProgress";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -26,15 +26,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { ArmType, armTypeFromRobotType, armLabel } from "@/lib/armTypes";
 import { useArms } from "@/hooks/useArms";
-import {
-  Loader2,
-  CheckCircle2,
-  XCircle,
-  GitMerge,
-  Minus,
-  Plus,
-  Scale,
-} from "lucide-react";
+import { Loader2, GitMerge, Scale } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import {
   datasetRepoIdIssue,
@@ -123,7 +115,6 @@ const MergeDatasetsDialog: React.FC<Props> = ({
   // Non-null while the backend has refused pending confirmation (cross-arm
   // sources); confirming re-submits with acknowledge_warnings.
   const [pendingWarnings, setPendingWarnings] = useState<string[] | null>(null);
-  const logBoxRef = useRef<HTMLDivElement>(null);
   const notifiedDone = useRef(false);
   // The name the running merge is writing to, captured at start. Read when it
   // completes: `output` is still editable while the merge runs, so reading the
@@ -229,11 +220,6 @@ const MergeDatasetsDialog: React.FC<Props> = ({
     statusChangeRef.current?.(status);
   }, [status]);
 
-  useEffect(() => {
-    if (logBoxRef.current)
-      logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
-  }, [status?.logs]);
-
   const toggle = (repoId: string) => {
     const wasSelected = selected.has(repoId);
     setSelected((prev) => {
@@ -254,16 +240,14 @@ const MergeDatasetsDialog: React.FC<Props> = ({
     [weights],
   );
 
-  // Clamp on write so invalid state is unrepresentable — the backend cap is
-  // mirrored here (MAX_SOURCE_WEIGHT) and an emptied field falls back to 1.
-  const setWeight = (repoId: string, next: number | undefined) =>
-    setWeights((prev) => ({
-      ...prev,
-      [repoId]: Math.min(
-        MAX_SOURCE_WEIGHT,
-        Math.max(1, Math.round(next ?? 1)),
-      ),
-    }));
+  // DatasetWeightPicker clamps each weight to MAX_SOURCE_WEIGHT on write and
+  // hands back the full row set; fold it into the overrides map.
+  const applyWeightRows = (
+    rows: { repo_id: string; weight: number }[],
+  ) =>
+    setWeights(
+      Object.fromEntries(rows.map((r) => [r.repo_id, r.weight])),
+    );
 
   const resetWeights = () => setWeights({});
 
@@ -512,16 +496,9 @@ const MergeDatasetsDialog: React.FC<Props> = ({
           // width — the content then spills past the dialog's background.
           <div className="min-h-0 min-w-0 space-y-4 overflow-y-auto">
             <div>
-              <div className="flex items-baseline justify-between gap-2">
-                <Label className="text-foreground">
-                  {t("landing.mergeDatasets.sources", { n: selected.size })}
-                </Label>
-                {selected.size > 0 && (
-                  <span className="text-xs text-muted-foreground">
-                    {t("landing.mergeDatasets.weightColumn")}
-                  </span>
-                )}
-              </div>
+              <Label className="text-foreground">
+                {t("landing.mergeDatasets.sources", { n: selected.size })}
+              </Label>
               <div className="mt-1 max-h-56 overflow-auto rounded-md border border-border divide-y divide-border">
                 {datasets.length === 0 ? (
                   <p className="p-3 text-sm text-muted-foreground">
@@ -530,7 +507,6 @@ const MergeDatasetsDialog: React.FC<Props> = ({
                 ) : (
                   datasets.map((d) => {
                     const isSelected = selected.has(d.repo_id);
-                    const weight = weightOf(d.repo_id);
                     const blockedReason = incompatibilityOf(d.repo_id);
                     return (
                       <div
@@ -546,9 +522,6 @@ const MergeDatasetsDialog: React.FC<Props> = ({
                             : "hover:bg-accent",
                         )}
                       >
-                        {/* The label wraps only the checkbox + name: the weight
-                            stepper must sit outside it, or clicking + would
-                            also toggle the selection. */}
                         <label
                           className={cn(
                             "flex min-w-0 flex-1 items-start gap-2",
@@ -563,50 +536,6 @@ const MergeDatasetsDialog: React.FC<Props> = ({
                           />
                           <span className="min-w-0 break-all">{d.repo_id}</span>
                         </label>
-                        {isSelected && (
-                          <div className="flex shrink-0 items-center gap-1">
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="icon"
-                              className="h-7 w-7"
-                              disabled={weight <= 1}
-                              aria-label={t(
-                                "landing.mergeDatasets.decreaseWeight",
-                              )}
-                              onClick={() => setWeight(d.repo_id, weight - 1)}
-                            >
-                              <Minus className="h-3 w-3" />
-                            </Button>
-                            <NumberInput
-                              value={weight}
-                              onChange={(v) => setWeight(d.repo_id, v)}
-                              min={1}
-                              max={MAX_SOURCE_WEIGHT}
-                              aria-label={t(
-                                "landing.mergeDatasets.weightAria",
-                                { repoId: d.repo_id },
-                              )}
-                              // min-w-0 is load-bearing: `w-12` sets width but
-                              // not min-width, and a number input's intrinsic
-                              // minimum would otherwise pin the row wide.
-                              className="h-7 w-12 min-w-0 px-1 text-center tabular-nums"
-                            />
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="icon"
-                              className="h-7 w-7"
-                              disabled={weight >= MAX_SOURCE_WEIGHT}
-                              aria-label={t(
-                                "landing.mergeDatasets.increaseWeight",
-                              )}
-                              onClick={() => setWeight(d.repo_id, weight + 1)}
-                            >
-                              <Plus className="h-3 w-3" />
-                            </Button>
-                          </div>
-                        )}
                       </div>
                     );
                   })
@@ -634,57 +563,16 @@ const MergeDatasetsDialog: React.FC<Props> = ({
                   )}
                 </div>
 
-                <div className="mt-2 max-h-48 min-w-0 space-y-2 overflow-y-auto pr-1">
-                  {mix.map((row) => (
-                    <div key={row.repoId} className="space-y-1">
-                      <div className="flex min-w-0 items-baseline justify-between gap-2 text-xs">
-                        <span className="flex min-w-0 flex-1 items-center gap-1.5">
-                          <span className="min-w-0 truncate text-foreground">
-                            {row.repoId}
-                          </span>
-                          {row.weight > 1 && (
-                            <Badge
-                              variant="secondary"
-                              className="shrink-0 px-1 py-0 text-[10px]"
-                            >
-                              {t("landing.mergeDatasets.weightTimes", {
-                                weight: row.weight,
-                              })}
-                            </Badge>
-                          )}
-                        </span>
-                        <span className="shrink-0 text-muted-foreground tabular-nums">
-                          {row.episodes === null
-                            ? t("landing.mergeDatasets.episodesUnknown")
-                            : row.weight > 1
-                              ? t("landing.mergeDatasets.mixEpisodesWeighted", {
-                                  count: row.episodes,
-                                  // Non-null whenever `episodes` is: both come
-                                  // from the same info lookup.
-                                  base: row.baseEpisodes ?? 0,
-                                })
-                              : t("landing.mergeDatasets.mixEpisodesPlain", {
-                                  count: row.episodes,
-                                })}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
-                          <div
-                            className="h-full rounded-full bg-info transition-all"
-                            style={{ width: `${row.share ?? 0}%` }}
-                          />
-                        </div>
-                        <span className="w-9 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
-                          {row.share === null
-                            ? "—"
-                            : t("landing.mergeDatasets.sharePercent", {
-                                percent: row.share,
-                              })}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
+                <div className="mt-2 max-h-48 min-w-0 overflow-y-auto pr-1">
+                  <DatasetWeightPicker
+                    value={mix.map((row) => ({
+                      repo_id: row.repoId,
+                      weight: row.weight,
+                      baseEpisodes: row.baseEpisodes,
+                    }))}
+                    onChange={applyWeightRows}
+                    maxWeight={MAX_SOURCE_WEIGHT}
+                  />
                 </div>
 
                 <Separator className="my-2" />
@@ -787,48 +675,12 @@ const MergeDatasetsDialog: React.FC<Props> = ({
           </div>
         ) : (
           <div className="min-h-0 min-w-0 space-y-3 overflow-y-auto">
-            <div className="flex items-center gap-2 text-sm text-foreground">
-              {state === "running" ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin text-info" />
-                  <Trans
-                    i18nKey="landing.mergeDatasets.merging"
-                    values={{ repoId: status?.output_repo_id ?? "" }}
-                    components={[<code key="0" className="text-info" />]}
-                  />
-                </>
-              ) : state === "done" ? (
-                <>
-                  <CheckCircle2 className="w-4 h-4 text-ok" />
-                  <Trans
-                    i18nKey="landing.mergeDatasets.created"
-                    values={{ repoId: status?.output_repo_id ?? "" }}
-                    components={[<code key="0" className="text-ok" />]}
-                  />
-                </>
-              ) : state === "cancelled" ? (
-                <>
-                  <XCircle className="w-4 h-4 text-muted-foreground" />{" "}
-                  {t("landing.mergeDatasets.cancelled")}
-                </>
-              ) : (
-                <>
-                  <XCircle className="w-4 h-4 text-destructive" />{" "}
-                  {t("landing.mergeDatasets.failed")}
-                </>
-              )}
-            </div>
-            <div
-              ref={logBoxRef}
-              className="max-h-56 overflow-auto rounded-md border border-border bg-muted p-2 font-mono text-xs text-foreground whitespace-pre-wrap"
-            >
-              {(status?.logs ?? []).map((l, i) => (
-                <div key={i}>{l.message}</div>
-              ))}
-            </div>
-            {status?.error ? (
-              <p className="text-sm text-destructive">{status.error}</p>
-            ) : null}
+            <MergeProgress
+              logs={(status?.logs ?? []).map((l) => l.message)}
+              state={state}
+              error={status?.error ?? null}
+              outputRepoId={status?.output_repo_id ?? null}
+            />
             <div className="flex justify-end gap-2">
               {state === "running" && (
                 <Button

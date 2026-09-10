@@ -1145,6 +1145,84 @@ def test_a_codec_mismatch_is_reported_instead_of_a_pointless_drop_prompt(
     assert "intervention" not in message
 
 
+# ---------------------------------------------------------------------------
+# Temporary merges and the merge sidecar (training-dataset-mix).
+# ---------------------------------------------------------------------------
+
+
+def test_generate_temporary_merge_repo_id_shares_namespace() -> None:
+    from makermodslab.datasets import validate_dataset_repo_id
+    from makermodslab.merge import generate_temporary_merge_repo_id
+
+    rid = generate_temporary_merge_repo_id(["alice/pick", "alice/place"])
+    assert rid.startswith("alice/mix-")
+    ok, _ = validate_dataset_repo_id(rid)
+    assert ok
+
+
+def test_generate_temporary_merge_repo_id_mixed_namespaces_is_bare() -> None:
+    from makermodslab.datasets import validate_dataset_repo_id
+    from makermodslab.merge import generate_temporary_merge_repo_id
+
+    rid = generate_temporary_merge_repo_id(["alice/pick", "bob/place"])
+    assert rid.startswith("mix-") and "/" not in rid
+    ok, _ = validate_dataset_repo_id(rid)
+    assert ok
+
+
+def test_merge_request_temporary_defaults_false() -> None:
+    from makermodslab.merge import MergeRequest
+
+    r = MergeRequest(source_repo_ids=["a", "b"], output_repo_id="c")
+    assert r.temporary is False
+
+
+def test_run_cli_writes_sidecar_after_merge(tmp_lerobot_home: Path, monkeypatch) -> None:
+    """The subprocess writes meta/makermodslab_merge.json with the recipe.
+
+    aggregate_datasets is stubbed — this asserts the manifest write, not lerobot.
+    """
+    from makermodslab import merge
+    from makermodslab.merge_manifest import read_merge_manifest
+
+    _write_source(tmp_lerobot_home, "ns/a", 4)
+    _write_source(tmp_lerobot_home, "ns/b", 6)
+    monkeypatch.setattr(merge, "aggregate_datasets", _fake_aggregate(tmp_lerobot_home, []))
+
+    rc = merge._run_cli(["ns/mix", "ns/a", "ns/b", "--weights", "1", "3", "--temporary"])
+    assert rc == 0
+
+    m = read_merge_manifest(tmp_lerobot_home / "ns/mix")
+    assert m is not None
+    assert m.temporary is True
+    assert m.weighted is True
+    assert [(s.repo_id, s.weight, s.episodes) for s in m.sources] == [
+        ("ns/a", 1, 4),
+        ("ns/b", 3, 6),
+    ]
+
+
+def test_run_cli_writes_sidecar_for_a_plain_unweighted_merge(tmp_lerobot_home: Path, monkeypatch) -> None:
+    """Every merge gets a sidecar: a plain library merge records temporary=false."""
+    from makermodslab import merge
+    from makermodslab.merge_manifest import read_merge_manifest
+
+    _write_source(tmp_lerobot_home, "ns/a", 2)
+    _write_source(tmp_lerobot_home, "ns/b", 3)
+    monkeypatch.setattr(merge, "aggregate_datasets", _fake_aggregate(tmp_lerobot_home, []))
+
+    assert merge._run_cli(["ns/out", "ns/a", "ns/b"]) == 0
+
+    m = read_merge_manifest(tmp_lerobot_home / "ns/out")
+    assert m is not None
+    assert m.temporary is False
+    assert m.weighted is False
+    assert [(s.repo_id, s.weight, s.episodes) for s in m.sources] == [
+        ("ns/a", 1, 2),
+        ("ns/b", 1, 3),
+    ]
+
+
 # ── Cancel + stuck-merge watchdog ────────────────────────────────────────────
 
 import signal  # noqa: E402

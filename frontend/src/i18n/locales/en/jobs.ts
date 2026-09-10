@@ -72,6 +72,11 @@ export default {
     image: "Image",
     updated: "Updated",
     base: "Base",
+    // The per-source training-data recipe on the policy card. Values beside
+    // these labels (repo ids, weights, percentages, the merge name) are data.
+    trainingData: "Training data",
+    weightedSource: "Weight · sampling share · episode count",
+    fromTemporaryMerge: "from a temporary merge · {{name}}",
   },
   // What a run started FROM. The chip says what the run IS at a glance; a run
   // started from random weights gets none, because a chip on every card carries

@@ -8,6 +8,10 @@ import { useHfAuth } from "@/contexts/HfAuthContext";
 import { useStudio } from "@/contexts/StudioContext";
 
 import { TrainingConfig } from "@/components/training/types";
+import {
+  CheckpointUploadKind,
+  configToRequest,
+} from "@/components/training/trainingRequest";
 import ConfigurationTab from "@/components/training/ConfigurationTab";
 import TrainingExtraGate from "@/components/training/TrainingExtraGate";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
@@ -33,7 +37,6 @@ import {
 import { Loader2, Play } from "lucide-react";
 
 import {
-  TrainingRequest,
   listJobs,
   startTrainingJob,
   listRunnerHardware,
@@ -130,12 +133,6 @@ export type FinetuneSeed = {
   checkpointSource?: "local" | "hub";
 };
 
-/** Which local→cloud transfer a launch needs, if any. "resume" moves the whole
- * checkpoint of the run being continued (weights AND optimizer state);
- * "finetune" moves only the base checkpoint's weights, since a fine-tune starts
- * a fresh optimizer and never reads the rest. */
-export type CheckpointUploadKind = "resume" | "finetune" | null;
-
 interface TrainingConfiguratorProps {
   /** Controlled policy type (chosen upstream — the panel policy grid or the
    * home-page/router state). EssentialsCard's dropdown edits it back through
@@ -168,6 +165,15 @@ interface TrainingConfiguratorProps {
    * null ⇒ the slot isn't mounted yet; render nothing (avoids a one-frame
    * inline flash before the ref callback fires). */
   actionsContainer?: HTMLElement | null;
+  /** "Combine datasets" mode: run before every launch to produce the dataset
+   * repo id the run trains on (the Train panel merges its selected sources into
+   * a throwaway dataset here). Returning null aborts the launch with nothing
+   * submitted. When set, `datasetRepoId` may be blank and `datasetReady` gates
+   * the Start button instead. */
+  prepareDatasetRepoId?: () => Promise<string | null>;
+  /** Whether Start may fire while `prepareDatasetRepoId` is set (the owner
+   * judges its own source selection). Ignored otherwise. */
+  datasetReady?: boolean;
 }
 
 // PI0.5 is a 4B-parameter VLA — a real cloud run OOM'd an 80GB A100 on step 1
@@ -178,64 +184,6 @@ const POLICY_DEFAULT_USE_AMP: Record<string, boolean> = {
 };
 const defaultUseAmp = (policyType: string): boolean =>
   POLICY_DEFAULT_USE_AMP[policyType] ?? false;
-
-function configToRequest(
-  c: TrainingConfig,
-  checkpointUploadKind: CheckpointUploadKind,
-): TrainingRequest {
-  // The backend's TrainingRequest has more optional fields; the form covers
-  // the user-meaningful subset.
-  return {
-    target: c.target,
-    dataset_repo_id: c.dataset_repo_id,
-    dataset_episodes: c.dataset_episodes,
-    policy_type: c.policy_type,
-    job_name: c.job_name,
-    steps: c.steps,
-    batch_size: c.batch_size,
-    seed: c.seed,
-    num_workers: c.num_workers,
-    log_freq: c.log_freq,
-    save_freq: c.save_freq,
-    save_checkpoint: c.save_checkpoint,
-    resume: c.resume,
-    resume_from_job_id: c.resume_from_job_id,
-    resume_from_step: c.resume_from_step,
-    resume_from_checkpoint_job_id: c.resume_from_checkpoint_job_id,
-    // Consent, not a mode: sent only for the combinations that have to push
-    // bytes to the Hub (a checkpoint only this machine has, needed by a run on
-    // cloud compute), and the backend refuses those without it. Left undefined
-    // otherwise so no other launch carries an upload permission it has no use
-    // for. One field per MODE rather than one shared flag, because they consent
-    // to different disclosures: the whole checkpoint of the run being continued,
-    // versus the base model's weights.
-    upload_resume_checkpoint:
-      checkpointUploadKind === "resume" ? true : undefined,
-    upload_finetune_checkpoint:
-      checkpointUploadKind === "finetune" ? true : undefined,
-    finetune_from_job_id: c.finetune_from_job_id,
-    finetune_from_step: c.finetune_from_step,
-    wandb_enable: c.wandb_enable,
-    wandb_project: c.wandb_project,
-    wandb_entity: c.wandb_entity,
-    wandb_notes: c.wandb_notes,
-    wandb_mode: c.wandb_mode,
-    wandb_disable_artifact: c.wandb_disable_artifact,
-    policy_device: c.policy_device,
-    policy_use_amp: c.policy_use_amp,
-    optimizer_type: c.optimizer_type,
-    optimizer_lr: c.optimizer_lr,
-    optimizer_weight_decay: c.optimizer_weight_decay,
-    optimizer_grad_clip_norm: c.optimizer_grad_clip_norm,
-    use_policy_training_preset: c.use_policy_training_preset,
-    // Cloud-only; the backend validates the format and ignores it for local.
-    // Send only a non-blank value so a stray "" doesn't reach the validator.
-    hf_job_timeout:
-      c.target.runner === "hf_cloud" && c.hf_job_timeout?.trim()
-        ? c.hf_job_timeout.trim()
-        : undefined,
-  };
-}
 
 /**
  * The training configuration form — extracted verbatim from Training.tsx's
@@ -260,6 +208,8 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   onFinetuneCheckpointChange,
   onStarted,
   actionsContainer,
+  prepareDatasetRepoId,
+  datasetReady,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { auth } = useHfAuth();
@@ -671,13 +621,22 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
 
   // The actual job launch, factored out so it can run either directly (dataset
   // already on the Hub) or as the upload's success continuation.
-  const launchJob = useCallback(async () => {
+  // `datasetOverride` is the repo id `prepareDatasetRepoId` resolved to — the
+  // Train panel's "combine datasets" mode merges its sources into a throwaway
+  // dataset and passes the minted name here, since `config.dataset_repo_id`
+  // (controlled) is still blank for that launch.
+  const launchJob = useCallback(async (datasetOverride?: string) => {
     setIsStarting(true);
     try {
       const job = await startTrainingJob(
         baseUrl,
         fetchWithHeaders,
-        configToRequest(config, checkpointUploadKind),
+        configToRequest(
+          datasetOverride
+            ? { ...config, dataset_repo_id: datasetOverride }
+            : config,
+          checkpointUploadKind,
+        ),
       );
       // The job's name is data — shown exactly as the backend returned it.
       // A busy local slot QUEUES the run rather than refusing (PR #83): say
@@ -762,7 +721,9 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   });
 
   const handleStart = async () => {
-    if (!datasetRepoId) {
+    // In normal mode a blank dataset is a hard stop; combine mode mints one
+    // later (via prepareDatasetRepoId), so it skips this guard.
+    if (!prepareDatasetRepoId && !datasetRepoId) {
       toast({
         title: t("training.configurator.toast.errorTitle"),
         description: t("training.configurator.toast.datasetRequired"),
@@ -777,6 +738,10 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     // here with a one-click installer instead of a buried ImportError after
     // the job has already started. Cloud jobs run in their own container
     // environment, so neither answer applies — skip the check.
+    //
+    // Runs BEFORE the combine-mode merge below: a missing package must abort
+    // without minting a throwaway dataset, and without `setIsStarting(true)`
+    // (these gates `return` without clearing it, which would wedge Start).
     if (config.target.runner === "local") {
       try {
         const r = await fetchWithHeaders(
@@ -839,6 +804,20 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       }
     }
 
+    // "Combine datasets" mode: phase one is a merge that mints the dataset this
+    // run trains on. A null result means it was refused or failed (the owner
+    // has already surfaced why) and nothing is submitted.
+    let datasetOverride: string | undefined;
+    if (prepareDatasetRepoId) {
+      setIsStarting(true);
+      const prepared = await prepareDatasetRepoId();
+      if (!prepared) {
+        setIsStarting(false);
+        return;
+      }
+      datasetOverride = prepared;
+    }
+
     // Cloud run on a local-only dataset: upload first, then launch on success.
     // The Start button is disabled while `uploading`, so we never reach here
     // with an in-flight upload for this repo (the hook re-attaches on mount and
@@ -861,7 +840,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       return;
     }
 
-    await launchJob();
+    await launchJob(datasetOverride);
   };
 
   if (trainingExtraAvailable === null) {
@@ -903,10 +882,13 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   // first, which offline mode makes impossible — a hard block, exactly like the
   // dataset case above.
   const checkpointUploadBlockedOffline = needsCheckpointUpload && offline;
+  // In "combine datasets" mode the dataset id is minted at launch, so the
+  // owner's source-selection readiness gates Start instead of a live repo id.
+  const datasetGateOk = prepareDatasetRepoId ? !!datasetReady : !!datasetRepoId;
   const startDisabled =
     isStarting ||
     uploading ||
-    !datasetRepoId ||
+    !datasetGateOk ||
     (targetRequiresAuth && !authenticated) ||
     targetMissingFlavor ||
     uploadBlockedOffline ||

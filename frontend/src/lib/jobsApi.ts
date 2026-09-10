@@ -103,6 +103,19 @@ export interface TrainingRequest {
   hf_job_timeout?: string;
 }
 
+export interface MergeProvenanceSource {
+  repo_id: string;
+  weight: number;
+  episodes?: number | null;
+}
+
+export interface MergeProvenance {
+  merged_repo_id: string;
+  weighted: boolean;
+  temporary: boolean;
+  sources: MergeProvenanceSource[];
+}
+
 export interface JobRecord {
   id: string;
   // Short, stable, human-facing run number ("#46"), assigned once at creation
@@ -153,6 +166,10 @@ export interface JobRecord {
   // only ids the server still has (so each is fetchable by id).
   child_ids: string[];
   ancestor_ids: string[];
+  /** Frozen recipe of a merged training dataset — every source and its
+   * weight. Present only for a run trained on a MakerMods merge; survives the
+   * merge's deletion. See makermodslab/jobs.py. */
+  merge_provenance?: MergeProvenance | null;
 }
 
 // Per-running-job snapshot pushed by the watchdog over WS at ~1Hz. Subset

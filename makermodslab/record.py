@@ -1412,16 +1412,20 @@ def handle_recording_status() -> dict[str, Any]:
 
 
 def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
-    """Remove a recorded dataset's directory from local disk."""
-    from pathlib import Path
+    """Remove a recorded dataset's directory from local disk.
 
-    from lerobot.utils.constants import HF_LEROBOT_HOME
-
+    When the directory carries a merge sidecar whose `hub_repo` back-ref was
+    filled in by a cloud push (Task 5), the MakerMods-created Hub copy is
+    deleted too — best-effort, guarded, and never able to fail the local
+    delete."""
     repo_id = request.dataset_repo_id
-    root = Path(HF_LEROBOT_HOME).resolve()
+    # `_lerobot_cache_root()` reads $HF_LEROBOT_HOME per call; the lerobot
+    # constant is frozen at import and can't be redirected by tests. Sibling
+    # _discard_empty_dataset already uses exactly this.
+    root = _lerobot_cache_root().resolve()
     target = (root / repo_id).resolve()
 
-    # Reject path traversal: target must stay strictly inside HF_LEROBOT_HOME.
+    # Reject path traversal: target must stay strictly inside the cache root.
     if target == root or root not in target.parents:
         return {"success": False, "message": "Invalid dataset path"}
 
@@ -1438,6 +1442,12 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     if not target.exists():
         return {"success": False, "message": f"Dataset not found on disk: {repo_id}"}
 
+    # The sidecar (and its Hub back-ref) is gone with the directory — read it
+    # BEFORE the rmtree.
+    from .merge_manifest import read_merge_manifest
+
+    pre_manifest = read_merge_manifest(target)
+
     try:
         shutil.rmtree(target)
     except Exception as e:
@@ -1452,8 +1462,24 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     invalidate_dataset_listing_cache()
     invalidate_hub_status(repo_id)
 
+    # Best-effort Hub cleanup: only a TEMPORARY merge's sidecar-recorded
+    # back-ref, only a repo the guard positively vouches for. "Delete dataset"
+    # is otherwise local-only — the Hub delete exists purely to reap the
+    # throwaway merges this feature creates. A failure here never fails the
+    # local delete.
+    hub_deleted = False
+    if pre_manifest is not None and pre_manifest.temporary and pre_manifest.hub_repo:
+        try:
+            from .datasets import _delete_hub_dataset_repo, _may_delete_hub_repo
+
+            if _may_delete_hub_repo(pre_manifest.hub_repo):
+                _delete_hub_dataset_repo(pre_manifest.hub_repo)
+                hub_deleted = True
+        except Exception as exc:
+            logger.warning(f"Hub cleanup for {repo_id} failed: {exc}")
+
     logger.info(f"Deleted dataset directory {target}")
-    return {"success": True, "message": f"Deleted {repo_id}"}
+    return {"success": True, "message": f"Deleted {repo_id}", "hub_deleted": hub_deleted}
 
 
 def _discard_empty_dataset(repo_id: str, resume: bool) -> bool:

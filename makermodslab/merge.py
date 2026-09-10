@@ -608,6 +608,27 @@ class MergeRequest(BaseModel):
     #: a warning refuses with ``started=False`` + ``warnings`` until this is
     #: true; hard incompatibilities (fps, cameras, feature shape) ignore it.
     acknowledge_warnings: bool = False
+    #: Tag the output as a throwaway training input (spec: training-dataset-mix).
+    #: Written into the sidecar as `temporary: true`; the dataset browser groups
+    #: these separately and the manual "clean up temporary merges" action
+    #: removes them. Default False keeps the library Merge dialog unchanged.
+    temporary: bool = False
+
+
+def generate_temporary_merge_repo_id(sources: list[str]) -> str:
+    """A minted name for a temporary merge whose caller supplied none.
+
+    `<ns>/mix-<8 hex>` when every source shares one namespace (mirrors the
+    frontend Merge dialog's `sharedNamespace` rule), else a bare `mix-<8 hex>`.
+    The `mix-` prefix is cosmetic — the sidecar is what marks it temporary.
+    """
+    import secrets
+
+    namespaces = {s.split("/", 1)[0] for s in sources if "/" in s}
+    slug = f"mix-{secrets.token_hex(4)}"
+    if len(namespaces) == 1 and all("/" in s for s in sources):
+        return f"{next(iter(namespaces))}/{slug}"
+    return slug
 
 
 def _weights_problem(n_sources: int, weights: list[int] | None) -> str | None:
@@ -865,6 +886,8 @@ class MergeManager:
         weighted = any(weight != 1 for weight in weights)
 
         output = request.output_repo_id.strip()
+        if not output and request.temporary:
+            output = generate_temporary_merge_repo_id(sources)
         with self._lock:
             if self.state == "running":
                 return {"started": False, "message": "A merge is already in progress"}
@@ -949,6 +972,8 @@ class MergeManager:
         cmd = [sys.executable, "-m", "makermodslab.merge", output, *sources]
         if weighted:
             cmd.extend(["--weights", *(str(weight) for weight in weights)])
+        if request.temporary:
+            cmd.append("--temporary")
         for name in drop:
             cmd += ["--drop-feature", name]
         logger.info("Starting dataset merge: %s", " ".join(cmd))
@@ -1336,6 +1361,11 @@ def _run_cli(argv: list[str] | None = None) -> int:
         dest="drop_features",
         help="Feature to strip from a working copy of any source that has it, before merging.",
     )
+    parser.add_argument(
+        "--temporary",
+        action="store_true",
+        help="Tag the output sidecar as a throwaway training input.",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
@@ -1486,6 +1516,24 @@ def _run_cli(argv: list[str] | None = None) -> int:
                 f"Cleared sampling weights inherited from a weighted source ({cleared} chunk(s)).",
                 flush=True,
             )
+
+    # Sidecar: the merge recipe, for the dataset browser and the policy card.
+    # Written for EVERY merge, temporary or not — a plain library merge gets
+    # `temporary: false` and its recipe is still available to a trained policy.
+    try:
+        from .merge_manifest import build_merge_manifest, write_merge_manifest
+
+        counts = _source_episode_counts([root_by_repo[r] for r in args.source_repo_ids])
+        manifest = build_merge_manifest(
+            args.source_repo_ids,
+            args.weights if args.weights is not None else [1] * len(args.source_repo_ids),
+            counts,
+            temporary=args.temporary,
+        )
+        write_merge_manifest(output_root, manifest)
+        print(f"Wrote merge manifest ({len(manifest.sources)} sources).", flush=True)
+    except Exception as exc:  # never fail a completed merge over its sidecar
+        print(f"Merge finished but the manifest could not be written: {exc}", flush=True)
 
     print(f"Done. Created {args.output_repo_id}", flush=True)
     return 0

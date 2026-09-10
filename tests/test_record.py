@@ -2870,7 +2870,6 @@ def test_delete_dataset_refused_mid_merge(tmp_lerobot_home, monkeypatch: pytest.
 def test_delete_dataset_refused_mid_local_training(tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch) -> None:
     """Deleting a dataset a running local training job reads is refused."""
     import json
-    from unittest.mock import MagicMock
 
     from makermodslab import jobs
     from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
@@ -2880,11 +2879,7 @@ def test_delete_dataset_refused_mid_local_training(tmp_lerobot_home, monkeypatch
     meta.mkdir(parents=True)
     (meta / "info.json").write_text(json.dumps({"total_episodes": 1}))
 
-    job = MagicMock()
-    job.state = "running"
-    job.runner = "local"
-    job.config.dataset_repo_id = repo_id
-    monkeypatch.setattr(jobs.job_registry, "list", lambda limit=200: [job])
+    monkeypatch.setattr(jobs.job_registry, "local_dataset_in_use", lambda rid: rid == repo_id)
 
     result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id))
     assert result["success"] is False
@@ -2915,6 +2910,94 @@ def test_delete_refusal_wording_is_action_neutral(tmp_lerobot_home, monkeypatch:
     assert result["success"] is False
     assert "renaming" not in result["message"]
     assert result["message"].endswith("Stop it first.")
+
+
+def test_delete_dataset_removes_recorded_hub_repo(tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A merge sidecar that recorded a MakerMods-created Hub copy: deleting the
+    local dir best-effort deletes the Hub repo too, gated by the guard."""
+    import makermodslab.datasets as ds
+    from makermodslab.merge_manifest import MergeManifest, MergeManifestSource, write_merge_manifest
+    from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
+
+    repo_id = "ns/mix"
+    (tmp_lerobot_home / repo_id / "meta").mkdir(parents=True)
+    (tmp_lerobot_home / repo_id / "meta" / "info.json").write_text('{"total_episodes": 1}')
+    write_merge_manifest(
+        tmp_lerobot_home / repo_id,
+        MergeManifest(
+            created_at=1.0,
+            weighted=False,
+            temporary=True,
+            hub_repo="me/mix",
+            sources=[MergeManifestSource(repo_id="ns/a", weight=1)],
+        ),
+    )
+
+    monkeypatch.setattr(ds, "_dataset_in_use", lambda rid: None)
+    monkeypatch.setattr(ds, "_may_delete_hub_repo", lambda repo: True)
+    calls: list[str] = []
+
+    class _Api:
+        def delete_repo(self, repo_id, repo_type, missing_ok=False):
+            calls.append(repo_id)
+
+    monkeypatch.setattr(ds, "shared_hf_api", lambda: _Api())
+
+    res = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id))
+    assert res["success"] is True
+    assert res.get("hub_deleted") is True
+    assert calls == ["me/mix"]
+    assert not (tmp_lerobot_home / repo_id).exists()
+
+
+def test_delete_dataset_hub_failure_never_fails_local_delete(
+    tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import makermodslab.datasets as ds
+    from makermodslab.merge_manifest import MergeManifest, MergeManifestSource, write_merge_manifest
+    from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
+
+    repo_id = "ns/mix2"
+    (tmp_lerobot_home / repo_id / "meta").mkdir(parents=True)
+    (tmp_lerobot_home / repo_id / "meta" / "info.json").write_text('{"total_episodes": 1}')
+    write_merge_manifest(
+        tmp_lerobot_home / repo_id,
+        MergeManifest(
+            created_at=1.0,
+            weighted=False,
+            temporary=True,
+            hub_repo="me/mix2",
+            sources=[MergeManifestSource(repo_id="ns/a", weight=1)],
+        ),
+    )
+
+    monkeypatch.setattr(ds, "_dataset_in_use", lambda rid: None)
+
+    def _boom(repo):
+        raise RuntimeError("guard blew up")
+
+    monkeypatch.setattr(ds, "_may_delete_hub_repo", _boom)
+
+    res = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id))
+    assert res["success"] is True
+    assert res.get("hub_deleted") is False
+    assert not (tmp_lerobot_home / repo_id).exists()
+
+
+def test_delete_dataset_no_sidecar_reports_hub_deleted_false(
+    tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import makermodslab.datasets as ds
+    from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
+
+    repo_id = "ns/plain"
+    (tmp_lerobot_home / repo_id / "meta").mkdir(parents=True)
+    (tmp_lerobot_home / repo_id / "meta" / "info.json").write_text('{"total_episodes": 1}')
+    monkeypatch.setattr(ds, "_dataset_in_use", lambda rid: None)
+
+    res = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id))
+    assert res["success"] is True
+    assert res["hub_deleted"] is False
 
 
 def _stub_recording_request(**overrides):

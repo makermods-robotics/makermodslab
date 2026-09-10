@@ -346,6 +346,9 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # Read-only — the Lab never runs `modal profile activate` and never
         # opens ~/.modal.toml.
         "GET /api/v1/remote-inference/gpu/targets",
+        # Temporary-merge cleanup: manual removal of throwaway training mixes,
+        # local dir plus any MakerMods-created Hub copy.
+        "POST /api/v1/datasets/merge/cleanup",
     ]
 )
 
