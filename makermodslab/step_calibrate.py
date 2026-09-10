@@ -56,7 +56,7 @@ from lerobot.utils.utils import init_logging
 
 from .api_errors import ApiError, ErrorCode
 from .arm_capabilities import require_known_arm_type
-from .arms.base import ArmFamily, CalibrationAborted
+from .arms.base import ArmFamily, CalibrationAborted, leader_kwargs
 from .session_events import notify_session_changed
 from .utils.config import calibration_dir_for_device, save_robot_record
 
@@ -119,6 +119,10 @@ class StepCalibrationRequest:
     # "steps". Defaults to maker so a request built before the Metal arm
     # existed is unchanged.
     arm_type: str = "maker"
+    # Which of the family's leaders a "teleop" run calibrates (the record's
+    # leader_kind; None = the family's default). Passed to the family only
+    # when it offers a choice (arms.base.leader_kwargs).
+    leader_kind: str | None = None
 
 
 class _ManagerUI:
@@ -257,7 +261,9 @@ class StepCalibrationManager:
 
                 # Refuse to silently clobber an existing calibration of the
                 # same name — same contract as the SO-101 flow.
-                config_dir = calibration_dir_for_device(request.device_type, request.arm_type)
+                config_dir = calibration_dir_for_device(
+                    request.device_type, request.arm_type, request.leader_kind
+                )
                 if config_dir is not None and not request.overwrite:
                     stem = request.config_file.removesuffix(".json")
                     if os.path.exists(os.path.join(config_dir, f"{stem}.json")):
@@ -384,7 +390,12 @@ class StepCalibrationManager:
             logger.info(f"Step calibration worker starting for {request.device_type} on {request.port}")
             side = "follower" if request.device_type == "robot" else "leader"
             self._update_status(message=f"Connecting to the {family.short_label} {side} arm...")
-            self.device = family.open_for_calibration(request.device_type, request.port, request.config_file)
+            self.device = family.open_for_calibration(
+                request.device_type,
+                request.port,
+                request.config_file,
+                **leader_kwargs(family, request.leader_kind),
+            )
 
             if self.stop_requested:
                 self._finish("Calibration cancelled", status="idle")
@@ -482,10 +493,11 @@ class StepCalibrationManager:
         The follower's bus was opened torque-off, but "stopped means
         de-energized" is checked, not assumed: ``family.release_torque`` runs
         before the disconnect on every exit path (a Metal handshake energizes,
-        and a family's procedure may have enabled a motor). The leader is
-        human-held and never energized here — on a Star leader a release would
-        be a write to servos the family never enabled — so it is only
-        disconnected. Guarded by ``_cleanup_lock`` for the same reason the
+        and a family's procedure may have enabled a motor). A Star leader is
+        human-held and never energized here — a release would be a write to
+        servos the family never enabled — so it is only disconnected; an
+        ENERGIZED leader (the Metal leader, a Damiao arm) gets the follower's
+        release. Guarded by ``_cleanup_lock`` for the same reason the
         SO-101 manager guards its own: ``stop()``'s join can time out while
         the worker is still mid-bus, and the request thread then forces a
         release that must not double-run against the worker's own eventual one.
@@ -495,9 +507,20 @@ class StepCalibrationManager:
             if device is None:
                 return
             family = self._family
-            if self.status.device_type == "robot" and family is not None:
+            request = self._current_request
+            # A follower always; a leader only when the family says the
+            # selected one holds torque (the Metal leader: a Damiao arm whose
+            # handshake energized it exactly as the follower's did).
+            energized_leader = (
+                self.status.device_type == "teleop"
+                and family is not None
+                and request is not None
+                and family.leader_holds_torque(request.leader_kind)
+            )
+            if family is not None and (self.status.device_type == "robot" or energized_leader):
+                side = "follower" if self.status.device_type == "robot" else "leader"
                 try:
-                    family.release_torque(device, f"{family.short_label} follower")
+                    family.release_torque(device, f"{family.short_label} {side}")
                 except Exception as e:
                     logger.warning(f"Error releasing torque after step calibration: {e}")
             try:

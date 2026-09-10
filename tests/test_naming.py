@@ -12,8 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Tests for makermodslab.utils.naming — the pure title/collision rules shared
-by the jobs registry and the models listing. No filesystem, no Hub, no registry:
-every case here is a string in and a string out."""
+by the jobs registry and the models listing. No filesystem and no Hub: every
+case here is a string in and a string out, with one deliberate exception —
+`test_known_policy_types_mirror_the_lerobot_pin` reads lerobot's policy registry,
+because the vocabulary those string transforms match against is only correct
+relative to the pin."""
 
 from __future__ import annotations
 
@@ -87,6 +90,25 @@ def test_policy_type_from_name() -> None:
     # derive_imported_title consults this only for a timestamped (generated)
     # name, and leaves `smolvla_base` whole.
     assert policy_type_from_name("smolvla_base") == "smolvla"
+    assert policy_type_from_name("molmoact2_orange_box_2026-01-01_10-00-00") == "molmoact2"
+
+
+def test_known_policy_types_mirror_the_lerobot_pin() -> None:
+    """KNOWN_POLICY_TYPES is a RECOGNITION vocabulary, not a menu: a type
+    missing from it makes a perfectly good model list with `policy_type: null`,
+    with nothing anywhere raising. It had silently drifted eight types behind
+    the pin, which is the failure this asserts against.
+
+    The one test in this file that touches the registry (see the module
+    docstring) — everything else here is a pure string transform. On a lerobot
+    pin bump the correct response is to update the constant, not the test; a
+    type MakerMods Lab cannot train still belongs here, because the training
+    picker is server.py's separate `_POLICY_TYPE_TO_LEROBOT`."""
+    import lerobot.policies  # noqa: F401  — eager registration of every policy config
+    from lerobot.configs.policies import PreTrainedConfig
+    from makermodslab.utils.naming import KNOWN_POLICY_TYPES
+
+    assert set(PreTrainedConfig.get_known_choices()) == KNOWN_POLICY_TYPES
 
 
 # ── suffix ladders ───────────────────────────────────────────────────────────

@@ -34,8 +34,33 @@ export interface ArmCapabilities {
   uses_feetech_bus: boolean;
   supports_auto_calibration: boolean;
   supports_dagger: boolean;
+  /** Absent on older servers; the client falls back to the built-in SO-101. */
+  supports_remote_inference?: boolean;
   supports_port_probe: boolean;
   motion_identify_energizes_follower: boolean;
+  /** The family can jog ONE port's gripper so the user sees which arm it is
+   * (POST /api/v1/maker/wiggle-gripper) — the identification of last resort
+   * when neither the probe nor the gesture can tell two arms apart. */
+  supports_gripper_wiggle: boolean;
+}
+
+/**
+ * One leader arm a family can be driven by — LeaderOptionInfo in
+ * makermodslab/schemas/system.py. `id` is what a robot record stores as
+ * `leader_kind`; `available` is false when this install cannot drive it
+ * (`unavailable_reason` names what to install); `energized` marks a leader
+ * that holds torque while the human moves it (the Metal arm's
+ * gravity-compensated leader): it answers the follower's protocol, so the
+ * probe cannot tell the two apart, and refuses the gesture.
+ */
+export interface LeaderOptionInfo {
+  id: string;
+  label: string;
+  available: boolean;
+  unavailable_reason: string | null;
+  energized: boolean;
+  /** The pre-start calibration summary for THIS leader's side. */
+  calibration_summary: ArmCalibrationSide | null;
 }
 
 export interface ArmFamilyInfo {
@@ -62,6 +87,10 @@ export interface ArmFamilyInfo {
   robot_types: string[];
   /** Substrings that identify a dataset's raw robot_type as this family. */
   robot_type_markers: string[];
+  /** What a record with no `leader_kind` reads as: `leader_options[0].id`. */
+  default_leader_kind: string;
+  /** The leader arms the family can be driven by, default first. */
+  leader_options: LeaderOptionInfo[];
 }
 
 /**

@@ -19,7 +19,19 @@ const SO101: ArmFamilyInfo = {
     supports_dagger: true,
     supports_port_probe: false,
     motion_identify_energizes_follower: false,
+    supports_gripper_wiggle: false,
   },
+  default_leader_kind: "default",
+  leader_options: [
+    {
+      id: "default",
+      label: "Leader",
+      available: true,
+      unavailable_reason: null,
+      energized: false,
+      calibration_summary: null,
+    },
+  ],
   robot_types: ["so101_follower", "bi_so_follower"],
   robot_type_markers: [
     "so100",
@@ -55,7 +67,19 @@ const NINE: ArmFamilyInfo = {
     supports_dagger: false,
     supports_port_probe: true,
     motion_identify_energizes_follower: false,
+    supports_gripper_wiggle: false,
   },
+  default_leader_kind: "default",
+  leader_options: [
+    {
+      id: "default",
+      label: "Leader",
+      available: true,
+      unavailable_reason: null,
+      energized: false,
+      calibration_summary: null,
+    },
+  ],
   robot_types: ["nine_follower", "bi_nine_follower"],
   robot_type_markers: ["nine"],
 };
@@ -83,7 +107,19 @@ const PANELED: ArmFamilyInfo = {
     supports_dagger: false,
     supports_port_probe: true,
     motion_identify_energizes_follower: false,
+    supports_gripper_wiggle: false,
   },
+  default_leader_kind: "default",
+  leader_options: [
+    {
+      id: "default",
+      label: "Leader",
+      available: true,
+      unavailable_reason: null,
+      energized: false,
+      calibration_summary: null,
+    },
+  ],
   robot_types: ["paneled_follower", "bi_paneled_follower"],
   robot_type_markers: ["paneled"],
 };

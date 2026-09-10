@@ -19,10 +19,11 @@ const TeleoperationPage = () => {
   const { selectedRecord } = useRobots();
   const { byId } = useArms();
   const bimanual = selectedRecord?.mode === "bimanual";
-  // A family whose telemetry is "degrees" ships no URDF (the CAN arms today),
+  // A family whose telemetry is "degrees" ships no URDF (such as an extension),
   // so its sessions show the live numeric joint readout in the viewer's place
-  // rather than animating the SO-101 model with a different arm's angles. See
-  // JointAngleReadout.
+  // rather than animating another arm's model with wrong angles. The SO-101, Maker, and
+  // Metal arms each ship one. See urdfConfigs / JointAngleReadout.
+  const armType = selectedRecord?.arm_type ?? "so101";
   const readoutOnly =
     telemetryKind(byId(selectedRecord?.arm_type)) === "degrees";
 
@@ -207,6 +208,7 @@ const TeleoperationPage = () => {
           className="lg:w-full"
           bimanual={bimanual}
           readoutOnly={readoutOnly}
+          armType={armType}
           rightSlot={<TeleopCameraPanel />}
         />
       </div>

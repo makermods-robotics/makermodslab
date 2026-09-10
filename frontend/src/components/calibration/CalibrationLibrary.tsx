@@ -32,6 +32,7 @@ import type { ArmType } from "@/hooks/useRobots";
 import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
 import ImportCalibrationButton from "./ImportCalibrationButton";
+import { libraryQuery } from "@/lib/calibrationLibraryQuery";
 
 interface ConfigEntry {
   name: string;
@@ -47,6 +48,13 @@ interface CalibrationLibraryProps {
    * deleting and renaming all have to be told which one they mean.
    */
   armType: ArmType;
+  /**
+   * Which of the family's leader libraries a "teleop" row addresses, for a
+   * family with more than one leader (the Metal arm's own leader keeps a
+   * library apart from the Star leader's). Omitted for every other family
+   * and for follower rows, so their requests are unchanged.
+   */
+  leaderKind?: string;
   /** Config name currently assigned to the selected robot (marked "in use"). */
   assignedConfig?: string;
   /** Robot record to reassign when "Use for this robot" is clicked. */
@@ -111,6 +119,7 @@ interface CalibrationLibraryProps {
 const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   device,
   armType,
+  leaderKind,
   assignedConfig,
   robotName,
   configField,
@@ -143,7 +152,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   const refresh = useCallback(async () => {
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/api/v1/calibration-configs/${device}?arm_type=${armType}`,
+        `${baseUrl}/api/v1/calibration-configs/${device}${libraryQuery(armType, leaderKind)}`,
       );
       const data = await res.json();
       if (data.success) {
@@ -154,7 +163,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     } catch {
       // Non-fatal; leave the list as-is.
     }
-  }, [baseUrl, fetchWithHeaders, device, armType]);
+  }, [baseUrl, fetchWithHeaders, device, armType, leaderKind]);
 
   useEffect(() => {
     refresh();
@@ -193,7 +202,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     setPendingDelete(null);
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/api/v1/calibration-configs/${device}/${encodeURIComponent(name)}?arm_type=${armType}`,
+        `${baseUrl}/api/v1/calibration-configs/${device}/${encodeURIComponent(name)}${libraryQuery(armType, leaderKind)}`,
         { method: "DELETE" },
       );
       const data = await res.json().catch(() => ({}));
@@ -244,6 +253,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     fetchWithHeaders,
     device,
     armType,
+    leaderKind,
     pendingDelete,
     toast,
     t,
@@ -359,7 +369,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     setRenameError(null);
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/api/v1/calibration-configs/${device}/${encodeURIComponent(selected)}/rename?arm_type=${armType}`,
+        `${baseUrl}/api/v1/calibration-configs/${device}/${encodeURIComponent(selected)}/rename${libraryQuery(armType, leaderKind)}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -397,6 +407,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     }
   }, [
     armType,
+    leaderKind,
     selected,
     renameValue,
     device,
@@ -553,6 +564,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           a border-seamed row. */}
       <ImportCalibrationButton
         armType={armType}
+        leaderKind={leaderKind}
         device={device}
         pickRef={importPick}
         onImported={async (name) => {

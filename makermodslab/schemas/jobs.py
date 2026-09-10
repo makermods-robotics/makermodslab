@@ -129,14 +129,56 @@ class CheckpointPolicyConfigResponse(BaseModel):
     inference engine; null means the policy type isn't one the server knows
     (a fork newer than jobs.policy_type_supports_rtc's table), which the client
     must read as "offer it and let the server decide", not as "no". The route
-    declares no exclude_none/exclude_unset, so the key is always present."""
+    declares no exclude_none/exclude_unset, so the key is always present.
+
+    n_action_steps / chunk_size are the checkpoint's chunk geometry, null when
+    the config omits them. n_action_steps is the CEILING on a remote-inference
+    horizon — a declared horizon above it makes the two Portal peers disagree
+    about the action-chunk shape, and every packet is then dropped in silence."""
 
     policy_type: str | None
     image_features: dict[str, CheckpointImageFeature]
     requires_task: bool
     supports_rtc: bool | None
+    # Whether the two GPU-launch knobs apply to THIS checkpoint (S3.8f), so a
+    # launch panel can disable a select with a reason instead of sending a
+    # value that will be dropped.
+    #
+    # supports_model_dtype is "this config carries a `model_dtype` field" —
+    # answered from the saved config rather than a table of policy types,
+    # because a config.json is a dataclass dump and key presence IS the class
+    # having the field. In this pin only MolmoAct2 does.
+    supports_model_dtype: bool
+    # Whether the checkpoint's family samples its actions in steps at all
+    # (smolvla, pi0, pi05, MolmoAct2 do; ACT and pi0_fast do not). A SEPARATE
+    # field from the default below on purpose: null there is both "no such
+    # knob" and "the knob exists and this checkpoint saved nothing this side
+    # can resolve" — a pi05 with a null `num_inference_steps` is the second.
+    supports_flow_steps: bool
+    # Whether extra camera views may be DECLARED on this checkpoint at launch
+    # (S3.8g) — true only for a family whose image-view count is a property of
+    # its lerobot wrapper rather than of its architecture
+    # (`utils.system.VARIABLE_VIEW_POLICY_TYPES`; in this pin, MolmoAct2 alone).
+    #
+    # Answered from a TABLE of policy types rather than from key presence the
+    # way `supports_model_dtype` is, because there is no field in a config.json
+    # that says "this vision tower takes any number of pictures" — it is a fact
+    # about the family's processor, established by reading it. False for a type
+    # this pin has never heard of, which is the safe direction: the checkpoint
+    # then runs with the views it was published with.
+    supports_extra_image_roles: bool
+    # The steps-per-chunk the checkpoint would run with, when it can be known.
+    # Null both for a policy with no such knob (ACT, pi0_fast) and for one that
+    # saved no value whose applying default is not readable from here.
+    # MolmoAct2 is NOT the latter: it saves `num_inference_steps: null` and
+    # then runs at 10 — the pin's own backbone default — so it answers 10.
+    # "Unknown" stays the honest answer for the rest, and a client must read
+    # null as "do not print a number", never as "no default".
+    flow_steps_default: int | None
     state_dim: int | None
     action_dim: int | None
+    n_action_steps: int | None
+    chunk_size: int | None
     trained_on_robot_type: str | None
 
 

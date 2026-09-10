@@ -221,6 +221,12 @@ def test_no_new_routes_outside_api_v1():
 # checks every entry actually exists so retired surface can't linger.
 V1_ONLY_ROUTES: frozenset[str] = frozenset(
     [
+        # Live Metal gripper effort-controller status.
+        "GET /api/v1/robots/{name}/gripper-status",
+        "GET /api/v1/recording-preview/{camera_name}",
+        # Per-episode task naming: the "naming" phase control verb. Born
+        # versioned — the flat mount was frozen long before this feature.
+        "POST /api/v1/recording-episode-task",
         # Multi-checkpoint publish: the training view's picker + background queue.
         # Legacy POST /models/upload stays the single-checkpoint synchronous push.
         "GET /api/v1/models/checkpoints",
@@ -254,6 +260,9 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # over UART, neither of which a Feetech bus can open.
         "POST /api/v1/maker/identify-arm",
         "POST /api/v1/maker/probe-ports",
+        # The CAN gripper wiggle (can_wiggle.py): the identification of last
+        # resort for a Metal rig driven by a second Metal arm.
+        "POST /api/v1/maker/wiggle-gripper",
         # CAN crash recovery (can_recovery.py): de-energize a follower whose
         # process died holding torque. Not a session (see the module
         # docstring), and no flat mirror for the same only-shrinks reason.
@@ -267,6 +276,26 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # peer's own coded refusals pass through with THEIR status and body).
         "GET /api/v1/nodes/{instance_id}/jobs/{job_id}",
         "GET /api/v1/nodes/{instance_id}/jobs/{job_id}/logs",
+        # LiveKit SFU token broker (sfu.py): the one party holding the API
+        # secret signs short-lived, role-scoped room tokens for Portal
+        # participants. Born versioned; 409 sfu.disabled without --sfu.
+        "POST /api/v1/sfu/token",
+        # Remote teleoperation (remote_host.py / remote_teleoperate.py): the
+        # station's hosting descriptor, the operator's status + camera
+        # re-stream, and the `remote` extra's install trio. Born versioned.
+        "GET /api/v1/hosting",
+        "GET /api/v1/remote-teleoperation",
+        "GET /api/v1/remote-teleoperation/camera/{name}",
+        "GET /api/v1/system/remote-extra",
+        "POST /api/v1/system/remote-extra/install",
+        "GET /api/v1/system/remote-extra/install-status",
+        # Operator-side Home / Engage: forwarded to the station as Portal RPCs.
+        "POST /api/v1/remote-teleoperation/home",
+        "POST /api/v1/remote-teleoperation/engage",
+        # Station mode posture: the hosted-robot choice, changeable from the
+        # station's UI and remembered across restarts.
+        "GET /api/v1/station",
+        "PUT /api/v1/station/robot",
         "POST /api/v1/nodes/{instance_id}/jobs/{job_id}/stop",
         "DELETE /api/v1/nodes/{instance_id}/jobs/{job_id}",
         # Environment proxies: the peer's own policy-extra status / install /
@@ -286,6 +315,10 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         "POST /api/v1/jobs/queue/reorder",
         # Skills: the deployable projection of the /models build (PR #94).
         "GET /api/v1/skills",
+        # Cancel a running dataset merge (SIGTERM -> SIGKILL + partial cleanup).
+        # Born versioned; POST /datasets/merge{,/status} keep their flat mirror
+        # only because they predate the freeze.
+        "POST /api/v1/datasets/merge/cancel",
         # Sessions: identity + server-side robot resolution (sessions.py).
         "GET /api/v1/sessions/current",
         "POST /api/v1/sessions",
@@ -295,6 +328,24 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # run is launched with. Read/replace only — never deletes an episode.
         "GET /api/v1/datasets/excluded-episodes",
         "PUT /api/v1/datasets/excluded-episodes",
+        # Remote inference (DRTC): read-only status + transport, plus the one
+        # mutation that clears the local-SFU override. Start/stop ride
+        # POST /api/v1/sessions and /sessions/{id}/stop — no new verbs. No flat
+        # mirror: the flat surface only ever shrinks.
+        "GET /api/v1/remote-inference-status",
+        "GET /api/v1/remote-inference/transport",
+        # The GPU half (modal_launcher.py), a LAB-LEVEL resource rather than a
+        # session field: it holds no hardware, so it gets its own verbs instead
+        # of a `launch_gpu` option that would hold the busy discriminant for a
+        # 1-3 minute cold start while the arm sat free.
+        "POST /api/v1/remote-inference/gpu/start",
+        "POST /api/v1/remote-inference/gpu/stop",
+        "GET /api/v1/remote-inference/gpu",
+        # Which workspace a launch bills (S3.8b): this machine's Modal profiles
+        # and one profile's environments, read from the CLI's own listings.
+        # Read-only — the Lab never runs `modal profile activate` and never
+        # opens ~/.modal.toml.
+        "GET /api/v1/remote-inference/gpu/targets",
         # Temporary-merge cleanup: manual removal of throwaway training mixes,
         # local dir plus any MakerMods-created Hub copy.
         "POST /api/v1/datasets/merge/cleanup",
@@ -334,6 +385,8 @@ def test_v1_mirrors_legacy_surface():
 # these.
 RESPONSE_MODEL_EXEMPT: frozenset[str] = frozenset(
     [
+        # Recorder-owned JPEG snapshots.
+        "GET /api/v1/recording-preview/{camera_name}",
         # 204 No Content: a successful job delete has no body to model.
         "DELETE /api/v1/jobs/{job_id}",
         # 204 No Content: the forwarded peer-job delete mirrors the peer's own.
@@ -342,6 +395,8 @@ RESPONSE_MODEL_EXEMPT: frozenset[str] = frozenset(
         "GET /api/v1/calibration-configs/{device_type}/{config_name}/download",
         # StreamingResponse: MJPEG camera preview stream.
         "GET /api/v1/camera-preview/{index}",
+        # StreamingResponse: MJPEG re-stream of a remote station's camera.
+        "GET /api/v1/remote-teleoperation/camera/{name}",
         # FileResponse: episode MP4 (Range-request video playback).
         "GET /api/v1/datasets/episode-video",
         # Raw Response: checkpoint zip served as an attachment download.

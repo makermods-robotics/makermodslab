@@ -99,7 +99,12 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # SO-101 pair, so they need their own redirect — without it any test that
     # touches a Maker calibration writes into the developer's real ~/.cache.
     maker_leader_cfg_dir = cache / "configs" / "rebot_102_leader"
+    maker_trigger_leader_cfg_dir = cache / "configs" / "rebot_102_leader_trigger"
     maker_follower_cfg_dir = cache / "configs" / "maker_follower"
+    # The Metal arm's: its follower library, and the library of its OWN
+    # (gravity-compensated) leader — the Star leader's is shared with Maker.
+    metal_follower_cfg_dir = cache / "configs" / "metal_follower"
+    metal_leader_cfg_dir = cache / "configs" / "metal_leader"
     port_dir = home / "ports"
     robots_dir = home / "robots"
     for d in (
@@ -108,7 +113,10 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         leader_cfg_dir,
         follower_cfg_dir,
         maker_leader_cfg_dir,
+        maker_trigger_leader_cfg_dir,
         maker_follower_cfg_dir,
+        metal_follower_cfg_dir,
+        metal_leader_cfg_dir,
         port_dir,
         robots_dir,
     ):
@@ -122,7 +130,10 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(cfg, "LEADER_CONFIG_PATH", str(leader_cfg_dir))
     monkeypatch.setattr(cfg, "FOLLOWER_CONFIG_PATH", str(follower_cfg_dir))
     monkeypatch.setattr(cfg, "MAKER_LEADER_CONFIG_PATH", str(maker_leader_cfg_dir))
+    monkeypatch.setattr(cfg, "MAKER_TRIGGER_LEADER_CONFIG_PATH", str(maker_trigger_leader_cfg_dir))
     monkeypatch.setattr(cfg, "MAKER_FOLLOWER_CONFIG_PATH", str(maker_follower_cfg_dir))
+    monkeypatch.setattr(cfg, "METAL_FOLLOWER_CONFIG_PATH", str(metal_follower_cfg_dir))
+    monkeypatch.setattr(cfg, "METAL_LEADER_CONFIG_PATH", str(metal_leader_cfg_dir))
     monkeypatch.setattr(cfg, "PORT_CONFIG_PATH", str(port_dir))
     monkeypatch.setattr(cfg, "LEADER_PORT_FILE", str(port_dir / "leader_port.txt"))
     monkeypatch.setattr(cfg, "FOLLOWER_PORT_FILE", str(port_dir / "follower_port.txt"))
@@ -187,6 +198,22 @@ def _reset_module_caches() -> None:
             _mgr.repo_id = None
             _mgr.message = None
             _mgr.error = None
+
+
+@pytest.fixture(autouse=True)
+def _no_real_gpu_app_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the GPU launcher's app-id record at tmp_path, for EVERY test.
+
+    That file is what the orphan reaper reads at server startup, and what it
+    finds decides whether it shells out to `modal app stop`. The `client`
+    fixture runs the real startup event, so without this redirect a suite run
+    on a machine that had just launched a GPU could stop the developer's actual
+    Modal app. Redirecting it makes the record permanently empty in tests,
+    which is the one state in which the reaper does nothing at all.
+    """
+    from makermodslab import modal_launcher
+
+    monkeypatch.setattr(modal_launcher, "_APP_RECORD_FILE", tmp_path / "drtc_gpu_app.json")
 
 
 @pytest.fixture(autouse=True)

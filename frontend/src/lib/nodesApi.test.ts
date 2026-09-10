@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   NodeEntry,
+  hostingNodes,
   isSelectableNode,
   listableNodes,
   nodeDisplayName,
@@ -111,5 +112,32 @@ describe("nodeGpuLabel", () => {
       nodeGpuLabel({ ...base, capabilities: { accepts_jobs: true, gpu: {} } }),
     ).toBeNull();
     expect(nodeGpuLabel({ ...base, capabilities: null })).toBeNull();
+  });
+});
+
+describe("hostingNodes", () => {
+  const hosting = { robot: "bench", arm_type: "so101" };
+
+  it("lists reachable, verified peers that advertise a hosted robot", () => {
+    const station = {
+      ...base,
+      capabilities: { ...base.capabilities, hosting },
+    };
+    expect(hostingNodes([station])).toEqual([station]);
+  });
+
+  it("never lists the self entry, an unreachable peer, or one not hosting", () => {
+    const station = {
+      ...base,
+      capabilities: { ...base.capabilities, hosting },
+    };
+    expect(
+      hostingNodes([
+        { ...station, is_self: true, url: null },
+        { ...station, status: "unreachable" },
+        { ...station, status: "pending", instance_id: null, capabilities: null },
+        base,
+      ]),
+    ).toEqual([]);
   });
 });

@@ -10,6 +10,7 @@ export type RobotMode = "single" | "bimanual";
 // pure and independently testable (this module pulls in the API context on
 // import). Re-exported here because ArmType's importers already use this path.
 import type { ArmType } from "@/lib/armTypes";
+import type { RobotArms } from "@/lib/robotSetupGap";
 export type { ArmType } from "@/lib/armTypes";
 
 export interface RobotRecord {
@@ -24,6 +25,20 @@ export interface RobotRecord {
   // unavailable and disables detect/calibrate. Resolve capabilities through
   // useArms().byId(arm_type), which is undefined in that case.
   arm_available: boolean;
+  // Which of the family's leaders drives the follower — an id from the
+  // manifest entry's `leader_options` (its default when the record predates
+  // leader kinds). Only the Metal arm offers a choice today: its Star Arm
+  // 102, or a second gravity-compensated Metal arm. Switching it blanks the
+  // leader ports and calibrations server-side (different hardware, separate
+  // calibration library).
+  leader_kind: string;
+  // The arm LAYOUT on this machine: a leader+follower pair ("both" — what
+  // every record written before remote teleoperation reads back as), a
+  // follower-only robot station, or a leader-only controller for a remote
+  // robot. `mode` composes with it (two followers, two leaders, or both
+  // pairs). Hidden arms keep their port/config fields — switching back
+  // restores them.
+  arms: RobotArms;
   // Primary pair (single mode), or the LEFT arm pair (bimanual mode).
   leader_port: string;
   follower_port: string;
@@ -39,12 +54,20 @@ export interface RobotRecord {
   // default 38 = the vendored script's stock 380). Sessions (teleop/record/
   // policy runs) use stock LeRobot torque and ignore this value.
   motor_power: number;
+  /** Metal gripper holding effort; absent defaults to 0.5 N·m, null opts out. */
+  gripper_hold_torque_nm?: number | null;
+  /** Alternative mode-4 current limiter, mutually exclusive with holding torque. */
+  gripper_current_limit_a?: number | null;
   is_clean: boolean;
   // Follower-side readiness only (ports + calibrations for the follower arm(s)).
   // Follower-only activities (inference, replay) gate on this instead of
   // is_clean so a missing LEADER setup — which they never touch — can't block
   // them. Mirrors the backend's is_robot_record_clean(record, arms="follower").
   follower_ready: boolean;
+  // Leader-side readiness — the twin of follower_ready for the activity that
+  // drives with the leader alone (remote teleoperation). Mirrors the
+  // backend's is_robot_record_clean(record, arms="leader").
+  leader_ready: boolean;
 }
 
 // The setup-gap diagnosis moved to lib/robotSetupGap.ts so it stays a pure,
@@ -55,8 +78,15 @@ export {
   robotSetupGap,
   robotSetupGaps,
   formatRobotSetupGap,
+  robotLayoutReady,
+  setupScopeForArms,
 } from "@/lib/robotSetupGap";
-export type { ArmKey, RobotSetupGaps } from "@/lib/robotSetupGap";
+export type {
+  ArmKey,
+  RobotArms,
+  RobotSetupGaps,
+  SetupScope,
+} from "@/lib/robotSetupGap";
 
 const SELECTED_KEY = "makermodslab.selectedRobot";
 

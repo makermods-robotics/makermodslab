@@ -60,6 +60,11 @@ export const MergeProgress: React.FC<Props> = ({
               components={[<code key="0" className="text-ok" />]}
             />
           </>
+        ) : state === "cancelled" ? (
+          <>
+            <XCircle className="w-4 h-4 text-muted-foreground" />{" "}
+            {t("landing.mergeDatasets.cancelled")}
+          </>
         ) : (
           <>
             <XCircle className="w-4 h-4 text-destructive" />{" "}

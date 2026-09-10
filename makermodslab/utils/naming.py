@@ -32,6 +32,17 @@ from collections.abc import Hashable, Sequence
 # lerobot/policies/factory.py (get_policy_class / make_policy_config). Defined
 # once here as the single source of truth for recognizing a model's policy type
 # from its tags / name / card; update alongside lerobot pin bumps.
+#
+# This is a RECOGNITION vocabulary, not a menu: it decides whether a Hub tag or
+# a repo-name prefix names a policy, so a type missing from it makes a perfectly
+# good model list with `policy_type: null`. It is therefore mirrored WHOLE from
+# the pin rather than curated down to what MakerMods Lab can train — the
+# training picker is server.py's `_POLICY_TYPE_TO_LEROBOT`, a separate and
+# deliberately smaller list.
+#
+# Verified against the b968c0c01 pin with
+# `PreTrainedConfig.get_known_choices()` (19 types); the eight below the blank
+# line had drifted out of the mirror across pin bumps.
 KNOWN_POLICY_TYPES = {
     "tdmpc",
     "diffusion",
@@ -44,6 +55,14 @@ KNOWN_POLICY_TYPES = {
     "smolvla",
     "wall_x",
     "pi0_fast",
+    "eo1",
+    "evo1",
+    "fastwam",
+    "groot",
+    "lingbot_va",
+    "molmoact2",
+    "vla_jepa",
+    "xvla",
 }
 
 # Longest-first for name-prefix matching, so a shorter type can never shadow a

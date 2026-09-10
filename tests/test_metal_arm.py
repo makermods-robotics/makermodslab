@@ -220,7 +220,7 @@ def test_auto_calibration_refuses_a_metal_robot(tmp_lerobot_home: Path) -> None:
     assert "zero-pose" in excinfo.value.detail
 
 
-METAL_FOLLOWER_ZERO_POSE = "Move the arm by hand to its ZERO POSE — standing upright, all joints at 0 degrees, gripper closed — then confirm."
+METAL_FOLLOWER_ZERO_POSE = "Move the arm by hand to its ZERO POSE — standing upright, all joints at 0 degrees, gripper fully closed — then confirm."
 
 
 def test_metal_calibrate_builds_ranges_with_the_send_can_id() -> None:
@@ -278,12 +278,10 @@ def test_metal_leader_calibrate_sets_origin_per_servo_from_the_metal_preset(
         assert (calibration[motor].range_min, calibration[motor].range_max) == (int(low), int(high))
 
 
-def test_metal_open_for_calibration_disables_torque_right_after_the_handshake(
+def test_metal_open_for_calibration_skips_handshake_and_disables_torque(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """On Metal this order is not a nicety: the Damiao handshake inside
-    bus.connect() IS the enable command, so the arm comes up energized and
-    the disable is what frees it for the user's hands."""
+    """Skip Damiao's energizing handshake and explicitly release existing torque."""
     from makermodslab.arms import registry
     from tests.mocks import FakeCanFollower
 
@@ -299,7 +297,7 @@ def test_metal_open_for_calibration_disables_torque_right_after_the_handshake(
     device = registry.get("metal").open_for_calibration("robot", "/dev/can0", "cal")
 
     assert [c.type for c in built] == ["metal_follower"]
-    assert device.log == [("bus", "connect"), ("bus", "disable_torque")]
+    assert device.log == [("bus", "connect", False), ("bus", "disable_torque")]
 
 
 def test_metal_open_for_calibration_connects_the_leader_with_the_metal_preset(
@@ -328,17 +326,13 @@ def test_metal_open_for_calibration_connects_the_leader_with_the_metal_preset(
 
 
 def test_calibration_summaries_differ_per_arm_type() -> None:
-    """Follower zero poses are family-specific and opposite on the gripper.
-
-    The user is being asked to do something physical, and the two poses are
-    OPPOSITES on the gripper (Maker: fully open; Metal: closed). Showing the
-    Maker text to a Metal user zeroes the gripper at the wrong end of travel."""
+    """Follower arm poses differ, while both grippers are fully closed."""
     from makermodslab.arms import registry
 
     maker_text = registry.get("maker").calibration_summary("robot")["text"]
     metal_text = registry.get("metal").calibration_summary("robot")["text"]
     assert maker_text != metal_text
-    assert "open" in maker_text
+    assert "fully closed" in maker_text
     assert metal_text == METAL_FOLLOWER_ZERO_POSE
     assert "upright" in metal_text and "closed" in metal_text
 
@@ -383,7 +377,7 @@ def _no_staging(monkeypatch: pytest.MonkeyPatch):
     """Skip the on-disk calibration staging — this is a config-shape test."""
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower, arm_type="so101": (leader, follower),
+        lambda leader, follower, arm_type="so101", leader_kind=None: (leader, follower),
     )
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.stage_bimanual_calibrations",
@@ -640,6 +634,11 @@ def test_a_failed_metal_follower_connect_de_energizes_the_bus(
     monkeypatch.setattr(teleoperate, "build_single_configs", lambda req, cameras=None: (object(), object()))
     monkeypatch.setattr(teleoperate, "make_robot_from_config", lambda cfg: _FakeRobot())
     monkeypatch.setattr(teleoperate, "make_teleoperator_from_config", lambda cfg: _FakeLeader())
+    # This test isolates connect failure/release with a deliberately incomplete
+    # robot. Real bus wrapping/routing is exercised in test_metal_gripper.py.
+    from makermodslab import metal_gripper
+
+    monkeypatch.setattr(metal_gripper, "install_metal_gripper", lambda robot, name: None)
 
     request = teleoperate.TeleoperateRequest(
         leader_port="/dev/star",

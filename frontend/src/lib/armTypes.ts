@@ -11,7 +11,7 @@
  * import.
  */
 import type { TFunction } from "i18next";
-import type { ArmFamilyInfo } from "./armsApi";
+import type { ArmFamilyInfo, LeaderOptionInfo } from "./armsApi";
 
 /**
  * A manifest id — no longer a closed union. The manifest (GET /api/v1/arms)
@@ -68,6 +68,52 @@ export function usesFeetechBus(info: ArmFamilyInfo | undefined): boolean {
 
 export function supportsDagger(info: ArmFamilyInfo | undefined): boolean {
   return info ? info.capabilities.supports_dagger : true;
+}
+
+export function supportsRemoteInference(
+  info: ArmFamilyInfo | undefined,
+): boolean {
+  return info
+    ? (info.capabilities.supports_remote_inference ?? info.id === "so101")
+    : true;
+}
+
+export function supportsGripperWiggle(
+  info: ArmFamilyInfo | undefined,
+): boolean {
+  return info ? info.capabilities.supports_gripper_wiggle : false;
+}
+
+/**
+ * The leader arms a family can be driven by, default first. Empty before
+ * the manifest loads — callers treat that as "one leader, nothing to pick".
+ */
+export function leaderOptions(
+  info: ArmFamilyInfo | undefined,
+): LeaderOptionInfo[] {
+  return info ? info.leader_options : [];
+}
+
+/**
+ * The record's effective leader kind: its own when set, else the family's
+ * default (a record written before leader kinds existed reads back as the
+ * default server-side too, so this only matters for a still-loading page).
+ */
+export function effectiveLeaderKind(
+  info: ArmFamilyInfo | undefined,
+  recordKind: string | undefined,
+): string {
+  if (recordKind) return recordKind;
+  return info?.default_leader_kind ?? "";
+}
+
+/** The manifest entry for a leader kind, or undefined for one the family
+ * does not offer (a hand-edited record) or before the manifest loads. */
+export function leaderOption(
+  info: ArmFamilyInfo | undefined,
+  kind: string,
+): LeaderOptionInfo | undefined {
+  return leaderOptions(info).find((o) => o.id === kind);
 }
 
 /** Flat proprioceptive width of ONE follower arm — one dim per joint. */

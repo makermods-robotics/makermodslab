@@ -135,6 +135,7 @@ class SO101Family(ArmFamily):
     # The Feetech sweep managers (calibrate.py / auto_calibrate.py).
     calibration_kind = "range_sweep"
     supports_dagger = True
+    supports_remote_inference = True
 
     single_robot_type = "so101_follower"
     bimanual_robot_type = "bi_so_follower"
@@ -154,6 +155,9 @@ class SO101Family(ArmFamily):
 
     telemetry_kind = "urdf"
 
+    # The one leader an SO-101 is ever driven by; the id a record stores.
+    default_leader_kind = "so101"
+
     @property
     def calibration_name_suffix(self) -> str:
         """Historical default: the bare record name, no family suffix."""
@@ -164,7 +168,7 @@ class SO101Family(ArmFamily):
 
         return SO101FollowerConfig(port=port, id=config_id)
 
-    def single_leader_config(self, port: str, config_id: str):
+    def single_leader_config(self, port: str, config_id: str, leader_kind: str | None = None):
         from lerobot.teleoperators.so_leader import SO101LeaderConfig
 
         return SO101LeaderConfig(port=port, id=config_id)
@@ -233,7 +237,9 @@ class SO101Family(ArmFamily):
 
         return torque.force_disable_torque(device, label)
 
-    async def identify_by_motion(self, device_type: str, ports: list[str] | None = None) -> dict:
+    async def identify_by_motion(
+        self, device_type: str, ports: list[str] | None = None, leader_kind: str | None = None
+    ) -> dict:
         # Both halves speak Feetech serial on motor id 1, so the side asked
         # about changes nothing — identify.py watches the same register either way.
         from .. import identify

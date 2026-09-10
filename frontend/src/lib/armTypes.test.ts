@@ -12,6 +12,10 @@ import {
   telemetryKind,
   calibrationKind,
   usesFeetechBus,
+  effectiveLeaderKind,
+  leaderOption,
+  leaderOptions,
+  supportsGripperWiggle,
 } from "./armTypes";
 
 // The client mirror of the backend's arm_capabilities.py predicates, now read
@@ -38,7 +42,19 @@ const SO101: ArmFamilyInfo = {
     supports_dagger: true,
     supports_port_probe: false,
     motion_identify_energizes_follower: false,
+    supports_gripper_wiggle: false,
   },
+  default_leader_kind: "default",
+  leader_options: [
+    {
+      id: "default",
+      label: "Leader",
+      available: true,
+      unavailable_reason: null,
+      energized: false,
+      calibration_summary: null,
+    },
+  ],
   robot_types: ["so101_follower", "bi_so_follower"],
   robot_type_markers: [
     "so100",
@@ -73,14 +89,26 @@ const MAKER: ArmFamilyInfo = {
     },
     panel_url: null,
   },
-  telemetry_kind: "degrees",
+  telemetry_kind: "urdf",
   capabilities: {
     uses_feetech_bus: false,
     supports_auto_calibration: false,
     supports_dagger: false,
     supports_port_probe: true,
     motion_identify_energizes_follower: false,
+    supports_gripper_wiggle: false,
   },
+  default_leader_kind: "default",
+  leader_options: [
+    {
+      id: "default",
+      label: "Leader",
+      available: true,
+      unavailable_reason: null,
+      energized: false,
+      calibration_summary: null,
+    },
+  ],
   robot_types: ["maker_follower", "bi_maker_follower"],
   robot_type_markers: ["maker"],
 };
@@ -108,14 +136,26 @@ const METAL: ArmFamilyInfo = {
     },
     panel_url: null,
   },
-  telemetry_kind: "degrees",
+  telemetry_kind: "urdf",
   capabilities: {
     uses_feetech_bus: false,
     supports_auto_calibration: false,
     supports_dagger: false,
     supports_port_probe: true,
     motion_identify_energizes_follower: true,
+    supports_gripper_wiggle: false,
   },
+  default_leader_kind: "default",
+  leader_options: [
+    {
+      id: "default",
+      label: "Leader",
+      available: true,
+      unavailable_reason: null,
+      energized: false,
+      calibration_summary: null,
+    },
+  ],
   robot_types: ["metal_follower", "bi_metal_follower"],
   robot_type_markers: ["metal"],
 };
@@ -138,7 +178,19 @@ const SO101_TWIN: ArmFamilyInfo = {
     supports_dagger: true,
     supports_port_probe: false,
     motion_identify_energizes_follower: false,
+    supports_gripper_wiggle: false,
   },
+  default_leader_kind: "default",
+  leader_options: [
+    {
+      id: "default",
+      label: "Leader",
+      available: true,
+      unavailable_reason: null,
+      energized: false,
+      calibration_summary: null,
+    },
+  ],
   robot_types: ["so101_twin_follower", "bi_so101_twin_follower"],
   robot_type_markers: ["twin"],
 };
@@ -168,7 +220,19 @@ const NINE: ArmFamilyInfo = {
     supports_dagger: false,
     supports_port_probe: true,
     motion_identify_energizes_follower: false,
+    supports_gripper_wiggle: false,
   },
+  default_leader_kind: "default",
+  leader_options: [
+    {
+      id: "default",
+      label: "Leader",
+      available: true,
+      unavailable_reason: null,
+      energized: false,
+      calibration_summary: null,
+    },
+  ],
   robot_types: ["nine_follower", "bi_nine_follower"],
   robot_type_markers: ["nine"],
 };
@@ -199,7 +263,19 @@ const PANELED: ArmFamilyInfo = {
     supports_dagger: false,
     supports_port_probe: true,
     motion_identify_energizes_follower: false,
+    supports_gripper_wiggle: false,
   },
+  default_leader_kind: "default",
+  leader_options: [
+    {
+      id: "default",
+      label: "Leader",
+      available: true,
+      unavailable_reason: null,
+      energized: false,
+      calibration_summary: null,
+    },
+  ],
   robot_types: ["paneled_follower", "bi_paneled_follower"],
   robot_type_markers: ["paneled"],
 };
@@ -290,8 +366,8 @@ describe("telemetryKind", () => {
   it("is urdf for the families that ship a model and degrees for the readout-only ones", () => {
     expect(telemetryKind(SO101)).toBe("urdf");
     expect(telemetryKind(SO101_TWIN)).toBe("urdf");
-    expect(telemetryKind(MAKER)).toBe("degrees");
-    expect(telemetryKind(METAL)).toBe("degrees");
+    expect(telemetryKind(MAKER)).toBe("urdf");
+    expect(telemetryKind(METAL)).toBe("urdf");
     expect(telemetryKind(NINE)).toBe("degrees");
     expect(telemetryKind(PANELED)).toBe("degrees");
   });
@@ -413,5 +489,61 @@ describe("armLabel", () => {
     expect(armLabel(MAKER, "maker", t)).toBe("Maker");
     expect(armLabel(METAL, "metal", t)).toBe("Metal");
     expect(armLabel(NINE, "nine", t)).toBe("Nine Arm");
+  });
+});
+
+describe("leader kinds", () => {
+  const STAR = {
+    id: "star",
+    label: "Star Arm 102 leader",
+    available: true,
+    unavailable_reason: null,
+    energized: false,
+    calibration_summary: null,
+  };
+  const OWN = {
+    id: "metal",
+    label: "Metal arm leader (gravity-compensated)",
+    available: false,
+    unavailable_reason: "install the extra",
+    energized: true,
+    calibration_summary: { text: "upright", image_url: null },
+  };
+  const TWO_LEADERS = {
+    ...METAL,
+    default_leader_kind: "star",
+    leader_options: [STAR, OWN],
+  };
+
+  it("lists the manifest's options, default first, and none before it loads", () => {
+    expect(leaderOptions(TWO_LEADERS).map((o) => o.id)).toEqual([
+      "star",
+      "metal",
+    ]);
+    expect(leaderOptions(undefined)).toEqual([]);
+  });
+
+  it("resolves a record's kind to its own value, else the family default", () => {
+    expect(effectiveLeaderKind(TWO_LEADERS, "metal")).toBe("metal");
+    expect(effectiveLeaderKind(TWO_LEADERS, "")).toBe("star");
+    expect(effectiveLeaderKind(TWO_LEADERS, undefined)).toBe("star");
+    expect(effectiveLeaderKind(undefined, undefined)).toBe("");
+  });
+
+  it("finds an option by kind and answers undefined for one the family lacks", () => {
+    expect(leaderOption(TWO_LEADERS, "metal")).toBe(OWN);
+    expect(leaderOption(TWO_LEADERS, "nope")).toBeUndefined();
+    expect(leaderOption(undefined, "star")).toBeUndefined();
+  });
+
+  it("reads the gripper-wiggle capability off the manifest, false before it loads", () => {
+    expect(supportsGripperWiggle(TWO_LEADERS)).toBe(false);
+    expect(
+      supportsGripperWiggle({
+        ...TWO_LEADERS,
+        capabilities: { ...TWO_LEADERS.capabilities, supports_gripper_wiggle: true },
+      }),
+    ).toBe(true);
+    expect(supportsGripperWiggle(undefined)).toBe(false);
   });
 });

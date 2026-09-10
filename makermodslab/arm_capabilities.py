@@ -87,6 +87,57 @@ def require_known_arm_type(arm_type: object) -> None:
         )
 
 
+def require_leader_kind(arm_type: object, leader_kind: object) -> None:
+    """Refuse (400 robot.leader_kind.unknown) a leader kind the family does not offer.
+
+    The gate every request that CARRIES a leader kind calls after
+    require_known_arm_type: the robot-record upsert, the calibration-library
+    routes' ``?leader_kind=``, the CAN port-detection routes. A missing kind
+    (None, "") is the family's default and passes; a string the family's
+    leader_options do not list is refused with the offered ids named.
+    """
+    require_known_arm_type(arm_type)
+    family = _family(arm_type)
+    try:
+        family.leader_option(leader_kind)
+    except KeyError:
+        offered = ", ".join(o.id for o in family.leader_options())
+        raise ApiError(
+            status_code=400,
+            detail=(
+                f"Leader kind {leader_kind!r} is not one the {family.short_label} can be driven by "
+                f"(offered: {offered})."
+            ),
+            code=ErrorCode.ROBOT_LEADER_KIND_UNKNOWN,
+        ) from None
+
+
+def require_leader_available(arm_type: object, leader_kind: object) -> None:
+    """Refuse (400 robot.leader_kind.unavailable) a leader this install cannot drive.
+
+    Called by every start that OPENS the leader (teleoperation, recording, a
+    coaching inference) — never by a follower-only flow, and never by
+    calibration, which zeroes the leader over its bus and needs none of the
+    leader's heavier dependencies. The detail is the option's own remedy
+    (which extra to install). An unknown kind is refused first, as above.
+    """
+    require_leader_kind(arm_type, leader_kind)
+    option = _family(arm_type).leader_option(leader_kind)
+    if not option.available:
+        raise ApiError(
+            status_code=400,
+            detail=option.unavailable_reason or f"The {option.label} is not available on this install.",
+            code=ErrorCode.ROBOT_LEADER_KIND_UNAVAILABLE,
+        )
+
+
+def leader_holds_torque(arm_type: object, leader_kind: object) -> bool:
+    """True when the selected leader is energized while the human moves it
+    (the Metal arm's gravity-compensated leader). What the connect-failure
+    and stop paths read to treat the leader like a follower."""
+    return _family(arm_type).leader_holds_torque(leader_kind)
+
+
 def joints_per_arm(arm_type: object) -> int:
     """Joint count of a single follower arm of this type.
 
@@ -171,6 +222,48 @@ def supports_dagger(arm_type: object) -> bool:
     hardware; ``tests/test_arm_capabilities.py`` pins both halves.
     """
     return _family(arm_type).supports_dagger
+
+
+def supports_remote_inference(arm_type: object, mode: object = "single") -> bool:
+    """True when this arm type + layout can run a REMOTE inference session.
+
+    Single-arm SO-101 only, and — unlike ``supports_dagger`` above — both
+    halves of that are WIRING limits, not hardware ones. Nothing about a Maker
+    or Metal arm makes it unable to play action chunks from a remote policy;
+    the entrypoint simply has not been wired for it:
+
+    * **CAN arms.** ``makermodslab/drtc/robot_sync.py`` registers
+      ``so_follower``, ``bi_so_follower``, ``koch_follower`` and
+      ``omx_follower`` with draccus and nothing else, so
+      ``--robot.type=maker_follower`` fails at CLI-PARSE time inside the child
+      — after a session has claimed the arm and preflighted it. And its
+      return-to-rest goes through ``rest_pose`` (Feetech ticks), with no
+      ``maker_rest_pose`` call site, so a CAN arm would also have no safe stop.
+    * **Bimanual.** The first-action ease-in is single-Feetech-bus only: a BiSO
+      robot's action keys are ``left_``/``right_`` prefixed while each sub-arm's
+      ``bus.motors`` are bare, so the action→bus mapping matches nothing and
+      the ease refuses rather than guessing (see ``drtc/_pose.ease_to_action``).
+      Without it the arm's FIRST move is a full-speed snap from wherever it is
+      to the policy's first pose. The return-to-rest works fine per bus — it is
+      only the entry that is unsafe.
+
+    Both are removable with work, which is exactly why this reads as a
+    capability rather than as an ``arm_type == "so101"`` literal at the refusal
+    site: when the wiring lands, one function changes.
+    """
+    return _family(arm_type).supports_remote_inference and mode != "bimanual"
+
+
+# lerobot `RobotConfig` choice-registry keys, mapped to the arm type they
+# describe. Kept as REGISTERED type strings rather than an isinstance check
+# so this module never has to import the device classes (which would drag the
+# python-can / motorbridge stack into every import of it).
+_ROBOT_TYPE_TO_ARM_TYPE = {
+    "maker_follower": "maker",
+    "bi_maker_follower": "maker",
+    "metal_follower": "metal",
+    "bi_metal_follower": "metal",
+}
 
 
 def arm_type_of_robot_config(robot_config: object) -> str:

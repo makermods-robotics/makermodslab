@@ -4825,6 +4825,96 @@ def test_policy_config_summary_rtc_is_none_when_the_type_is_unreadable(tmp_path,
     assert summary["supports_rtc"] is None
 
 
+def test_policy_config_summary_reports_which_gpu_knobs_apply(tmp_path, tmp_lerobot_home) -> None:
+    """So the remote panel can disable a select with a reason instead of
+    sending a value the launcher would drop — the bench failure this exists
+    for is a precision remembered from a MolmoAct2 run still being selected
+    for a SmolVLA one, which cost a cold start."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+
+    def _summary(cfg: dict) -> dict:
+        model = tmp_path / f"model{len(cfg)}{cfg.get('type')}"
+        model.mkdir()
+        (model / "config.json").write_text(_json.dumps(cfg))
+        return reg.get_policy_config_summary(reg.register_imported(str(model)).id, 0)
+
+    molmo = _summary({"type": "molmoact2", "model_dtype": "float32", "num_inference_steps": None})
+    assert molmo["supports_model_dtype"] is True
+    # The knob applies, and the number the panel shows beside "Checkpoint
+    # default" is 10 even though the config saved null: the container resolves
+    # `num_steps or flow_matching_num_steps` against the backbone config, whose
+    # default is 10. (8 is `num_flow_timesteps`, a TRAINING knob.)
+    assert molmo["supports_flow_steps"] is True
+    assert molmo["flow_steps_default"] == 10
+
+    smol = _summary({"type": "smolvla", "num_steps": 10})
+    assert smol["supports_model_dtype"] is False
+    assert smol["supports_flow_steps"] is True
+    assert smol["flow_steps_default"] == 10
+
+    act = _summary({"type": "act", "n_action_steps": 100})
+    assert act["supports_model_dtype"] is False
+    assert act["supports_flow_steps"] is False
+    assert act["flow_steps_default"] is None
+
+    # And the third knob (S3.8g), which is the one the panel FAILS CLOSED on:
+    # it is an OFFER to add a camera, and offering it for a policy whose vision
+    # tower is fixed buys a shape error inside a paid container.
+    assert molmo["supports_extra_image_roles"] is True
+    assert smol["supports_extra_image_roles"] is False
+    assert act["supports_extra_image_roles"] is False
+
+
+def test_policy_config_summary_reports_the_chunk_geometry(tmp_path, tmp_lerobot_home) -> None:
+    """n_action_steps is the CEILING on a remote-inference horizon: declare
+    more than the policy returns and the two Portal peers disagree about the
+    action-chunk shape, so every packet is dropped in silence. MolmoAct2's
+    published checkpoint is 30 where the panel's default is 50, which is the
+    case this field exists to stop the operator walking into."""
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(
+        _json.dumps({"type": "molmoact2", "chunk_size": 30, "n_action_steps": 30})
+    )
+
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    summary = reg.get_policy_config_summary(rec.id, 0)
+    assert summary["n_action_steps"] == 30
+    assert summary["chunk_size"] == 30
+    # MolmoAct2 joined the language-conditioned set: it renders a missing task
+    # as the literal prompt "The task is to ." and degrades silently.
+    assert summary["requires_task"] is True
+
+
+def test_policy_config_summary_chunk_geometry_is_none_when_unusable(tmp_path, tmp_lerobot_home) -> None:
+    """Absent, non-integral or non-positive all answer null. Every policy config
+    validates these itself at construction, so a bad value here means a corrupt
+    or hand-edited config.json — "unknown" is the honest answer, not a number
+    somebody derives a horizon from."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+
+    absent = tmp_path / "absent"
+    absent.mkdir()
+    (absent / "config.json").write_text(_json.dumps({"type": "act"}))
+    summary = reg.get_policy_config_summary(reg.register_imported(str(absent)).id, 0)
+    assert summary["n_action_steps"] is None
+    assert summary["chunk_size"] is None
+
+    junk = tmp_path / "junk"
+    junk.mkdir()
+    (junk / "config.json").write_text(_json.dumps({"type": "act", "n_action_steps": "50", "chunk_size": 0}))
+    summary = reg.get_policy_config_summary(reg.register_imported(str(junk)).id, 0)
+    assert summary["n_action_steps"] is None
+    assert summary["chunk_size"] is None
+
+
 # --- Deliberate stop vs genuine failure -------------------------------------
 #
 # Regression cover for the defect where every press of Stop landed in run
@@ -8334,6 +8424,12 @@ def test_each_feature_refuses_to_start_while_training_runs(monkeypatch) -> None:
     [
         ("record", "recording_active", True, "a recording session"),
         ("rollout", "inference_active", True, "an inference session"),
+        (
+            "remote_inference",
+            "remote_inference_active",
+            True,
+            "a remote inference session",
+        ),
         ("teleoperate", "teleoperation_active", True, "teleoperation"),
         ("replay", "replay_active", True, "a replay"),
         ("calibrate", "calibration_is_active", lambda: True, "calibration"),
@@ -8344,7 +8440,7 @@ def test_each_feature_refuses_to_start_while_training_runs(monkeypatch) -> None:
 def test_every_robot_activity_holds_the_queue(
     monkeypatch, tmp_path, module_name, attr, busy_value, label
 ) -> None:
-    """`_robot_busy`'s seven legs, one case each — the queue side of the mutex.
+    """`_robot_busy`'s eight legs, one case each — the queue side of the mutex.
 
     Only the `recording_active` leg was exercised; the other four could be
     deleted outright with a green suite, which matters because they are read from

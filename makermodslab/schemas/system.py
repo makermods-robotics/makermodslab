@@ -75,7 +75,11 @@ class HealthCapabilities(BaseModel):
     The health doc grows additively as the node registry needs more
     (gpu, hardware inventory, …) — extra="allow" keeps keys the handler adds
     before this model learns about them, instead of silently filtering them
-    out of the handshake.
+    out of the handshake. Absent-or-present keys (`gpu`, and `sfu` — the
+    bundled LiveKit server's signalling URL, `{"url": "ws://host:7880"}`,
+    only when started with --sfu) are deliberately NOT declared here: a
+    declared optional would materialize as null on nodes without one, and
+    the contract is "absent means none/unknown".
     """
 
     model_config = ConfigDict(extra="allow")
@@ -233,6 +237,22 @@ class MakerIdentifyArmResponse(BaseModel):
     message: str
     port: str | None = None
     skipped: list[str] = []
+    # The identification of last resort the client should offer next —
+    # "wiggle" (can_wiggle.py) when the gesture was refused or found nothing
+    # on a family with a gripper wiggle; absent otherwise (never null).
+    fallback: Literal["wiggle"] | None = None
+
+
+class CanGripperWiggleResponse(BaseModel):
+    """can_wiggle.wiggle_can_gripper — one port's gripper was jogged (or not).
+
+    `code` is present only on a busy refusal (robot.busy.*), like every
+    other hardware handler's refusal dict; the route excludes None.
+    """
+
+    success: bool
+    message: str
+    code: str | None = None
 
 
 class ArmCalibrationSide(BaseModel):
@@ -274,8 +294,34 @@ class ArmCapabilities(BaseModel):
     uses_feetech_bus: bool
     supports_auto_calibration: bool
     supports_dagger: bool
+    supports_remote_inference: bool
     supports_port_probe: bool
     motion_identify_energizes_follower: bool
+    # The family can jog ONE port's gripper so the user sees which arm it is
+    # (POST /api/v1/maker/wiggle-gripper) — the identification of last resort
+    # when neither the probe nor the gesture can tell two arms apart.
+    supports_gripper_wiggle: bool
+
+
+class LeaderOptionInfo(BaseModel):
+    """One leader arm a family can be driven by (arms/base.py LeaderOption).
+
+    `id` is what a robot record stores as `leader_kind`; `available` is
+    false when this install cannot drive it, with `unavailable_reason`
+    naming what to install (null when available); `energized` marks a leader
+    that holds torque while the human moves it (the Metal arm's
+    gravity-compensated leader): it answers the follower's protocol, refuses
+    the gesture, and is returned and released on a stop like a follower.
+    `calibration_summary` is the pre-start summary for THIS leader's side
+    (null for a family with nothing to summarize).
+    """
+
+    id: str
+    label: str
+    available: bool
+    unavailable_reason: str | None
+    energized: bool
+    calibration_summary: ArmCalibrationSide | None
 
 
 class ArmFamilyInfo(BaseModel):
@@ -287,7 +333,9 @@ class ArmFamilyInfo(BaseModel):
     `calibration_name_suffix` what the server appends to a robot record's
     name when it mints a default calibration id ("" for the SO-101);
     `image_url` a served image for the create dialog (null for the built-ins,
-    whose photos the frontend bundles).
+    whose photos the frontend bundles); `leader_options` the leader arms the
+    family can be driven by, default first (`default_leader_kind` names it —
+    what a record with no `leader_kind` reads as).
     """
 
     id: str
@@ -303,6 +351,8 @@ class ArmFamilyInfo(BaseModel):
     robot_types: list[str]
     robot_type_markers: list[str]
     calibration_name_suffix: str
+    default_leader_kind: str
+    leader_options: list[LeaderOptionInfo]
 
 
 class ArmFamiliesResponse(BaseModel):

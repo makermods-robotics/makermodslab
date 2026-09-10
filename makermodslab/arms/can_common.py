@@ -33,20 +33,40 @@ Both leaders share ONE calibration library (rebot_102_leader): the
 presets are config-only variants of one lerobot class and the class name
 picks the directory. That sharing is why default_calibration_name mints
 the family id into the slot name (inherited from the base contract).
+
+Leader kinds. The Star Arm 102 is every CAN family's DEFAULT leader
+(leader kind "star"); a family may offer a second, ENERGIZED leader — the
+Metal arm's gravity-compensated Metal leader (kind "metal", metal.py) — and
+every leader-side hook here reads the ``leader_kind`` keyword to pick it. An
+energized leader is a CAN follower in every way that matters to these seams:
+it opens (and, on Damiao, energizes) on a CAN bus, it zeroes with the bus's
+set-zero broadcast against the FOLLOWER's fixed joint limits, it answers the
+follower's probe protocol (so the probe cannot tell the two apart and the
+gripper wiggle is the identification of last resort), it refuses the motion
+gesture, and on a stop it is captured, returned and released exactly like a
+follower (capture_leader_rest_poses) — a torqued arm with no brakes must
+never simply be disconnected: the fork's own MetalLeader.disconnect() would
+freeze it in place with torque ON, which is the state "stopped means
+de-energized" exists to rule out, so the single-leader config we build sets
+hold_kp_on_disconnect=0 and the stop path does the return + release itself.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .base import ArmFamily, CalibrationUI
+from .base import ArmFamily, CalibrationUI, LeaderOption, leader_kwargs
 
 logger = logging.getLogger(__name__)
+
+# The leader kind every CAN family is driven by unless a record says otherwise.
+STAR_LEADER_KIND = "star"
 
 # Settle time after unlocking a FashionStar servo before writing its origin
 # point. Mirrors lerobot's own `_SETTLE_SEC` in rebot_102_leader.py — the servo
@@ -75,9 +95,14 @@ class CanDeviceClasses:
 
 
 # Both CAN families use the same Star Arm 102 leader, and it has ONE zero
-# pose: folded against the base, gripper closed. The follower poses are
-# family-specific (follower_zero_pose) and opposite on the gripper.
-_LEADER_ZERO_POSE = "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, gripper closed — then confirm."
+# pose: folded against the base, gripper fully closed. The follower poses are
+# family-specific (follower_zero_pose), with the gripper fully closed.
+_LEADER_ZERO_POSE = "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, gripper fully closed — then confirm."
+
+# The lerobot device names of an energized CAN leader, how a device handed
+# to calibrate() / the stop path is recognized as one (the class name is the
+# fork's stable identifier; the config carries no flag).
+_ENERGIZED_LEADER_NAMES = frozenset({"metal_leader", "bi_metal_leader"})
 
 
 class CanArmFamily(ArmFamily):
@@ -99,13 +124,30 @@ class CanArmFamily(ArmFamily):
 
     leader_library_attr = "MAKER_LEADER_CONFIG_PATH"
 
-    # No Maker or Metal URDF ships, so the viewer's slot shows the numeric
-    # readout fed by `joints_deg`.
+    # Families without a bundled model retain the numeric readout.
+    # Maker and Metal each override this and own their URDF conversion.
     telemetry_kind = "degrees"
 
-    def _device_classes(self) -> CanDeviceClasses:  # pragma: no cover - abstract by convention
-        """Import (lazily — python-can / motorbridge) and return this family's classes."""
+    default_leader_kind = STAR_LEADER_KIND
+
+    def leader_options(self) -> tuple[LeaderOption, ...]:
+        return (LeaderOption(id=STAR_LEADER_KIND, label="Star Arm 102 leader"),)
+
+    def _device_classes(self, leader_kind: str | None = None) -> CanDeviceClasses:  # pragma: no cover
+        """Import (lazily — python-can / motorbridge) and return this family's classes
+        for the selected leader kind (the Star presets by default)."""
         raise NotImplementedError
+
+    @staticmethod
+    def is_energized_leader(device: Any) -> bool:
+        """True for a device object that is an energized CAN leader (by lerobot name)."""
+        return getattr(device, "name", None) in _ENERGIZED_LEADER_NAMES
+
+    @staticmethod
+    def _is_can_device(device: Any) -> bool:
+        """True for a device on a CAN bus (a follower, or an energized leader):
+        its config carries motor_can_ids, where the Star leader carries joint_ids."""
+        return hasattr(getattr(device, "config", None), "motor_can_ids")
 
     # --- the zero-pose calibration, as a step wizard ----------------------------
     # The CAN arms need no range sweep: their joint limits are fixed constants
@@ -117,100 +159,175 @@ class CanArmFamily(ArmFamily):
     # driving. A web reimplementation of lerobot's MakerFollower.calibrate() /
     # RebotArm102Leader.calibrate(), which block on input().
 
-    def zero_pose_instructions(self, device_type: object | None = None) -> str:
+    def zero_pose_instructions(
+        self, device_type: object | None = None, leader_kind: str | None = None
+    ) -> str:
         """The physical pose to ask for: the shared Star-leader pose for
-        "teleop", this family's follower pose otherwise (opposites on the
-        gripper between Maker and Metal). The families' own helper, not part
-        of the base contract — calibration_summary and calibrate serve it."""
-        if device_type == "teleop":
+        "teleop", this family's follower pose otherwise. An ENERGIZED leader is this
+        family's own arm, so its pose is the follower's. The families' own
+        helper, not part of the base contract — calibration_summary and
+        calibrate serve it."""
+        if device_type == "teleop" and not self.leader_holds_torque(leader_kind):
             return _LEADER_ZERO_POSE
         return self.follower_zero_pose
 
-    def calibration_summary(self, device_type: object | None = None) -> dict | None:
+    def calibration_summary(
+        self, device_type: object | None = None, leader_kind: str | None = None
+    ) -> dict | None:
         # No served image: the frontend keeps its bundled photos for the built-ins.
-        return {"text": self.zero_pose_instructions(device_type), "image_url": None}
+        return {"text": self.zero_pose_instructions(device_type, leader_kind), "image_url": None}
 
-    def open_for_calibration(self, device_type: str, port: str, config_id: str) -> Any:
+    def _open_can_bus_torque_off(self, device: Any, label: str) -> None:
+        """Open a CAN device's bus directly and disable torque — never connect().
+
+        NOT device.connect(): both followers' connect() finishes by calling
+        enable_torque() (and an energized leader's starts its gravity thread),
+        which would lock the arm rigid exactly when the user needs to move it
+        by hand. Open the bus directly and disable torque, which is what
+        lerobot's own calibrate() does internally. Skip the energizing Damiao
+        handshake; calibration checks fresh replies from every joint before
+        asking for the pose and again before and after setting zero.
+        """
+        try:
+            device.bus.connect(handshake=False)
+            device.bus.disable_torque()
+        except Exception:
+            # Recover a failed open or torque-disable through a fresh bus
+            # connection, then close it before propagating the original error.
+            from .. import torque
+
+            torque.de_energize_can_device(device, label)
+            # Best effort: the original error is the one to raise.
+            with contextlib.suppress(Exception):
+                device.bus.disconnect(False)
+            raise
+
+    def open_for_calibration(
+        self, device_type: str, port: str, config_id: str, leader_kind: str | None = None
+    ) -> Any:
         """Open ONE device's bus with torque OFF, ready for the user to pose the arm."""
         if device_type == "robot":
             from lerobot.robots import make_robot_from_config
 
             device = make_robot_from_config(self.single_follower_config(port, config_id))
-            # NOT device.connect(): both followers' connect() finishes by
-            # calling enable_torque(), which would lock the arm rigid exactly
-            # when the user needs to move it by hand. Open the bus directly
-            # and disable torque, which is what lerobot's own calibrate() does
-            # internally. The disable is not optional for Metal even here:
-            # the Damiao HANDSHAKE inside bus.connect() is itself the enable
-            # command, so the arm comes up energized and this write is what
-            # frees it for the user's hands.
-            try:
-                device.bus.connect()
-                device.bus.disable_torque()
-            except Exception:
-                # Either the handshake raised partway (a Damiao handshake is
-                # the per-motor enable, so the motors that answered are
-                # energized while is_connected reads False) or it completed
-                # and the write that frees the arm failed. Both: de-energize
-                # the bus the recovery way (reopen without the handshake if
-                # needed, broadcast the disable), close the port, then let the
-                # failure propagate. Same recovery the teleop/replay connect
-                # paths run; without it the arm holds torque with no device
-                # object left to release it through.
-                from .. import torque
-
-                torque.de_energize_can_device(device, f"{self.short_label} follower arm")
-                # Best effort: the original error is the one to raise.
-                with contextlib.suppress(Exception):
-                    device.bus.disconnect(False)
-                raise
+            self._open_can_bus_torque_off(device, f"{self.short_label} follower arm")
             return device
 
         from lerobot.teleoperators import make_teleoperator_from_config
 
-        device = make_teleoperator_from_config(self.single_leader_config(port, config_id))
-        # The leader's bus is constructed inside connect(), so there is no
-        # bus-only path — but there is nothing to disable either: its joints
-        # hold encoders and no motors. connect(calibrate=False) leaves it
-        # unlocked and back-drivable, which is the state we want.
+        device = make_teleoperator_from_config(self.single_leader_config(port, config_id, leader_kind))
+        if self.leader_holds_torque(leader_kind):
+            # An energized leader is a CAN arm: same bus-only open as the
+            # follower, same torque-off guarantee, same Damiao recovery.
+            self._open_can_bus_torque_off(device, f"{self.short_label} leader arm")
+            return device
+        # The Star leader's bus is constructed inside connect(), so there is
+        # no bus-only path — but there is nothing to disable either: its
+        # joints hold encoders and no motors. connect(calibrate=False)
+        # leaves it unlocked and back-drivable, which is the state we want.
         device.connect(calibrate=False)
         return device
 
     def calibrate(self, device: Any, device_type: str, ui: CalibrationUI) -> dict[str, Any]:
         """One live-positions step at the zero pose, then set zero and build the file.
 
-        The two device SIDES differ in exactly one place, the zero write: the
-        followers speak CAN (RobStride and Damiao alike), and one whole-bus
-        ``set_zero_position()`` zeroes every motor at once; the Star 102 leader
-        speaks FashionStar UART, and each servo has to be unlocked and given
-        ``set_origin_point`` individually.
+        The two BUS KINDS differ in exactly one place, the zero write: a CAN
+        device (either follower, RobStride and Damiao alike — and an energized
+        CAN leader, which is this family's own arm) takes one whole-bus
+        ``set_zero_position()`` that zeroes every motor at once; the Star 102
+        leader speaks FashionStar UART, and each servo has to be unlocked and
+        given ``set_origin_point`` individually. The device says which it is
+        (its config carries motor_can_ids or joint_ids), so a leader run needs
+        no leader_kind here.
         """
-        is_follower = device_type == "robot"
+        self._read_fresh_positions(device)
+        is_can = self._is_can_device(device)
+        is_leader = device_type == "teleop"
+        leader_kind = None
+        if is_leader and self.is_energized_leader(device):
+            leader_kind = next(o.id for o in self.leader_options() if o.energized)
         # Torque is off and stays off for this entire wait: the user is
         # physically moving the arm.
-        ui.step(self.zero_pose_instructions(device_type), image_url=None, live_positions=True)
+        ui.step(self.zero_pose_instructions(device_type, leader_kind), image_url=None, live_positions=True)
         ui.message("Setting zero…")
 
-        pre_zero: dict[str, float] = {}
-        try:
-            pre_zero = self.read_positions(device)
-        except Exception as e:
-            logger.warning(f"Could not read pre-zero positions: {e}")
+        pre_zero = self._read_fresh_positions(device)
         for motor, value in pre_zero.items():
             # Logged so an offset against the PREVIOUS zero stays recoverable
             # from the logs if this one turns out to have been taken in the
             # wrong pose — same reason lerobot's own calibrate() logs them.
             logger.info(f"Pre-zero position of {motor}: {value:.2f} deg")
 
-        self._set_zero(device, is_follower)
+        self._set_zero(device, is_can)
+        self._read_fresh_positions(device)
         logger.info("Arm zero position set.")
-        return self._build_calibration(device, is_follower)
+        # An energized leader's config has no joint_limits of its own: it is
+        # this family's arm, so the FOLLOWER's fixed limits are its ranges.
+        ranges = self._follower_joint_limits(device.config.port) if (is_can and is_leader) else None
+        return self._build_calibration(device, is_can, ranges)
+
+    def _read_fresh_positions(self, device: Any) -> dict[str, float]:
+        """Require a reply from every joint; cached telemetry cannot prove power."""
+        bus = device.bus
+        if self._is_can_device(device):
+            # Both follower raw/sync readers can reuse old feedback on a miss.
+            # Single-motor reads raise when the motor does not respond.
+            readers = {
+                name: lambda name=name: bus.read("Present_Position", name)
+                for name in device.config.motor_can_ids
+            }
+        else:
+            # sync_monitor's reliable flag also rejects valid near-zero angles
+            # via the SDK's power-cycle filter. Individual raw-angle queries
+            # return a fresh packet or raise on timeout, without that filter.
+            readers = {
+                name: lambda motor_id=motor_id: bus.read_raw_angle(motor_id)
+                for name, motor_id in device.config.joint_ids.items()
+            }
+        positions = {}
+        for name, read in readers.items():
+            for attempt in range(3):
+                try:
+                    positions[name] = float(read())
+                    break
+                except (OSError, RuntimeError) as error:
+                    # Faults are not packet loss; preserve their actual cause.
+                    if "fault" in str(error).lower():
+                        raise
+                    if attempt == 2:
+                        raise ConnectionError(f"No response from motor '{name}': {error}") from error
+                    time.sleep(0.05)
+        if not positions or not all(math.isfinite(value) for value in positions.values()):
+            raise ConnectionError("Arm returned invalid positions. Check its connection.")
+        return positions
+
+    def _build_gripper_bus(self, port: str, bus_class: type, motor_models: dict):
+        from lerobot.motors import Motor, MotorNormMode
+
+        config = self._device_classes().follower_base(port=port)
+        ids = config.motor_can_ids["gripper"]
+        send_id, recv_id = ids if isinstance(ids, tuple) else (ids, ids)
+        model = motor_models["gripper"]
+        motor = Motor(send_id, model, MotorNormMode.DEGREES)
+        motor.recv_id = recv_id
+        motor.motor_type_str = model
+        return bus_class(
+            port=port,
+            motors={"gripper": motor},
+            can_interface="slcan",
+            use_can_fd=False,
+            bitrate=config.can_bitrate,
+            data_bitrate=None,
+        )
+
+    def _follower_joint_limits(self, port: str) -> dict[str, tuple[float, float]]:
+        return dict(self._device_classes().follower_base(port=port).joint_limits)
 
     @staticmethod
-    def _set_zero(device: Any, is_follower: bool) -> None:
+    def _set_zero(device: Any, is_can: bool) -> None:
         """Tell the motors that where they are now is zero."""
         bus = device.bus
-        if is_follower:
+        if is_can:
             # CAN (RobStride and Damiao alike): one broadcast zeroes every
             # motor on the bus.
             bus.set_zero_position()
@@ -234,7 +351,9 @@ class CanArmFamily(ArmFamily):
             bus.set_origin_point(motor_id)
 
     @staticmethod
-    def _build_calibration(device: Any, is_follower: bool) -> dict[str, Any]:
+    def _build_calibration(
+        device: Any, is_can: bool, ranges: dict[str, tuple[float, float]] | None = None
+    ) -> dict[str, Any]:
         """The calibration file's contents: fixed ranges from the config.
 
         ``homing_offset`` is 0 for every joint and that is correct, not a
@@ -247,9 +366,10 @@ class CanArmFamily(ArmFamily):
         from lerobot.motors import MotorCalibration
 
         config = device.config
-        if is_follower:
+        if is_can:
             ids = config.motor_can_ids
-            ranges = config.joint_limits
+            if ranges is None:
+                ranges = config.joint_limits
         else:
             ids = config.joint_ids
             ranges = {m: tuple(v) for m, v in config.joint_ranges.items()}
@@ -276,8 +396,20 @@ class CanArmFamily(ArmFamily):
     def single_follower_config(self, port: str, config_id: str):
         return self._device_classes().follower(port=port, id=config_id)
 
-    def single_leader_config(self, port: str, config_id: str):
-        return self._device_classes().teleop(port=port, id=config_id)
+    def single_leader_config(self, port: str, config_id: str, leader_kind: str | None = None):
+        # The config names its library outright (as the bimanual staging
+        # configs always have): for a kind whose library is not the one
+        # lerobot derives from the class name (the Maker trigger leader
+        # shares its class with the lever leader) the default would read and
+        # write the wrong directory.
+        return self._device_classes(leader_kind).teleop(
+            port=port, id=config_id, calibration_dir=Path(self._leader_library(leader_kind))
+        )
+
+    def _leader_library(self, leader_kind: str | None) -> str:
+        """This family's leader library for ``leader_kind`` (the keyword goes
+        only to a family that offers a choice, per leader_kwargs)."""
+        return self.leader_calibration_dir(**leader_kwargs(self, leader_kind))
 
     def capture_rest_poses(self, robot: Any, *, include_gripper: bool = False) -> list[tuple[Any, dict]]:
         # Degrees by bare motor name, one entry per drivable sub-arm (the
@@ -289,6 +421,25 @@ class CanArmFamily(ArmFamily):
             for arm, _label in maker_rest_pose.maker_follower_arms(robot)
         ]
 
+    def capture_leader_rest_poses(self, teleop: Any) -> list[tuple[Any, dict]]:
+        # An energized leader (recognized by the device, so a caller that
+        # only holds the built pair needs no leader_kind) is returned like a
+        # follower: each sub-arm is wrapped in the drive adapter that stops
+        # its gravity thread and speaks send_action/get_observation over its
+        # bus, so return_to_rest below needs no leader branch. The gripper is
+        # excluded for the follower's reason: the operator's hand is on it.
+        from .. import maker_rest_pose
+
+        poses: list[tuple[Any, dict]] = []
+        for arm, _label in maker_rest_pose.maker_follower_arms(teleop):
+            if not self.is_energized_leader(arm):
+                continue
+            drive = maker_rest_pose.EnergizedLeaderDrive(arm)
+            pose = maker_rest_pose.capture_maker_pose(drive, include_gripper=False)
+            if pose:
+                poses.append((drive, pose))
+        return poses
+
     def return_to_rest(self, rest_poses: list[tuple[Any, dict]], abort_event: Any = None) -> None:
         # The MIT setpoint interpolated at a bounded rate, arrival judged by
         # CONVERGENCE (a loaded joint holds a standing error), all arms at once.
@@ -297,26 +448,42 @@ class CanArmFamily(ArmFamily):
         maker_rest_pose.return_maker_arms_to_rest(rest_poses, abort_event)
 
     def release_torque(self, device: Any, label: str = "device") -> list[str]:
-        # One whole-bus disable per bus; the Star leader has no motors and is skipped.
+        # One whole-bus disable per bus; the Star leader has no motors and is
+        # skipped, and an energized leader's gravity thread is stopped first.
         from .. import torque
 
         return torque.release_maker_torque(device, label)
 
-    async def probe_ports(self, ports: list[str] | None = None) -> dict:
+    async def probe_ports(self, ports: list[str] | None = None, leader_kind: str | None = None) -> dict:
         from .. import maker_ports
 
-        return await maker_ports.probe_maker_ports(ports, self.id)
+        return await maker_ports.probe_maker_ports(ports, self.id, leader_kind)
 
-    async def identify_by_motion(self, device_type: str, ports: list[str] | None = None) -> dict:
+    async def identify_by_motion(
+        self, device_type: str, ports: list[str] | None = None, leader_kind: str | None = None
+    ) -> dict:
         from .. import maker_ports
 
-        return await maker_ports.identify_maker_arm_by_motion(device_type, ports, self.id)
+        return await maker_ports.identify_maker_arm_by_motion(device_type, ports, self.id, leader_kind)
+
+    async def identify_by_gripper_wiggle(
+        self, device_type: str, port: str, leader_kind: str | None = None
+    ) -> dict:
+        if not self.supports_gripper_wiggle:
+            return await super().identify_by_gripper_wiggle(device_type, port, leader_kind)
+        from .. import can_wiggle
+
+        return await can_wiggle.wiggle_can_gripper(self.id, device_type, port, leader_kind)
+
+    def _request_leader_kind(self, request: Any) -> str | None:
+        """The leader kind a start request names (None on a request that predates them)."""
+        return getattr(request, "leader_kind", None) or None
 
     def build_single_configs(self, request: Any, cameras: dict | None, leader_id: str, follower_id: str):
         # The follower config's defaults carry the CAN wiring (slcan @ 1 Mbps,
         # the per-joint ids, soft limits and MIT gains); only the adapter port
         # and the calibration id vary per session.
-        cls = self._device_classes()
+        cls = self._device_classes(self._request_leader_kind(request))
         if cameras is None:
             robot_config = cls.follower(
                 port=request.follower_port,
@@ -332,6 +499,7 @@ class CanArmFamily(ArmFamily):
         teleop_config = cls.teleop(
             port=request.leader_port,
             id=leader_id,
+            calibration_dir=Path(self._leader_library(self._request_leader_kind(request))),
         )
 
         return robot_config, teleop_config
@@ -344,7 +512,7 @@ class CanArmFamily(ArmFamily):
         leader_staging: str,
         follower_staging: str,
     ):
-        cls = self._device_classes()
+        cls = self._device_classes(self._request_leader_kind(request))
         if cameras is None:
             left_follower = cls.follower_base(port=request.follower_port)
         else:

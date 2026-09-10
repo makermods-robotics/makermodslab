@@ -130,10 +130,10 @@ def test_default_calibration_name_is_the_record_name_plus_the_family_suffix(fami
     assert family.default_calibration_name("bot") == "bot" + family.calibration_name_suffix
 
 
-def test_the_can_followers_zero_poses_are_opposites_on_the_gripper() -> None:
+def test_the_can_followers_zero_poses_use_closed_grippers() -> None:
     maker, metal = registry.get("maker"), registry.get("metal")
-    assert "gripper fully open" in maker.calibration_summary("robot")["text"]
-    assert "gripper closed" in metal.calibration_summary("robot")["text"]
+    assert "gripper fully closed" in maker.calibration_summary("robot")["text"]
+    assert "gripper fully closed" in metal.calibration_summary("robot")["text"]
     assert maker.calibration_summary("teleop") == metal.calibration_summary("teleop")
 
 
@@ -148,8 +148,8 @@ async def test_probe_ports_exists_exactly_for_families_with_a_probe_protocol(
 
     seen: list[tuple[list[str] | None, str]] = []
 
-    async def fake_probe(ports, arm_type="maker"):
-        seen.append((ports, arm_type))
+    async def fake_probe(ports, arm_type="maker", leader_kind=None):
+        seen.append((ports, arm_type, leader_kind))
         return {"success": True, "follower_ports": ["/dev/f"], "leader_ports": [], "unknown_ports": []}
 
     monkeypatch.setattr(maker_ports, "probe_maker_ports", fake_probe)
@@ -161,7 +161,9 @@ async def test_probe_ports_exists_exactly_for_families_with_a_probe_protocol(
             assert result["unknown_ports"] == ["/dev/x"]
         else:
             assert result["success"] is True
-    assert seen == [(["/dev/x"], "maker"), (["/dev/x"], "metal")]
+    # No leader kind reaches maker_ports from a call that named none: the
+    # family's default is what the probe then assumes.
+    assert seen == [(["/dev/x"], "maker", None), (["/dev/x"], "metal", None)]
 
 
 @pytest.mark.asyncio
@@ -174,7 +176,7 @@ async def test_identify_by_motion_routes_to_the_family_detector(monkeypatch: pyt
         calls.append(("so", ports))
         return {"success": True}
 
-    async def fake_can(device_type, ports=None, arm_type="maker"):
+    async def fake_can(device_type, ports=None, arm_type="maker", leader_kind=None):
         calls.append(("can", device_type, ports, arm_type))
         return {"success": True}
 
@@ -190,10 +192,11 @@ async def test_identify_by_motion_routes_to_the_family_detector(monkeypatch: pyt
 
 
 def test_telemetry_kind_is_one_of_the_two_the_frontend_renders() -> None:
-    """`joints` (URDF fractions) drives the 3D viewer; `joints_deg` feeds the
-    numeric readout in its slot. A family with a URDF says "urdf"."""
+    """`joints` (URDF joint values) drives the 3D viewer; `joints_deg` feeds the
+    numeric readout in its slot. A family with a URDF says "urdf" — the SO-101
+    Maker, and Metal arms each ship one."""
     assert all(f.telemetry_kind in ("urdf", "degrees") for f in registry.families())
-    assert [f.telemetry_kind for f in registry.families()] == ["urdf", "degrees", "degrees"]
+    assert [f.telemetry_kind for f in registry.families()] == ["urdf", "urdf", "urdf"]
 
 
 def test_only_the_damiao_follower_refuses_the_motion_gesture() -> None:

@@ -1221,3 +1221,132 @@ def test_run_cli_writes_sidecar_for_a_plain_unweighted_merge(tmp_lerobot_home: P
         ("ns/a", 1, 2),
         ("ns/b", 1, 3),
     ]
+
+
+# ── Cancel + stuck-merge watchdog ────────────────────────────────────────────
+
+import signal  # noqa: E402
+
+
+class _NullStream:
+    def readline(self) -> str:
+        return ""
+
+
+class _FakeProc:
+    """Stand-in for the merge subprocess: records the signals it is sent and
+    reports 'exited' only once it has been terminated."""
+
+    def __init__(self, pid: int = 999_999) -> None:
+        self.pid = pid
+        self.terminated = False
+        self.killed = False
+        self.returncode: int | None = None
+        self.stdout = _NullStream()
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is None:
+            self.returncode = -signal.SIGTERM
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -signal.SIGTERM
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -signal.SIGKILL
+
+
+def _running_manager(tmp_lerobot_home: Path, output_rel: str) -> tuple[object, _FakeProc, Path]:
+    from makermodslab.merge import MergeManager
+
+    mgr = MergeManager()
+    mgr.state = "running"
+    proc = _FakeProc()
+    mgr.process = proc
+    out = tmp_lerobot_home / output_rel
+    (out / "meta").mkdir(parents=True)
+    mgr._output_root = out
+    mgr._last_output_at = 1_000.0
+    return mgr, proc, out
+
+
+def test_cancel_terminates_a_running_merge(tmp_lerobot_home: Path) -> None:
+    mgr, proc, out = _running_manager(tmp_lerobot_home, "a/mix-dead")
+
+    res = mgr.cancel()
+
+    assert res == {"cancelled": True, "message": "Merge cancelled."}
+    assert proc.terminated is True
+    assert mgr.state == "cancelled"
+    assert not out.exists()  # partial output reclaimed
+
+
+def test_cancel_is_a_noop_when_no_merge_is_running() -> None:
+    from makermodslab.merge import MergeManager
+
+    mgr = MergeManager()
+    proc = _FakeProc()
+    mgr.process = proc
+    mgr.state = "done"
+
+    res = mgr.cancel()
+
+    assert res["cancelled"] is False
+    assert proc.terminated is False
+    assert mgr.state == "done"
+
+
+def test_monitor_does_not_overwrite_a_cancelled_verdict(tmp_lerobot_home: Path) -> None:
+    mgr, proc, _ = _running_manager(tmp_lerobot_home, "a/mix-race")
+    proc.returncode = -signal.SIGTERM
+    mgr.state = "cancelled"
+
+    mgr._monitor()
+
+    assert mgr.state == "cancelled"
+
+
+def test_watchdog_kills_a_merge_that_goes_silent(tmp_lerobot_home: Path) -> None:
+    mgr, proc, out = _running_manager(tmp_lerobot_home, "a/mix-stuck")
+    clock = [1_000.0]
+    mgr._now = lambda: clock[0]
+    mgr._last_output_at = clock[0]
+    mgr._stuck_after = 600
+
+    clock[0] += 300  # 5 min of silence — not stuck yet
+    assert mgr._watchdog_tick() is False
+    assert mgr.state == "running"
+
+    clock[0] += 400  # 700s of silence — over the threshold
+    assert mgr._watchdog_tick() is True
+    assert proc.terminated is True
+    assert mgr.state == "error"
+    assert "no output" in mgr.error.lower() or "stuck" in mgr.error.lower()
+    assert not out.exists()
+
+
+def test_watchdog_does_not_fire_while_output_keeps_arriving(tmp_lerobot_home: Path) -> None:
+    mgr, proc, _ = _running_manager(tmp_lerobot_home, "a/mix-live")
+    clock = [1_000.0]
+    mgr._now = lambda: clock[0]
+    mgr._last_output_at = clock[0]
+    mgr._stuck_after = 600
+
+    for _ in range(20):
+        clock[0] += 120  # a progress line every 2 minutes
+        mgr._enqueue("aggregating episode ...")
+        assert mgr._watchdog_tick() is False
+
+    assert mgr.state == "running"
+    assert proc.terminated is False
+
+
+def test_merge_cancel_endpoint_reports_no_merge_when_idle(client) -> None:
+    r = client.post("/api/v1/datasets/merge/cancel")
+    assert r.status_code == 200
+    assert r.json() == {"cancelled": False, "message": "No merge is running."}

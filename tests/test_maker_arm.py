@@ -6,6 +6,7 @@ zero-calibration worker, the port probe's bus I/O) are deliberately NOT
 exercised here; they are verified against real hardware instead.
 """
 
+import math
 from pathlib import Path
 
 import pytest
@@ -233,7 +234,8 @@ def _no_staging(monkeypatch: pytest.MonkeyPatch):
     """Skip the on-disk calibration staging — this is a config-shape test."""
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower, arm_type="so101": (leader, follower),
+        # The Maker arm offers two leader kinds, so it now hears leader_kind.
+        lambda leader, follower, arm_type="so101", **kw: (leader, follower),
     )
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.stage_bimanual_calibrations",
@@ -601,6 +603,179 @@ def test_maker_return_leaves_joints_absent_from_the_pose_alone() -> None:
     assert arm.pos["gripper"] == -50.0
 
 
+# ---------------------------------------------------------------------------
+# A destination that moves: the mid-session re-alignment chases the leader
+#
+# The teardown return goes to a pose captured once, which cannot move. The
+# re-alignment goes to the LEADER, and the UI says "resumed" the instant Resume
+# is pressed — so the operator's hand is back on it while the follower is still
+# walking. Sampling the destination once would deliver everything the leader
+# moved during the walk in one unramped step at the end.
+# ---------------------------------------------------------------------------
+
+
+def test_a_move_without_a_target_fn_keeps_the_old_fixed_plan() -> None:
+    """Every teardown caller passes no target_fn and must keep byte-for-byte
+    its old motion: one interpolation planned up front, all joints on one
+    timeline. The chase is strictly opt-in."""
+    from makermodslab.maker_rest_pose import MAKER_RETURN_FPS, return_maker_to_pose
+
+    arm = _MakerArmDouble({"shoulder_pan": 30.0})
+    return_maker_to_pose(arm, {"shoulder_pan": 0.0})
+
+    # 30 deg at 30 deg/s is 1.0s, and the ramp runs at MAKER_RETURN_FPS.
+    steps = int(1.0 * MAKER_RETURN_FPS)
+    ramp = [sent["shoulder_pan.pos"] for sent in arm.sent[:steps]]
+    assert ramp == [pytest.approx(30.0 * (1 - step / steps)) for step in range(1, steps + 1)]
+
+
+def test_chase_follows_a_target_that_moves_during_the_slew() -> None:
+    """The point of target_fn: a leader the operator keeps moving is followed,
+    and the arm lands where the leader ENDED UP, not where it was when Resume
+    was pressed."""
+    from makermodslab.maker_rest_pose import return_maker_to_pose
+
+    arm = _MakerArmDouble({"shoulder_pan": 30.0})
+    target = {"shoulder_pan": 0.0}
+    calls = {"n": 0}
+
+    def _moving_target() -> dict[str, float]:
+        calls["n"] += 1
+        if calls["n"] == 5:
+            # The operator carries on past the original destination.
+            target["shoulder_pan"] = -10.0
+        return dict(target)
+
+    arrived, reason = return_maker_to_pose(arm, {"shoulder_pan": 0.0}, target_fn=_moving_target)
+
+    assert arrived is True
+    assert reason in ("", "settled")
+    # Landed on the LAST target, not the first — a fixed plan would have
+    # stopped at 0 and left 10 deg to be snapped by the next passthrough tick.
+    assert arm.pos["shoulder_pan"] == pytest.approx(-10.0, abs=2.0)
+    assert arm.sent[-1]["shoulder_pan.pos"] == pytest.approx(-10.0, abs=2.0)
+
+
+def test_chase_never_steps_faster_than_the_rate_cap() -> None:
+    """A moving target must not become an excuse to jump: each tick steps
+    toward wherever the target is now by at most speed_deg_s * dt, which is
+    what keeps the arm from snapping when the leader moves a long way."""
+    from makermodslab.maker_rest_pose import (
+        MAKER_RETURN_FPS,
+        MAKER_RETURN_SPEED_DEG_S,
+        return_maker_to_pose,
+    )
+
+    arm = _MakerArmDouble({"shoulder_pan": 20.0})
+    target = {"shoulder_pan": 0.0}
+    calls = {"n": 0}
+
+    def _jumping_target() -> dict[str, float]:
+        calls["n"] += 1
+        if calls["n"] == 3:
+            target["shoulder_pan"] = -60.0  # a whole arm-length in one tick
+        return dict(target)
+
+    return_maker_to_pose(arm, {"shoulder_pan": 0.0}, target_fn=_jumping_target)
+
+    cap = MAKER_RETURN_SPEED_DEG_S / MAKER_RETURN_FPS
+    setpoints = [20.0] + [sent["shoulder_pan.pos"] for sent in arm.sent]
+    biggest = max(abs(b - a) for a, b in zip(setpoints, setpoints[1:], strict=False))
+    assert biggest <= cap + 1e-9
+
+
+def test_chase_keeps_the_last_good_target_when_the_refresh_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A leader read that dies mid-chase must not raise out of a courtesy move
+    and must not abandon the arm part-way: it keeps walking to the last target
+    it knows. Logged ONCE — at 30 Hz for a whole ceiling, per-tick logging
+    would bury the session."""
+    import logging
+
+    from makermodslab.maker_rest_pose import return_maker_to_pose
+
+    arm = _MakerArmDouble({"shoulder_pan": 20.0})
+
+    def _broken_target() -> dict[str, float]:
+        raise RuntimeError("UART leader went away")
+
+    with caplog.at_level(logging.WARNING, logger="makermodslab.maker_rest_pose"):
+        arrived, _reason = return_maker_to_pose(arm, {"shoulder_pan": 0.0}, target_fn=_broken_target)
+
+    assert arrived is True
+    assert arm.pos["shoulder_pan"] == pytest.approx(0.0, abs=2.0)
+    warnings = [r for r in caplog.records if "refresh" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+def test_chase_aborts_as_promptly_as_the_fixed_plan() -> None:
+    """The abort event and the ceiling apply to the chase exactly as they do to
+    the plan — a stop mid-re-alignment must not wait for the leader to settle."""
+    import threading
+
+    from makermodslab.maker_rest_pose import return_maker_to_pose
+
+    abort = threading.Event()
+    abort.set()
+    arm = _MakerArmDouble({"shoulder_pan": 40.0})
+
+    arrived, reason = return_maker_to_pose(
+        arm, {"shoulder_pan": 0.0}, abort_event=abort, target_fn=lambda: {"shoulder_pan": 0.0}
+    )
+
+    assert (arrived, reason) == (False, "cut-short")
+    assert arm.sent == []
+
+
+def test_each_arm_of_a_bimanual_chase_gets_its_own_target_fn() -> None:
+    """Each side receives its own target through the coordinated chase."""
+    from makermodslab.maker_rest_pose import return_maker_arms_to_rest
+
+    left = _MakerArmDouble({"shoulder_pan": 15.0})
+    right = _MakerArmDouble({"shoulder_pan": -15.0})
+
+    verdicts = return_maker_arms_to_rest(
+        [(left, {"shoulder_pan": 0.0}), (right, {"shoulder_pan": 0.0})],
+        target_label="the leader's pose",
+        target_fns=[lambda: {"shoulder_pan": 5.0}, lambda: {"shoulder_pan": -5.0}],
+    )
+
+    assert all(ok for ok, _reason in verdicts)
+    assert left.pos["shoulder_pan"] == pytest.approx(5.0, abs=2.0)
+    assert right.pos["shoulder_pan"] == pytest.approx(-5.0, abs=2.0)
+
+
+@pytest.mark.parametrize("left_start", [0.0, 5.0])
+def test_bimanual_chase_keeps_early_arrival_tracking(left_start: float) -> None:
+    """An aligned or early-arriving side follows a leader moved during its
+    partner's longer catch-up, leaving no large jump for raw passthrough."""
+    from makermodslab.maker_rest_pose import (
+        MAKER_RETURN_FPS,
+        MAKER_RETURN_SPEED_DEG_S,
+        return_maker_arms_to_rest,
+    )
+
+    left = _MakerArmDouble({"shoulder_pan": left_start})
+    right = _MakerArmDouble({"shoulder_pan": 90.0})
+
+    def left_target():
+        return {"shoulder_pan": 30.0 if len(right.sent) >= 20 else 0.0}
+
+    verdicts = return_maker_arms_to_rest(
+        [(left, {"shoulder_pan": 0.0}), (right, {"shoulder_pan": 0.0})],
+        target_fns=[left_target, lambda: {"shoulder_pan": 0.0}],
+    )
+
+    assert all(ok for ok, _reason in verdicts)
+    assert left.pos["shoulder_pan"] == pytest.approx(30.0, abs=2.0)
+    assert right.pos["shoulder_pan"] == pytest.approx(0.0, abs=2.0)
+    cap = MAKER_RETURN_SPEED_DEG_S / MAKER_RETURN_FPS
+    for arm, start in [(left, left_start), (right, 90.0)]:
+        goals = [start] + [action["shoulder_pan.pos"] for action in arm.sent]
+        assert all(abs(b - a) <= cap + 1e-9 for a, b in zip(goals, goals[1:], strict=False))
+
+
 def test_bimanual_maker_arms_are_returned_concurrently() -> None:
     """Two arms on separate CAN buses: returning them in series would take
     twice as long and leave the second hanging under gravity meanwhile."""
@@ -613,6 +788,79 @@ def test_bimanual_maker_arms_are_returned_concurrently() -> None:
 
     assert abs(left.pos["shoulder_pan"]) <= 2.0
     assert abs(right.pos["shoulder_pan"]) <= 2.0
+
+
+def test_action_targets_strip_the_bimanual_side_prefixes() -> None:
+    """A robot-level action is keyed left_/right_ (BiMakerFollower.send_action
+    splits on exactly those); the sub-arms the return drives speak bare names.
+    Getting this wrong would hand each arm an empty pose and silently skip the
+    move the caller asked for."""
+    from makermodslab.maker_rest_pose import maker_targets_from_action
+
+    class _Bi:
+        left_arm = "L"
+        right_arm = "R"
+
+    targets = maker_targets_from_action(
+        _Bi(),
+        {
+            "left_shoulder_pan.pos": 10.0,
+            "left_gripper.pos": -40.0,
+            "right_shoulder_pan.pos": -10.0,
+            "right_elbow_flex.pos": 5.0,
+        },
+    )
+
+    assert targets == [
+        ("L", {"shoulder_pan": 10.0}),
+        ("R", {"shoulder_pan": -10.0, "elbow_flex": 5.0}),
+    ]
+
+
+def test_action_targets_of_a_single_arm_are_the_bare_action() -> None:
+    from makermodslab.maker_rest_pose import maker_targets_from_action
+
+    robot = object()
+    targets = maker_targets_from_action(
+        robot, {"shoulder_pan.pos": 3.0, "gripper.pos": 0.0, "not_a_joint": "x"}
+    )
+
+    assert targets == [(robot, {"shoulder_pan": 3.0})]
+
+
+def test_action_targets_pair_device_for_device_with_maker_follower_arms() -> None:
+    """The two helpers are used together — one names the arms, the other says
+    where to send them — so their ordering must not drift apart."""
+    from makermodslab.maker_rest_pose import maker_follower_arms, maker_targets_from_action
+
+    class _Bi:
+        left_arm = "L"
+        right_arm = "R"
+
+    robot = _Bi()
+    action = {"left_shoulder_pan.pos": 1.0, "right_shoulder_pan.pos": 2.0}
+
+    assert [d for d, _ in maker_follower_arms(robot)] == [
+        d for d, _ in maker_targets_from_action(robot, action)
+    ]
+
+
+def test_arms_to_rest_reports_each_arms_verdict() -> None:
+    """The mid-session re-alignment logs what happened; a thread whose join
+    timed out must not read back as a success."""
+    from makermodslab.maker_rest_pose import return_maker_arms_to_rest
+
+    left = _MakerArmDouble({"shoulder_pan": 3.0})
+    right = _MakerArmDouble({"shoulder_pan": -3.0})
+
+    verdicts = return_maker_arms_to_rest(
+        [(left, {"shoulder_pan": 0.0}), (right, {"shoulder_pan": 0.0})],
+        target_label="the leader's pose",
+    )
+
+    assert len(verdicts) == 2
+    assert all(ok for ok, _reason in verdicts)
+    assert return_maker_arms_to_rest([]) == []
 
 
 def test_maker_follower_arms_finds_both_sides_of_a_bimanual_robot() -> None:
@@ -650,6 +898,77 @@ def test_auto_calibration_refuses_a_maker_robot(tmp_lerobot_home: Path) -> None:
 
     assert excinfo.value.status_code == 400
     assert "zero-pose" in excinfo.value.detail
+
+
+# ---------------------------------------------------------------------------
+# URDF joint mapping for the 3D teleop viewer
+# ---------------------------------------------------------------------------
+
+
+_MAKER_MOTORS_ZEROED = {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": 0.0,
+    "elbow_flex": 0.0,
+    "wrist_flex": 0.0,
+    "wrist_yaw": 0.0,
+    "wrist_roll": 0.0,
+    "gripper": -60.0,
+}
+
+
+def test_maker_urdf_mapping_converts_motor_degrees_to_urdf_radians() -> None:
+    """The Maker follower reports true joint angles in degrees about its
+    calibration zero, so the viewer mapping is a direct degrees->radians (the
+    SO-101's affine range->range remap is only needed because Feetech norm
+    values are not physical angles)."""
+    from makermodslab.arms.urdf import maker_joint_positions
+
+    arm = {**_MAKER_MOTORS_ZEROED, "shoulder_pan": 90.0, "elbow_flex": -45.0}
+    joints = maker_joint_positions(arm)
+
+    assert joints["link_002_joint"] == pytest.approx(math.pi / 2)
+    assert joints["link_004_joint"] == pytest.approx(-math.pi / 4)
+    assert joints["link_003_joint"] == pytest.approx(0.0)
+
+
+def test_maker_urdf_mapping_drives_the_gripper_joint() -> None:
+    """The shipped Maker URDF has a symmetric sliding gripper: the mapping
+    feeds `gripper_left_joint` (prismatic, metres) and the URDF's mimic moves
+    the other jaw. The value is clamped to the jaw's real 0..TRAVEL range."""
+    from makermodslab.arms.urdf import (
+        _MAKER_GRIPPER_JAW_TRAVEL_M,
+        _MAKER_URDF_GRIPPER_JOINT,
+        maker_joint_positions,
+    )
+
+    joints = maker_joint_positions(dict(_MAKER_MOTORS_ZEROED))
+
+    assert len(joints) == 7
+    assert _MAKER_URDF_GRIPPER_JOINT in joints
+    assert 0.0 <= joints[_MAKER_URDF_GRIPPER_JOINT] <= _MAKER_GRIPPER_JAW_TRAVEL_M
+
+    # Closed at the SDK's closed-encoder angle, fully open past the open one.
+    closed = maker_joint_positions({**_MAKER_MOTORS_ZEROED, "gripper": math.degrees(0.0067132066834521)})
+    wide = maker_joint_positions({**_MAKER_MOTORS_ZEROED, "gripper": math.degrees(-2.5)})
+    assert closed[_MAKER_URDF_GRIPPER_JOINT] == pytest.approx(0.0, abs=1e-6)
+    assert wide[_MAKER_URDF_GRIPPER_JOINT] == pytest.approx(_MAKER_GRIPPER_JAW_TRAVEL_M)
+
+
+def test_maker_urdf_mapping_applies_per_joint_sign_and_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`sign` (motor-increasing vs URDF-increasing) and `offset` (URDF zero vs
+    the arm's folded calibration zero) are the two per-joint facts that can
+    only be confirmed against real hardware, so the mapping must honour them."""
+    from makermodslab.arms import urdf
+
+    monkeypatch.setitem(urdf._MAKER_URDF_JOINTS, "wrist_roll", ("link_007_joint", -1, math.pi / 2))
+    arm = {**_MAKER_MOTORS_ZEROED, "wrist_roll": 90.0}
+
+    joints = urdf.maker_joint_positions(arm)
+
+    # -radians(90) + pi/2 == 0
+    assert joints["link_007_joint"] == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -765,11 +1084,11 @@ def test_stopping_with_no_calibration_running_is_a_clean_refusal() -> None:
 # ---------------------------------------------------------------------------
 
 MAKER_FOLLOWER_ZERO_POSE = (
-    "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully open — then confirm."
+    "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully closed — then confirm."
 )
 STAR_LEADER_ZERO_POSE = (
     "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, "
-    "gripper closed — then confirm."
+    "gripper fully closed — then confirm."
 )
 
 
@@ -873,7 +1192,7 @@ def test_maker_open_for_calibration_connects_the_follower_bus_then_disables_torq
 
     assert [c.type for c in built] == ["maker_follower"]
     assert (built[0].port, built[0].id) == ("/dev/can0", "cal")
-    assert device.log == [("bus", "connect"), ("bus", "disable_torque")]
+    assert device.log == [("bus", "connect", False), ("bus", "disable_torque")]
 
 
 def test_maker_open_for_calibration_connects_the_leader_uncalibrated(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -969,7 +1288,8 @@ def test_a_failed_torque_disable_after_connect_de_energizes_and_closes_the_bus(
     calls: list[str] = []
 
     class _Bus:
-        def connect(self):
+        def connect(self, handshake=True):
+            assert handshake is False
             calls.append("connect")
 
         def disable_torque(self):
@@ -1015,7 +1335,8 @@ def test_a_handshake_that_raises_partway_is_de_energized_before_the_error_propag
     class _Bus:
         is_connected = False
 
-        def connect(self):
+        def connect(self, handshake=True):
+            assert handshake is False
             calls.append("connect")
             raise RuntimeError("motor 4 did not answer the handshake")
 
