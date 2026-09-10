@@ -11,6 +11,34 @@
  * every `message`/`error` string the server sends back.
  */
 export default {
+  gripperCurrentLimit: {
+    title: "Experimental gripper current limit",
+    enabled: "Enabled",
+    disabled: "Disabled (stock behavior)",
+    description: "Limits motor current during position control; startup behavior and grip force have not been validated on hardware. Can be combined with the soft squeeze limit.",
+    percent: "Motor current cap (%)",
+    velocity: "Maximum gripper speed (degrees/sec)",
+    invalidCurrent: "Enter a finite value from 0.01 to 100%. No safe current cap is assumed.",
+    currentHelp: "Percentage of the motor's current scale. This is not a jaw-force percentage.",
+    invalidVelocity: "Enter a finite speed within the motor protocol's range (about 0.573–5729.578 degrees/sec). No safe speed is assumed.",
+    velocityHelp: "Required with the current cap. Choose a speed for your gripper and object.",
+    requirements: "Requires supported DM4310 firmware, checked at session start. Changes the motor control mode for the next local session; the prior mode is restored after the motor is disabled.",
+    scope: "Applies from the next local teleoperation or recording session only.",
+    scopeBimanual: "Applies to both grippers from the next local teleoperation or recording session only.",
+  },
+
+  gripperSoftLimit: {
+    title: "Gripper soft squeeze limit",
+    enabled: "Enabled",
+    disabled: "Disabled (stock behavior)",
+    description: "Caps how far the gripper target can push past its measured position while closing. Smaller values reduce sustained squeeze; opening remains responsive. This is not a force or torque guarantee.",
+    degrees: "Maximum closing error (degrees)",
+    invalid: "Enter a finite number greater than 0. No safe limit is assumed.",
+    help: "Smaller values reduce sustained squeeze. Choose a value for your gripper and object.",
+    scope: "Applies from the next local teleoperation or recording session only.",
+    scopeBimanual: "Applies to both grippers from the next local teleoperation or recording session only.",
+  },
+
   // ---- Window chrome + footer -------------------------------------------
   window: {
     // Rendered uppercase by the `.eyebrow` class (a no-op on Chinese).
@@ -44,7 +72,7 @@ export default {
     discard: {
       title: "Discard unsaved changes?",
       description:
-        "You have unsaved configuration changes (ports, cameras, or motor torque). Closing now discards them — nothing was written to the robot. Save first to keep them.",
+        "You have unsaved configuration changes (ports, cameras, motor torque, or gripper settings). Closing now discards them — nothing was written to the robot. Save first to keep them.",
       cancel: "Keep editing",
       confirm: "Discard & quit",
     },

@@ -23,7 +23,7 @@ from datetime import datetime
 from functools import partial
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from lerobot.configs.dataset import DatasetRecordConfig
 from lerobot.configs.video import RGBEncoderConfig
@@ -404,6 +404,11 @@ class RecordingRequest(BaseModel):
     # Which of the family's leaders drives the follower (the record's
     # leader_kind; blank = the family's default). See TeleoperateRequest.
     leader_kind: str | None = None
+    gripper_closing_error_deg: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
+    gripper_current_limit_ratio: float | None = Field(
+        default=None, ge=0.0001, le=1, allow_inf_nan=False, strict=True
+    )
+    gripper_max_velocity_deg_s: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
     dataset_repo_id: str
     single_task: str
     num_episodes: int = 5
@@ -653,6 +658,9 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
     # (400 robot.arm_type.unavailable) before the flag is claimed or a device
     # config built.
     require_known_arm_type(request.arm_type)
+    from .gripper_soft_limit import resolve_request_gripper_soft_limit
+
+    resolve_request_gripper_soft_limit(request)
 
     # Claim the active flag under the lock so two concurrent starts can't both
     # pass the precondition check.
@@ -903,6 +911,9 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     recording_events,
                     skip_identity_check=request.skip_identity_check,
                     identity_config_names=identity_config_names,
+                    gripper_closing_error_deg=request.gripper_closing_error_deg,
+                    gripper_current_limit_ratio=request.gripper_current_limit_ratio,
+                    gripper_max_velocity_deg_s=request.gripper_max_velocity_deg_s,
                 )
                 logger.info(f"Recording completed successfully. Dataset has {dataset.num_episodes} episodes")
                 last_session_outcome = "ok"
@@ -2042,6 +2053,9 @@ def record_with_web_events(
     web_events: dict,
     skip_identity_check: bool = False,
     identity_config_names: list[str] | None = None,
+    gripper_closing_error_deg: float | None = None,
+    gripper_current_limit_ratio: float | None = None,
+    gripper_max_velocity_deg_s: float | None = None,
 ) -> LeRobotDataset:
     """
     Implement recording with phase tracking - exactly mirrors original record() function behavior
@@ -2076,6 +2090,11 @@ def record_with_web_events(
     # Everything below that touches a Feetech register by name is gated on it.
     family = arm_registry.family_for_robot_config_type(getattr(cfg.robot, "type", None))
     feetech = family.uses_feetech_bus
+    from .gripper_soft_limit import install_gripper_soft_limit
+
+    install_gripper_soft_limit(
+        robot, family, gripper_closing_error_deg, gripper_current_limit_ratio, gripper_max_velocity_deg_s
+    )
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
     publish_preview = observation_tap(robot, family)
@@ -2087,6 +2106,10 @@ def record_with_web_events(
     action_features = hw_to_dataset_features(robot.action_features, "action", cfg.dataset.video)
     obs_features = hw_to_dataset_features(robot.observation_features, "observation", cfg.dataset.video)
     dataset_features = {**action_features, **obs_features}
+    if gripper_closing_error_deg is not None or gripper_current_limit_ratio is not None:
+        from .gripper_soft_limit import gripper_action_columns
+
+        gripper_action_columns(robot, dataset_features)
 
     if cfg.resume:
         num_cameras = len(robot.cameras) if hasattr(robot, "cameras") else 0
@@ -2135,6 +2158,11 @@ def record_with_web_events(
             encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
             encoder_threads=cfg.dataset.encoder_threads,
         )
+
+    if gripper_closing_error_deg is not None or gripper_current_limit_ratio is not None:
+        from .gripper_soft_limit import record_limited_gripper_actions
+
+        record_limited_gripper_actions(dataset, robot)
 
     # 🔧 ROBOT CONNECTION: Connect with enhanced error handling for camera conflicts.
     #
