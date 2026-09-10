@@ -39,7 +39,7 @@ describe("the recording form's per-episode-task checkbox", () => {
   it("is offered unchecked next to the task description", () => {
     render(<RecordingForm {...baseProps} />);
     const box = screen.getByRole("checkbox", {
-      name: /name each episode's task after recording it/i,
+      name: /describe each episode's task/i,
     });
     expect(box).toHaveAttribute("data-state", "unchecked");
   });
@@ -51,7 +51,7 @@ describe("the recording form's per-episode-task checkbox", () => {
     );
     fireEvent.click(
       screen.getByRole("checkbox", {
-        name: /name each episode's task after recording it/i,
+        name: /describe each episode's task/i,
       }),
     );
     expect(setPerEpisodeTask).toHaveBeenCalledWith(true);
@@ -66,7 +66,7 @@ describe("the recording form's per-episode-task checkbox", () => {
     // The checkbox itself stays put.
     expect(
       screen.getByRole("checkbox", {
-        name: /name each episode's task after recording it/i,
+        name: /describe each episode's task/i,
       }),
     ).toBeInTheDocument();
   });
