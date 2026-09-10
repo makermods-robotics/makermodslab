@@ -56,4 +56,18 @@ describe("the recording form's per-episode-task checkbox", () => {
     );
     expect(setPerEpisodeTask).toHaveBeenCalledWith(true);
   });
+
+  it("shows the dataset-level task field only while the mode is off", () => {
+    const { rerender } = render(<RecordingForm {...baseProps} />);
+    expect(screen.getByLabelText(/task description/i)).toBeInTheDocument();
+
+    rerender(<RecordingForm {...baseProps} perEpisodeTask={true} />);
+    expect(screen.queryByLabelText(/task description/i)).not.toBeInTheDocument();
+    // The checkbox itself stays put.
+    expect(
+      screen.getByRole("checkbox", {
+        name: /name each episode's task after recording it/i,
+      }),
+    ).toBeInTheDocument();
+  });
 });

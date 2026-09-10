@@ -179,7 +179,9 @@ const CollectPanel: React.FC = () => {
     // now (400 robot.not_ready from POST /api/v1/sessions, rendered by the
     // session dialog's start-failure toast). The Start button below still
     // disables on the same condition as a courtesy.
-    if (!datasetName || !singleTask) {
+    // With per-episode tasks there is no dataset-level task to require — each
+    // episode names its own during the session.
+    if (!datasetName || (!perEpisodeTask && !singleTask)) {
       toast({
         title: t("studio.collect.toast.missingDetailsTitle"),
         description: t("studio.collect.toast.missingDetailsBody"),
@@ -226,7 +228,9 @@ const CollectPanel: React.FC = () => {
     const recordingConfig = {
       robot: robot.name,
       dataset_repo_id: datasetRepoId,
-      single_task: singleTask,
+      // Per-episode-task sessions carry no dataset-level task; the first
+      // episode's prompt just starts blank.
+      single_task: perEpisodeTask ? "" : singleTask,
       per_episode_task: perEpisodeTask,
       num_episodes: numEpisodes,
       episode_time_s: episodeTimeS,
@@ -270,12 +274,13 @@ const CollectPanel: React.FC = () => {
   );
 
   // Gate for the pinned Start button: robot ready + every required parameter
-  // filled in (name valid per the backend's rules, task described).
+  // filled in (name valid per the backend's rules, task described — unless
+  // each episode names its own task, which drops the dataset-level one).
   const canStart =
     !!selectedRecord &&
     selectedRecord.is_clean &&
     datasetNameIssue(datasetName) === null &&
-    singleTask.trim().length > 0;
+    (perEpisodeTask || singleTask.trim().length > 0);
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">

@@ -41,7 +41,8 @@ import RecordingSessionDialog from "./RecordingSessionDialog";
 const CONFIG = {
   robot: "bench",
   dataset_repo_id: "alice/varied",
-  single_task: "pick the cube",
+  // Per-episode-task sessions carry no dataset-level task.
+  single_task: "",
   per_episode_task: true,
   num_episodes: 3,
   episode_time_s: 60,

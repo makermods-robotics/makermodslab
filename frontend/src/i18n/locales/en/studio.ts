@@ -72,7 +72,7 @@ export default {
         "e.g., pick up the red block and place it on the blue square",
       perEpisodeTaskLabel: "Name each episode's task after recording it",
       perEpisodeTaskHint:
-        "After every episode the session pauses and asks you to describe that episode's task. Use it when the episodes in this dataset do different things. The task above is the starting point for the first prompt.",
+        "After every episode the session pauses and asks you to describe that episode's task, just before the reset. Use it when the episodes in this dataset do different things. There is no single task for the whole dataset.",
       numEpisodes: "Number of episodes",
       episodeTime: "Episode duration (s)",
       resetTime: "Reset duration (s)",

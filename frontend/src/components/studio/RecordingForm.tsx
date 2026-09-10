@@ -145,14 +145,24 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="singleTask">{t("studio.collect.form.task")}</Label>
-          <Input
-            id="singleTask"
-            value={singleTask}
-            onChange={(e) => setSingleTask(e.target.value)}
-            placeholder={t("studio.collect.form.taskPlaceholder")}
-          />
-          <div className="flex items-start gap-3 pt-1">
+          {/* The dataset-level task is gone entirely when each episode names
+              its own — there is no single task for the run to describe. */}
+          {!perEpisodeTask && (
+            <>
+              <Label htmlFor="singleTask">{t("studio.collect.form.task")}</Label>
+              <Input
+                id="singleTask"
+                value={singleTask}
+                onChange={(e) => setSingleTask(e.target.value)}
+                placeholder={t("studio.collect.form.taskPlaceholder")}
+              />
+            </>
+          )}
+          <div
+            className={`flex items-start gap-3 ${
+              perEpisodeTask ? "" : "pt-1"
+            }`}
+          >
             <Checkbox
               id="perEpisodeTask"
               checked={perEpisodeTask}
