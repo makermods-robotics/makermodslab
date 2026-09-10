@@ -88,6 +88,10 @@ export default {
     energizedHint:
       "主控臂可支撑自身重量。使用“抖动”查找它的端口。",
     optionFor: {
+      maker: {
+        star: "Star Arm 102 主控臂",
+        star_trigger: "Star Arm 102 主控臂（扳机式夹爪）",
+      },
       metal: {
         star: "Star Arm 102 主控臂",
         metal: "Metal 机械臂主控臂（重力补偿）",
@@ -237,6 +241,8 @@ export default {
         maker: {
           leader:
             "用手将 Star Arm 102 主控臂摆成上图的姿态：折叠贴近底座，夹爪闭合。关节未通电，可以自由移动。",
+          leader_star_trigger:
+            "用手将 Star Arm 102 主控臂摆成上图的姿态：折叠贴近底座，夹爪扳机处于闭合挡位。关节未通电，可以自由移动。",
           follower:
             "用手把机械臂摆成上图的姿态：折叠贴近底座，夹爪完全闭合。扭矩已关闭，可以自由移动。",
         },

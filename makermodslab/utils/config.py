@@ -99,6 +99,13 @@ FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "so_follower")
 # mappings even though the physical leader zero pose is shared, so a name
 # collision would silently reuse calibration metadata for the wrong follower.
 MAKER_LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "rebot_102_leader")
+# The Maker arm's SECOND leader kind ("star_trigger": the same Star Arm 102
+# fitted with MakerMods' trigger gripper, lerobot's rebot_102_leader_maker_trigger
+# preset). Same lerobot class as the lever leader, so lerobot would derive the
+# SAME directory for it; the registry refuses two leader kinds of one family in
+# one library, so this one is the Lab's own name and every single-arm CAN
+# leader config carries its library as an explicit calibration_dir.
+MAKER_TRIGGER_LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "rebot_102_leader_trigger")
 MAKER_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "maker_follower")
 METAL_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "metal_follower")
 # The Metal arm's SECOND leader (leader kind "metal": a gravity-compensated
