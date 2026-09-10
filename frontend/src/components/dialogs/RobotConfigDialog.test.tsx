@@ -283,3 +283,58 @@ describe("zero-pose calibration", () => {
     expect(screen.getByRole("button", { name: "Calibrate all" })).toBeEnabled();
   });
 });
+
+
+describe("gripper soft squeeze limit", () => {
+  function serveRobot(armType = "metal", saved: number | null = null) {
+    const fallback = mocks.fetch.getMockImplementation()!;
+    let robot = {
+      name: "test", mode: "bimanual", arms: "both", arm_type: armType,
+      cameras: [], motor_power: 38, gripper_closing_error_deg: saved,
+    };
+    mocks.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (!url.includes("/robots/")) return fallback(url, init);
+      if (init?.method === "POST") robot = { ...robot, ...JSON.parse(String(init.body)) };
+      return { ok: true, json: async () => ({ robot }) };
+    });
+    render(<RobotConfigDialog open robotName="test" onOpenChange={() => {}} />);
+  }
+
+  it("requires an explicit positive limit and persists Save and disable", async () => {
+    serveRobot();
+    const toggle = await screen.findByRole("switch", { name: "Gripper soft squeeze limit" });
+    expect(toggle).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByText(/Applies to both grippers/)).toBeInTheDocument();
+    fireEvent.click(toggle);
+    const input = screen.getByRole("spinbutton", { name: "Maximum closing error (degrees)" });
+    expect(input).toHaveValue(null);
+    for (const value of ["", "0", "-2", "1e999"]) {
+      fireEvent.change(input, { target: { value } });
+      expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    }
+    fireEvent.change(input, { target: { value: "0.5" } });
+    expect(mocks.fetch.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("button", { name: "Saved ✓" });
+    expect(mocks.fetch).toHaveBeenCalledWith("http://test/api/v1/robots/test", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ gripper_closing_error_deg: 0.5 }),
+    }));
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("button", { name: "Saved ✓" });
+    expect(mocks.fetch).toHaveBeenCalledWith("http://test/api/v1/robots/test", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ gripper_closing_error_deg: null }),
+    }));
+  });
+
+  it("loads a saved limit and hides controls for unsupported families", async () => {
+    serveRobot("metal", 2);
+    expect(await screen.findByRole("spinbutton", { name: "Maximum closing error (degrees)" })).toHaveValue(2);
+    expect(screen.getByRole("switch", { name: "Gripper soft squeeze limit" })).toBeChecked();
+    cleanup();
+    serveRobot("maker");
+    await screen.findByRole("button", { name: "Calibrate all" });
+    expect(screen.queryByRole("switch", { name: "Gripper soft squeeze limit" })).not.toBeInTheDocument();
+  });
+});

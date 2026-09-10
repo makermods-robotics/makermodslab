@@ -12,6 +12,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
@@ -2112,6 +2113,25 @@ const RobotConfigWindow = ({
   // The integer percent the draft would persist, clamped to the backend's 10-100.
   const motorPercent = Math.min(100, Math.max(10, Math.round(powerDraft)));
 
+  const gripperSoftLimitSupported =
+    armInfo?.capabilities.supports_gripper_soft_limit === true;
+  const [gripperLimitEnabled, setGripperLimitEnabled] = useState(false);
+  const [gripperLimitDraft, setGripperLimitDraft] = useState("");
+  useEffect(() => {
+    const saved = robot?.gripper_closing_error_deg;
+    setGripperLimitEnabled(saved != null);
+    setGripperLimitDraft(saved == null ? "" : String(saved));
+  }, [robot?.name, robot?.gripper_closing_error_deg]);
+  const gripperLimitValue = gripperLimitEnabled ? Number(gripperLimitDraft) : null;
+  const gripperLimitInvalid =
+    gripperSoftLimitSupported && gripperLimitEnabled &&
+    (gripperLimitDraft.trim() === "" ||
+      !Number.isFinite(gripperLimitValue) || (gripperLimitValue ?? 0) <= 0);
+  const gripperLimitDirty =
+    !!robot && gripperSoftLimitSupported &&
+    (gripperLimitInvalid ||
+      gripperLimitValue !== (robot.gripper_closing_error_deg ?? null));
+
   // --- Draft dirtiness + batched Save ------------------------------------
   // A field is dirty when its draft differs from the last-fetched baseline.
   // Save is the ONLY path that writes the record; it POSTs every dirty field in
@@ -2136,14 +2156,16 @@ const RobotConfigWindow = ({
   );
   const motorDirty = !!robot && motorPercent !== robot.motor_power;
   const armsDirty = !!robot && draftArms !== (robot.arms ?? "both");
-  const isDirty = camerasDirty || portsDirty || motorDirty || armsDirty;
+  const isDirty =
+    camerasDirty || portsDirty || motorDirty || armsDirty || gripperLimitDirty;
 
   const handleSave = useCallback(async () => {
-    if (!robotName || !robot) return;
+    if (!robotName || !robot || gripperLimitInvalid) return;
     const patch: Record<string, unknown> = {};
     if (camerasDirty) patch.cameras = cameras;
     if (motorDirty) patch.motor_power = motorPercent;
     if (armsDirty) patch.arms = draftArms;
+    if (gripperLimitDirty) patch.gripper_closing_error_deg = gripperLimitValue;
     if (portsDirty) {
       for (const [f, v] of Object.entries(portDraft)) {
         if ((v ?? "") !== ((robot[f as keyof RobotRecord] as string) || "")) {
@@ -2193,6 +2215,9 @@ const RobotConfigWindow = ({
   }, [
     robotName,
     robot,
+    gripperLimitInvalid,
+    gripperLimitDirty,
+    gripperLimitValue,
     camerasDirty,
     motorDirty,
     portsDirty,
@@ -3581,6 +3606,59 @@ const RobotConfigWindow = ({
             </section>
           )}
 
+          {showFollower && gripperSoftLimitSupported && (
+            <section className="space-y-3 py-5">
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor="gripper-soft-limit" className="font-medium">
+                  {t("robotConfig.gripperSoftLimit.title")}
+                </Label>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-muted-foreground">
+                    {gripperLimitEnabled
+                      ? t("robotConfig.gripperSoftLimit.enabled")
+                      : t("robotConfig.gripperSoftLimit.disabled")}
+                  </span>
+                  <Switch
+                    id="gripper-soft-limit"
+                    checked={gripperLimitEnabled}
+                    onCheckedChange={setGripperLimitEnabled}
+                    aria-describedby="gripper-soft-limit-description"
+                  />
+                </div>
+              </div>
+              <p id="gripper-soft-limit-description" className="text-sm text-muted-foreground">
+                {t("robotConfig.gripperSoftLimit.description")}
+              </p>
+              {gripperLimitEnabled && (
+                <div className="space-y-2">
+                  <Label htmlFor="gripper-closing-error">
+                    {t("robotConfig.gripperSoftLimit.degrees")}
+                  </Label>
+                  <Input
+                    id="gripper-closing-error"
+                    type="number"
+                    step="any"
+                    value={gripperLimitDraft}
+                    onChange={(event) => setGripperLimitDraft(event.target.value)}
+                    aria-invalid={gripperLimitInvalid}
+                    aria-describedby="gripper-soft-limit-help"
+                    className="max-w-48"
+                  />
+                  <p id="gripper-soft-limit-help" className={`text-sm ${gripperLimitInvalid ? "text-destructive" : "text-muted-foreground"}`}>
+                    {t(gripperLimitInvalid
+                      ? "robotConfig.gripperSoftLimit.invalid"
+                      : "robotConfig.gripperSoftLimit.help")}
+                  </p>
+                </div>
+              )}
+              <p className="text-sm text-muted-foreground">
+                {t(isBimanual
+                  ? "robotConfig.gripperSoftLimit.scopeBimanual"
+                  : "robotConfig.gripperSoftLimit.scope")}
+              </p>
+            </section>
+          )}
+
           {/* 03 · Cameras — follower-side, so a leader-only controller has
               none to configure. */}
           {showFollower && (
@@ -3675,7 +3753,10 @@ const RobotConfigWindow = ({
             <Button variant="outline" onClick={requestClose}>
               {t("robotConfig.window.quit")}
             </Button>
-            <Button onClick={handleSave} disabled={!isDirty || saving}>
+            <Button
+              onClick={handleSave}
+              disabled={!isDirty || saving || gripperLimitInvalid}
+            >
               {saving ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               ) : (

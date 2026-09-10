@@ -42,6 +42,8 @@ export interface ArmCapabilities {
    * (POST /api/v1/maker/wiggle-gripper) — the identification of last resort
    * when neither the probe nor the gesture can tell two arms apart. */
   supports_gripper_wiggle: boolean;
+  /** Absent on older servers; never assume support. */
+  supports_gripper_soft_limit?: boolean;
 }
 
 /**

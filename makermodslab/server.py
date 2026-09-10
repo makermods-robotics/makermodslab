@@ -338,6 +338,7 @@ from .utils.config import (
     save_imported_calibration,
     save_robot_record,
     set_excluded_episodes,
+    validate_gripper_closing_error,
 )
 from .utils.hf_auth import (
     cached_whoami,
@@ -5063,12 +5064,27 @@ def upsert_robot(name: str, data: dict, create: bool = False):
     body = data or {}
     existing = get_robot_record(name) or {}
 
+    require_known_arm_type(body.get("arm_type"))
+
+    if "gripper_closing_error_deg" in body:
+        try:
+            validate_gripper_closing_error(body["gripper_closing_error_deg"])
+            if body["gripper_closing_error_deg"] is not None:
+                effective_arm_type = (
+                    body.get("arm_type") or existing.get("arm_type") or arm_registry.DEFAULT_ID
+                )
+                require_known_arm_type(effective_arm_type)
+                family = arm_registry.get(effective_arm_type)
+                if family is None or not family.supports_gripper_soft_limit:
+                    raise ValueError("This arm does not support the gripper soft squeeze limit.")
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"status": "error", "message": str(exc)})
+
     # An arm type nothing registered is refused on BOTH the create and the
     # patch path — the whole body, so a record is never left half-switched
     # (the disk layer would otherwise ignore the key and merge the rest). An
     # absent or null arm_type is "unspecified" and passes (the disk layer
     # then keeps the existing value, or the SO-101 default on create).
-    require_known_arm_type(body.get("arm_type"))
     # A leader kind is validated against the family the record WILL have:
     # the body's arm type when it names one, else the stored one (the SO-101
     # default on create). Refused whole, like an unknown arm type.

@@ -118,6 +118,7 @@ export const METAL: ArmFamilyInfo = {
     supports_port_probe: true,
     motion_identify_energizes_follower: true,
     supports_gripper_wiggle: true,
+    supports_gripper_soft_limit: true,
   },
   default_leader_kind: "star",
   leader_options: [

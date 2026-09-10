@@ -139,6 +139,10 @@
             "title": "Supports Dagger",
             "type": "boolean"
           },
+          "supports_gripper_soft_limit": {
+            "title": "Supports Gripper Soft Limit",
+            "type": "boolean"
+          },
           "supports_gripper_wiggle": {
             "title": "Supports Gripper Wiggle",
             "type": "boolean"
@@ -163,6 +167,7 @@
           "supports_remote_inference",
           "supports_port_probe",
           "motion_identify_energizes_follower",
+          "supports_gripper_soft_limit",
           "supports_gripper_wiggle"
         ],
         "title": "ArmCapabilities",
@@ -5070,6 +5075,18 @@
             "title": "Fps",
             "type": "integer"
           },
+          "gripper_closing_error_deg": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gripper Closing Error Deg"
+          },
           "leader_config": {
             "title": "Leader Config",
             "type": "string"
@@ -7105,6 +7122,18 @@
           "follower_port": {
             "title": "Follower Port",
             "type": "string"
+          },
+          "gripper_closing_error_deg": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gripper Closing Error Deg"
           },
           "leader_config": {
             "title": "Leader Config",

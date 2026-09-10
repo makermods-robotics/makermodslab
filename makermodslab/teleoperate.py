@@ -19,7 +19,7 @@ import threading
 import time
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from lerobot.robots import make_robot_from_config
 from lerobot.robots.bi_so_follower import BiSOFollower
@@ -307,6 +307,7 @@ class TeleoperateRequest(BaseModel):
     # arm — an ENERGIZED leader, returned and released on a stop like a
     # follower. Read through the family; nothing here compares it.
     leader_kind: str | None = None
+    gripper_closing_error_deg: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
     # Escape hatch for the arm-identity guard (see makermodslab/arm_identity.py):
     # when true, start even if the connected arms don't match their calibrations.
     skip_identity_check: bool = False
@@ -698,6 +699,9 @@ def _connect_can(request: TeleoperateRequest):
     # BiRebot102Leader), so dispatching on the registered `config.type` is the
     # only mapping guaranteed to stay correct if that changes upstream.
     robot = make_robot_from_config(robot_config)
+    from .gripper_soft_limit import install_gripper_soft_limit
+
+    install_gripper_soft_limit(robot, arm_family, request.gripper_closing_error_deg)
     teleop_device = make_teleoperator_from_config(teleop_config)
 
     try:
@@ -767,6 +771,9 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
     # (400 robot.arm_type.unavailable) before anything is released, claimed
     # or built — build_single_configs would otherwise ask the registry for it.
     require_known_arm_type(request.arm_type)
+    from .gripper_soft_limit import resolve_request_gripper_soft_limit
+
+    resolve_request_gripper_soft_limit(request)
 
     # A previous session (teleop or recording) may still be holding torque for
     # its release grace — cut it short so this start doesn't fail on a busy

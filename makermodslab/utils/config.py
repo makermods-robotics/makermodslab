@@ -15,6 +15,7 @@
 import contextlib
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -905,6 +906,22 @@ def validate_job_name(name: str) -> str:
     return trimmed
 
 
+def validate_gripper_closing_error(value: object) -> float | None:
+    """Validate an optional soft closing-position error cap, in motor degrees."""
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError(
+            "Gripper closing error must be a finite positive number of degrees, or null to disable."
+        )
+    return float(value)
+
+
 def _empty_record(name: str) -> dict:
     record: dict = {
         "name": name,
@@ -915,6 +932,7 @@ def _empty_record(name: str) -> dict:
         # written before leader kinds existed reads back as that default.
         "leader_kind": "",
         "motor_power": DEFAULT_MOTOR_POWER,
+        "gripper_closing_error_deg": None,
     }
     for field in _ROBOT_STRING_FIELDS:
         record[field] = ""
@@ -997,6 +1015,8 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
         logger.error(f"Invalid robot name: {name!r}")
         return False
 
+    if "gripper_closing_error_deg" in data:
+        validate_gripper_closing_error(data["gripper_closing_error_deg"])
     os.makedirs(ROBOTS_PATH, exist_ok=True)
     existing = get_robot_record(name)
     if existing is None and not allow_create:
@@ -1036,6 +1056,10 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
     value = data.get("motor_power")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         record["motor_power"] = clamp_motor_power(value)
+    if "gripper_closing_error_deg" in data:
+        record["gripper_closing_error_deg"] = validate_gripper_closing_error(
+            data["gripper_closing_error_deg"]
+        )
     if data.get("mode") in _VALID_MODES:
         record["mode"] = data["mode"]
     record.setdefault("mode", _DEFAULT_MODE)
@@ -1052,6 +1076,8 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
     # THIS payload survive: a caller that switches type and assigns new ports
     # in one request means both.
     if switching_arm_type:
+        if "gripper_closing_error_deg" not in data:
+            record["gripper_closing_error_deg"] = None
         record["arm_type"] = data["arm_type"]
         for stale in _ROBOT_STRING_FIELDS:
             if stale not in data:

@@ -300,6 +300,7 @@ class ArmCapabilities(BaseModel):
     # The family can jog ONE port's gripper so the user sees which arm it is
     # (POST /api/v1/maker/wiggle-gripper) — the identification of last resort
     # when neither the probe nor the gesture can tell two arms apart.
+    supports_gripper_soft_limit: bool
     supports_gripper_wiggle: bool
 
 

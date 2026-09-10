@@ -11,6 +11,18 @@
  * every `message`/`error` string the server sends back.
  */
 export default {
+  gripperSoftLimit: {
+    title: "Gripper soft squeeze limit",
+    enabled: "Enabled",
+    disabled: "Disabled (stock behavior)",
+    description: "Caps how far the gripper target can push past its measured position while closing. Smaller values reduce sustained squeeze; opening remains responsive. This is not a force or torque guarantee.",
+    degrees: "Maximum closing error (degrees)",
+    invalid: "Enter a finite number greater than 0. No safe limit is assumed.",
+    help: "Smaller values reduce sustained squeeze. Choose a value for your gripper and object.",
+    scope: "Applies from the next local teleoperation or recording session only.",
+    scopeBimanual: "Applies to both grippers from the next local teleoperation or recording session only.",
+  },
+
   // ---- Window chrome + footer -------------------------------------------
   window: {
     // Rendered uppercase by the `.eyebrow` class (a no-op on Chinese).
@@ -44,7 +56,7 @@ export default {
     discard: {
       title: "Discard unsaved changes?",
       description:
-        "You have unsaved configuration changes (ports, cameras, or motor torque). Closing now discards them — nothing was written to the robot. Save first to keep them.",
+        "You have unsaved configuration changes (ports, cameras, motor torque, or gripper settings). Closing now discards them — nothing was written to the robot. Save first to keep them.",
       cancel: "Keep editing",
       confirm: "Discard & quit",
     },

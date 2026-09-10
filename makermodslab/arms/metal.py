@@ -102,6 +102,7 @@ class MetalFamily(CanArmFamily):
 
     # Two Damiao arms that answer the same protocol cannot be told apart by
     # probe or gesture; a gripper wiggle on one port can (can_wiggle.py).
+    supports_gripper_soft_limit = True
     supports_gripper_wiggle = True
 
     def leader_options(self) -> tuple[LeaderOption, ...]:
