@@ -68,6 +68,8 @@ export default {
       savedAs: "Will be saved as <0>{{repoId}}</0>",
       loginHint: "Log in to Hugging Face to set the repository owner.",
       task: "Task description *",
+      perEpisodeTaskLabel: "Describe each episode",
+      perEpisodeTaskHint: "Enter a task before each episode. Reset when needed, then press Space to record.",
       taskPlaceholder:
         "e.g., pick up the red block and place it on the blue square",
       numEpisodes: "Number of episodes",

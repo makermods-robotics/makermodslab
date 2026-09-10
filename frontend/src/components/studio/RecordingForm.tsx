@@ -3,6 +3,7 @@ import { Trans, useTranslation } from "react-i18next";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import { SessionCameraList } from "@/components/recording/CameraConfiguration";
 import {
@@ -21,10 +22,16 @@ interface RecordingFormProps {
   robot: RobotRecord | null;
   datasetName: string;
   setDatasetName: (value: string) => void;
+  singleTask: string;
+  setSingleTask: (value: string) => void;
+  perEpisodeTask: boolean;
+  setPerEpisodeTask: (value: boolean) => void;
   numEpisodes: number;
   setNumEpisodes: (value: number) => void;
   episodeTimeS: number;
   setEpisodeTimeS: (value: number) => void;
+  resetTimeS: number;
+  setResetTimeS: (value: number) => void;
   streamingEncoding: boolean;
   setStreamingEncoding: (value: boolean) => void;
   pushToHub: boolean;
@@ -48,10 +55,16 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
   robot,
   datasetName,
   setDatasetName,
+  singleTask,
+  setSingleTask,
+  perEpisodeTask,
+  setPerEpisodeTask,
   numEpisodes,
   setNumEpisodes,
   episodeTimeS,
   setEpisodeTimeS,
+  resetTimeS,
+  setResetTimeS,
   streamingEncoding,
   setStreamingEncoding,
   pushToHub,
@@ -133,6 +146,45 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
         </div>
 
         <div className="space-y-2">
+          {/* The dataset-level task is gone entirely when each episode names
+              its own — there is no single task for the run to describe. */}
+          {!perEpisodeTask && (
+              <>
+                <Label htmlFor="singleTask">{t("studio.collect.form.task")}</Label>
+                <Input
+                  id="singleTask"
+                  value={singleTask}
+                  onChange={(e) => setSingleTask(e.target.value)}
+                  placeholder={t("studio.collect.form.taskPlaceholder")}
+                />
+              </>
+          )}
+          <div
+            className={`flex items-start gap-3 ${
+              perEpisodeTask ? "" : "pt-1"
+            }`}
+          >
+            <Switch
+              id="perEpisodeTask"
+              checked={perEpisodeTask}
+              onCheckedChange={(value) => setPerEpisodeTask(value === true)}
+              className="mt-0.5"
+            />
+            <div className="space-y-1">
+              <Label
+                htmlFor="perEpisodeTask"
+                className="cursor-pointer font-medium"
+              >
+                {t("studio.collect.form.perEpisodeTaskLabel")}
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                {t("studio.collect.form.perEpisodeTaskHint")}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-2">
           <Label htmlFor="numEpisodes">{t("studio.collect.form.numEpisodes")}</Label>
           <NumberInput
             id="numEpisodes"
@@ -145,7 +197,7 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
           />
         </div>
 
-        <div>
+        <div className={perEpisodeTask ? "" : "grid grid-cols-2 gap-4"}>
           <div className="space-y-2">
             <Label htmlFor="episodeTimeS">
               {t("studio.collect.form.episodeTime")}
@@ -159,6 +211,21 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
               }}
             />
           </div>
+          {!perEpisodeTask && (
+            <div className="space-y-2">
+              <Label htmlFor="resetTimeS">
+                {t("studio.collect.form.resetTime")}
+              </Label>
+              <NumberInput
+                id="resetTimeS"
+                min="1"
+                value={resetTimeS}
+                onChange={(v) => {
+                  if (v !== undefined) setResetTimeS(v);
+                }}
+              />
+            </div>
+          )}
         </div>
       </div>
 

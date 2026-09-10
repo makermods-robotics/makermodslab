@@ -45,6 +45,8 @@ export default {
       savedAs: "将保存为 <0>{{repoId}}</0>",
       loginHint: "登录 Hugging Face 以设置仓库归属账号。",
       task: "任务描述 *",
+      perEpisodeTaskLabel: "逐回合描述任务",
+      perEpisodeTaskHint: "每回合录制前输入任务。准备好环境后，按空格键开始录制。",
       taskPlaceholder: "例如：拿起红色方块并放到蓝色方格上",
       numEpisodes: "片段数量",
       episodeTime: "单个片段时长（秒）",
