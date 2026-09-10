@@ -79,6 +79,7 @@ const CollectPanel: React.FC = () => {
     formOpen,
     datasetName,
     singleTask,
+    perEpisodeTask,
     numEpisodes,
     episodeTimeS,
     resetTimeS,
@@ -226,6 +227,7 @@ const CollectPanel: React.FC = () => {
       robot: robot.name,
       dataset_repo_id: datasetRepoId,
       single_task: singleTask,
+      per_episode_task: perEpisodeTask,
       num_episodes: numEpisodes,
       episode_time_s: episodeTimeS,
       reset_time_s: resetTimeS,
@@ -306,6 +308,8 @@ const CollectPanel: React.FC = () => {
             setDatasetName={(v) => updateCollectForm({ datasetName: v })}
             singleTask={singleTask}
             setSingleTask={(v) => updateCollectForm({ singleTask: v })}
+            perEpisodeTask={perEpisodeTask}
+            setPerEpisodeTask={(v) => updateCollectForm({ perEpisodeTask: v })}
             numEpisodes={numEpisodes}
             setNumEpisodes={(v) => updateCollectForm({ numEpisodes: v })}
             episodeTimeS={episodeTimeS}

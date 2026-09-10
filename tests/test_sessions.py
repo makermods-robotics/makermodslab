@@ -606,6 +606,27 @@ def test_recording_request_merges_record_and_options(client, tmp_lerobot_home, m
     assert (req.num_episodes, req.fps) == (12, 25)
     assert req.push_to_hub is True and req.tags == ["so101"]
     assert req.episode_time_s == 30  # untouched defaults stay the feature's own
+    assert req.per_episode_task is False  # off unless the option asks for it
+
+
+def test_recording_request_carries_the_per_episode_task_flag(client, tmp_lerobot_home, monkeypatch) -> None:
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr("makermodslab.record.handle_start_recording", _fake_start("recording", captured))
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "recording",
+            "robot": "bench",
+            "options": {
+                "dataset_repo_id": "alice/pick",
+                "single_task": "pick the cube",
+                "per_episode_task": True,
+            },
+        },
+    )
+    assert resp.status_code == 201
+    assert captured[0].per_episode_task is True
 
 
 def test_inference_request_is_follower_only(client, tmp_lerobot_home, monkeypatch) -> None:

@@ -46,6 +46,9 @@ export default {
       loginHint: "登录 Hugging Face 以设置仓库归属账号。",
       task: "任务描述 *",
       taskPlaceholder: "例如：拿起红色方块并放到蓝色方格上",
+      perEpisodeTaskLabel: "录制每个片段后为其命名任务描述",
+      perEpisodeTaskHint:
+        "每录完一个片段，会话会暂停并让你描述该片段的任务。当本数据集中的片段执行的动作各不相同时使用。上方的任务描述作为第一次提示的初始值。",
       numEpisodes: "片段数量",
       episodeTime: "单个片段时长（秒）",
       resetTime: "复位时长（秒）",
