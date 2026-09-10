@@ -708,6 +708,20 @@ METAL_ENTRY = {
                 "image_url": None,
             },
         },
+        {
+            "id": "star_vertical",
+            "label": "Star arm vertical grip",
+            "available": True,
+            "unavailable_reason": None,
+            "energized": False,
+            "calibration_summary": {
+                "text": (
+                    "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, "
+                    "gripper fully closed — then confirm."
+                ),
+                "image_url": None,
+            },
+        },
     ],
 }
 
