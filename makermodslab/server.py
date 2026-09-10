@@ -153,6 +153,7 @@ from .record import (
     handle_resume_recording,
     handle_start_recording,
     handle_stop_recording,
+    handle_submit_episode_task,
     handle_upload_dataset,
     handle_upload_status,
     stop_and_wait as stop_recording_and_wait,
@@ -2292,6 +2293,32 @@ def recording_resume():
     """Resume a paused reset-phase gap. No-ops if not currently paused —
     see handle_resume_recording."""
     return handle_resume_recording()
+
+
+class EpisodeTaskBody(BaseModel):
+    task: str
+
+
+class RecordingControlResponse(BaseModel):
+    """The 200 body of a recording control verb: `success` is False for a
+    legitimately refused request (wrong phase, empty task) that still returns
+    200 — the frontend reads this flag, not just the status code."""
+
+    success: bool
+    message: str
+
+
+@v1_router.post(
+    "/recording-episode-task",
+    response_model=RecordingControlResponse,
+    tags=["recording"],
+)
+def recording_episode_task(body: EpisodeTaskBody):
+    """Name the task for the episode a per-episode-task session is holding in
+    its "naming" phase. Mandatory and un-bypassable: an empty description or a
+    submission outside the naming phase comes back 200 + {success: false} —
+    see handle_submit_episode_task."""
+    return handle_submit_episode_task(body.task)
 
 
 # Tagged "datasets": handled in record.py for historical reasons, but this is a

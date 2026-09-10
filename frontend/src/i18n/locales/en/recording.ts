@@ -93,6 +93,7 @@ export default {
       recordingEpisode: "Recording episode {{index}}",
       resetPaused: "Reset paused",
       resetGetReady: "Reset — get ready",
+      namingEpisode: "Name this episode's task",
       connectingRobot: "Connecting arm & cameras…",
       // {{attempt}}/{{max}} come straight off the status payload.
       reconnectingRetry: "Camera hiccup, retrying ({{attempt}}/{{max}})…",
@@ -125,6 +126,16 @@ export default {
       keepEpisodes: "Keep episodes & continue",
       discardExit: "Discard & exit",
       backHome: "Back to home",
+      saveEpisodeTask: "Save task & continue",
+    },
+    // The blocking card shown between the recording phase and the reset gap
+    // when the session records a per-episode task (the Collect form checkbox).
+    naming: {
+      title: "What was episode {{index}}'s task?",
+      description:
+        "Describe what this episode did. It is saved as the task for every frame of episode {{index}}. The session continues once you save.",
+      inputLabel: "Task description for episode {{index}}",
+      placeholder: "e.g., fold the left sleeve inward",
     },
     ended: {
       complete: "Recording complete — returning home…",

@@ -1515,6 +1515,19 @@
         "title": "EpisodeSummary",
         "type": "object"
       },
+      "EpisodeTaskBody": {
+        "properties": {
+          "task": {
+            "title": "Task",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "title": "EpisodeTaskBody",
+        "type": "object"
+      },
       "ExcludedEpisodesRequest": {
         "properties": {
           "episode_indices": {
@@ -5041,6 +5054,25 @@
         "title": "PolicyOptimizerPreset",
         "type": "object"
       },
+      "RecordingControlResponse": {
+        "description": "The 200 body of a recording control verb: `success` is False for a\nlegitimately refused request (wrong phase, empty task) that still returns\n200 — the frontend reads this flag, not just the status code.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "RecordingControlResponse",
+        "type": "object"
+      },
       "RecordingRequest": {
         "properties": {
           "arm_type": {
@@ -5098,6 +5130,11 @@
             "default": 5,
             "title": "Num Episodes",
             "type": "integer"
+          },
+          "per_episode_task": {
+            "default": false,
+            "title": "Per Episode Task",
+            "type": "boolean"
           },
           "private": {
             "default": false,
@@ -12042,6 +12079,48 @@
         "summary": "Get Policy Optimizer Defaults",
         "tags": [
           "system"
+        ]
+      }
+    },
+    "/api/v1/recording-episode-task": {
+      "post": {
+        "description": "Name the task for the episode a per-episode-task session is holding in\nits \"naming\" phase. Mandatory and un-bypassable: an empty description or a\nsubmission outside the naming phase comes back 200 + {success: false} —\nsee handle_submit_episode_task.",
+        "operationId": "recording_episode_task",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EpisodeTaskBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordingControlResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recording Episode Task",
+        "tags": [
+          "recording"
         ]
       }
     },
