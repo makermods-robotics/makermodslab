@@ -25,11 +25,12 @@ dependencies = [
     # extra: the token route is part of the base surface, and remote
     # inference's own preflight (the room probe) signs with it too.
     "livekit-api>=1.0",
-    # Pinned to makermods-robotics/lerobot @ arm/makermods-combined (eaab69339), the
-    # two-parent merge of robot/makermods-maker-arm (af9072a8c — the previous pin,
-    # via the Maker-Mods org) and arm/makermods-metal (85a3000d4). Upstream v0.6.2
-    # base; a strict superset of the Maker-only pin, adding the Metal arm's
-    # MetalFollower/BiMetalFollower (7-DOF Damiao CAN) and metal_leader stack.
+    # Pinned to makermods-robotics/lerobot @ arm/makermods-combined (0efbaf55b):
+    # the trigger-gripper Star leader presets (rebot_102_leader_maker_trigger,
+    # merged from robot/makermods-maker-arm b780f78e3) and the Metal follower
+    # gain/feedforward tuning (a86385a0f), on top of eaab69339 (the previous
+    # pin: the Star-leader unwrap fix over the two-parent merge of
+    # robot/makermods-maker-arm and arm/makermods-metal). Upstream v0.6.2 base.
     # Pinned by SHA, not branch name — a moving pin makes every unrelated failure
     # a bisect.
     # Extras beyond the SO-101 set: `maker` = RobStride over CAN (python-can +
@@ -40,7 +41,7 @@ dependencies = [
     # drags in Pinocchio (`pin`, no Windows wheels) that only the
     # gravity-compensated Metal leader needs; that leader is opt-in through
     # the `metal-leader` extra below.
-    "lerobot[core_scripts,feetech,training,maker,damiao,rebot] @ git+https://github.com/makermods-robotics/lerobot.git@eaab69339120787948776e4354dcee09f501fd16",
+    "lerobot[core_scripts,feetech,training,maker,damiao,rebot] @ git+https://github.com/makermods-robotics/lerobot.git@0efbaf55be27cfab8cfd0d29afe2f8aeac0afdb9",
     # Windows-only: real DirectShow camera names for /available-cameras so the
     # frontend can match a camera to its browser deviceId (issues #12, #16).
     # Guarded by try/except at the call site, so its absence degrades gracefully.
@@ -95,7 +96,7 @@ test = [
 # installed GET /api/v1/arms lists the option as unavailable and every session
 # that opens the leader refuses with robot.leader_kind.unavailable.
 metal-leader = [
-    "lerobot[pin-dep] @ git+https://github.com/makermods-robotics/lerobot.git@eaab69339120787948776e4354dcee09f501fd16",
+    "lerobot[pin-dep] @ git+https://github.com/makermods-robotics/lerobot.git@0efbaf55be27cfab8cfd0d29afe2f8aeac0afdb9",
 ]
 
 [project.scripts]

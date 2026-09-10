@@ -503,7 +503,7 @@ image = (
         # and scipy (~35 MB) on top of what [pi,smolvla] already pulls, and all
         # three extras resolve the same transformers range — no conflict.
         '"lerobot[pi,smolvla,molmoact2] @ git+https://github.com/makermods-robotics/lerobot.git'
-        '@eaab69339120787948776e4354dcee09f501fd16"'
+        '@0efbaf55be27cfab8cfd0d29afe2f8aeac0afdb9"'
     )
     # Tailscale, for the `--tailscale` hybrid transport (signaling over the
     # tailnet; media still direct UDP). Installed from Tailscale's own apt repo,
