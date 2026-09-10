@@ -2430,7 +2430,7 @@ const DeployPanel: React.FC = () => {
               </details>
             ) : null}
           </>
-        ) : startBlockedKey ? (
+        ) : startBlockedKey && startBlockedKey !== "studio.deploy.blocked.noCheckpoint" ? (
           <p className="text-xs leading-relaxed text-warn">
             {t(startBlockedKey as never)}
           </p>

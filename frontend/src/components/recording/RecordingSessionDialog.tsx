@@ -150,6 +150,8 @@ const RecordingSessionDialog: React.FC<{
     null
   );
   const [recordingSessionStarted, setRecordingSessionStarted] = useState(false);
+  const [initialTask, setInitialTask] = useState<string | null>(null);
+  const pendingInitialTaskRef = useRef<string | null>(null);
   const [logs, setLogs] = useState("");
 
   const [optimisticPhase, setOptimisticPhase] = useState<Phase | null>(null);
@@ -215,10 +217,11 @@ const RecordingSessionDialog: React.FC<{
   useSessionHeartbeat(sessionId, tabOwnerId(), sessionLive);
   useUnloadWarning(sessionLive);
 
-  // Start recording session when the dialog mounts. The ref guard prevents
+  // Collect the first task before starting the hardware session. The ref prevents
   // React StrictMode (and any future re-renders) from POSTing the session
   // start twice — the second call returns 409 and bounces the user out.
   useEffect(() => {
+    if (recordingConfig.per_episode_task && initialTask === null) return;
     if (!startInitiatedRef.current) {
       startInitiatedRef.current = true;
       startRecordingSession();
@@ -226,7 +229,7 @@ const RecordingSessionDialog: React.FC<{
     // startRecordingSession is intentionally omitted: re-running this effect
     // on its identity change would re-fire the session start.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [initialTask, recordingConfig.per_episode_task]);
 
   // Refs so the poll interval below stays stable and reads the latest values
   // without tearing itself down on every state change.
@@ -396,7 +399,7 @@ const RecordingSessionDialog: React.FC<{
         kind: "recording",
         robot,
         owner: tabOwnerId(),
-        options,
+        options: { ...options, single_task: initialTask ?? options.single_task },
       });
       setSessionId(session.id);
       setRecordingSessionStarted(true);
@@ -514,6 +517,15 @@ const RecordingSessionDialog: React.FC<{
     },
     [submittingTask, baseUrl, fetchWithHeaders, toast, t]
   );
+
+  // The first Space already requested capture. Submit once the backend is ready.
+  useEffect(() => {
+    if (backendStatus?.current_phase !== "naming") return;
+    const task = pendingInitialTaskRef.current;
+    if (task === null) return;
+    pendingInitialTaskRef.current = null;
+    void handleSubmitEpisodeTask(task);
+  }, [backendStatus?.current_phase, handleSubmitEpisodeTask]);
 
   const handlePauseRecording = useCallback(async () => {
     if (!backendStatus?.available_controls.pause_recording) return;
@@ -918,7 +930,22 @@ const RecordingSessionDialog: React.FC<{
         </DialogTitle>
 
         {/* Loading state while waiting for the first backend status */}
-        {!backendStatus ? (
+        {recordingConfig.per_episode_task && initialTask === null ? (
+          <div className="space-y-4 py-6">
+            <EpisodeTaskPrompt
+              episode={1}
+              defaultTask={recordingConfig.single_task}
+              submitting={false}
+              onSubmit={(task) => {
+                pendingInitialTaskRef.current = task;
+                setInitialTask(task);
+              }}
+            />
+            <Button variant="ghost" onClick={() => onExit()}>
+              {t("common.cancel")}
+            </Button>
+          </div>
+        ) : !backendStatus ? (
           <div className="flex flex-col items-center justify-center py-16 text-center">
             <div className="mb-4 h-12 w-12 animate-spin rounded-full border-b-2 border-red-500" />
             <p className="text-lg">{t("recording.session.connecting")}</p>
