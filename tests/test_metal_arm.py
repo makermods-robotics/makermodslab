@@ -631,6 +631,10 @@ def test_a_failed_metal_follower_connect_de_energizes_the_bus(
         def connect(self, calibrate=True):
             raise AssertionError("leader must not be connected after the follower failed")
 
+    # This double exercises the connect-failure cleanup dispatch, not the
+    # Metal register protocol. Its bus intentionally lacks those internals;
+    # the real limiter installation/cleanup is covered in the gripper tests.
+    monkeypatch.setattr("makermodslab.gripper_soft_limit.install_gripper_soft_limit", lambda *args: None)
     monkeypatch.setattr(teleoperate, "build_single_configs", lambda req, cameras=None: (object(), object()))
     monkeypatch.setattr(teleoperate, "make_robot_from_config", lambda cfg: _FakeRobot())
     monkeypatch.setattr(teleoperate, "make_teleoperator_from_config", lambda cfg: _FakeLeader())
