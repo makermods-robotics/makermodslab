@@ -120,6 +120,7 @@ export const METAL: ArmFamilyInfo = {
     supports_gripper_wiggle: true,
     supports_gripper_soft_limit: true,
     supports_gripper_current_limit: true,
+    supports_gripper_leader_hold: true,
   },
   default_leader_kind: "star",
   leader_options: [

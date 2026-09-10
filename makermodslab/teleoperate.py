@@ -308,6 +308,7 @@ class TeleoperateRequest(BaseModel):
     # follower. Read through the family; nothing here compares it.
     leader_kind: str | None = None
     gripper_closing_error_deg: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
+    gripper_leader_hold_gap_deg: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
     gripper_current_limit_ratio: float | None = Field(
         default=None, ge=0.0001, le=1, allow_inf_nan=False, strict=True
     )
@@ -742,6 +743,12 @@ def _connect_can(request: TeleoperateRequest):
                 "Make sure it's plugged in and powered on, then try again."
             ) from e
 
+        from .gripper_leader_hold import install_gripper_leader_hold
+
+        install_gripper_leader_hold(
+            robot, teleop_device, arm_family, request.gripper_leader_hold_gap_deg
+        )
+
         logger.info(f"Successfully connected to the {family} arm pair")
         return robot, teleop_device, []
     except Exception as e:
@@ -781,9 +788,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
     # (400 robot.arm_type.unavailable) before anything is released, claimed
     # or built — build_single_configs would otherwise ask the registry for it.
     require_known_arm_type(request.arm_type)
+    from .gripper_leader_hold import resolve_request_gripper_leader_hold
     from .gripper_soft_limit import resolve_request_gripper_soft_limit
 
     resolve_request_gripper_soft_limit(request)
+    resolve_request_gripper_leader_hold(request)
 
     # A previous session (teleop or recording) may still be holding torque for
     # its release grace — cut it short so this start doesn't fail on a busy
@@ -1061,6 +1070,12 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 # session died on its own — a real failure, classified below.
                 loop_error = format_exception(e)
             finally:
+                # Unlock the leader gripper servo first (the family's leader
+                # torque release is a no-op on the motorless Star leader, so
+                # this is the only thing that releases a held gripper).
+                _hold = getattr(robot, "_gripper_leader_hold", None)
+                if _hold is not None:
+                    _hold.release()
                 telemetry_summary = telemetry.summary()
                 if telemetry_summary:
                     logger.info(telemetry_summary)

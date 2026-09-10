@@ -405,6 +405,7 @@ class RecordingRequest(BaseModel):
     # leader_kind; blank = the family's default). See TeleoperateRequest.
     leader_kind: str | None = None
     gripper_closing_error_deg: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
+    gripper_leader_hold_gap_deg: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
     gripper_current_limit_ratio: float | None = Field(
         default=None, ge=0.0001, le=1, allow_inf_nan=False, strict=True
     )
@@ -658,9 +659,11 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
     # (400 robot.arm_type.unavailable) before the flag is claimed or a device
     # config built.
     require_known_arm_type(request.arm_type)
+    from .gripper_leader_hold import resolve_request_gripper_leader_hold
     from .gripper_soft_limit import resolve_request_gripper_soft_limit
 
     resolve_request_gripper_soft_limit(request)
+    resolve_request_gripper_leader_hold(request)
 
     # Claim the active flag under the lock so two concurrent starts can't both
     # pass the precondition check.
@@ -912,6 +915,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     skip_identity_check=request.skip_identity_check,
                     identity_config_names=identity_config_names,
                     gripper_closing_error_deg=request.gripper_closing_error_deg,
+                    gripper_leader_hold_gap_deg=request.gripper_leader_hold_gap_deg,
                     gripper_current_limit_ratio=request.gripper_current_limit_ratio,
                     gripper_max_velocity_deg_s=request.gripper_max_velocity_deg_s,
                 )
@@ -2054,6 +2058,7 @@ def record_with_web_events(
     skip_identity_check: bool = False,
     identity_config_names: list[str] | None = None,
     gripper_closing_error_deg: float | None = None,
+    gripper_leader_hold_gap_deg: float | None = None,
     gripper_current_limit_ratio: float | None = None,
     gripper_max_velocity_deg_s: float | None = None,
 ) -> LeRobotDataset:
@@ -2351,6 +2356,15 @@ def record_with_web_events(
     # leader; a failed write degrades to the previous value (logged inside)
     # and must not abort the session. A no-op on a CAN family.
     family.prepare_follower_registers(robot)
+
+    # Leader-side haptic gripper hold: wrap robot.send_action AFTER the soft
+    # limiter above, so this sees the operator's raw gripper request. Single-arm
+    # Metal only; a no-op when disabled or when teleop is absent (replay-style
+    # record paths don't reach here).
+    if teleop is not None:
+        from .gripper_leader_hold import install_gripper_leader_hold
+
+        install_gripper_leader_hold(robot, teleop, family, gripper_leader_hold_gap_deg)
 
     # Capture the follower's rest pose now — after connect/configure/identity
     # guard, before the recording loop moves anything — so a normal stop can
@@ -2654,6 +2668,11 @@ def record_with_web_events(
 
     finally:
         try:
+            # Unlock the leader gripper servo first — the family's leader torque
+            # release is a no-op on the motorless Star leader.
+            _hold = getattr(robot, "_gripper_leader_hold", None)
+            if _hold is not None:
+                _hold.release()
             if ended_normally and not _release_now.is_set():
                 # User-initiated stop / planned session end: no timed hold — the
                 # servos hold their last goal on their own in position mode — so

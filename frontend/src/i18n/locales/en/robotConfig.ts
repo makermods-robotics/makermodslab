@@ -39,6 +39,18 @@ export default {
     scopeBimanual: "Applies to both grippers from the next local teleoperation or recording session only.",
   },
 
+  gripperLeaderHold: {
+    title: "Leader gripper hold",
+    enabled: "Enabled",
+    disabled: "Disabled (stock behavior)",
+    description: "Briefly holds the leader gripper handle rigid when you squeeze it harder than the follower can close on an object, so you feel the wall instead of stalling the follower. The hold pulses — pull the handle open to release it.",
+    degrees: "Engage gap (degrees)",
+    invalid: "Enter a finite number greater than 0. No safe gap is assumed.",
+    help: "How far past the follower's actual position the handle must push before the hold engages. Larger values engage later.",
+    requirements: "Requires a MOTORIZED Star Arm 102 leader (there is no way to detect a motorless one — leave this off if yours has no gripper servo). Single-arm only for now.",
+    scope: "Applies from the next local teleoperation or recording session only.",
+  },
+
   // ---- Window chrome + footer -------------------------------------------
   window: {
     // Rendered uppercase by the `.eyebrow` class (a no-op on Chinese).

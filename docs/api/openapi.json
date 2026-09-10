@@ -143,6 +143,10 @@
             "title": "Supports Gripper Current Limit",
             "type": "boolean"
           },
+          "supports_gripper_leader_hold": {
+            "title": "Supports Gripper Leader Hold",
+            "type": "boolean"
+          },
           "supports_gripper_soft_limit": {
             "title": "Supports Gripper Soft Limit",
             "type": "boolean"
@@ -173,6 +177,7 @@
           "motion_identify_energizes_follower",
           "supports_gripper_current_limit",
           "supports_gripper_soft_limit",
+          "supports_gripper_leader_hold",
           "supports_gripper_wiggle"
         ],
         "title": "ArmCapabilities",
@@ -5105,6 +5110,18 @@
             ],
             "title": "Gripper Current Limit Ratio"
           },
+          "gripper_leader_hold_gap_deg": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gripper Leader Hold Gap Deg"
+          },
           "gripper_max_velocity_deg_s": {
             "anyOf": [
               {
@@ -7177,6 +7194,18 @@
               }
             ],
             "title": "Gripper Current Limit Ratio"
+          },
+          "gripper_leader_hold_gap_deg": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gripper Leader Hold Gap Deg"
           },
           "gripper_max_velocity_deg_s": {
             "anyOf": [

@@ -2132,6 +2132,25 @@ const RobotConfigWindow = ({
     (gripperLimitInvalid ||
       gripperLimitValue !== (robot.gripper_closing_error_deg ?? null));
 
+  const gripperLeaderHoldSupported =
+    armInfo?.capabilities.supports_gripper_leader_hold === true;
+  const [leaderHoldEnabled, setLeaderHoldEnabled] = useState(false);
+  const [leaderHoldDraft, setLeaderHoldDraft] = useState("");
+  useEffect(() => {
+    const saved = robot?.gripper_leader_hold_gap_deg;
+    setLeaderHoldEnabled(saved != null);
+    setLeaderHoldDraft(saved == null ? "" : String(saved));
+  }, [robot?.name, robot?.gripper_leader_hold_gap_deg]);
+  const leaderHoldValue = leaderHoldEnabled ? Number(leaderHoldDraft) : null;
+  const leaderHoldInvalid =
+    gripperLeaderHoldSupported && leaderHoldEnabled &&
+    (leaderHoldDraft.trim() === "" ||
+      !Number.isFinite(leaderHoldValue) || (leaderHoldValue ?? 0) <= 0);
+  const leaderHoldDirty =
+    !!robot && gripperLeaderHoldSupported &&
+    (leaderHoldInvalid ||
+      leaderHoldValue !== (robot.gripper_leader_hold_gap_deg ?? null));
+
   const gripperCurrentSupported =
     armInfo?.capabilities.supports_gripper_current_limit === true;
   const [gripperCurrentEnabled, setGripperCurrentEnabled] = useState(false);
@@ -2159,7 +2178,8 @@ const RobotConfigWindow = ({
       (gripperCurrentEnabled ? Number(gripperCurrentDraft) : null) !==
         (robot.gripper_current_limit_ratio == null ? null : robot.gripper_current_limit_ratio * 100) ||
       gripperVelocityValue !== (robot.gripper_max_velocity_deg_s ?? null));
-  const gripperSettingsInvalid = gripperLimitInvalid || gripperCurrentInvalid || gripperVelocityInvalid;
+  const gripperSettingsInvalid =
+    gripperLimitInvalid || leaderHoldInvalid || gripperCurrentInvalid || gripperVelocityInvalid;
 
   // --- Draft dirtiness + batched Save ------------------------------------
   // A field is dirty when its draft differs from the last-fetched baseline.
@@ -2186,7 +2206,8 @@ const RobotConfigWindow = ({
   const motorDirty = !!robot && motorPercent !== robot.motor_power;
   const armsDirty = !!robot && draftArms !== (robot.arms ?? "both");
   const isDirty =
-    camerasDirty || portsDirty || motorDirty || armsDirty || gripperLimitDirty || gripperCurrentDirty;
+    camerasDirty || portsDirty || motorDirty || armsDirty ||
+    gripperLimitDirty || leaderHoldDirty || gripperCurrentDirty;
 
   const handleSave = useCallback(async () => {
     if (!robotName || !robot || gripperSettingsInvalid) return;
@@ -2195,6 +2216,7 @@ const RobotConfigWindow = ({
     if (motorDirty) patch.motor_power = motorPercent;
     if (armsDirty) patch.arms = draftArms;
     if (gripperLimitDirty) patch.gripper_closing_error_deg = gripperLimitValue;
+    if (leaderHoldDirty) patch.gripper_leader_hold_gap_deg = leaderHoldValue;
     if (gripperCurrentDirty) {
       patch.gripper_current_limit_ratio = gripperCurrentValue;
       patch.gripper_max_velocity_deg_s = gripperVelocityValue;
@@ -2254,6 +2276,8 @@ const RobotConfigWindow = ({
     gripperVelocityValue,
     gripperLimitDirty,
     gripperLimitValue,
+    leaderHoldDirty,
+    leaderHoldValue,
     camerasDirty,
     motorDirty,
     portsDirty,
@@ -3691,6 +3715,60 @@ const RobotConfigWindow = ({
                 {t(isBimanual
                   ? "robotConfig.gripperSoftLimit.scopeBimanual"
                   : "robotConfig.gripperSoftLimit.scope")}
+              </p>
+            </section>
+          )}
+
+          {showFollower && gripperLeaderHoldSupported && (
+            <section className="space-y-3 py-5">
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor="gripper-leader-hold" className="font-medium">
+                  {t("robotConfig.gripperLeaderHold.title")}
+                </Label>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-muted-foreground">
+                    {leaderHoldEnabled
+                      ? t("robotConfig.gripperLeaderHold.enabled")
+                      : t("robotConfig.gripperLeaderHold.disabled")}
+                  </span>
+                  <Switch
+                    id="gripper-leader-hold"
+                    checked={leaderHoldEnabled}
+                    onCheckedChange={setLeaderHoldEnabled}
+                    aria-describedby="gripper-leader-hold-description"
+                  />
+                </div>
+              </div>
+              <p id="gripper-leader-hold-description" className="text-sm text-muted-foreground">
+                {t("robotConfig.gripperLeaderHold.description")}
+              </p>
+              {leaderHoldEnabled && (
+                <div className="space-y-2">
+                  <Label htmlFor="gripper-leader-hold-gap">
+                    {t("robotConfig.gripperLeaderHold.degrees")}
+                  </Label>
+                  <Input
+                    id="gripper-leader-hold-gap"
+                    type="number"
+                    step="any"
+                    value={leaderHoldDraft}
+                    onChange={(event) => setLeaderHoldDraft(event.target.value)}
+                    aria-invalid={leaderHoldInvalid}
+                    aria-describedby="gripper-leader-hold-help"
+                    className="max-w-48"
+                  />
+                  <p id="gripper-leader-hold-help" className={`text-sm ${leaderHoldInvalid ? "text-destructive" : "text-muted-foreground"}`}>
+                    {t(leaderHoldInvalid
+                      ? "robotConfig.gripperLeaderHold.invalid"
+                      : "robotConfig.gripperLeaderHold.help")}
+                  </p>
+                </div>
+              )}
+              <p className="text-sm text-muted-foreground">
+                {t("robotConfig.gripperLeaderHold.requirements")}
+              </p>
+              <p className="text-sm text-muted-foreground">
+                {t("robotConfig.gripperLeaderHold.scope")}
               </p>
             </section>
           )}

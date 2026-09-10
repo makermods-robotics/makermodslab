@@ -104,6 +104,7 @@ class MetalFamily(CanArmFamily):
     # probe or gesture; a gripper wiggle on one port can (can_wiggle.py).
     supports_gripper_current_limit = True
     supports_gripper_soft_limit = True
+    supports_gripper_leader_hold = True
     supports_gripper_wiggle = True
 
     def leader_options(self) -> tuple[LeaderOption, ...]:
