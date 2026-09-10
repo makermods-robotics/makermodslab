@@ -31,7 +31,7 @@ from makermodslab.arms.base import LeaderOption, leader_kwargs
 from makermodslab.arms.maker import MAKER, STAR_TRIGGER_LEADER_KIND
 from makermodslab.utils import config as cfg
 
-TRIGGER_GRIPPER_DIRECTION = 0.6424
+TRIGGER_GRIPPER_DIRECTION = 1.2848  # 120 / 93.4: half the pull opens the jaw fully
 
 
 class _Req(SimpleNamespace):
