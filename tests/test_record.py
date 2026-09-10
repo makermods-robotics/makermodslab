@@ -3854,6 +3854,139 @@ def test_teleop_connect_failure_releases_both_devices(
     assert [s["label"] for s in seen] == ["robot", "teleop"]
 
 
+# ---------------------------------------------------------------------------
+# Per-episode task naming — the operator names each episode's task description
+# right after recording it (a checkbox on the Collect form). The session pauses
+# in a dedicated "naming" phase between the recording phase and the reset gap.
+# ---------------------------------------------------------------------------
+
+
+def test_recording_request_per_episode_task_defaults_off() -> None:
+    """The flag is additive: a request that predates the feature (or leaves the
+    checkbox unticked) records with one dataset-level task, exactly as before."""
+    from makermodslab.record import RecordingRequest
+
+    req = RecordingRequest(
+        leader_port="/dev/l",
+        follower_port="/dev/f",
+        leader_config="LC",
+        follower_config="FC",
+        dataset_repo_id="u/d",
+        single_task="pick the cube",
+    )
+    assert req.per_episode_task is False
+
+    ticked = req.model_copy(update={"per_episode_task": True})
+    assert ticked.per_episode_task is True
+
+
+def test_apply_episode_task_rewrites_every_frame_in_the_pending_buffer() -> None:
+    """record_loop appended the captured frames with the session's placeholder
+    task; _apply_episode_task swaps in the operator-named string before
+    save_episode() reads the buffer."""
+    from makermodslab.record import _apply_episode_task
+
+    dataset = type(
+        "FakeDataset",
+        (),
+        {"writer": type("W", (), {"episode_buffer": {"task": ["placeholder"] * 4, "size": 4}})()},
+    )()
+
+    _apply_episode_task(dataset, "fold the left sleeve")
+
+    assert dataset.writer.episode_buffer["task"] == ["fold the left sleeve"] * 4
+
+
+def test_handle_submit_episode_task_stashes_the_task_during_the_naming_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A submitted task is trimmed, stashed for the naming loop to pick up, and
+    becomes the prefill for the next episode's prompt."""
+    import makermodslab.record as record
+
+    events = {"stop_recording": False, "exit_early": False, "episode_task_submitted": None}
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "current_phase", "naming")
+    monkeypatch.setattr(record, "last_episode_task", "pick the cube")
+
+    result = record.handle_submit_episode_task("  fold the towel  ")
+
+    assert result["success"] is True
+    assert events["episode_task_submitted"] == "fold the towel"
+    assert record.last_episode_task == "fold the towel"
+
+
+def test_handle_submit_episode_task_rejects_an_empty_description(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Naming is mandatory: a blank/whitespace task never unblocks the phase."""
+    import makermodslab.record as record
+
+    events = {"stop_recording": False, "exit_early": False, "episode_task_submitted": None}
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "current_phase", "naming")
+
+    result = record.handle_submit_episode_task("   ")
+
+    assert result["success"] is False
+    assert events["episode_task_submitted"] is None
+
+
+def test_handle_submit_episode_task_refused_outside_the_naming_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A task submitted while the session is recording (a stale client, a
+    double-submit) is refused rather than applied to the wrong episode."""
+    import makermodslab.record as record
+
+    events = {"stop_recording": False, "exit_early": False, "episode_task_submitted": None}
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "current_phase", "recording")
+
+    result = record.handle_submit_episode_task("fold the towel")
+
+    assert result["success"] is False
+    assert events["episode_task_submitted"] is None
+
+
+def test_recording_status_naming_phase_locks_every_control_but_the_task_submit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While the session waits for an episode task there is no bypass: Stop,
+    skip-to-next, re-record and pause are all withdrawn, and the status carries
+    the prefill for the prompt (the previous episode's task)."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "current_phase", "naming")
+    monkeypatch.setattr(record, "last_episode_task", "pick the cube")
+    monkeypatch.setattr(
+        record,
+        "recording_config",
+        type(
+            "Cfg",
+            (),
+            {"dataset_repo_id": "tester/ds", "num_episodes": 3, "single_task": "pick the cube"},
+        )(),
+    )
+    monkeypatch.setattr(
+        record, "recording_events", {"paused": False, "exit_early": False, "stop_recording": False}
+    )
+
+    status = record.handle_recording_status()
+
+    controls = status["available_controls"]
+    assert controls["submit_episode_task"] is True
+    assert controls["stop_recording"] is False
+    assert controls["exit_early"] is False
+    assert controls["rerecord_episode"] is False
+    assert controls["pause_recording"] is False
+    assert status["current_episode_task_default"] == "pick the cube"
+
+
 def test_episode_preparation_precedes_timer_and_record_loop(monkeypatch, tmp_lerobot_home):
     from makermodslab import record
 

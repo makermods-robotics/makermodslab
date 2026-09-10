@@ -23,6 +23,8 @@ interface RecordingFormProps {
   setDatasetName: (value: string) => void;
   singleTask: string;
   setSingleTask: (value: string) => void;
+  perEpisodeTask: boolean;
+  setPerEpisodeTask: (value: boolean) => void;
   numEpisodes: number;
   setNumEpisodes: (value: number) => void;
   episodeTimeS: number;
@@ -54,6 +56,8 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
   setDatasetName,
   singleTask,
   setSingleTask,
+  perEpisodeTask,
+  setPerEpisodeTask,
   numEpisodes,
   setNumEpisodes,
   episodeTimeS,
@@ -141,13 +145,42 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="singleTask">{t("studio.collect.form.task")}</Label>
-          <Input
-            id="singleTask"
-            value={singleTask}
-            onChange={(e) => setSingleTask(e.target.value)}
-            placeholder={t("studio.collect.form.taskPlaceholder")}
-          />
+          {/* The dataset-level task is gone entirely when each episode names
+              its own — there is no single task for the run to describe. */}
+          {!perEpisodeTask && (
+            <>
+              <Label htmlFor="singleTask">{t("studio.collect.form.task")}</Label>
+              <Input
+                id="singleTask"
+                value={singleTask}
+                onChange={(e) => setSingleTask(e.target.value)}
+                placeholder={t("studio.collect.form.taskPlaceholder")}
+              />
+            </>
+          )}
+          <div
+            className={`flex items-start gap-3 ${
+              perEpisodeTask ? "" : "pt-1"
+            }`}
+          >
+            <Checkbox
+              id="perEpisodeTask"
+              checked={perEpisodeTask}
+              onCheckedChange={(value) => setPerEpisodeTask(value === true)}
+              className="mt-0.5"
+            />
+            <div className="space-y-1">
+              <Label
+                htmlFor="perEpisodeTask"
+                className="cursor-pointer font-medium"
+              >
+                {t("studio.collect.form.perEpisodeTaskLabel")}
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                {t("studio.collect.form.perEpisodeTaskHint")}
+              </p>
+            </div>
+          </div>
         </div>
 
         <div className="space-y-2">

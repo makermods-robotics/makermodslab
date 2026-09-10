@@ -471,7 +471,7 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
         jointsKey={jointsKey === "joints" ? "joints_deg" : "joints_deg_right"}
       />
     ) : (
-      <UrdfViewer jointsKey={jointsKey} variant="light" compact />
+      <UrdfViewer armType={hostedArmType ?? robot?.arm_type ?? "so101"} jointsKey={jointsKey} variant="light" compact />
     );
 
   return (

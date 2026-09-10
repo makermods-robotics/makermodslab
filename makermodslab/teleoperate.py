@@ -291,9 +291,8 @@ class TeleoperateRequest(BaseModel):
     right_follower_port: str = ""
     right_leader_config: str = ""
     right_follower_config: str = ""
-    # Robot record name — used only as the BiSO staging base id (bimanual). It
-    # decides the on-disk staging dir, not which calibration drives which arm.
-    # Blank/invalid falls back to DEFAULT_BIMANUAL_BASE.
+    # Robot record name: loads per-robot gripper settings and supplies the BiSO
+    # staging base id (bimanual). Calibration selection uses the fields above.
     robot_name: str = ""
     # Hardware family: "so101" (Feetech serial) or "maker" (RobStride CAN
     # follower + Star Arm 102 leader). Decides which lerobot config classes the
@@ -699,6 +698,11 @@ def _connect_can(request: TeleoperateRequest):
     # only mapping guaranteed to stay correct if that changes upstream.
     robot = make_robot_from_config(robot_config)
     teleop_device = make_teleoperator_from_config(teleop_config)
+
+    if arm_family.supports_gripper_effort_control:
+        from .metal_gripper import install_metal_gripper
+
+        install_metal_gripper(robot, request.robot_name)
 
     try:
         logger.info(f"Connecting to {family} follower arm(s)...")

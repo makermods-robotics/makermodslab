@@ -118,6 +118,67 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+describe("advanced holding torque", () => {
+  function openMetal(holdTorque: number | null | undefined = undefined, currentLimit: number | null = null) {
+    const record = {
+      name: "test", mode: "single", arm_type: "metal", arms: "both", cameras: [],
+      motor_power: 38, gripper_hold_torque_nm: holdTorque, gripper_current_limit_a: currentLimit,
+      leader_port: "leader", follower_port: "follower",
+    };
+    const original = mocks.fetch.getMockImplementation();
+    mocks.fetch.mockImplementation(async (url: string, options?: RequestInit) => {
+      if (url.endsWith("/robots/test")) {
+        if (options?.method === "POST") Object.assign(record, JSON.parse(String(options.body)));
+        return { ok: true, json: async () => ({ robot: { ...record }, gripper_application: "live" }) };
+      }
+      return original?.(url, options);
+    });
+    render(<RobotConfigDialog open robotName="test" onOpenChange={() => {}} />);
+  }
+
+  it("starts collapsed at 0.5 Nm and saves only the edited holding torque", async () => {
+    openMetal();
+    const advanced = await screen.findByRole("button", { name: "Advanced parameters" });
+    expect(advanced).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("slider", { name: "Holding torque (N·m)" })).not.toBeInTheDocument();
+    fireEvent.click(advanced);
+    const slider = screen.getByRole("slider", { name: "Holding torque (N·m)" });
+    expect(slider).toHaveValue("0.5");
+    expect(slider).toHaveAttribute("min", "0.1");
+    expect(slider).toHaveAttribute("max", "2");
+    fireEvent.change(slider, { target: { value: "0.7" } });
+    expect(mocks.fetch.mock.calls.filter(([, opts]) => opts?.method === "POST")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledWith("http://test/api/v1/robots/test", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ gripper_hold_torque_nm: 0.7 }),
+    })));
+    await waitFor(() => expect(mocks.toast).toHaveBeenCalledWith({ title: "Holding torque applied and saved" }));
+  });
+
+  it("loads a saved value and resets its draft to the default", async () => {
+    openMetal(0.9);
+    fireEvent.click(await screen.findByRole("button", { name: "Advanced parameters" }));
+    const slider = screen.getByRole("slider", { name: "Holding torque (N·m)" });
+    expect(slider).toHaveValue("0.9");
+    fireEvent.click(screen.getByRole("button", { name: "Default: 0.5 N·m" }));
+    expect(slider).toHaveValue("0.5");
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+    expect(mocks.fetch.mock.calls.filter(([, opts]) => opts?.method === "POST")).toHaveLength(0);
+  });
+
+  it("preserves opt-out until edited and clears the alternative current mode on Save", async () => {
+    openMetal(null, 0.5);
+    fireEvent.click(await screen.findByRole("button", { name: "Advanced parameters" }));
+    expect(screen.getByText(/Holding control is disabled/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Default: 0.5 N·m" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledWith("http://test/api/v1/robots/test", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ gripper_hold_torque_nm: 0.5, gripper_current_limit_a: null }),
+    })));
+  });
+});
+
 async function openAll() {
   render(<RobotConfigDialog open robotName="test" onOpenChange={() => {}} />);
   const button = await screen.findByRole("button", { name: "Calibrate all" });

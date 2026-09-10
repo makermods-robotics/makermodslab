@@ -634,6 +634,11 @@ def test_a_failed_metal_follower_connect_de_energizes_the_bus(
     monkeypatch.setattr(teleoperate, "build_single_configs", lambda req, cameras=None: (object(), object()))
     monkeypatch.setattr(teleoperate, "make_robot_from_config", lambda cfg: _FakeRobot())
     monkeypatch.setattr(teleoperate, "make_teleoperator_from_config", lambda cfg: _FakeLeader())
+    # This test isolates connect failure/release with a deliberately incomplete
+    # robot. Real bus wrapping/routing is exercised in test_metal_gripper.py.
+    from makermodslab import metal_gripper
+
+    monkeypatch.setattr(metal_gripper, "install_metal_gripper", lambda robot, name: None)
 
     request = teleoperate.TeleoperateRequest(
         leader_port="/dev/star",

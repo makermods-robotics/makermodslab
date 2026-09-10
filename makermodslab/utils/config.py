@@ -710,13 +710,16 @@ def setup_calibration_files(
     return leader_config_name, follower_config_name
 
 
-def setup_leader_calibration_file(leader_config: str, arm_type: object = DEFAULT_ARM_TYPE) -> str:
+def setup_leader_calibration_file(
+    leader_config: str, arm_type: object = DEFAULT_ARM_TYPE, leader_kind: object = None
+) -> str:
     """Leader twin of setup_follower_calibration_file (remote teleoperation
     opens ONLY the leader). Validates the assigned config exists in the arm
-    type's leader library and returns its stem — lerobot's `id`."""
+    type's leader library and returns its stem — lerobot's `id`.
+    ``leader_kind`` selects the library for a multi-leader family."""
     _require_assigned_config(leader_config, "leader")
     leader_config_name = os.path.splitext(leader_config)[0]
-    leader_library = leader_config_path_for(arm_type)
+    leader_library = leader_config_path_for(arm_type, leader_kind)
     target = os.path.join(leader_library, f"{leader_config_name}.json")
     if not os.path.exists(target):
         raise FileNotFoundError(
@@ -915,6 +918,9 @@ def _empty_record(name: str) -> dict:
         # written before leader kinds existed reads back as that default.
         "leader_kind": "",
         "motor_power": DEFAULT_MOTOR_POWER,
+        # Alternative mode-4 experiment. Holding defaults are family-specific.
+        "gripper_current_limit_a": None,
+        "gripper_hold_torque_nm": None,
     }
     for field in _ROBOT_STRING_FIELDS:
         record[field] = ""
@@ -957,6 +963,12 @@ def get_robot_record(name: str) -> dict | None:
     # A hand-edited UNKNOWN string is kept as is: the record lists as
     # unavailable and refuses to start, rather than masquerading as an SO-101.
     record["arm_type"] = normalize_arm_type(record.get("arm_type"))
+    if "gripper_hold_torque_nm" not in data:
+        from ..gripper_settings import default_gripper_hold_torque
+
+        record["gripper_hold_torque_nm"] = default_gripper_hold_torque(
+            record["arm_type"], record.get("gripper_current_limit_a")
+        )
     # Same rule for the leader kind: missing (every record written before it
     # existed) reads as the family's default; an unknown string is kept, so
     # it lists and is refused rather than silently driving the wrong leader.
@@ -965,6 +977,8 @@ def get_robot_record(name: str) -> dict | None:
     # out-of-range or corrupted value on disk is clamped so every consumer
     # sees a safe 10-100 integer.
     record["motor_power"] = clamp_motor_power(record.get("motor_power"))
+    # Preserve invalid persisted gripper values here: session setup validates
+    # strictly and refuses them, rather than silently removing a safety cap.
     return record
 
 
@@ -1036,6 +1050,22 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
     value = data.get("motor_power")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         record["motor_power"] = clamp_motor_power(value)
+    if "gripper_current_limit_a" in data:
+        from ..gripper_settings import validate_gripper_current
+
+        record["gripper_current_limit_a"] = validate_gripper_current(data["gripper_current_limit_a"])
+    if "gripper_hold_torque_nm" in data:
+        from ..gripper_settings import validate_gripper_hold_torque
+
+        record["gripper_hold_torque_nm"] = validate_gripper_hold_torque(data["gripper_hold_torque_nm"])
+    elif existing is None or switching_arm_type:
+        from ..gripper_settings import default_gripper_hold_torque
+
+        record["gripper_hold_torque_nm"] = default_gripper_hold_torque(
+            data.get("arm_type", record["arm_type"]), record.get("gripper_current_limit_a")
+        )
+    if record.get("gripper_current_limit_a") is not None and record.get("gripper_hold_torque_nm") is not None:
+        raise ValueError("Choose holding torque or current limiting, not both")
     if data.get("mode") in _VALID_MODES:
         record["mode"] = data["mode"]
     record.setdefault("mode", _DEFAULT_MODE)
@@ -1499,12 +1529,19 @@ def stage_bimanual_leader_calibrations(
     leader_left: str,
     leader_right: str,
     arm_type: object = DEFAULT_ARM_TYPE,
+    leader_kind: object = None,
 ) -> tuple[str, str]:
     """Leader twin of stage_bimanual_follower_calibrations (remote
-    teleoperation opens only the leaders). Returns (leader_staging_dir, base)."""
+    teleoperation opens only the leaders). Returns (leader_staging_dir, base).
+    ``leader_kind`` selects the source library for a multi-leader family."""
     leader_staging = _bimanual_leader_staging_dir(base)
     _stage_one_side(
-        leader_config_path_for(arm_type), leader_staging, base, leader_left, leader_right, "leader"
+        leader_config_path_for(arm_type, leader_kind),
+        leader_staging,
+        base,
+        leader_left,
+        leader_right,
+        "leader",
     )
     return leader_staging, base
 

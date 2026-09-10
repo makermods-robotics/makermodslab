@@ -1515,6 +1515,19 @@
         "title": "EpisodeSummary",
         "type": "object"
       },
+      "EpisodeTaskBody": {
+        "properties": {
+          "task": {
+            "title": "Task",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "title": "EpisodeTaskBody",
+        "type": "object"
+      },
       "ExcludedEpisodesRequest": {
         "properties": {
           "episode_indices": {
@@ -2164,6 +2177,103 @@
           "error"
         ],
         "title": "GpuTargetsResponse",
+        "type": "object"
+      },
+      "GripperStatus": {
+        "properties": {
+          "effective_current_a": {
+            "title": "Effective Current A",
+            "type": "number"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "fault": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fault"
+          },
+          "hold_torque_nm": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hold Torque Nm"
+          },
+          "holding": {
+            "title": "Holding",
+            "type": "boolean"
+          },
+          "limit_a": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit A"
+          },
+          "measured_torque_nm": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Measured Torque Nm"
+          },
+          "port": {
+            "title": "Port",
+            "type": "string"
+          },
+          "temperature_c": {
+            "title": "Temperature C",
+            "type": "number"
+          }
+        },
+        "required": [
+          "port",
+          "enabled",
+          "limit_a",
+          "effective_current_a",
+          "temperature_c",
+          "fault",
+          "hold_torque_nm",
+          "holding",
+          "measured_torque_nm"
+        ],
+        "title": "GripperStatus",
+        "type": "object"
+      },
+      "GripperStatusResponse": {
+        "properties": {
+          "grippers": {
+            "items": {
+              "$ref": "#/components/schemas/GripperStatus"
+            },
+            "title": "Grippers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "grippers"
+        ],
+        "title": "GripperStatusResponse",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -5041,6 +5151,25 @@
         "title": "PolicyOptimizerPreset",
         "type": "object"
       },
+      "RecordingControlResponse": {
+        "description": "The 200 body of a recording control verb: `success` is False for a\nlegitimately refused request (wrong phase, empty task) that still returns\n200 — the frontend reads this flag, not just the status code.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "RecordingControlResponse",
+        "type": "object"
+      },
       "RecordingRequest": {
         "properties": {
           "arm_type": {
@@ -5098,6 +5227,11 @@
             "default": 5,
             "title": "Num Episodes",
             "type": "integer"
+          },
+          "per_episode_task": {
+            "default": false,
+            "title": "Per Episode Task",
+            "type": "boolean"
           },
           "private": {
             "default": false,
@@ -12045,6 +12179,48 @@
         ]
       }
     },
+    "/api/v1/recording-episode-task": {
+      "post": {
+        "description": "Name the task for the episode a per-episode-task session is holding in\nits \"naming\" phase. Mandatory and un-bypassable: an empty description or a\nsubmission outside the naming phase comes back 200 + {success: false} —\nsee handle_submit_episode_task.",
+        "operationId": "recording_episode_task",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EpisodeTaskBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordingControlResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recording Episode Task",
+        "tags": [
+          "recording"
+        ]
+      }
+    },
     "/api/v1/recording-exit-early": {
       "post": {
         "description": "Skip to next episode (replaces right arrow key)",
@@ -12680,6 +12856,48 @@
           }
         },
         "summary": "Upsert Robot"
+      }
+    },
+    "/api/v1/robots/{name}/gripper-status": {
+      "get": {
+        "operationId": "get_gripper_status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GripperStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Gripper Status",
+        "tags": [
+          "robots"
+        ]
       }
     },
     "/api/v1/robots/{name}/rename": {

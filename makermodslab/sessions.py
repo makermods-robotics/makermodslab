@@ -589,6 +589,7 @@ def _build_recording_request(record: dict, opts: RecordingOptions):
         resume=opts.resume,
         streaming_encoding=opts.streaming_encoding,
         skip_identity_check=opts.skip_identity_check,
+        per_episode_task=opts.per_episode_task,
     )
 
 

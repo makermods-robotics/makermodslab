@@ -61,6 +61,7 @@ export default {
       recordingEpisode: "正在录制第 {{index}} 个回合",
       resetPaused: "重置已暂停",
       resetGetReady: "重置中 — 请做好准备",
+      namingEpisode: "为该回合命名任务",
       connectingRobot: "正在连接机械臂与摄像头…",
       reconnectingRetry: "摄像头异常，正在重试（{{attempt}}/{{max}}）…",
       reconnecting: "摄像头异常，正在重试…",
@@ -89,6 +90,14 @@ export default {
       keepEpisodes: "保留回合并继续",
       discardExit: "丢弃并退出",
       backHome: "返回首页",
+      saveEpisodeTask: "保存任务并继续",
+    },
+    naming: {
+      title: "第 {{index}} 个回合的任务是什么？",
+      description:
+        "描述该回合执行的动作。它将作为第 {{index}} 个回合每一帧的任务保存。保存后会话继续。",
+      inputLabel: "第 {{index}} 个回合的任务描述",
+      placeholder: "例如：将左袖向内折叠",
     },
     ended: {
       complete: "录制完成 — 正在返回首页…",

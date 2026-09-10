@@ -73,6 +73,7 @@ def _metal_leader_available() -> bool:
 
 class MetalFamily(CanArmFamily):
     id = "metal"
+    supports_gripper_effort_control = True
     label = "Metal Arm"
     short_label = "Metal"
     indefinite_label = "a Metal arm"
