@@ -26,14 +26,8 @@ export interface RecordedInfo {
 export interface CollectFormState {
   formOpen: boolean;
   datasetName: string;
-  singleTask: string;
-  /** Pause after every episode to name that episode's task description
-   * (record.py's "naming" phase). `singleTask` stays the baseline / first
-   * prompt's prefill. */
-  perEpisodeTask: boolean;
   numEpisodes: number;
   episodeTimeS: number;
-  resetTimeS: number;
   streamingEncoding: boolean;
   /** Push the finished dataset to the Hugging Face Hub automatically when the
    * session ends (via the background UploadManager, not the recorder's
@@ -49,11 +43,8 @@ export interface CollectFormState {
 const DEFAULT_COLLECT_FORM: CollectFormState = {
   formOpen: false,
   datasetName: "",
-  singleTask: "",
-  perEpisodeTask: false,
   numEpisodes: 5,
   episodeTimeS: 60,
-  resetTimeS: 15,
   streamingEncoding: true,
   pushToHub: true,
 };

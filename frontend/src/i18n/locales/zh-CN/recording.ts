@@ -79,9 +79,9 @@ export default {
       unmute: "取消静音",
     },
     button: {
-      done: "完成",
+      done: "结束会话",
       quit: "退出",
-      endEpisode: "结束回合",
+      endEpisode: "完成",
       startNextEpisode: "开始下一回合",
       advance: "继续",
       pause: "暂停",
@@ -90,14 +90,16 @@ export default {
       keepEpisodes: "保留回合并继续",
       discardExit: "丢弃并退出",
       backHome: "返回首页",
-      saveEpisodeTask: "保存任务并继续",
+      saveEpisodeTask: "开始录制回合",
     },
     naming: {
-      title: "第 {{index}} 个回合的任务是什么？",
+      title: "下一个任务是什么？",
       description:
-        "描述该回合执行的动作。它将作为第 {{index}} 个回合每一帧的任务保存。保存后会话继续。",
+        "输入任务描述并重置环境。准备就绪后开始录制。",
       inputLabel: "第 {{index}} 个回合的任务描述",
       placeholder: "例如：将左袖向内折叠",
+      keyboardHint: "按 Enter 完成编辑，再按空格键开始录制。",
+      rerecordPrevious: "丢弃上次录制并重录",
     },
     ended: {
       complete: "录制完成 — 正在返回首页…",

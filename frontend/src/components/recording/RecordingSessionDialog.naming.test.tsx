@@ -63,7 +63,7 @@ const namingStatus = {
   session_ended: false,
   current_episode_task_default: "pick the cube",
   available_controls: {
-    stop_recording: false,
+    stop_recording: true,
     exit_early: false,
     rerecord_episode: false,
     pause_recording: false,
@@ -98,7 +98,7 @@ describe("the recording dialog during the naming phase", () => {
     expect(box).toHaveValue("pick the cube");
 
     fireEvent.change(box, { target: { value: "fold the napkin" } });
-    fireEvent.click(screen.getByRole("button", { name: /save task/i }));
+    fireEvent.click(screen.getByRole("button", { name: /start recording/i }));
 
     await waitFor(() => {
       const call = mocks.fetch.mock.calls.find(([u]) =>
@@ -109,14 +109,14 @@ describe("the recording dialog during the naming phase", () => {
     });
   });
 
-  it("offers no Done/Quit exit while the task is unnamed", async () => {
+  it("offers Done/Quit while waiting for the next task", async () => {
     render(<RecordingSessionDialog config={CONFIG} onExit={vi.fn()} />);
     await screen.findByRole("textbox");
     expect(
-      screen.queryByRole("button", { name: /^done$/i }),
-    ).not.toBeInTheDocument();
+      screen.queryByRole("button", { name: /^finish session$/i }),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /^quit$/i }),
-    ).not.toBeInTheDocument();
+    ).toBeInTheDocument();
   });
 });

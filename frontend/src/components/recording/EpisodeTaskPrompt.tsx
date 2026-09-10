@@ -1,41 +1,52 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 interface EpisodeTaskPromptProps {
-  /** 1-based index of the episode just recorded. */
+  /** 1-based index of the episode about to record. */
   episode: number;
-  /** What the box starts filled with — the previous episode's task, or the
-   * dataset-level task before the first one is named. */
   defaultTask: string;
-  /** A submission is in flight; the button is locked until it resolves. */
   submitting: boolean;
   onSubmit: (task: string) => void;
+  onRerecord?: () => void;
 }
 
-/**
- * The blocking card shown between an episode's recording phase and the reset
- * gap when the session records a per-episode task (record.py's "naming"
- * phase). There is no bypass — the session only advances once a non-empty task
- * is submitted — so this renders in place of the whole live HUD, not beside
- * it. Mount it keyed by episode so each episode starts from its own prefill.
- */
+/** No countdown: finish editing with Enter, then press Space when ready.
+ * Spaces inside the description remain ordinary text input. */
 const EpisodeTaskPrompt: React.FC<EpisodeTaskPromptProps> = ({
   episode,
   defaultTask,
   submitting,
   onSubmit,
+  onRerecord,
 }) => {
   const { t } = useTranslation();
   const [value, setValue] = useState(defaultTask);
+  const startButton = useRef<HTMLButtonElement>(null);
   const canSubmit = value.trim().length > 0 && !submitting;
 
   const submit = () => {
-    if (!canSubmit) return;
-    onSubmit(value.trim());
+    if (canSubmit) onSubmit(value.trim());
   };
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      if (event.repeat || event.isComposing || !canSubmit) return;
+      if (target?.matches("input, textarea") || target?.isContentEditable) return;
+      // Other buttons retain their own keyboard action, including session exits.
+      if (target?.closest("button") && target.closest("button") !== startButton.current) return;
+      if (event.key === " ") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        onSubmit(value.trim());
+      }
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [canSubmit, onSubmit, value]);
 
   return (
     <div className="flex flex-col items-center gap-4 py-6 text-center">
@@ -57,21 +68,32 @@ const EpisodeTaskPrompt: React.FC<EpisodeTaskPromptProps> = ({
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") {
+            if (e.key === "Enter" && !e.nativeEvent.isComposing) {
               e.preventDefault();
-              submit();
+              if (canSubmit) startButton.current?.focus();
             }
           }}
           placeholder={t("recording.session.naming.placeholder")}
+          aria-describedby="episodeTaskHint"
         />
+        <p id="episodeTaskHint" className="text-xs text-muted-foreground">
+          {t("recording.session.naming.keyboardHint")}
+        </p>
       </div>
       <Button
+        ref={startButton}
         onClick={submit}
         disabled={!canSubmit}
         className="w-full max-w-md font-semibold"
       >
         {t("recording.session.button.saveEpisodeTask")}
+        <span className="ml-3 text-xs font-mono">SPACE</span>
       </Button>
+      {onRerecord && (
+        <Button variant="outline" disabled={submitting} onClick={onRerecord}>
+          {t("recording.session.naming.rerecordPrevious")}
+        </Button>
+      )}
     </div>
   );
 };

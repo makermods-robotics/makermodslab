@@ -78,11 +78,8 @@ const CollectPanel: React.FC = () => {
   const {
     formOpen,
     datasetName,
-    singleTask,
-    perEpisodeTask,
     numEpisodes,
     episodeTimeS,
-    resetTimeS,
     streamingEncoding,
     pushToHub,
   } = collectForm;
@@ -181,7 +178,7 @@ const CollectPanel: React.FC = () => {
     // disables on the same condition as a courtesy.
     // With per-episode tasks there is no dataset-level task to require — each
     // episode names its own during the session.
-    if (!datasetName || (!perEpisodeTask && !singleTask)) {
+    if (!datasetName) {
       toast({
         title: t("studio.collect.toast.missingDetailsTitle"),
         description: t("studio.collect.toast.missingDetailsBody"),
@@ -230,11 +227,11 @@ const CollectPanel: React.FC = () => {
       dataset_repo_id: datasetRepoId,
       // Per-episode-task sessions carry no dataset-level task; the first
       // episode's prompt just starts blank.
-      single_task: perEpisodeTask ? "" : singleTask,
-      per_episode_task: perEpisodeTask,
+      single_task: "",
+      per_episode_task: true,
       num_episodes: numEpisodes,
       episode_time_s: episodeTimeS,
-      reset_time_s: resetTimeS,
+      reset_time_s: 0,
       fps: 30,
       video: true,
       push_to_hub: false,
@@ -273,14 +270,11 @@ const CollectPanel: React.FC = () => {
     [setLastRecorded, updateCollectForm],
   );
 
-  // Gate for the pinned Start button: robot ready + every required parameter
-  // filled in (name valid per the backend's rules, task described — unless
-  // each episode names its own task, which drops the dataset-level one).
+  // Task descriptions are entered inside the session before each episode.
   const canStart =
     !!selectedRecord &&
     selectedRecord.is_clean &&
-    datasetNameIssue(datasetName) === null &&
-    (perEpisodeTask || singleTask.trim().length > 0);
+    datasetNameIssue(datasetName) === null;
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
@@ -311,16 +305,10 @@ const CollectPanel: React.FC = () => {
             robot={selectedRecord}
             datasetName={datasetName}
             setDatasetName={(v) => updateCollectForm({ datasetName: v })}
-            singleTask={singleTask}
-            setSingleTask={(v) => updateCollectForm({ singleTask: v })}
-            perEpisodeTask={perEpisodeTask}
-            setPerEpisodeTask={(v) => updateCollectForm({ perEpisodeTask: v })}
             numEpisodes={numEpisodes}
             setNumEpisodes={(v) => updateCollectForm({ numEpisodes: v })}
             episodeTimeS={episodeTimeS}
             setEpisodeTimeS={(v) => updateCollectForm({ episodeTimeS: v })}
-            resetTimeS={resetTimeS}
-            setResetTimeS={(v) => updateCollectForm({ resetTimeS: v })}
             streamingEncoding={streamingEncoding}
             setStreamingEncoding={(v) =>
               updateCollectForm({ streamingEncoding: v })
