@@ -639,6 +639,8 @@ def create_record_config(request: RecordingRequest, cameras: dict | None = None)
         display_data=False,  # Don't display data in API mode
         play_sounds=False,  # Don't play sounds in API mode
     )
+    # Local application context, not a LeRobot configuration/CLI field.
+    record_config._makermodslab_robot_name = request.robot_name
 
     return record_config
 
@@ -2128,6 +2130,11 @@ def record_with_web_events(
     # Everything below that touches a Feetech register by name is gated on it.
     family = arm_registry.family_for_robot_config_type(getattr(cfg.robot, "type", None))
     feetech = family.uses_feetech_bus
+
+    if family.supports_gripper_effort_control:
+        from .metal_gripper import install_metal_gripper
+
+        install_metal_gripper(robot, getattr(cfg, "_makermodslab_robot_name", ""))
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
     publish_preview = observation_tap(robot, family)

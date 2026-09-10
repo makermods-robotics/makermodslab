@@ -2103,6 +2103,13 @@ const RobotConfigWindow = ({
   // matches backend DEFAULT_MOTOR_POWER (38% = Torque_Limit 380); re-syncs
   // from the baseline whenever the saved value changes.
   const [powerDraft, setPowerDraft] = useState(38);
+  const savedHoldingTorque = robot?.gripper_hold_torque_nm === undefined
+    ? (robot?.gripper_current_limit_a == null ? 0.5 : null)
+    : robot.gripper_hold_torque_nm;
+  const [holdingDraft, setHoldingDraft] = useState<number | null>(0.5);
+  useEffect(() => {
+    setHoldingDraft(savedHoldingTorque);
+  }, [robot?.name, savedHoldingTorque]);
   useEffect(() => {
     setPowerDraft(robot?.motor_power ?? 38);
   }, [robot?.motor_power]);
@@ -2135,14 +2142,20 @@ const RobotConfigWindow = ({
     [portDraft, robot],
   );
   const motorDirty = !!robot && motorPercent !== robot.motor_power;
+  const holdingDirty = !!robot && armType === "metal" && holdingDraft !== savedHoldingTorque;
+  const holdingValid = holdingDraft === null || (Number.isFinite(holdingDraft) && holdingDraft >= 0.1 && holdingDraft <= 2);
   const armsDirty = !!robot && draftArms !== (robot.arms ?? "both");
-  const isDirty = camerasDirty || portsDirty || motorDirty || armsDirty;
+  const isDirty = camerasDirty || portsDirty || motorDirty || armsDirty || holdingDirty;
 
   const handleSave = useCallback(async () => {
-    if (!robotName || !robot) return;
+    if (!robotName || !robot || !holdingValid) return;
     const patch: Record<string, unknown> = {};
     if (camerasDirty) patch.cameras = cameras;
     if (motorDirty) patch.motor_power = motorPercent;
+    if (holdingDirty) {
+      patch.gripper_hold_torque_nm = holdingDraft;
+      if (robot.gripper_current_limit_a != null) patch.gripper_current_limit_a = null;
+    }
     if (armsDirty) patch.arms = draftArms;
     if (portsDirty) {
       for (const [f, v] of Object.entries(portDraft)) {
@@ -2171,7 +2184,11 @@ const RobotConfigWindow = ({
         setArmsDraft(null);
         setCameras((data.robot as RobotRecord).cameras ?? []);
         setJustSaved(true);
-        toast({ title: t("robotConfig.window.toast.saved") });
+        toast({ title: t(data.gripper_application === "live"
+          ? "robotConfig.advanced.holdingApplied"
+          : data.gripper_application === "next_session"
+            ? "robotConfig.advanced.holdingSaved"
+            : "robotConfig.window.toast.saved") });
       } else {
         // Surface the backend guard (e.g. duplicate-port 409) and stay put.
         toast({
@@ -2195,6 +2212,9 @@ const RobotConfigWindow = ({
     robot,
     camerasDirty,
     motorDirty,
+    holdingDirty,
+    holdingDraft,
+    holdingValid,
     portsDirty,
     armsDirty,
     draftArms,
@@ -3639,6 +3659,43 @@ const RobotConfigWindow = ({
               )}
             </section>
           )}
+          {robot && armType === "metal" && showFollower && (
+            <Collapsible key={robotName} className="group py-5">
+              <CollapsibleTrigger className="flex w-full items-center justify-between text-sm font-semibold text-foreground">
+                {t("robotConfig.advanced.title")}
+                <ChevronDown className="h-4 w-4 transition-transform group-data-[state=open]:rotate-180" />
+              </CollapsibleTrigger>
+              <CollapsibleContent className={SLIDE}>
+                <div className="space-y-3 pt-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <Label htmlFor="gripperHoldingTorque">{t("robotConfig.advanced.holdingLabel")}</Label>
+                    <output htmlFor="gripperHoldingTorque" className="font-mono text-sm tabular-nums">
+                      {(holdingDraft ?? 0.5).toFixed(1)} N·m
+                    </output>
+                  </div>
+                  <input id="gripperHoldingTorque" type="range" min={0.1} max={2} step={0.1}
+                    value={holdingDraft ?? 0.5} disabled={saving}
+                    onChange={(event) => setHoldingDraft(Number(event.target.value))}
+                    aria-valuetext={`${(holdingDraft ?? 0.5).toFixed(1)} N·m`}
+                    className="h-1.5 w-full cursor-pointer accent-primary disabled:cursor-not-allowed"
+                    list="gripperHoldingTorqueTicks" />
+                  <datalist id="gripperHoldingTorqueTicks"><option value={0.5} /></datalist>
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>0.1 N·m</span>
+                    <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-xs"
+                      disabled={saving || holdingDraft === 0.5} onClick={() => setHoldingDraft(0.5)}>
+                      {t("robotConfig.advanced.holdingDefault")}
+                    </Button>
+                    <span>2.0 N·m</span>
+                  </div>
+                  {holdingDraft === null && <p className="text-xs text-muted-foreground">
+                    {t("robotConfig.advanced.holdingDisabled")}
+                  </p>}
+                  <p className="text-xs text-muted-foreground">{t("robotConfig.advanced.holdingHint")}</p>
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
+          )}
         </div>
 
         {/* Window footer — Save is the ONLY path that writes the robot record;
@@ -3675,7 +3732,7 @@ const RobotConfigWindow = ({
             <Button variant="outline" onClick={requestClose}>
               {t("robotConfig.window.quit")}
             </Button>
-            <Button onClick={handleSave} disabled={!isDirty || saving}>
+            <Button onClick={handleSave} disabled={!isDirty || saving || !holdingValid}>
               {saving ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               ) : (

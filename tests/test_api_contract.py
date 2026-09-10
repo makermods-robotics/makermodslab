@@ -221,6 +221,8 @@ def test_no_new_routes_outside_api_v1():
 # checks every entry actually exists so retired surface can't linger.
 V1_ONLY_ROUTES: frozenset[str] = frozenset(
     [
+        # Live Metal gripper effort-controller status.
+        "GET /api/v1/robots/{name}/gripper-status",
         "GET /api/v1/recording-preview/{camera_name}",
         # Per-episode task naming: the "naming" phase control verb. Born
         # versioned — the flat mount was frozen long before this feature.

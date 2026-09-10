@@ -375,6 +375,12 @@ export default {
 
   // ---- 高级参数（自动标定力矩） ------------------------------------------
   advanced: {
+    holdingLabel: "保持力矩 (N·m)",
+    holdingDefault: "默认：0.5 N·m",
+    holdingHint: "调整夹住物体后的持续夹持力度。点击保存可在遥操作或录制中实时应用并记住该值。双臂机器人的两个从臂夹爪共用此设置。这不是瞬时力矩上限。",
+    holdingDisabled: "保持控制已禁用。请选择数值或使用默认值，然后在会话停止时点击保存以启用。",
+    holdingApplied: "保持力矩已应用并保存",
+    holdingSaved: "保持力矩已保存，将用于下一次会话",
     title: "高级参数",
     subtitle: "自动标定力矩",
     torqueLabel: "自动标定力矩",
