@@ -19,7 +19,15 @@ from makermodslab.drtc._policy_loading import (
 
 
 @pytest.fixture
-def tiny_checkpoint(tmp_path):
+def model_rng():
+    # Keep tiny model weights stable without changing another test's RNG state.
+    with torch.random.fork_rng(devices=[]):
+        torch.random.default_generator.manual_seed(0)
+        yield
+
+
+@pytest.fixture
+def tiny_checkpoint(tmp_path, model_rng):
     # LeRobot imports without policy extras, but leaves the HF model classes
     # as None. Skip only when the optional dependency itself is absent.
     pytest.importorskip("transformers")
@@ -162,7 +170,9 @@ def test_matches_legacy_weights_buffers_and_actions_without_reading_base(
         actions.append(
             policy.predict_action_chunk(batch, generator=torch.Generator().manual_seed(37), **kwargs)
         )
-    torch.testing.assert_close(actions[0], actions[1], rtol=0, atol=0)
+    # Weights and persistent buffers must match exactly above. Computed actions
+    # can differ by a few float32 rounding bits in CPU kernels and RTC guidance.
+    torch.testing.assert_close(actions[0], actions[1], rtol=1e-5, atol=1e-6)
 
 
 @pytest.mark.parametrize("defect", ["missing", "unexpected", "shape"])
