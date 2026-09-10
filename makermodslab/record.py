@@ -381,6 +381,10 @@ class RecordingRequest(BaseModel):
     # leader_kind; blank = the family's default). See TeleoperateRequest.
     leader_kind: str | None = None
     gripper_closing_error_deg: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
+    gripper_current_limit_ratio: float | None = Field(
+        default=None, ge=0.0001, le=1, allow_inf_nan=False, strict=True
+    )
+    gripper_max_velocity_deg_s: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
     dataset_repo_id: str
     single_task: str
     num_episodes: int = 5
@@ -891,6 +895,8 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     skip_identity_check=request.skip_identity_check,
                     identity_config_names=identity_config_names,
                     gripper_closing_error_deg=request.gripper_closing_error_deg,
+                    gripper_current_limit_ratio=request.gripper_current_limit_ratio,
+                    gripper_max_velocity_deg_s=request.gripper_max_velocity_deg_s,
                 )
                 logger.info(f"Recording completed successfully. Dataset has {dataset.num_episodes} episodes")
                 last_session_outcome = "ok"
@@ -1699,6 +1705,8 @@ def record_with_web_events(
     skip_identity_check: bool = False,
     identity_config_names: list[str] | None = None,
     gripper_closing_error_deg: float | None = None,
+    gripper_current_limit_ratio: float | None = None,
+    gripper_max_velocity_deg_s: float | None = None,
 ) -> LeRobotDataset:
     """
     Implement recording with phase tracking - exactly mirrors original record() function behavior
@@ -1735,7 +1743,9 @@ def record_with_web_events(
     feetech = family.uses_feetech_bus
     from .gripper_soft_limit import install_gripper_soft_limit
 
-    install_gripper_soft_limit(robot, family, gripper_closing_error_deg)
+    install_gripper_soft_limit(
+        robot, family, gripper_closing_error_deg, gripper_current_limit_ratio, gripper_max_velocity_deg_s
+    )
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
     publish_preview = observation_tap(robot, family)
@@ -1747,7 +1757,7 @@ def record_with_web_events(
     action_features = hw_to_dataset_features(robot.action_features, "action", cfg.dataset.video)
     obs_features = hw_to_dataset_features(robot.observation_features, "observation", cfg.dataset.video)
     dataset_features = {**action_features, **obs_features}
-    if gripper_closing_error_deg is not None:
+    if gripper_closing_error_deg is not None or gripper_current_limit_ratio is not None:
         from .gripper_soft_limit import gripper_action_columns
 
         gripper_action_columns(robot, dataset_features)
@@ -1800,7 +1810,7 @@ def record_with_web_events(
             encoder_threads=cfg.dataset.encoder_threads,
         )
 
-    if gripper_closing_error_deg is not None:
+    if gripper_closing_error_deg is not None or gripper_current_limit_ratio is not None:
         from .gripper_soft_limit import record_limited_gripper_actions
 
         record_limited_gripper_actions(dataset, robot)

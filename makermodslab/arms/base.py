@@ -365,6 +365,7 @@ class ArmFamily(ABC):
     # --- gripper wiggle -------------------------------------------------------------
     # True when identify_by_gripper_wiggle is implemented: the family can drive
     # one port's gripper a visible stroke to tell two look-alike arms apart.
+    supports_gripper_current_limit: bool = False
     supports_gripper_soft_limit: bool = False
     supports_gripper_wiggle: bool = False
 

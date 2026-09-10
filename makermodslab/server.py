@@ -339,6 +339,7 @@ from .utils.config import (
     save_robot_record,
     set_excluded_episodes,
     validate_gripper_closing_error,
+    validate_gripper_current_limit,
 )
 from .utils.hf_auth import (
     cached_whoami,
@@ -5065,6 +5066,22 @@ def upsert_robot(name: str, data: dict, create: bool = False):
     existing = get_robot_record(name) or {}
 
     require_known_arm_type(body.get("arm_type"))
+
+    current_fields = ("gripper_current_limit_ratio", "gripper_max_velocity_deg_s")
+    if any(field in body for field in current_fields):
+        try:
+            ratio, _velocity = validate_gripper_current_limit(
+                *(body.get(field, existing.get(field)) for field in current_fields)
+            )
+            if ratio is not None:
+                effective_arm_type = (
+                    body.get("arm_type") or existing.get("arm_type") or arm_registry.DEFAULT_ID
+                )
+                require_known_arm_type(effective_arm_type)
+                if not arm_registry.get(effective_arm_type).supports_gripper_current_limit:
+                    raise ValueError("This arm does not support the experimental gripper current limit.")
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"status": "error", "message": str(exc)})
 
     if "gripper_closing_error_deg" in body:
         try:

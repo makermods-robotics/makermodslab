@@ -93,6 +93,7 @@ def describe_family(family: ArmFamily) -> dict:
             "motion_identify_energizes_follower": family.motion_identify_energizes_follower,
             "supports_gripper_wiggle": family.supports_gripper_wiggle,
             "supports_gripper_soft_limit": family.supports_gripper_soft_limit,
+            "supports_gripper_current_limit": family.supports_gripper_current_limit,
         },
         "robot_types": [family.single_robot_type, family.bimanual_robot_type],
         "robot_type_markers": list(family.robot_type_markers),

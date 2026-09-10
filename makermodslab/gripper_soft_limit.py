@@ -23,7 +23,7 @@ One extra gripper round trip is required per action; no hardware timing claim.
 import math
 import time
 
-from .utils.config import get_robot_record, validate_gripper_closing_error
+from .utils.config import get_robot_record, validate_gripper_closing_error, validate_gripper_current_limit
 
 
 class _ActionBus:
@@ -79,7 +79,7 @@ class _ActionBus:
         return self._bus.sync_write_metal(commands, *args, **kwargs)
 
 
-def install_gripper_soft_limit(robot, family, closing_error):
+def install_gripper_soft_limit(robot, family, closing_error, current_ratio=None, max_velocity=None):
     """Install before connect; stock single/bimanual send_action stays in charge.
 
     Every local action, including record reset, runs through this final bus
@@ -88,15 +88,31 @@ def install_gripper_soft_limit(robot, family, closing_error):
     releases hardware. Bimanual buses remain independently scheduled.
     """
     validate_gripper_closing_error(closing_error)
-    if closing_error is None:
+    validate_gripper_current_limit(current_ratio, max_velocity)
+    supports_current = getattr(family, "supports_gripper_current_limit", False)
+    if current_ratio is not None and not supports_current:
+        raise ValueError("Gripper current limit is only supported for Metal followers")
+    if closing_error is None and not supports_current:
         return
-    if not family.supports_gripper_soft_limit:
+    if closing_error is not None and not family.supports_gripper_soft_limit:
         raise ValueError("Gripper soft limit is only supported for Metal followers")
     arms = [robot.left_arm, robot.right_arm] if hasattr(robot, "left_arm") else [robot]
     for arm in arms:
         if isinstance(arm.bus, _ActionBus):
             raise RuntimeError("Gripper soft limit already installed")
-        bus = _ActionBus(arm.bus, closing_error, arm.config.joint_limits["gripper"])
+        if supports_current:
+            from .gripper_current_limit import MetalGripperBus
+
+            arm.bus = MetalGripperBus(
+                arm.bus, current_ratio, max_velocity, arm.config.joint_limits["gripper"]
+            )
+        if closing_error is None and current_ratio is None:
+            continue  # Ordinary Metal still checks for a leftover incompatible mode.
+        bus = (
+            _ActionBus(arm.bus, closing_error, arm.config.joint_limits["gripper"])
+            if closing_error is not None
+            else arm.bus
+        )
         original_send = arm.send_action
 
         def send_action(action, _bus=bus, _send=original_send):
@@ -133,6 +149,25 @@ def resolve_request_gripper_soft_limit(request):
     except ValueError as exc:
         raise ApiError(status_code=400, detail=str(exc), code=ErrorCode.REQUEST_VALIDATION) from exc
     request.gripper_closing_error_deg = value
+    ratio = request.gripper_current_limit_ratio
+    velocity = request.gripper_max_velocity_deg_s
+    # Omitted pair inherits a named record; explicit null/null disables both.
+    if (
+        request.robot_name
+        and not {"gripper_current_limit_ratio", "gripper_max_velocity_deg_s"} & request.model_fields_set
+    ):
+        record = get_robot_record(request.robot_name)
+        if record is not None:
+            ratio = record.get("gripper_current_limit_ratio")
+            velocity = record.get("gripper_max_velocity_deg_s")
+    try:
+        ratio, velocity = validate_gripper_current_limit(ratio, velocity)
+        if ratio is not None and not registry.get(request.arm_type).supports_gripper_current_limit:
+            raise ValueError("Gripper current limit is only supported for Metal followers")
+    except ValueError as exc:
+        raise ApiError(status_code=400, detail=str(exc), code=ErrorCode.REQUEST_VALIDATION) from exc
+    request.gripper_current_limit_ratio = ratio
+    request.gripper_max_velocity_deg_s = velocity
 
 
 def gripper_action_columns(robot, features):

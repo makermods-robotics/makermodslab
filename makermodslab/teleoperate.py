@@ -308,6 +308,10 @@ class TeleoperateRequest(BaseModel):
     # follower. Read through the family; nothing here compares it.
     leader_kind: str | None = None
     gripper_closing_error_deg: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
+    gripper_current_limit_ratio: float | None = Field(
+        default=None, ge=0.0001, le=1, allow_inf_nan=False, strict=True
+    )
+    gripper_max_velocity_deg_s: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
     # Escape hatch for the arm-identity guard (see makermodslab/arm_identity.py):
     # when true, start even if the connected arms don't match their calibrations.
     skip_identity_check: bool = False
@@ -701,7 +705,13 @@ def _connect_can(request: TeleoperateRequest):
     robot = make_robot_from_config(robot_config)
     from .gripper_soft_limit import install_gripper_soft_limit
 
-    install_gripper_soft_limit(robot, arm_family, request.gripper_closing_error_deg)
+    install_gripper_soft_limit(
+        robot,
+        arm_family,
+        request.gripper_closing_error_deg,
+        request.gripper_current_limit_ratio,
+        request.gripper_max_velocity_deg_s,
+    )
     teleop_device = make_teleoperator_from_config(teleop_config)
 
     try:

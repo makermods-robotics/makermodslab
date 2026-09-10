@@ -286,11 +286,12 @@ describe("zero-pose calibration", () => {
 
 
 describe("gripper soft squeeze limit", () => {
-  function serveRobot(armType = "metal", saved: number | null = null) {
+  function serveRobot(armType = "metal", saved: number | null = null, current: number | null = null, velocity: number | null = null) {
     const fallback = mocks.fetch.getMockImplementation()!;
     let robot = {
       name: "test", mode: "bimanual", arms: "both", arm_type: armType,
       cameras: [], motor_power: 38, gripper_closing_error_deg: saved,
+      gripper_current_limit_ratio: current, gripper_max_velocity_deg_s: velocity,
     };
     mocks.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
       if (!url.includes("/robots/")) return fallback(url, init);
@@ -305,7 +306,7 @@ describe("gripper soft squeeze limit", () => {
     const toggle = await screen.findByRole("switch", { name: "Gripper soft squeeze limit" });
     expect(toggle).not.toBeChecked();
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
-    expect(screen.getByText(/Applies to both grippers/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Applies to both grippers/)).toHaveLength(2);
     fireEvent.click(toggle);
     const input = screen.getByRole("spinbutton", { name: "Maximum closing error (degrees)" });
     expect(input).toHaveValue(null);
@@ -328,6 +329,52 @@ describe("gripper soft squeeze limit", () => {
     }));
   });
 
+  it("requires both current settings, validates limits, and saves or clears the pair", async () => {
+    serveRobot();
+    const toggle = await screen.findByRole("switch", { name: "Experimental gripper current limit" });
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
+    const current = screen.getByRole("spinbutton", { name: "Motor current cap (%)" });
+    const velocity = screen.getByRole("spinbutton", { name: "Maximum gripper speed (degrees/sec)" });
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(current).toHaveValue(null);
+    expect(velocity).toHaveValue(null);
+    fireEvent.change(current, { target: { value: "10" } });
+    expect(save).toBeDisabled();
+    fireEvent.change(velocity, { target: { value: "20" } });
+    for (const value of ["", "0", "-1", "0.009", "101", "1e999"]) {
+      fireEvent.change(current, { target: { value } });
+      expect(save).toBeDisabled();
+    }
+    fireEvent.change(current, { target: { value: "10" } });
+    for (const value of ["", "0", "-1", "0.5", "6000", "1e999"]) {
+      fireEvent.change(velocity, { target: { value } });
+      expect(save).toBeDisabled();
+    }
+    fireEvent.change(velocity, { target: { value: "20" } });
+    expect(save).toBeEnabled();
+    expect(mocks.fetch.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+    fireEvent.click(save);
+    await screen.findByRole("button", { name: "Saved ✓" });
+    expect(mocks.fetch).toHaveBeenCalledWith("http://test/api/v1/robots/test", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ gripper_current_limit_ratio: 0.1, gripper_max_velocity_deg_s: 20 }),
+    }));
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("button", { name: "Saved ✓" });
+    expect(mocks.fetch).toHaveBeenCalledWith("http://test/api/v1/robots/test", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ gripper_current_limit_ratio: null, gripper_max_velocity_deg_s: null }),
+    }));
+  });
+
+  it("reloads both limits together without making an unchanged percent dirty", async () => {
+    serveRobot("metal", 2, 0.123456789, 20);
+    expect(await screen.findByRole("spinbutton", { name: "Motor current cap (%)" })).toHaveValue(0.123456789 * 100);
+    expect(screen.getByRole("spinbutton", { name: "Maximum gripper speed (degrees/sec)" })).toHaveValue(20);
+    expect(screen.getByRole("spinbutton", { name: "Maximum closing error (degrees)" })).toHaveValue(2);
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
   it("loads a saved limit and hides controls for unsupported families", async () => {
     serveRobot("metal", 2);
     expect(await screen.findByRole("spinbutton", { name: "Maximum closing error (degrees)" })).toHaveValue(2);
@@ -336,5 +383,6 @@ describe("gripper soft squeeze limit", () => {
     serveRobot("maker");
     await screen.findByRole("button", { name: "Calibrate all" });
     expect(screen.queryByRole("switch", { name: "Gripper soft squeeze limit" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch", { name: "Experimental gripper current limit" })).not.toBeInTheDocument();
   });
 });

@@ -56,6 +56,9 @@ export interface RobotRecord {
   motor_power: number;
   // Soft closing position-error cap for local teleop/record; null is disabled.
   gripper_closing_error_deg?: number | null;
+  // Motor-enforced current cap and speed are configured/disabled together.
+  gripper_current_limit_ratio?: number | null;
+  gripper_max_velocity_deg_s?: number | null;
   is_clean: boolean;
   // Follower-side readiness only (ports + calibrations for the follower arm(s)).
   // Follower-only activities (inference, replay) gate on this instead of

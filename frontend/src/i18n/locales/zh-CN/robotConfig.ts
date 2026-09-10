@@ -8,6 +8,22 @@
  * message / error 文本都属于数据，一律原样呈现，不在此翻译。
  */
 export default {
+  gripperCurrentLimit: {
+    title: "实验性夹爪电流限制",
+    enabled: "已启用",
+    disabled: "已禁用（原始行为）",
+    description: "限制位置控制期间的电机电流；启动行为和夹持力尚未经硬件验证。可与软夹持限制同时启用。",
+    percent: "电机电流上限（%）",
+    velocity: "夹爪最大速度（度/秒）",
+    invalidCurrent: "请输入 0.01% 至 100% 的有限数值。系统不预设安全电流上限。",
+    currentHelp: "电机电流量程的百分比，并非夹持力的百分比。",
+    invalidVelocity: "请输入电机协议范围内的有限速度（约 0.573–5729.578 度/秒）。系统不预设安全速度。",
+    velocityHelp: "设置电流上限时必须同时设置速度。请根据夹爪和物体选择速度。",
+    requirements: "需要受支持的 DM4310 固件，会话启动时会检查。下一次本地会话将切换电机控制模式，电机禁用后恢复原模式。",
+    scope: "仅从下一次本地遥操作或录制会话开始生效。",
+    scopeBimanual: "仅从下一次本地遥操作或录制会话开始对两个夹爪生效。",
+  },
+
   gripperSoftLimit: {
     title: "夹爪软夹持限制",
     enabled: "已启用",

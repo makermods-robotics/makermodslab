@@ -1291,3 +1291,95 @@ def test_gripper_limit_unknown_arm_keeps_coded_refusal():
     with pytest.raises(ApiError):
         upsert_robot("new-grip", {"arm_type": "unknown", "gripper_closing_error_deg": 2}, create=True)
     assert cfg.get_robot_record("new-grip") is None
+
+
+@pytest.mark.parametrize(
+    "ratio,velocity",
+    [
+        (None, 30),
+        (0.1, None),
+        (0, 30),
+        (1.1, 30),
+        (0.00001, 30),
+        (True, 30),
+        ("0.1", 30),
+        (0.1, True),
+        (0.1, "30"),
+        (float("nan"), 30),
+        (0.1, float("inf")),
+        (0.1, 0.1),
+        (0.1, 6000),
+    ],
+)
+def test_invalid_current_limit_pair_leaves_no_artifacts(tmp_path, monkeypatch, ratio, velocity):
+    directory = tmp_path / "not-created"
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(directory))
+    with pytest.raises(ValueError):
+        cfg.save_robot_record(
+            "grip", {"gripper_current_limit_ratio": ratio, "gripper_max_velocity_deg_s": velocity}
+        )
+    assert not directory.exists()
+
+
+def test_current_limit_pair_persists_partial_patch_and_clears():
+    cfg.save_robot_record(
+        "grip", {"arm_type": "metal", "gripper_current_limit_ratio": 0.1, "gripper_max_velocity_deg_s": 30}
+    )
+    cfg.save_robot_record("grip", {"gripper_max_velocity_deg_s": 40})
+    record = cfg.get_robot_record("grip")
+    assert record["gripper_current_limit_ratio"] == 0.1
+    assert record["gripper_max_velocity_deg_s"] == 40
+    cfg.save_robot_record("grip", {"gripper_current_limit_ratio": None, "gripper_max_velocity_deg_s": None})
+    record = cfg.get_robot_record("grip")
+    assert record["gripper_current_limit_ratio"] is None
+    assert record["gripper_max_velocity_deg_s"] is None
+
+
+def test_current_limit_api_partial_disable_is_atomic():
+    from makermodslab.server import upsert_robot
+
+    cfg.save_robot_record(
+        "grip", {"arm_type": "metal", "gripper_current_limit_ratio": 0.1, "gripper_max_velocity_deg_s": 30}
+    )
+    response = upsert_robot("grip", {"gripper_current_limit_ratio": None, "follower_port": "/dev/new"})
+    assert response.status_code == 400
+    record = cfg.get_robot_record("grip")
+    assert record["gripper_current_limit_ratio"] == 0.1
+    assert record["follower_port"] == ""
+
+
+def test_current_limit_api_refuses_unsupported_arm():
+    from makermodslab.server import upsert_robot
+
+    response = upsert_robot(
+        "grip", {"gripper_current_limit_ratio": 0.1, "gripper_max_velocity_deg_s": 30}, create=True
+    )
+    assert response.status_code == 400
+    assert cfg.get_robot_record("grip") is None
+
+
+def test_current_limit_arm_switch_clears_pair():
+    cfg.save_robot_record(
+        "grip", {"arm_type": "metal", "gripper_current_limit_ratio": 0.1, "gripper_max_velocity_deg_s": 30}
+    )
+    cfg.save_robot_record("grip", {"arm_type": "so101"})
+    record = cfg.get_robot_record("grip")
+    assert record["gripper_current_limit_ratio"] is None
+    assert record["gripper_max_velocity_deg_s"] is None
+
+
+def test_current_limit_pair_forwarded_to_local_session_requests():
+    from makermodslab.schemas.sessions import RecordingOptions, TeleoperationOptions
+    from makermodslab.sessions import _build_recording_request, _build_teleoperation_request
+
+    cfg.save_robot_record(
+        "grip", {"arm_type": "metal", "gripper_current_limit_ratio": 0.1, "gripper_max_velocity_deg_s": 30}
+    )
+    record = cfg.get_robot_record("grip")
+    requests = [
+        _build_teleoperation_request(record, TeleoperationOptions()),
+        _build_recording_request(record, RecordingOptions(dataset_repo_id="local/test", single_task="grasp")),
+    ]
+    for request in requests:
+        assert request.gripper_current_limit_ratio == 0.1
+        assert request.gripper_max_velocity_deg_s == 30
