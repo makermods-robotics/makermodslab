@@ -82,7 +82,7 @@ def leader_missing(monkeypatch: pytest.MonkeyPatch):
 def test_only_the_metal_family_offers_a_second_leader() -> None:
     assert [o.id for o in SO101.leader_options()] == ["so101"]
     assert [o.id for o in MAKER.leader_options()] == ["star"]
-    assert [o.id for o in METAL.leader_options()] == ["star", "metal"]
+    assert [o.id for o in METAL.leader_options()] == ["star", "metal", "star_vertical"]
     assert METAL.leader_options()[0] == LeaderOption(id="star", label="Star Arm 102 leader")
     assert METAL.leader_option("metal").energized is True
     assert METAL.leader_holds_torque("star") is False
@@ -120,7 +120,7 @@ def test_manifest_publishes_the_options_with_availability(client, leader_missing
     arms = {a["id"]: a for a in client.get("/api/v1/arms").json()["arms"]}
     metal = arms["metal"]
     assert metal["default_leader_kind"] == "star"
-    assert [o["id"] for o in metal["leader_options"]] == ["star", "metal"]
+    assert [o["id"] for o in metal["leader_options"]] == ["star", "metal", "star_vertical"]
     option = metal["leader_options"][1]
     assert option["available"] is False
     assert "pip install" in option["unavailable_reason"]
