@@ -28,15 +28,17 @@ import threading
 import time
 import zipfile
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub.errors import HfHubHTTPError
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
@@ -49,12 +51,31 @@ from lerobot.policies.factory import make_policy_config
 # lookup at call time, not a bound name frozen at import).
 from . import (
     datasets as dataset_browser,
+    # The GPU half of a remote-inference run, as a LAB-LEVEL resource (S3.8):
+    # it shells out to the `modal` CLI, imports nothing from `drtc/`, and is
+    # deliberately not a session — see its module docstring.
+    modal_launcher,
     models as model_browser,
     record as record_state,
+    remote_host,
+    # The ROBOT half of the same run. Imported as a module (beside the two
+    # handlers pulled in below) because `shutdown_event` calls
+    # `stop_for_shutdown` on it — the child holds an energized arm and does not
+    # die with this process.
+    remote_inference,
+    remote_teleoperate,
     rollout as rollout_state,
+    session_events,
+    sfu,
 )
 
 # Import our custom calibration functionality
+from .__version__ import __version__
+from .api_errors import ApiError, ErrorCode, install_error_handlers
+from .arm_capabilities import require_known_arm_type, require_leader_kind
+from .arms import registry as arm_registry
+from .arms.base import leader_kwargs
+from .arms.manifest import arms_manifest
 from .auto_calibrate import (
     AutoCalibrationBatchRequest,
     AutoCalibrationRequest,
@@ -62,20 +83,61 @@ from .auto_calibrate import (
     auto_calibration_manager,
 )
 from .calibrate import CalibrationRequest, calibration_manager
-from .camera_identity import resolve_cv2_index
+from .camera_identity import identify_cv2_index, pump_avfoundation_runloop
 from .camera_preview import CameraOpenError, camera_preview_manager
-from .identify import identify_arm_by_motion
+from .can_recovery import ReleaseCanTorqueRequest, handle_release_can_torque
+from .dagger_protocol import (
+    CMD_CANCEL,
+    CMD_DROP_LAST,
+    CMD_HANDBACK,
+    CMD_HOLD,
+    CMD_RECOVERED,
+    CMD_RESET,
+    CMD_RESUME,
+    CMD_TAKEOVER,
+)
 from .jobs import (
+    _KNOWN_FOUNDATION_BASE_REPO_IDS,
+    CHECKPOINTS_STAGING_SUFFIX,
+    DatasetHubCopyEmptyError,
     DatasetNotOnHubError,
-    JobAlreadyRunningError,
+    JobAlreadyContinuedError,
+    JobHasChildrenError,
     JobNotFoundError,
     JobNotRunningError,
+    JobPublishInProgressError,
+    JobRemovalFailedError,
+    JobSourceOfQueuedRunError,
+    JobState,
+    JobStateChangedError,
     JobTarget,
+    QueueChangedError,
     _list_local_checkpoints,
+    hub_ref_repo_id,
+    hub_ref_step_label,
     job_registry,
+    training_is_active,
 )
 from .merge import MergeRequest, handle_merge_status, handle_start_merge
 from .motor_power import read_supply_voltage
+from .nodes import (
+    NodeNotFoundError,
+    NodeUnreachableError,
+    handle_add_node,
+    handle_delete_node_job,
+    handle_get_node_job,
+    handle_get_node_job_logs,
+    handle_get_node_jobs,
+    handle_get_node_policy_extra,
+    handle_get_node_policy_extra_status,
+    handle_get_node_queue,
+    handle_install_node_policy_extra,
+    handle_list_node_sources,
+    handle_list_nodes,
+    handle_remove_node,
+    handle_restart_node,
+    handle_stop_node_job,
+)
 
 # Import our custom recording functionality
 from .record import (
@@ -91,12 +153,31 @@ from .record import (
     handle_resume_recording,
     handle_start_recording,
     handle_stop_recording,
+    handle_submit_episode_task,
     handle_upload_dataset,
     handle_upload_status,
     stop_and_wait as stop_recording_and_wait,
 )
+from .recording_preview import recording_preview
+
+# Remote inference (DRTC). The module guards its own optional-extra imports
+# (aiohttp / dotenv / livekit.api / drtc._env are one try/except that degrades
+# to `_extra_missing()`), so importing it at server module scope cannot break a
+# no-extra install — and nothing under `makermodslab.drtc` is reached at boot.
+from .remote_inference import (
+    handle_remote_inference_status,
+    handle_remote_inference_transport,
+)
+from .replay import (
+    ReplayRequest,
+    handle_replay_status,
+    handle_start_replay,
+    handle_stop_replay,
+    stop_and_wait as stop_replay_and_wait,
+)
 from .rollout import (
     InferenceRequest,
+    handle_coaching_command,
     handle_inference_log,
     handle_inference_status,
     handle_next_episode,
@@ -104,6 +185,114 @@ from .rollout import (
     handle_stop_episode,
     handle_stop_inference,
 )
+from .schemas.datasets import (
+    DatasetHubSettingsResponse,
+    DatasetHubStatusResponse,
+    DatasetInfoResponse,
+    DatasetListItem,
+    DatasetRenameResponse,
+    DatasetTagsResponse,
+    DatasetVisibilityResponse,
+    DeleteDatasetResponse,
+    DownloadStartResponse,
+    DownloadStatusResponse,
+    EpisodeJointSeriesResponse,
+    EpisodeSummary,
+    ExcludedEpisodesResponse,
+    ImportResponse,
+    MergeStartResponse,
+    MergeStatusResponse,
+    SetExcludedEpisodesResponse,
+    SuccessRepoIdResponse,
+    UploadStartResponse,
+    UploadStatusResponse,
+)
+from .schemas.gripper import GripperStatusResponse
+from .schemas.jobs import (
+    CheckpointPolicyConfigResponse,
+    HubJobDismissResponse,
+    HubJobsResponse,
+    HubModelDeleteResponse,
+    JobCheckpointsResponse,
+    JobListResponse,
+    JobLogsResponse,
+    JobMetricsHistoryResponse,
+    JobQueueResponse,
+    JobRecord,
+    RunnersHardwareResponse,
+)
+from .schemas.models import (
+    ModelDeleteResponse,
+    ModelInfoResponse,
+    ModelListItem,
+    ModelPublishStartResponse,
+    ModelPublishStatusResponse,
+    ModelUploadResponse,
+    RunCheckpointsResponse,
+    SkillsResponse,
+)
+from .schemas.nodes import (
+    NodeEntry,
+    NodeListResponse,
+    NodeRemoveResponse,
+)
+from .schemas.remote import (
+    HostingStatusResponse,
+    RemoteCommandResponse,
+    RemoteTeleoperationStatusResponse,
+    StationStatusResponse,
+)
+
+# Response models for the typed /api/v1 surface (see makermodslab/schemas/).
+from .schemas.remote_network import GpuNetworkOptions
+from .schemas.sessions import (
+    CoachingCommandResponse,
+    CurrentSessionResponse,
+    GpuLaunchResponse,
+    GpuStatusResponse,
+    GpuTargetsResponse,
+    RemoteInferenceStatusResponse,
+    RemoteInferenceTransportStatusResponse,
+    SessionCoachingBody,
+    SessionCoachingResponse,
+    SessionHeartbeatBody,
+    SessionHeartbeatResponse,
+    SessionStartBody,
+    SessionStartResponse,
+    SessionStopResponse,
+)
+from .schemas.sfu import SfuTokenResponse
+from .schemas.system import (
+    ArmFamiliesResponse,
+    AvailableCamerasResponse,
+    AvailablePortsResponse,
+    CanGripperWiggleResponse,
+    ExtraStatus,
+    HealthResponse,
+    HfAuthStatusResponse,
+    HfLoginResponse,
+    InstallStartResponse,
+    InstallStatusResponse,
+    MakerIdentifyArmResponse,
+    MakerProbePortsResponse,
+    PolicyExtraStatus,
+    PolicyOptimizerDefaultsResponse,
+    ReleaseCanTorqueResponse,
+    RestartResponse,
+    RobotPortResponse,
+    SupplyVoltageResponse,
+    UpdateResult,
+    UpdateStatus,
+)
+from .sessions import (
+    handle_coaching_command_for_session,
+    handle_current_session,
+    handle_heartbeat_session,
+    handle_start_session,
+    handle_stop_session,
+    held_by,
+)
+from .step_calibrate import step_calibration_is_active, step_calibration_manager
 
 # Import our custom teleoperation functionality
 from .teleoperate import (
@@ -118,8 +307,7 @@ from .teleoperate import (
 from .train import TrainingRequest
 from .update import handle_run_update, handle_update_check
 from .utils.config import (
-    FOLLOWER_CONFIG_PATH,
-    LEADER_CONFIG_PATH,
+    HOME_IS_OVERRIDDEN,
     add_dismissed_hub_job,
     add_hidden_dataset,
     add_hidden_model,
@@ -132,11 +320,15 @@ from .utils.config import (
     find_available_ports,
     get_default_robot_port,
     get_dismissed_hub_jobs,
+    get_excluded_episodes,
+    get_instance_id,
     get_robot_record,
     get_saved_robot_port,
+    is_known_arm_type,
     is_robot_record_clean,
     is_valid_robot_name,
     list_robot_records,
+    migrate_legacy_state,
     port_slot_conflict,
     prune_dismissed_hub_jobs,
     remove_hidden_dataset,
@@ -147,6 +339,7 @@ from .utils.config import (
     rename_robot_record,
     save_imported_calibration,
     save_robot_record,
+    set_excluded_episodes,
 )
 from .utils.hf_auth import (
     cached_whoami,
@@ -156,15 +349,22 @@ from .utils.hf_auth import (
 )
 from .utils.system import (
     handle_get_policy_extra,
+    handle_get_remote_extra,
     handle_get_training_extra,
     handle_get_wandb_extra,
     handle_install_policy_extra,
     handle_install_policy_extra_status,
+    handle_install_remote_extra,
+    handle_install_remote_extra_status,
     handle_install_training_extra,
     handle_install_training_extra_status,
     handle_install_wandb_extra,
     handle_install_wandb_extra_status,
+    install_in_progress,
     open_folder_in_file_browser,
+    probe_gpu,
+    restart_supported,
+    schedule_restart,
     warn_if_cuda_mismatch,
 )
 from .wiggle import wiggle_gripper
@@ -230,6 +430,34 @@ class StartTrainingBody(BaseModel):
         return cls(config=TrainingRequest.model_validate(raw))
 
 
+def _refuse_repeated_query_keys(request: Request) -> None:
+    """Route dependency: 422 when any query key appears more than once.
+
+    Guards `expect_state` on the stop/cancel routes. FastAPI resolves a
+    repeated scalar key to its LAST value (starlette's multidict keeps the
+    final duplicate), so `?expect_state=queued&expect_state=running` reached
+    `JobRegistry.stop` as `running` — a Cancel-shaped URL with a stray
+    duplicate (a retrying proxy that appends instead of replacing, a mangled
+    copy-paste) walked past the optimistic-concurrency precondition and
+    SIGTERMed a live run while the caller believed it cancelled a queued one.
+    A repeated key is one request making two contradictory claims; refuse it
+    as malformed rather than picking a winner.
+
+    Declared as a plain-`Request` dependency so the parameter's OpenAPI schema
+    stays the scalar it always was — this changes no contract, it just stops
+    resolving an ambiguity that should never have been resolvable.
+    """
+    params = request.query_params
+    repeated = sorted({key for key in params if len(params.getlist(key)) > 1})
+    if repeated:
+        names = ", ".join(repr(k) for k in repeated)
+        raise ApiError(
+            status_code=422,
+            detail=f"Query parameter {names} was given more than once; pass each key at most once.",
+            code=ErrorCode.REQUEST_VALIDATION,
+        )
+
+
 # Cache for HF Jobs hardware flavors (5-minute TTL)
 _flavors_cache: dict = {"data": None, "fetched_at": 0.0}
 _FLAVOR_CACHE_TTL_SECONDS = 300.0
@@ -247,6 +475,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Every endpoint registers on this router, which is mounted twice at the bottom
+# of the module: once flat (the surface the shipped frontend was built against)
+# and once under /api/v1 (the versioned surface SDK clients target). The two
+# stay identical by construction; tests/test_api_contract.py asserts it.
+router = APIRouter()
+
+# NEW surface registers here instead: this router is mounted ONLY under
+# /api/v1 (the flat mount is frozen — LEGACY_ROUTES is a shrink-only ratchet).
+# Each addition is documented in tests/test_api_contract.py V1_ONLY_ROUTES.
+v1_router = APIRouter()
+
+# ApiError responses carry a machine-readable `code` beside the legacy string
+# `detail` (see api_errors.py); plain HTTPException raises are untouched.
+install_error_handlers(app)
 
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 
@@ -401,6 +644,38 @@ class ConnectionManager:
             with contextlib.suppress(queue.Full):
                 self.broadcast_queue.put_nowait({"type": "jobs_changed", "timestamp": time.time()})
 
+    def notify_session_changed(self, event: dict) -> None:
+        """Push a feature module's 'session_changed' hint to all WS clients.
+
+        Wired into makermodslab/session_events.py below so the feature modules
+        never import the manager. The event dict is built by the seam
+        (type/session/timestamp); like notify_jobs_changed this is a droppable
+        hint — skipped silently with no clients connected, and consumers
+        refetch the relevant status endpoint rather than trusting the payload,
+        so a missed broadcast is self-healing (every page already polls).
+        """
+        if self.is_running and self.active_connections:
+            with contextlib.suppress(queue.Full):
+                self.broadcast_queue.put_nowait(event)
+
+    def notify_coaching_state(self, fields: dict[str, Any]) -> None:
+        """Push the coaching block the instant it changes, ahead of the poll.
+
+        Unlike `notify_jobs_changed` this carries the STATE rather than a
+        "refetch me" nudge, because the thing it carries is safety-relevant and
+        a refetch round-trip is most of the latency we are trying to remove:
+        the operator has to know who is holding the arm now, not after another
+        request. See rollout._on_coaching_state for the full argument.
+
+        Dropped silently with no clients — the dialog polls once a second and
+        reconciles itself, so a missed push costs a second, never correctness.
+        """
+        if self.is_running and self.active_connections:
+            with contextlib.suppress(queue.Full):
+                self.broadcast_queue.put_nowait(
+                    {"type": "coaching_state", "timestamp": time.time(), **fields}
+                )
+
     def notify_job_progress(self, snapshots: list[dict]) -> None:
         """Push a 'job_progress' event with per-running-job snapshots.
 
@@ -416,8 +691,40 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
-job_registry.set_on_change(manager.notify_jobs_changed)
+recording_preview.joint_notifier = manager.broadcast_joint_data_sync
+
+
+def _on_jobs_changed() -> None:
+    """Registry-change fan-out: drop the models listing cache, THEN announce.
+
+    A run reaching a terminal state changes what `/models` lists — that is the
+    moment it becomes a deployable skill — but no MODEL mutation ran, so until
+    now nothing invalidated the listing cache. The picker stayed up to
+    `_LISTING_CACHE_TTL_S` (45s) stale while the jobs-driven library, which
+    reads the registry directly over a WS push, was already current. That gap
+    is the transient half of "the two skill lists disagree". Registry renames
+    had the same shape: `rename` fires this hook, but no route invalidated the
+    listing, so the picker showed a run's old name for up to a TTL.
+
+    Two placement details, both load-bearing:
+
+      * Invalidation runs BEFORE the broadcast. Clients refetch on the event,
+        so announcing first races a cache this call exists to drop.
+      * Invalidation runs OUTSIDE `notify_jobs_changed`'s "are any clients
+        connected?" guard. The broadcast is pointless with nobody listening;
+        the cache drop is not — the next plain HTTP GET still wants the truth.
+    """
+    model_browser.invalidate_model_listing_cache()
+    manager.notify_jobs_changed()
+
+
+job_registry.set_on_change(_on_jobs_changed)
 job_registry.set_on_progress(manager.notify_job_progress)
+session_events.set_notifier(manager.notify_session_changed)
+# Coaching phase changes reach the browser by push, not by poll — the banner
+# names who is holding the arm, and a second of lag there is a second of the
+# operator not knowing. See rollout._on_coaching_state.
+rollout_state.set_on_coaching_state(manager.notify_coaching_state)
 
 
 # Frontend policy_type -> lerobot registry name. In this lerobot pin the names
@@ -461,7 +768,7 @@ def _optimizer_name_from_preset(preset) -> str:
     return _OPTIMIZER_CLASS_TO_NAME.get(name, name)
 
 
-@app.get("/policy-optimizer-defaults")
+@router.get("/policy-optimizer-defaults", response_model=PolicyOptimizerDefaultsResponse, tags=["system"])
 def get_policy_optimizer_defaults():
     """Return each policy's optimizer preset (lr / weight_decay / grad_clip_norm
     + optimizer type) so the training UI can show the real "policy default"
@@ -510,83 +817,229 @@ def get_policy_optimizer_defaults():
     return {"defaults": defaults, "available": available}
 
 
-@app.post("/move-arm")
+@router.post("/move-arm")
 def teleoperate_arm(request: TeleoperateRequest):
     """Start teleoperation of the robot arm"""
     return handle_start_teleoperation(request, manager)
 
 
-@app.post("/stop-teleoperation")
+@router.post("/stop-teleoperation")
 def stop_teleoperation():
     """Stop the current teleoperation session"""
     return handle_stop_teleoperation()
 
 
-@app.get("/teleoperation-status")
+@router.get("/teleoperation-status")
 def teleoperation_status():
     """Get the current teleoperation status"""
     return handle_teleoperation_status()
 
 
-@app.post("/start-inference")
+@router.post("/start-inference")
 def start_inference(request: InferenceRequest):
     result = handle_start_inference(request)
     if not result.get("success"):
-        raise HTTPException(
+        raise ApiError(
             status_code=result.get("status_code", 500),
             detail=result.get("message", "Failed to start inference"),
+            code=result.get("code"),
         )
     return result
 
 
-@app.post("/stop-inference")
+@router.post("/stop-inference")
 def stop_inference():
     """Abort the whole session. In evaluation mode (eval_episodes > 1) this ends
     the run wherever it is and reports the partial tally with NO accuracy — the
     per-episode control is /inference-episode-stop."""
     result = handle_stop_inference()
     if not result.get("success"):
-        raise HTTPException(
+        raise ApiError(
             status_code=result.get("status_code", 500),
             detail=result.get("message", "Failed to stop inference"),
+            code=result.get("code"),
         )
     return result
 
 
-@app.post("/inference-episode-stop")
+@router.post("/inference-episode-stop")
 def inference_episode_stop():
     """Evaluation mode only: end the CURRENT episode early and score it a
     SUCCESS ("the robot did the task"). The session stays up and moves into its
     reset phase. 409 when no evaluation episode is running."""
     result = handle_stop_episode()
     if not result.get("success"):
-        raise HTTPException(
+        raise ApiError(
             status_code=result.get("status_code", 500),
             detail=result.get("message", "Failed to stop the episode"),
+            code=result.get("code"),
         )
     return result
 
 
-@app.post("/inference-next-episode")
+@router.post("/inference-next-episode")
 def inference_next_episode():
     """Evaluation mode only: leave the reset phase and start the next episode.
     The reset is user-ended (no auto-timer). 409 unless an evaluation is parked
     waiting for a reset."""
     result = handle_next_episode()
     if not result.get("success"):
-        raise HTTPException(
+        raise ApiError(
             status_code=result.get("status_code", 500),
             detail=result.get("message", "Failed to start the next episode"),
+            code=result.get("code"),
         )
     return result
 
 
-@app.get("/inference-status")
+def _coaching_route(command: str):
+    """Shared body for the eight flat coaching controls.
+
+    They differ only in the verb they forward, so the route layer's job is
+    entirely uniform: hand the verb to the orchestrator and translate a refusal
+    into the right status code. Which transitions the verb is legal from is the
+    RUNNER's call, not this layer's — see `handle_coaching_command`."""
+    result = handle_coaching_command(command)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to send the coaching command"),
+        )
+    return result
+
+
+@v1_router.post("/coaching-takeover", response_model=CoachingCommandResponse, tags=["inference"])
+def coaching_takeover():
+    """Coaching mode only: take control from the policy and start recording.
+
+    One press covers the whole handover — the policy pauses, an actuated leader
+    glides toward the follower's pose so the operator picks up an arm roughly
+    where the robot is, and only then does the correction begin recording. The
+    glide is best-effort and nothing checks that it arrived: whatever gap is
+    left is measured at the edge and cancelled out of every command, so the
+    follower cannot jump however far apart the two arms were."""
+    return _coaching_route(CMD_TAKEOVER)
+
+
+@v1_router.post("/coaching-handback", response_model=CoachingCommandResponse, tags=["inference"])
+def coaching_handback():
+    """Coaching mode only: end the correction, SAVE it, and resume the policy."""
+    return _coaching_route(CMD_HANDBACK)
+
+
+@v1_router.post("/coaching-cancel", response_model=CoachingCommandResponse, tags=["inference"])
+def coaching_cancel():
+    """Coaching mode only: end the correction and DISCARD it.
+
+    The fumbled-takeover escape. Upstream lerobot saves every correction
+    unconditionally, which makes a botched takeover permanent training data;
+    this drops the buffer instead.
+
+    It then runs the ordinary reset behind the discard — the follower eases home
+    and the session parks for a scene rearrangement, and the leader is released
+    on the way. A discard means the last few seconds were a mess, and the scene
+    almost always needs setting up again after one. Accepted from EVERY phase,
+    not just mid-correction: with nothing in flight it is a plain reset, which
+    is what still gives a wedged correction a way out."""
+    return _coaching_route(CMD_CANCEL)
+
+
+@v1_router.post("/coaching-hold", response_model=CoachingCommandResponse, tags=["inference"])
+def coaching_hold():
+    """Coaching mode only: freeze the policy without taking over.
+
+    The arm holds its pose and nothing is recorded — for when the operator needs
+    a moment to decide, or to reposition the scene, without committing to a
+    correction."""
+    return _coaching_route(CMD_HOLD)
+
+
+@v1_router.post("/coaching-resume", response_model=CoachingCommandResponse, tags=["inference"])
+def coaching_resume():
+    """Coaching mode only: hand control back to the policy from a hold."""
+    return _coaching_route(CMD_RESUME)
+
+
+@v1_router.post("/coaching-reset", response_model=CoachingCommandResponse, tags=["inference"])
+def coaching_reset():
+    """Coaching mode only: end this ATTEMPT at the task and reset for the next.
+
+    Corrections-only DAgger has no task-episode concept — an "episode" there is
+    one takeover — so this is what tells the session that the cube is finally in
+    the tray. The policy stops, the follower eases back to the pose captured at
+    connect, and the session parks so the scene can be rearranged. Nothing is
+    written to the dataset: corrections are the only thing ever recorded.
+
+    Valid mid-correction, where it SAVES the correction in flight before
+    resetting: an operator who finishes the task while still driving has
+    already decided those frames are the correction, and making them hand back
+    and then reset as two presses let the policy briefly regain a finished
+    scene in between. Use /coaching-cancel for the opposite — discard, then
+    reset."""
+    return _coaching_route(CMD_RESET)
+
+
+@v1_router.post("/coaching-drop-last", response_model=CoachingCommandResponse, tags=["inference"])
+def coaching_drop_last():
+    """Coaching mode only: un-record the correction from the attempt just ended.
+
+    A real delete, and it can be one only because nothing has been deleted: the
+    runner HOLDS a finished correction in memory rather than writing it at
+    hand-back, and commits it when the operator takes over again or starts the
+    next attempt. This says don't.
+
+    That indirection is not an optimisation. `save_episode` interleaves an
+    episode's frames into a shared per-chunk parquet file and appends its video
+    into a shared per-chunk video file, and lerobot offers nothing that removes
+    one episode from a dataset that is still open — `dataset_tools.delete_episodes`
+    rebuilds a FINALIZED dataset into a new directory by copying and re-encoding
+    everything that survives. See "The held correction" in dagger_protocol.
+
+    So the window is narrow and the runner owns it: from the hand-back that
+    ended the correction until the operator either takes over again or starts
+    the next attempt — exactly the window they spend standing at a parked arm
+    deciding. Clients must read
+    `droppable_correction` off /inference-status rather than infer it from the
+    phase.
+
+    Refused mid-correction — there the operator means the take they are still
+    recording, and /coaching-cancel is the control for that one.
+
+    409 `coaching.nothing_to_drop` when the window is shut (mid-correction, or
+    once the correction has been committed or already dropped). That is the one
+    state check this surface makes, and it is not a phase guess: it reads
+    `droppable_correction`, the runner's own published window. It used to answer
+    200 "sent" and let the runner refuse in a log nobody reads."""
+    return _coaching_route(CMD_DROP_LAST)
+
+
+@v1_router.post("/coaching-recovered", response_model=CoachingCommandResponse, tags=["inference"])
+def coaching_recovered():
+    """Coaching mode only: mark the end of RECOVERY inside the correction.
+
+    An intervention is two things wearing one name — first the operator rewinds
+    the arm back to a state the policy has actually seen, then they demonstrate
+    the behaviour that should follow. lerobot's own HIL guide names RaC
+    (arXiv:2509.07953) as the protocol its DAgger strategy follows, and RaC's
+    entire claim rests on that decomposition; the strategy nonetheless records
+    both halves as one undifferentiated `intervention=True`.
+
+    This records the boundary out of band (a sidecar beside the dataset — see
+    dagger_protocol) because the dataset's feature dict is assembled inside
+    lerobot with no hook to add a column. It requests no phase change: recovery
+    and correction are the same control mode.
+
+    Ignored outside a correction, and ignored a second time within one — the
+    first mark is the one the operator meant."""
+    return _coaching_route(CMD_RECOVERED)
+
+
+@router.get("/inference-status")
 def inference_status():
     return handle_inference_status()
 
 
-@app.get("/inference-log")
+@router.get("/inference-log")
 def inference_log():
     """Tail of the active/most-recent rollout's log file (read-only, bounded).
 
@@ -599,13 +1052,818 @@ def inference_log():
     return handle_inference_log()
 
 
-@app.get("/health")
-def health_check():
-    """Simple health check endpoint to verify server is running"""
-    return {"status": "ok", "message": "FastAPI server is running"}
+@router.post("/start-replay")
+def start_replay(request: ReplayRequest):
+    result = handle_start_replay(request, manager)
+    if not result.get("success"):
+        raise ApiError(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to start replay"),
+            code=result.get("code"),
+        )
+    return result
 
 
-@app.get("/hf-auth-status")
+@router.post("/stop-replay")
+def stop_replay():
+    result = handle_stop_replay()
+    if not result.get("success"):
+        raise ApiError(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to stop replay"),
+            code=result.get("code"),
+        )
+    return result
+
+
+@router.get("/replay-status")
+def replay_status():
+    return handle_replay_status()
+
+
+# --- Sessions (v1-only surface; see v1_router note above) ---
+
+
+@v1_router.post("/sessions", response_model=SessionStartResponse, status_code=201, tags=["sessions"])
+def start_session(body: SessionStartBody):
+    """Start a robot session by robot name; ports, configs, mode, right-arm
+    fields and cameras resolve server-side from the saved robot record, and
+    `options` carries only the kind-specific fields (see schemas/sessions.py).
+
+    Startable kinds: teleoperation, recording, inference, remote_inference,
+    replay, calibration, auto_calibration. Only wiggle still starts through
+    its legacy flow endpoint (seconds of open-loop motion, no stop handler) —
+    the identity tracker observes it all the same. Calibration's mid-session
+    wizard controls (complete-calibration-step, the status polls) stay on
+    their existing endpoints, like recording's pause/rerecord.
+
+    201 returns the session identity plus optional `warnings` — warn-but-
+    allow findings from the feature's start (teleoperation/replay
+    arm-identity checks) that the legacy start responses used to carry; 409
+    session.held (details name the holder) when any session already holds
+    the hardware; 404 robot.not_found; 400 robot.not_ready (readiness is
+    scoped to the arms the kind drives — inference/replay never open the
+    leader bus; the calibration kinds need only a port per targeted slot);
+    422 request.validation for options that don't fit the kind, an
+    empty/oversized owner, or a lease_timeout_s outside 10–600. Other
+    feature refusals pass through with their existing statuses and codes.
+
+    `owner` attaches a lease: heartbeat within `lease_timeout_s` (default
+    60s) or the session is safety-stopped. No owner, no lease, no
+    timeout-stop — legacy-started and owner-less sessions are never killed."""
+    return handle_start_session(body, manager)
+
+
+@v1_router.get("/sessions/current", response_model=CurrentSessionResponse, tags=["sessions"])
+def current_session():
+    """Identity of the current session (or null), plus a summary of the last
+    ended one. Identity only — kind-specific rich status stays on the feature
+    status endpoints this phase. `robot`/`owner` are null for sessions started
+    through the legacy endpoints (the tracker never guesses); `lease` is null
+    unless the session was created with an owner. Reading NEVER renews the
+    lease — renewal is the owner's deliberate act via the heartbeat endpoint."""
+    return handle_current_session()
+
+
+@v1_router.post(
+    "/sessions/{session_id}/heartbeat", response_model=SessionHeartbeatResponse, tags=["sessions"]
+)
+def heartbeat_session(session_id: str, body: SessionHeartbeatBody):
+    """Renew the current session's lease deadline — the owner's deliberate
+    act (GET /sessions/current never renews).
+
+    200 with the renewed identity when `session_id` names the current session
+    and `owner` matches its lease; a current session with NO lease is a
+    harmless no-op 200 (eases client rollout while leases are opt-in). 404
+    session.not_found for an unknown or stale id — including a session the
+    expiry watchdog already stopped and released; 409 session.lease_expired
+    only in the window where the expiry stop is dispatched but the release
+    hasn't landed; 409 session.not_owner on an owner mismatch."""
+    return handle_heartbeat_session(session_id, body.owner)
+
+
+@v1_router.post("/sessions/{session_id}/stop", response_model=SessionStopResponse, tags=["sessions"])
+def stop_session(session_id: str):
+    """Stop the current session by its own id — 404 session.not_found unless
+    `session_id` names the session that is actually running, so a stale stop
+    can never hit a session it didn't mean (the operation-identity guarantee).
+    Returns the kind's stop-handler result verbatim beside the final
+    identity."""
+    return handle_stop_session(session_id)
+
+
+@v1_router.post(
+    "/sessions/{session_id}/coaching",
+    response_model=SessionCoachingResponse,
+    tags=["sessions"],
+)
+def coaching_command(session_id: str, body: SessionCoachingBody):
+    """Send one coaching (DAgger) command to the current inference session.
+
+    Session-scoped like /stop: 404 `session.not_found` unless `session_id`
+    names the running session; a plain (non-coaching) inference session yields
+    the runner's coded 409. The verb — takeover / handback / cancel / hold /
+    resume / reset / recovered / drop_last — is forwarded to the coaching
+    runner, which alone decides which phase it is legal from (a server-side
+    phase copy is always one event stale). Never owner-gated: a physical arm
+    must stay controllable by whoever can reach the API.
+
+    THIS is the endpoint the browser uses. The flat `/coaching-*` verbs below
+    remain for callers that only know "an inference run is active", exactly as
+    `/stop-inference` does beside `/sessions/{id}/stop` — but anything holding a
+    session id must come through here, or a dialog left open across a session
+    change commands whichever session happens to be current instead of failing.
+    """
+    return handle_coaching_command_for_session(session_id, body.command)
+
+
+# --- Remote inference (DRTC): status + transport (v1-only surface) ---
+#
+# No start/stop verbs live here: a remote-inference session starts through
+# POST /api/v1/sessions with kind "remote_inference" and stops through
+# /sessions/{id}/stop, like every other robot-driving kind. What is left is two
+# reads. The third route this group used to carry — clear-local-override —
+# retired with the shell SFU scripts in S3.6: the Lab hosts the SFU itself now
+# (--sfu), so there is no dotenv file outliving a script to delete.
+
+
+@v1_router.get(
+    "/remote-inference-status",
+    response_model=RemoteInferenceStatusResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_status():
+    """Live telemetry of the remote-inference session: phase, elapsed/duration,
+    the child's 1 Hz STATS sample, and the transport it actually resolved.
+
+    Poll at 1 Hz — the rate the child emits at. Metrics are deliberately NOT
+    pushed on the websocket: `holds` climbing and `degrade` mean the run is
+    losing quality and the operator's response is "stop it", which is not a
+    millisecond decision; and a droppable hint channel drops under queue
+    pressure, which is exactly when a run is in trouble. Only real transitions
+    ride `session_changed`.
+
+    `stats` is null until the first sample lands (and stays null for a run that
+    never connected); every key WITHIN a sample is always present, null where
+    unknown — a dropped or malformed line degrades to "no sample this second",
+    never to a half-populated one the UI would render as real. No exclusion
+    mode: those nulls are meaningful (see RemoteInferenceStats).
+
+    Pollable unconditionally: when idle it answers
+    `remote_inference_active=false` with null stats/transport, mirroring
+    /inference-status.
+    """
+    return handle_remote_inference_status()
+
+
+@v1_router.get(
+    "/remote-inference/transport",
+    response_model=RemoteInferenceTransportStatusResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_transport():
+    """What transport a remote-inference child would resolve RIGHT NOW, and
+    whether anything is answering on it. Read-only; touches no hardware and
+    starts nothing.
+
+    Two transports, one shape. When this process runs the Lab's own SFU
+    (`makermodslab --sfu`) the url, room and credentials come from sfu.py
+    in-process and livekit.env is never read; the `sfu_*` block then carries
+    what the panel needs for the GPU side's command line — including the key
+    NAME and the file the secret lives in, never the secret. Otherwise the
+    LiveKit Cloud credentials are resolved through `drtc._env.read_env()`,
+    never `load_env()`: load_env writes os.environ, and a server that has
+    stamped a url into its own environment can never re-resolve it.
+
+    `endpoint_reachable` / `operator_present` come from one `list_participants`
+    call behind remote_inference._probe_room, bounded at 3s, and are null when
+    that probe did not run at all. A missing [remote] extra is REPORTED here
+    rather than raised: the panel's job is to tell the user what to install,
+    and the install command must name the PRIMARY CHECKOUT — an editable
+    install run from a worktree silently re-points every other session's
+    makermodslab.
+
+    Deliberately NOT refused while a session is live. Unlike
+    /arms/release-torque this reads dotenv files and asks the SFU who is in a
+    room; it touches nothing the running child owns, and a live child already
+    pinned its transport at spawn (READY echoes the effective values).
+    """
+    return handle_remote_inference_transport()
+
+
+# --- Remote inference: the GPU half (modal_launcher.py, v1-only surface) ---
+#
+# A LAB-LEVEL RESOURCE, not a session, and that is the whole design decision of
+# S3.8 (docs/drtc/SLICE3.md "S3.8 as built"). The GPU holds no hardware, so:
+# these are their own verbs rather than a `launch_gpu` field on
+# `RemoteInferenceOptions` — that would hold `robot.busy.remote_inference` for
+# the 1-3 minute cold start while the arm sat completely free; stopping a
+# session does NOT stop the GPU (a lease expiry is a safety stop whose one job
+# is de-energizing an arm, and it must not grow a network call); and the GPU
+# reaching `ready` does NOT gate the arm — `_probe_room` still does, because it
+# observes the room rather than a log line.
+
+
+class GpuStartBody(GpuNetworkOptions):
+    """The GPU side of the remote-run form. Field-for-field the subset of
+    `RemoteInferenceOptions` the container needs, with the same defaults: the
+    two halves are launched from one object precisely so horizon / fps / codec
+    / s_min cannot disagree (Portal fingerprints the wire schema and drops a
+    mismatched stream in silence).
+
+    `extra="forbid"` like every options model — a typo'd knob is a loud 422,
+    never a silently ignored one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    engine: Literal["sync", "rtc"] = "sync"
+    # Required in practice: `--policy-path` has no default in either wrapper,
+    # so an empty one is refused (gpu.launch_failed) BEFORE the spawn rather
+    # than arriving as a Click usage error 90s into a cold-start log.
+    policy_hub_id: str = ""
+    task: str = ""
+    horizon: int = 16
+    fps: int = 30
+    video_codec: Literal["H264", "MJPEG"] = "H264"
+    s_min: int = 4
+    slack: int = Field(
+        default=modal_launcher.DEFAULT_SLACK,
+        ge=modal_launcher.SLACK_MIN,
+        le=modal_launcher.SLACK_MAX,
+        strict=True,
+        description="Policy-side synchronization buffering in ticks; applied on GPU launch.",
+    )
+    # WHICH WORKSPACE PAYS. Both optional, and empty means exactly what S3.8
+    # did: the `modal` CLI resolves the profile and the environment itself
+    # (MODAL_ENVIRONMENT, then the active local profile, then the workspace
+    # default). A client that never sends them sees no change.
+    #
+    # Free-form strings rather than a Literal because the valid set is THIS
+    # MACHINE's, read from the CLI at request time — see
+    # GET /remote-inference/gpu/targets. Unknown values are refused there and
+    # again in `modal_launcher.check_target`, before anything is spawned.
+    profile: str = ""
+    environment: str = ""
+    # WHAT IT RUNS AS and WHAT IT RUNS ON (S3.8e). Both empty is S3.8's
+    # behaviour byte for byte — the checkpoint's own saved dtype, and the
+    # wrapper's own pinned GPU — so a client that never sends them sees no
+    # change.
+    #
+    # Literals here, unlike `profile` / `environment` above, because these two
+    # sets are STATIC rather than this machine's: they are annotated with the
+    # launcher's own types so the allowlist is written down once
+    # (`modal_launcher.GpuChoice` / `.ModelDtypeChoice`). `modal_launcher`
+    # checks them AGAIN before spawning, because `start()` is a plain function
+    # and a pydantic field cannot guard the callers that skip this model.
+    #
+    # A precision that is not the saved one replaces the config's `model_dtype`
+    # before the weights load; the GPU type cannot ride argv at all (the
+    # wrapper's `@app.function(gpu=…)` is evaluated at import) and travels as
+    # DRTC_GPU in the child env.
+    model_dtype: modal_launcher.ModelDtypeChoice = ""
+    gpu: modal_launcher.GpuChoice = ""
+    # HOW HARD IT WORKS PER CHUNK (S3.8f): the flow-matching / denoising steps
+    # the sampler takes for one action chunk. Null (the default) is the
+    # checkpoint's own count and passes no flag at all — an int has no empty
+    # string, so null is what "" is for the two above.
+    #
+    # A RANGE rather than a Literal, unlike those two, because every integer in
+    # it is meaningful — the sampler simply integrates that many times. The
+    # bounds are the launcher's (`modal_launcher.FLOW_STEPS_MIN/MAX`) and it
+    # checks them again before spawning, because `start()` is a plain function
+    # and a pydantic field cannot guard the callers that skip this model.
+    #
+    # Which config field it writes is per family and is resolved in the
+    # container; if the target checkpoint's config carries no such field at
+    # all, the launcher DROPS the knob before spawning rather than paying for a
+    # cold start that ends in the container's refusal (`flow_steps_applied` in
+    # the GPU status says so).
+    flow_steps: int | None = Field(
+        default=None,
+        ge=modal_launcher.FLOW_STEPS_MIN,
+        le=modal_launcher.FLOW_STEPS_MAX,
+    )
+    # EXTRA CAMERA VIEWS to declare on the checkpoint before the weights load
+    # (S3.8g), by role name — `["cam2"]` on a checkpoint published with
+    # `cam0`/`cam1`. Empty (the default) is the checkpoint's own views and
+    # passes no flag, so a client that never sends it sees no change.
+    #
+    # The only knob here that changes the WIRE rather than the GPU's own work:
+    # each role becomes an `observation.images.<role>` input feature, so the
+    # policy expects one more video track and the robot side must publish one
+    # (bind it in the same `camera_bindings` the checkpoint's own roles use).
+    #
+    # A LIST rather than a comma-joined string, because that is what it is;
+    # `modal_launcher.build_argv` does the joining, the wrappers' Click
+    # parameter being a str. `max_length` and the per-item pattern are the
+    # launcher's own (`MAX_EXTRA_IMAGE_ROLES`, `is_valid_image_role`) and it
+    # checks them AGAIN before spawning, because `start()` is a plain function
+    # and a pydantic field cannot guard the callers that skip this model.
+    #
+    # Dropped before the spawn for a checkpoint whose view count is fixed by
+    # its architecture, on `flow_steps`' rule (`extra_image_roles_applied` in
+    # the GPU status says so) — a role remembered from a MolmoAct2 run must not
+    # cost a cold start after the operator switches checkpoint.
+    extra_image_roles: list[str] = Field(
+        default_factory=list,
+        max_length=modal_launcher.MAX_EXTRA_IMAGE_ROLES,
+    )
+
+
+@v1_router.get(
+    "/remote-inference/gpu/targets",
+    response_model=GpuTargetsResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_gpu_targets(profile: str = ""):
+    """This machine's Modal profiles, and one profile's environments.
+
+    What the two pickers above Start GPU are built from, so a launch can be
+    billed to a chosen workspace WITHOUT `modal profile activate` — that
+    rewrites ~/.modal.toml, which every other terminal on this machine shares,
+    and a web request has no business doing that. The profile rides the child's
+    MODAL_PROFILE instead, and the environment rides `modal run --env`.
+
+    `profile` picks whose environments to list (empty: the active one), because
+    `modal environment list` only ever describes one profile's workspace.
+
+    Read-only and never 500: two bounded `modal … list --json` subprocesses, no
+    mutating subcommand, and ~/.modal.toml — which holds every profile's
+    token_id and token_secret — is never opened. A missing CLI, an expired
+    token or a listing this build cannot parse come back as a coded `error` in
+    the body, because a failed listing is not a failed launch: with no selection
+    the CLI still resolves the target on its own."""
+    return modal_launcher.list_targets(profile)
+
+
+@v1_router.post(
+    "/remote-inference/gpu/start",
+    response_model=GpuLaunchResponse,
+    tags=["sessions"],
+)
+def start_remote_inference_gpu(body: GpuStartBody):
+    """Launch the policy server on Modal, attached, from this machine.
+
+    Attached on purpose (no `--detach`): the local `modal run` process is the
+    app's lifeline, so stopping it stops the app — which is the cost-safety
+    property, and it means the GPU dies with the Lab. Detached would buy
+    "survives a restart" in exchange for orphaned A100s nobody knows about.
+
+    The API secret is NEVER in the command line: both wrappers' `main()` falls
+    back to LIVEKIT_API_KEY / LIVEKIT_API_SECRET from the environment, and the
+    launcher passes them there instead of in argv, which is world-readable in
+    `ps` on this machine.
+
+    Deliberately NOT refused while a local training run holds this machine: a
+    Modal A100 is not this machine's GPU.
+    """
+    return modal_launcher.start(
+        engine=body.engine,
+        policy_hub_id=body.policy_hub_id,
+        task=body.task,
+        horizon=body.horizon,
+        fps=body.fps,
+        video_codec=body.video_codec,
+        s_min=body.s_min,
+        slack=body.slack,
+        region=body.region,
+        tolerance=body.tolerance,
+        profile=body.profile,
+        environment=body.environment,
+        model_dtype=body.model_dtype,
+        gpu=body.gpu,
+        flow_steps=body.flow_steps,
+        extra_image_roles=body.extra_image_roles,
+    )
+
+
+@v1_router.post(
+    "/remote-inference/gpu/stop",
+    response_model=GpuStatusResponse,
+    tags=["sessions"],
+)
+def stop_remote_inference_gpu():
+    """Stop the GPU policy server (SIGTERM→SIGKILL over its process group).
+
+    Returns while the group is still going down, in state `stopping`; the
+    launcher's own stdout pump lands it in `idle`. 409 `gpu.not_running` when
+    there is nothing to stop. Never touches the arm — a live remote-inference
+    session keeps running and its watchdogs report the empty room, which is a
+    better diagnosis than a stop the user did not ask for."""
+    return modal_launcher.stop()
+
+
+@v1_router.get(
+    "/remote-inference/gpu",
+    response_model=GpuStatusResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_gpu():
+    """The GPU launcher's state: idle | starting | ready | failed | stopping,
+    plus the container's own phase, the room it was pinned to, the log path and
+    the idle auto-stop countdown.
+
+    Pollable unconditionally, and a poll is also one of the two things (with
+    the log pump) that can notice a cold start that overran or a ready GPU
+    nobody is using — neither deadline needs a thread of its own.
+
+    `state == "ready"` is a HINT derived from the container's stdout, never the
+    authority: the gate on energizing the arm stays the session's own room
+    probe."""
+    return modal_launcher.status()
+
+
+@router.get("/health", response_model=HealthResponse, tags=["system"])
+def health_check(request: Request):
+    """Node identity + capability document.
+
+    Doubles as the node-registry verify handshake: a discovered peer is
+    confirmed by fetching this and reading version/instance_id/capabilities.
+    `status`/`message` are the legacy reachability-probe fields — keep them.
+    Capabilities grow additively (gpu, hardware inventory) as the registry
+    needs them; absent key means "unknown/unsupported", never guess."""
+    return {
+        "status": "ok",
+        "message": "FastAPI server is running",
+        "version": __version__,
+        "instance_id": get_instance_id(),
+        "capabilities": {
+            "serves_ui": ui_enabled(),
+            "accepts_jobs": True,
+            # Present only when the torch probe sees an accelerator — an
+            # absent key means none/unknown, never guess (see HealthResponse).
+            **({"gpu": gpu} if (gpu := probe_gpu()) else {}),
+            # Present only when this process runs (or fronts) a LiveKit SFU
+            # (--sfu): the signalling URL as reachable from the caller's
+            # side. Absent = no SFU here; a peer wanting one asks another
+            # node. Same absent-means-unknown rule as gpu.
+            **(
+                {"sfu": {"url": sfu.sfu_url(request.url.hostname or "localhost")}}
+                if sfu.sfu_enabled()
+                else {}
+            ),
+            # Present only while a hosting session is live — the robot this
+            # station offers for remote teleoperation. A laptop's station
+            # picker filters on it. Same absent-means-none rule.
+            **_hosting_capability(),
+        },
+    }
+
+
+def _hosting_capability() -> dict:
+    descriptor = remote_host.current_descriptor
+    if not remote_host.hosting_active or not descriptor:
+        return {}
+    return {
+        "hosting": {
+            "robot": descriptor["robot"],
+            "arm_type": descriptor["arm_type"],
+            "phase": remote_host.phase,
+            "active_operator": remote_host.seat_holder(),
+        }
+    }
+
+
+# --- SFU token broker (v1-only surface; see v1_router note above) ---
+
+
+class SfuTokenBody(BaseModel):
+    """Request for a LiveKit room token (sfu.py). Every field is optional:
+    the server picks a unique identity and the station's default room, and
+    `operator` is the role a laptop or a policy worker wants. `robot` is for
+    the one participant that publishes cameras/state (normally this station
+    itself, in a later phase); `viewer` subscribes only."""
+
+    identity: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")] | None = None
+    room: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")] | None = None
+    role: Literal["robot", "operator", "viewer"] = "operator"
+    ttl_seconds: int = Field(sfu.DEFAULT_TTL_SECONDS, ge=sfu.MIN_TTL_SECONDS, le=sfu.MAX_TTL_SECONDS)
+
+
+@v1_router.post("/sfu/token", response_model=SfuTokenResponse, tags=["sfu"])
+def issue_sfu_token(body: SfuTokenBody, request: Request):
+    """Sign a short-lived, role-scoped LiveKit room token.
+
+    The station is the only party holding the SFU secret, so participants
+    (a laptop's makermodslab, a Modal worker, a browser) get their JWT here
+    instead of carrying the secret. The URL is built from the host the
+    caller reached THIS API on — the one address known to be routable from
+    where they sit. 409 sfu.disabled when the launcher wasn't started with
+    --sfu: the remedy is a restart with the flag, not a retry."""
+    if not sfu.sfu_enabled():
+        raise ApiError(
+            409,
+            "No LiveKit SFU is configured on this node. Start it with `makermodslab --sfu`.",
+            code=ErrorCode.SFU_DISABLED,
+        )
+    api_key, api_secret = sfu.api_keys()
+    identity = body.identity or sfu.default_identity(body.role)
+    # Single seat: while a hosting session's seat is held, only its holder
+    # (a reconnect) gets another operator token. The room cap is the SFU's
+    # half of the same rule.
+    if body.role == "operator":
+        holder = remote_host.seat_holder()
+        if holder is not None and holder != identity:
+            raise ApiError(
+                409,
+                f"This station's operator seat is held by {holder!r}. Only one operator drives at a time.",
+                code=ErrorCode.SFU_SEAT_TAKEN,
+                details={"holder": holder},
+            )
+    room = body.room or sfu.default_room(get_instance_id())
+    token, expires_at = sfu.mint_token(
+        api_key=api_key,
+        api_secret=api_secret,
+        identity=identity,
+        room=room,
+        role=body.role,
+        ttl_seconds=body.ttl_seconds,
+    )
+    return {
+        "url": sfu.sfu_url(request.url.hostname or "localhost"),
+        "token": token,
+        "room": room,
+        "identity": identity,
+        "role": body.role,
+        "expires_at": expires_at,
+    }
+
+
+# --- Remote teleoperation (v1-only surface; see v1_router note above) ---
+
+
+@v1_router.get("/hosting", response_model=HostingStatusResponse, tags=["remote"])
+def get_hosting_status(request: Request):
+    """The station's hosting descriptor + status (remote_host.py). An
+    operator node reads this (through its registry) to learn the room, the
+    codec/fps, and the motor/camera schema before joining; the URL is
+    derived from the host the caller reached this API on."""
+    return remote_host.handle_hosting_status(request.url.hostname or "localhost")
+
+
+@v1_router.get("/remote-teleoperation", response_model=RemoteTeleoperationStatusResponse, tags=["remote"])
+def get_remote_teleoperation_status():
+    """The operator side's status (remote_teleoperate.py): which station,
+    which room, the remote cameras being re-streamed, Portal RTT metrics."""
+    return remote_teleoperate.handle_remote_teleoperation_status()
+
+
+@v1_router.get("/remote-teleoperation/camera/{name}", tags=["remote"])
+def get_remote_teleoperation_camera(name: str):
+    """MJPEG re-stream of one remote camera during a remote teleoperation
+    session, from the frames Portal delivers — the existing camera tiles
+    consume it unchanged. 404 when no session (or no such camera)."""
+    if not remote_teleoperate.remote_teleoperation_active or name not in remote_teleoperate.current_cameras:
+        raise ApiError(404, f"No remote camera named {name!r} is streaming.", code=ErrorCode.ROBOT_NOT_FOUND)
+    return StreamingResponse(
+        remote_teleoperate.camera_stream(name), media_type="multipart/x-mixed-replace; boundary=frame"
+    )
+
+
+class StationRobotBody(BaseModel):
+    """PUT /api/v1/station/robot — the robot this station hosts; null clears
+    the choice (hosting stops once idle and waits for a new pick)."""
+
+    robot: str | None = None
+
+
+@v1_router.get("/station", response_model=StationStatusResponse, tags=["remote"])
+def get_station_status():
+    """Station mode posture (remote_host.py): whether this machine was started
+    with --host, which robot it hosts, which saved robots it could host."""
+    return remote_host.handle_station_status()
+
+
+@v1_router.put("/station/robot", response_model=StationStatusResponse, tags=["remote"])
+def set_station_robot(body: StationRobotBody):
+    """Choose (or clear) the hosted robot. Remembered across restarts; a
+    parked, unseated hosting session of another robot yields and the
+    supervisor re-hosts the new choice within seconds; an engaged one is
+    refused with session.held."""
+    return remote_host.set_station_robot(body.robot)
+
+
+@v1_router.post("/remote-teleoperation/home", response_model=RemoteCommandResponse, tags=["remote"])
+def remote_teleoperation_home():
+    """Park the station's arm (return to rest, torque off) and hold it there
+    until Engage. Forwarded to the station as a Portal RPC; the station
+    honours it only from the seated operator."""
+    return remote_teleoperate.handle_remote_home()
+
+
+@v1_router.post("/remote-teleoperation/engage", response_model=RemoteCommandResponse, tags=["remote"])
+def remote_teleoperation_engage():
+    """Re-energize the station's arm after a Home, with a soft start."""
+    return remote_teleoperate.handle_remote_engage()
+
+
+@v1_router.get("/system/remote-extra", response_model=ExtraStatus, tags=["system"])
+def get_remote_extra():
+    """Whether the `remote` extra (LiveKit Portal's lerobot plugins) is importable."""
+    return handle_get_remote_extra()
+
+
+@v1_router.post("/system/remote-extra/install", response_model=InstallStartResponse, tags=["system"])
+def install_remote_extra():
+    """Spawn the Portal plugins' pip install as a background subprocess. No-op if already running."""
+    return handle_install_remote_extra()
+
+
+@v1_router.get("/system/remote-extra/install-status", response_model=InstallStatusResponse, tags=["system"])
+def install_remote_extra_status():
+    """Current install state plus any pending log lines (drained on read)."""
+    return handle_install_remote_extra_status()
+
+
+# --- Node registry (v1-only surface; see v1_router note above) ---
+
+
+class AddNodeBody(BaseModel):
+    url: str
+    name: str | None = None
+
+
+@v1_router.get("/nodes", response_model=NodeListResponse, tags=["nodes"])
+def list_nodes(request: Request, force: bool = False):
+    """All known nodes: this server first (is_self=true, built from the same
+    health fields the handshake reads, so clients render one uniform list),
+    then every registered peer. Peers whose last probe is older than the TTL
+    are re-verified inline; a peer that fails re-verification is reported
+    `unreachable` but kept until explicitly removed. `sources` names the
+    registered discovery sources, so a client can tell "no peers" apart from
+    "discovery is off". ?force=true is the manual-refresh contract: this one
+    pass bypasses the TTL — discovery runs now and every known entry is
+    probed now — so a refresh button answers with the world as it is, not as
+    it was up to TTL seconds ago."""
+    health = health_check(request)
+    self_entry = {
+        "url": None,  # a server doesn't know its own external address
+        "instance_id": health["instance_id"],
+        "name": None,
+        "version": health["version"],
+        "capabilities": health["capabilities"],
+        "status": "ok",
+        "last_verified_at": None,  # no handshake needed with ourselves
+        "last_seen_at": None,
+        "is_self": True,
+        "source": "manual",  # intrinsic, like a hand-added peer — never discovered
+    }
+    return {
+        "nodes": [self_entry, *handle_list_nodes(force=force)],
+        "sources": handle_list_node_sources(),
+    }
+
+
+@v1_router.post("/nodes", response_model=NodeEntry, tags=["nodes"])
+def add_node(body: AddNodeBody):
+    """Verify-on-add: GET {url}/api/v1/health and register the peer's
+    identity. 200 returns the entry (also when a known peer's URL is updated
+    in place); 422 request.validation for a non-http(s) url; 409 node.self /
+    node.duplicate; 502 node.unreachable when the handshake fails (dead host
+    or a non-node answer) — an unreachable peer is an error, never a pending
+    state."""
+    return handle_add_node(body.url, name=body.name)
+
+
+@v1_router.get("/nodes/{instance_id}/jobs", response_model=JobListResponse, tags=["nodes"])
+def get_node_jobs(instance_id: str):
+    """Server-to-server workload proxy: the peer's own typed GET /api/v1/jobs,
+    returned verbatim (the browser talks to ITS server; only servers talk to
+    peers). The response reuses JobListResponse because the peer runs this
+    same code — and on version skew the stance is passthrough: a newer peer's
+    additive fields are dropped by the model, never an error, so the proxy
+    doesn't break the moment one machine updates first. 404 node.not_found
+    for an unknown instance_id; 502 node.unreachable when the peer doesn't
+    answer (short timeout — a peer that can't list its jobs promptly is as
+    good as down for scheduling purposes)."""
+    return handle_get_node_jobs(instance_id)
+
+
+@v1_router.get("/nodes/{instance_id}/jobs/queue", response_model=JobQueueResponse, tags=["nodes"])
+def get_node_queue(instance_id: str):
+    """The peer's own typed GET /api/v1/jobs/queue, passed through — the EXACT
+    queue. The sibling jobs proxy reads the peer's default jobs page, which is
+    limited and can undercount queued runs on a busy peer; a client that shows
+    a queued count reads this instead. Same passthrough/version-skew stance
+    and error mapping as the jobs proxy."""
+    return handle_get_node_queue(instance_id)
+
+
+# The drill-in proxies below share the {job_id} segment with the queue proxy's
+# literal "queue"; the queue route is declared first, so FastAPI's first-match
+# routing keeps /jobs/queue answering as the queue (same note as the local
+# /jobs/{job_id} family).
+@v1_router.get("/nodes/{instance_id}/jobs/{job_id}", response_model=JobRecord, tags=["nodes"])
+def get_node_job(instance_id: str, job_id: str):
+    """Drill-in proxy: the peer's own GET /api/v1/jobs/{job_id}, passed
+    through verbatim (same passthrough/version-skew stance as the jobs proxy —
+    a newer peer's additive fields are dropped by the model, never an error).
+    404 node.not_found for an unknown instance_id; 502 node.unreachable for
+    ANY failure to read the peer, its own 404 for an unknown job included."""
+    return handle_get_node_job(instance_id, job_id)
+
+
+@v1_router.get("/nodes/{instance_id}/jobs/{job_id}/logs", response_model=JobLogsResponse, tags=["nodes"])
+def get_node_job_logs(instance_id: str, job_id: str):
+    """The peer's own GET /api/v1/jobs/{job_id}/logs, passed through. The peer
+    drains its runner's live queue per call, so this proxy is inherently
+    incremental — each call returns only the lines that arrived since the last
+    one, whoever made it. Same error mapping as the record proxy above."""
+    return handle_get_node_job_logs(instance_id, job_id)
+
+
+@v1_router.post(
+    "/nodes/{instance_id}/jobs/{job_id}/stop",
+    response_model=JobRecord,
+    tags=["nodes"],
+    # A repeated ?expect_state= must not silently resolve to one of its two
+    # contradictory values — see _refuse_repeated_query_keys.
+    dependencies=[Depends(_refuse_repeated_query_keys)],
+)
+def stop_node_job(instance_id: str, job_id: str, expect_state: JobState | None = None):
+    """Forward a stop/cancel to the peer, `expect_state` precondition included.
+
+    Error stance — subtly different from the GET proxies, where any HTTP error
+    counts as unreachable: a stop is a request the peer may REFUSE for its own
+    reasons (409 job.state_changed / job.has_queued_dependents, 404
+    job.not_found, …), and those coded refusals pass through with the PEER's
+    status and body, never re-wrapped as 502. Only transport-level failure is
+    502 node.unreachable; 404 node.not_found still names an unknown NODE."""
+    return handle_stop_node_job(instance_id, job_id, expect_state=expect_state)
+
+
+# 204 No Content, like the peer's own delete — no body to model, so the route
+# sits in RESPONSE_MODEL_EXEMPT (tests/test_api_contract.py).
+@v1_router.delete("/nodes/{instance_id}/jobs/{job_id}", status_code=204, tags=["nodes"])
+def delete_node_job(instance_id: str, job_id: str):
+    """Forward a delete to the peer (terminal runs only — the peer refuses the
+    rest). Same passthrough stance as the stop above: the peer's coded
+    refusals (409 job.has_children / job.has_queued_dependents, 404
+    job.not_found, …) keep THEIR status and body; only transport-level failure
+    is 502 node.unreachable, and 404 node.not_found names an unknown node."""
+    handle_delete_node_job(instance_id, job_id)
+
+
+@v1_router.get(
+    "/nodes/{instance_id}/policy-extra/{policy_type}", response_model=PolicyExtraStatus, tags=["nodes"]
+)
+def get_node_policy_extra(instance_id: str, policy_type: str):
+    """Environment proxy: the peer's own GET /api/v1/system/policy-extra/
+    {policy_type}, passed through — whether the extra the policy needs is
+    importable in THE PEER's environment, the one an offloaded run imports
+    from (the local answer is irrelevant to it). Same error mapping as the
+    other GET proxies: 404 node.not_found for an unknown instance_id, 502
+    node.unreachable for ANY failure to read the peer."""
+    return handle_get_node_policy_extra(instance_id, policy_type)
+
+
+@v1_router.get(
+    "/nodes/{instance_id}/policy-extra/{policy_type}/install-status",
+    response_model=InstallStatusResponse,
+    tags=["nodes"],
+)
+def get_node_policy_extra_status(instance_id: str, policy_type: str):
+    """The peer's own install-status, passed through. The peer drains pending
+    pip log lines per call, so this proxy is inherently incremental — like
+    the job-log proxy. Same error mapping as the GET proxies."""
+    return handle_get_node_policy_extra_status(instance_id, policy_type)
+
+
+@v1_router.post(
+    "/nodes/{instance_id}/policy-extra/{policy_type}/install",
+    response_model=InstallStartResponse,
+    tags=["nodes"],
+)
+def install_node_policy_extra(instance_id: str, policy_type: str):
+    """Forward the install to the peer: `pip install lerobot[<extra>]` runs
+    THERE, in the environment its training subprocesses import from. Mutation
+    stance, like the stop/delete proxies: the peer's own refusals keep THEIR
+    status and body; only transport-level failure is 502 node.unreachable,
+    and 404 node.not_found names an unknown node."""
+    return handle_install_node_policy_extra(instance_id, policy_type)
+
+
+@v1_router.post("/nodes/{instance_id}/restart", response_model=RestartResponse, tags=["nodes"])
+def restart_node(instance_id: str):
+    """Forward a restart to the peer (its own POST /api/v1/system/restart).
+    200 means the peer ANSWERED and scheduled its re-exec — expect it to flap
+    unreachable for a few seconds; the registry's probes pick it back up. The
+    peer's coded refusals (409 session.held / robot.busy.training /
+    system.restart_unsupported — or a plain 404 from a peer too old to have
+    the endpoint) pass through with THEIR status and body; only transport
+    failure is 502 node.unreachable."""
+    return handle_restart_node(instance_id)
+
+
+@v1_router.delete("/nodes/{instance_id}", response_model=NodeRemoveResponse, tags=["nodes"])
+def remove_node(instance_id: str):
+    """Remove a registered peer. 404 node.not_found for an unknown
+    instance_id (including a saved peer that has never completed a handshake
+    this run — those carry a null instance_id until verified)."""
+    return handle_remove_node(instance_id)
+
+
+@router.get("/hf-auth-status", response_model=HfAuthStatusResponse, tags=["system"])
 def hf_auth_status():
     """Check whether the local HF CLI is authenticated and return user info."""
     return handle_hf_auth_status()
@@ -615,7 +1873,7 @@ class HfLoginBody(BaseModel):
     token: str
 
 
-@app.post("/hf-auth/login")
+@router.post("/hf-auth/login", response_model=HfLoginResponse, tags=["system"])
 def hf_auth_login(body: HfLoginBody):
     """Persist a pasted HF token (validated against whoami) for this user."""
     try:
@@ -624,7 +1882,16 @@ def hf_auth_login(body: HfLoginBody):
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
-@app.get("/datasets")
+# exclude_unset: `saved_custom` exists only on pin-fold rows (absent, never
+# null, elsewhere) while `last_modified` is legitimately null on pinned rows —
+# unset-exclusion reproduces each producer's exact keys where None-exclusion
+# would eat the legitimate nulls.
+@router.get(
+    "/datasets",
+    response_model=list[DatasetListItem],
+    response_model_exclude_unset=True,
+    tags=["datasets"],
+)
 def datasets_list():
     """List datasets available to the user — Hub-owned + local cache.
 
@@ -633,7 +1900,7 @@ def datasets_list():
     return dataset_browser.list_all_datasets()
 
 
-@app.get("/datasets/info")
+@router.get("/datasets/info", response_model=DatasetInfoResponse, tags=["datasets"])
 def datasets_info(repo_id: str):
     """Detail card for one dataset. Local cache first (full detail: episodes,
     cameras, tasks, size on disk — ``source: "local"``); a dataset with no
@@ -649,7 +1916,7 @@ def datasets_info(repo_id: str):
     return info
 
 
-@app.get("/datasets/episodes")
+@router.get("/datasets/episodes", response_model=list[EpisodeSummary], tags=["datasets"])
 def datasets_episodes(repo_id: str):
     """Per-episode index/length/duration/tasks for the dataset viewer window.
     404 when the dataset isn't local or predates the v3.0 parquet episode
@@ -660,7 +1927,41 @@ def datasets_episodes(repo_id: str):
     return episodes
 
 
-@app.get("/datasets/episode-joints")
+@v1_router.get(
+    "/datasets/excluded-episodes",
+    response_model=ExcludedEpisodesResponse,
+    tags=["datasets"],
+)
+def datasets_excluded_episodes(repo_id: str):
+    """Episode indices the user excluded from training for this dataset
+    (curation, not deletion — see set_excluded_episodes). Empty list for a
+    dataset with no exclusions."""
+    return {"repo_id": repo_id, "episode_indices": get_excluded_episodes(repo_id)}
+
+
+class ExcludedEpisodesRequest(BaseModel):
+    repo_id: str
+    episode_indices: list[int]
+
+
+@v1_router.put(
+    "/datasets/excluded-episodes",
+    response_model=SetExcludedEpisodesResponse,
+    tags=["datasets"],
+)
+def datasets_set_excluded_episodes(request: ExcludedEpisodesRequest):
+    """Replace the excluded-episode set for one dataset. NEVER deletes or
+    mutates the dataset — the viewer computes the training subset from this
+    and sends it as dataset_episodes when launching a run."""
+    set_excluded_episodes(request.repo_id, request.episode_indices)
+    return {
+        "success": True,
+        "repo_id": request.repo_id,
+        "episode_indices": get_excluded_episodes(request.repo_id),
+    }
+
+
+@router.get("/datasets/episode-joints", response_model=EpisodeJointSeriesResponse, tags=["datasets"])
 def datasets_episode_joints(repo_id: str, episode_index: int):
     """Per-frame timestamp + joint (observation.state) values for one episode,
     for the dataset viewer's joint-position chart."""
@@ -672,7 +1973,7 @@ def datasets_episode_joints(repo_id: str, episode_index: int):
     return series
 
 
-@app.get("/datasets/episode-video")
+@router.get("/datasets/episode-video")
 def datasets_episode_video(repo_id: str, episode_index: int, camera: str):
     """The mp4 backing one camera's footage for one episode, served straight
     off disk. FileResponse handles Range requests, so the <video> element can
@@ -686,7 +1987,7 @@ def datasets_episode_video(repo_id: str, episode_index: int, camera: str):
     return FileResponse(video_path, media_type="video/mp4")
 
 
-@app.get("/datasets/hub-status")
+@router.get("/datasets/hub-status", response_model=DatasetHubStatusResponse, tags=["datasets"])
 def datasets_hub_status(repo_id: str):
     """Whether a dataset repo with this id exists on the Hub.
 
@@ -697,7 +1998,7 @@ def datasets_hub_status(repo_id: str):
     return dataset_browser.get_hub_status(repo_id)
 
 
-@app.get("/datasets/hub-settings")
+@router.get("/datasets/hub-settings", response_model=DatasetHubSettingsResponse, tags=["datasets"])
 def datasets_hub_settings(repo_id: str):
     """Current Hub-side visibility + tags for a dataset, for pre-filling the
     post-upload editor. Returns ``{repo_id, private, tags}``. 403/502 on a Hub
@@ -713,7 +2014,7 @@ class DatasetVisibilityBody(BaseModel):
     private: bool
 
 
-@app.post("/datasets/visibility")
+@router.post("/datasets/visibility", response_model=DatasetVisibilityResponse, tags=["datasets"])
 def datasets_visibility(body: DatasetVisibilityBody):
     """Flip a Hub dataset's visibility (public <-> private). MUTATES the live
     repo. 403 when the token can't write the namespace; 502 on any other Hub
@@ -729,7 +2030,7 @@ class DatasetTagsBody(BaseModel):
     tags: list[str]
 
 
-@app.post("/datasets/tags")
+@router.post("/datasets/tags", response_model=DatasetTagsResponse, tags=["datasets"])
 def datasets_tags(body: DatasetTagsBody):
     """Replace a Hub dataset card's ``tags:`` metadata. User tags run through
     with_makermodslab_tag first, so the required org tags are never dropped. MUTATES
@@ -746,19 +2047,27 @@ class DatasetRenameBody(BaseModel):
     new_name: str
 
 
-@app.post("/datasets/rename")
+@router.post("/datasets/rename", response_model=DatasetRenameResponse, tags=["datasets"])
 def datasets_rename(body: DatasetRenameBody):
-    """Rename a locally-cached dataset by moving its directory.
+    """Rename a locally-cached dataset by moving its directory, and its Hub
+    copy (if any) to match.
 
     `new_name` is the NAME PART ONLY — the namespace prefix stays fixed, so
     `ns/old` renamed to `new` becomes `ns/new`. Refuses (409) if the dataset is
-    being recorded, merged, or trained on locally. Returns the new repo_id.
+    being recorded, merged, or trained on locally, or if the new name is
+    already taken (locally or on the Hub).
+
+    Returns `{success, repo_id, hub}`, where `hub` is `"renamed"` (the Hub copy
+    moved too), `"none"` (the Hub has no copy of this dataset), or `"skipped"`
+    (the Hub step didn't run — offline, logged out, or someone else's
+    namespace — so a Hub copy, if any, kept its old name). The caller needs
+    that distinction to avoid claiming a Hub rename that didn't happen.
     """
     try:
-        new_repo_id = dataset_browser.rename_local_dataset(body.repo_id, body.new_name)
+        result = dataset_browser.rename_local_dataset(body.repo_id, body.new_name)
     except dataset_browser.DatasetRenameError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from exc
-    return {"success": True, "repo_id": new_repo_id}
+    return {"success": True, **result}
 
 
 class CustomDatasetRequest(BaseModel):
@@ -769,7 +2078,7 @@ class CustomDatasetRequest(BaseModel):
 _CUSTOM_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
 
 
-@app.post("/datasets/custom")
+@router.post("/datasets/custom", response_model=SuccessRepoIdResponse, tags=["datasets"])
 def datasets_save_custom(request: CustomDatasetRequest):
     """Pin a typed Hub dataset repo id so it persists in the picker listing.
 
@@ -789,7 +2098,7 @@ def datasets_save_custom(request: CustomDatasetRequest):
     return {"success": True, "repo_id": repo_id}
 
 
-@app.delete("/datasets/custom")
+@router.delete("/datasets/custom", response_model=SuccessRepoIdResponse, tags=["datasets"])
 def datasets_remove_custom(request: CustomDatasetRequest):
     """Unpin a saved custom dataset (does NOT touch the Hub or any local copy)."""
     repo_id = request.repo_id.strip()
@@ -798,7 +2107,7 @@ def datasets_remove_custom(request: CustomDatasetRequest):
     return {"success": removed, "repo_id": repo_id}
 
 
-@app.post("/datasets/hide")
+@router.post("/datasets/hide", response_model=SuccessRepoIdResponse, tags=["datasets"])
 def datasets_hide(request: CustomDatasetRequest):
     """Hide a Hub dataset from the picker listing ("remove from list").
 
@@ -816,7 +2125,7 @@ def datasets_hide(request: CustomDatasetRequest):
     return {"success": True, "repo_id": repo_id}
 
 
-@app.delete("/datasets/hide")
+@router.delete("/datasets/hide", response_model=SuccessRepoIdResponse, tags=["datasets"])
 def datasets_unhide(request: CustomDatasetRequest):
     """Unhide a dataset so it reappears in the listing (does NOT touch the Hub)."""
     repo_id = request.repo_id.strip()
@@ -829,7 +2138,7 @@ class DatasetDownloadRequest(BaseModel):
     repo_id: str
 
 
-@app.post("/datasets/download")
+@router.post("/datasets/download", response_model=DownloadStartResponse, tags=["datasets"])
 def datasets_download(request: DatasetDownloadRequest):
     """Download a Hub dataset into the local cache in the background.
 
@@ -846,7 +2155,7 @@ def datasets_download(request: DatasetDownloadRequest):
     return result
 
 
-@app.get("/datasets/download-status")
+@router.get("/datasets/download-status", response_model=DownloadStatusResponse, tags=["datasets"])
 def datasets_download_status():
     """Current download state (idle | running | done | error) + repo_id, message,
     and error once failed. Polled by the info card so a download survives
@@ -859,7 +2168,7 @@ class DatasetImportRequest(BaseModel):
     name: str | None = None
 
 
-@app.post("/datasets/import")
+@router.post("/datasets/import", response_model=ImportResponse, tags=["datasets"])
 def datasets_import(request: DatasetImportRequest):
     """Import a LeRobot dataset folder already on the server machine by COPYING
     it into the local cache (the user's source folder is left intact).
@@ -873,19 +2182,19 @@ def datasets_import(request: DatasetImportRequest):
         raise HTTPException(status_code=exc.status, detail=exc.message) from exc
 
 
-@app.post("/datasets/merge")
+@router.post("/datasets/merge", response_model=MergeStartResponse, tags=["datasets"])
 def datasets_merge(request: MergeRequest):
     """Aggregate 2+ datasets into a new local dataset in the background."""
     return handle_start_merge(request)
 
 
-@app.get("/datasets/merge/status")
+@router.get("/datasets/merge/status", response_model=MergeStatusResponse, tags=["datasets"])
 def datasets_merge_status():
     """Current merge state + drained log lines (idle | running | done | error)."""
     return handle_merge_status()
 
 
-@app.websocket("/ws/joint-data")
+@router.websocket("/ws/joint-data")
 async def websocket_endpoint(websocket: WebSocket):
     logger.info("🔗 New WebSocket connection attempt")
     try:
@@ -917,7 +2226,7 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.info("🧹 WebSocket connection cleaned up")
 
 
-@app.post("/start-recording")
+@router.post("/start-recording")
 def start_recording(request: RecordingRequest):
     """Start a dataset recording session.
 
@@ -926,14 +2235,15 @@ def start_recording(request: RecordingRequest):
     400 for a malformed dataset name."""
     result = handle_start_recording(request)
     if not result.get("success"):
-        raise HTTPException(
+        raise ApiError(
             status_code=result.get("status_code", 500),
             detail=result.get("message", "Failed to start recording"),
+            code=result.get("code"),
         )
     return result
 
 
-@app.post("/stop-recording")
+@router.post("/stop-recording")
 def stop_recording(discard: bool = False):
     """End the current recording session.
 
@@ -945,13 +2255,13 @@ def stop_recording(discard: bool = False):
     return handle_stop_recording(discard=discard)
 
 
-@app.get("/recording-status")
+@router.get("/recording-status")
 def recording_status():
     """Get the current recording status"""
     return handle_recording_status()
 
 
-@app.get("/recording-log")
+@router.get("/recording-log")
 def recording_log():
     """Tail of the current/most-recent recording session's log (read-only,
     bounded ring buffer). Returns {logs}; empty (not an error) before a session
@@ -959,33 +2269,61 @@ def recording_log():
     return handle_recording_log()
 
 
-@app.post("/recording-exit-early")
+@router.post("/recording-exit-early")
 def recording_exit_early():
     """Skip to next episode (replaces right arrow key)"""
     return handle_exit_early()
 
 
-@app.post("/recording-rerecord-episode")
+@router.post("/recording-rerecord-episode")
 def recording_rerecord_episode():
     """Re-record current episode (replaces left arrow key)"""
     return handle_rerecord_episode()
 
 
-@app.post("/recording-pause")
+@router.post("/recording-pause")
 def recording_pause():
     """Pause the reset-phase gap between episodes (mouse-only, no keyboard
     shortcut). No-ops outside the reset phase — see handle_pause_recording."""
     return handle_pause_recording()
 
 
-@app.post("/recording-resume")
+@router.post("/recording-resume")
 def recording_resume():
     """Resume a paused reset-phase gap. No-ops if not currently paused —
     see handle_resume_recording."""
     return handle_resume_recording()
 
 
-@app.post("/upload-dataset")
+class EpisodeTaskBody(BaseModel):
+    task: str
+
+
+class RecordingControlResponse(BaseModel):
+    """The 200 body of a recording control verb: `success` is False for a
+    legitimately refused request (wrong phase, empty task) that still returns
+    200 — the frontend reads this flag, not just the status code."""
+
+    success: bool
+    message: str
+
+
+@v1_router.post(
+    "/recording-episode-task",
+    response_model=RecordingControlResponse,
+    tags=["recording"],
+)
+def recording_episode_task(body: EpisodeTaskBody):
+    """Set the upcoming episode's task and start recording after environment
+    reset. An empty description or a submission outside the naming phase
+    comes back 200 + {success: false}."""
+    return handle_submit_episode_task(body.task)
+
+
+# Tagged "datasets": handled in record.py for historical reasons, but this is a
+# dataset-library operation (push a recorded dataset to the Hub), not part of
+# the recording session flow.
+@router.post("/upload-dataset", response_model=UploadStartResponse, tags=["datasets"])
 def upload_dataset(request: UploadRequest):
     """Start a background upload of a local dataset to the Hub.
 
@@ -998,13 +2336,21 @@ def upload_dataset(request: UploadRequest):
     return result
 
 
-@app.get("/upload-status")
+# exclude_unset: `docs_url` is set only alongside an auth-failure message
+# (absent otherwise, never null), while repo_id/message/dataset_url ARE null in
+# the idle state — unset-exclusion keeps both behaviors byte-identical.
+@router.get(
+    "/upload-status",
+    response_model=UploadStatusResponse,
+    response_model_exclude_unset=True,
+    tags=["datasets"],
+)
 def upload_status():
     """Current upload state + repo_id, message, and dataset_url once done."""
     return handle_upload_status()
 
 
-@app.post("/delete-dataset")
+@router.post("/delete-dataset", response_model=DeleteDatasetResponse, tags=["datasets"])
 def delete_dataset(request: DatasetInfoRequest):
     """Remove a recorded dataset directory from local disk."""
     return handle_delete_dataset(request)
@@ -1018,7 +2364,16 @@ def delete_dataset(request: DatasetInfoRequest):
 # Hub models are the user's LeRobot policy repos. See makermodslab/models.py.
 
 
-@app.get("/models")
+# exclude_unset: the listing merges four producers whose rows carry different
+# key sets (repo_id/private/target_steps/state/saved_custom are absent — never
+# null — outside their producer) while other keys are legitimately null; see
+# ModelListItem. Unset-exclusion reproduces each producer's exact keys.
+@router.get(
+    "/models",
+    response_model=list[ModelListItem],
+    response_model_exclude_unset=True,
+    tags=["models"],
+)
 def models_list():
     """List trained models available to the user — local runs + Hub repos.
 
@@ -1027,7 +2382,38 @@ def models_list():
     return model_browser.list_all_models()
 
 
-@app.get("/models/info")
+# exclude_unset for the same reason as GET /models: the rows come from the same
+# four producers, whose key sets differ (see SkillListItem).
+@v1_router.get(
+    "/skills",
+    response_model=SkillsResponse,
+    response_model_exclude_unset=True,
+    tags=["models"],
+)
+def skills_list():
+    """Every trained policy, each saying whether it can actually run.
+
+    The deployable projection of the same merged build `/models` serves, so the
+    deploy picker and the models library can no longer disagree about what a
+    skill is — they were reading two different endpoints (`/models` and the
+    `/jobs` registry) and filtering them on two different rules.
+
+    Envelope, not a bare array: `{skills, hub}`. `hub` reports whether the Hub
+    half was reachable, because "the Hub is down" and "you own no skills" used
+    to render identically as an empty list. Each row carries `weights`
+    (ready/unverified/none), `superseded_by`, `deployable`, `origin` and the
+    `job_id` that deploys it."""
+    return model_browser.list_skills()
+
+
+# exclude_unset for the same reason as GET /models: the local/hub/probe
+# branches carry different key sets (see ModelInfoResponse).
+@router.get(
+    "/models/info",
+    response_model=ModelInfoResponse,
+    response_model_exclude_unset=True,
+    tags=["models"],
+)
 def models_info(id: str):
     """Detail card for one model: policy type, base dataset, steps, size, and the
     local path (local) or Hub repo (hub). `id` is a local run id or a Hub repo id
@@ -1043,38 +2429,101 @@ class ModelUploadBody(BaseModel):
     repo_id: str | None = None
 
 
-@app.post("/models/upload")
+@router.post("/models/upload", response_model=ModelUploadResponse, tags=["models"])
 def models_upload(body: ModelUploadBody):
     """Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged
     model repo. MUTATES the Hub (creates/updates the repo). 403 when
     the token can't write the namespace; 404 when the local model has no saved
-    checkpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}."""
+    checkpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.
+
+    The single-checkpoint synchronous push, frozen for SDK clients — including
+    its ON-HUB SHAPE: files land at the repo root, loadable by a plain
+    from_pretrained(repo_id) (root_layout=True). The training view's
+    multi-checkpoint picker uses POST /api/v1/models/publish instead, which
+    step-addresses under checkpoints/<step>/."""
     try:
-        return model_browser.upload_local_model(body.id, body.repo_id)
+        return model_browser.upload_local_model(body.id, body.repo_id, root_layout=True)
     except model_browser.ModelError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+@v1_router.get("/models/checkpoints", response_model=RunCheckpointsResponse, tags=["models"])
+def models_checkpoints(id: str):
+    """The publish picker's source of truth for one local run: every checkpoint
+    it saved, which steps are already on the Hub, and the repo a publish would
+    target. `id` is a run id (query param for symmetry with /models/info).
+    404 when the run has no uploadable checkpoint."""
+    try:
+        return model_browser.list_run_checkpoints(id)
+    except model_browser.ModelError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+class ModelPublishBody(BaseModel):
+    id: str
+    repo_id: str | None = None
+    # Which checkpoints to publish. Omitted ⇒ the run's final checkpoint only.
+    # Every step lands in the SAME repo under checkpoints/<step>/pretrained_model,
+    # so a later call adds to the same model card instead of creating a second repo.
+    steps: list[int] | None = None
+
+
+@v1_router.post("/models/publish", response_model=ModelPublishStartResponse, tags=["models"])
+def models_publish(body: ModelPublishBody):
+    """START publishing a local run's checkpoints to the Hub as ONE PUBLIC,
+    MakerModsLab-tagged model repo. MUTATES the Hub (creates/updates the repo).
+
+    Returns immediately with {started, model_id, message} — the queue runs
+    sequentially in a background thread (a run's worth of checkpoints is
+    gigabytes, far past what an inline request should hold open) and
+    GET /api/v1/models/publish-status reports progress. 409 when a publish is
+    already running; the per-step failures (400 offline, 403 permission, 404
+    unknown step, 502 Hub) surface through that status, not this call."""
+    try:
+        result = model_browser.model_upload_manager.start(body.id, body.repo_id, body.steps)
+    except model_browser.ModelError as exc:
+        # A worker that could not even be spawned — the manager has already
+        # released the slot (state "error"), so this is a 500, not a 409.
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+    if not result.get("started"):
+        raise HTTPException(status_code=409, detail=result.get("message", "Publish busy"))
+    return result
+
+
+@v1_router.get("/models/publish-status", response_model=ModelPublishStatusResponse, tags=["models"])
+def models_publish_status():
+    """Poll the single background publish: state (idle/running/done/error),
+    target repo + url, `done`/`total`/`current_step` for the queue position, and
+    `done_steps` — the steps already on the Hub, which stay meaningful after an
+    error because a failed queue keeps everything it published before it died."""
+    return model_browser.model_upload_manager.get_status()
 
 
 class ModelDeleteBody(BaseModel):
     id: str
 
 
-@app.post("/models/delete")
+@router.post("/models/delete", response_model=ModelDeleteResponse, tags=["models"])
 def models_delete(body: ModelDeleteBody):
     """Delete a local model — its training run's output dir (strictly sandboxed
     under outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404
-    unknown; 409 when the run is still training; 502 on a delete failure."""
+    unknown; 409 when the run is still training or queued (job.not_terminal —
+    only a terminal run has artifacts to delete; a queued run is cancelled on
+    the jobs surface, never through here); 502 on a delete failure."""
     try:
         return model_browser.delete_local_model(body.id)
     except model_browser.ModelError as exc:
-        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+        # ApiError so a machine-readable `code` (when the refusal carries one)
+        # rides beside the legacy string detail; the body shape is unchanged
+        # for code-less refusals.
+        raise ApiError(status_code=exc.status, detail=exc.message, code=exc.code) from exc
 
 
 class CustomModelRequest(BaseModel):
     repo_id: str
 
 
-@app.post("/models/custom")
+@router.post("/models/custom", response_model=SuccessRepoIdResponse, tags=["models"])
 def models_save_custom(request: CustomModelRequest):
     """Pin a Hub model repo id so it persists in the /models listing.
 
@@ -1092,7 +2541,7 @@ def models_save_custom(request: CustomModelRequest):
     return {"success": True, "repo_id": repo_id}
 
 
-@app.delete("/models/custom")
+@router.delete("/models/custom", response_model=SuccessRepoIdResponse, tags=["models"])
 def models_remove_custom(request: CustomModelRequest):
     """Unpin a saved custom model (does NOT touch the Hub or any local copy)."""
     repo_id = request.repo_id.strip()
@@ -1101,7 +2550,7 @@ def models_remove_custom(request: CustomModelRequest):
     return {"success": removed, "repo_id": repo_id}
 
 
-@app.post("/models/hide")
+@router.post("/models/hide", response_model=SuccessRepoIdResponse, tags=["models"])
 def models_hide(request: CustomModelRequest):
     """Hide a Hub model from the picker listing ("remove from list").
 
@@ -1117,7 +2566,7 @@ def models_hide(request: CustomModelRequest):
     return {"success": True, "repo_id": repo_id}
 
 
-@app.delete("/models/hide")
+@router.delete("/models/hide", response_model=SuccessRepoIdResponse, tags=["models"])
 def models_unhide(request: CustomModelRequest):
     """Unhide a model so it reappears in the listing (does NOT touch the Hub)."""
     repo_id = request.repo_id.strip()
@@ -1130,7 +2579,7 @@ class ModelDownloadRequest(BaseModel):
     repo_id: str
 
 
-@app.post("/models/download")
+@router.post("/models/download", response_model=DownloadStartResponse, tags=["models"])
 def models_download(request: ModelDownloadRequest):
     """Download a Hub model checkpoint into the local models dir in the
     background. Returns immediately with {started, repo_id, message}; poll
@@ -1147,7 +2596,7 @@ def models_download(request: ModelDownloadRequest):
     return result
 
 
-@app.get("/models/download-status")
+@router.get("/models/download-status", response_model=DownloadStatusResponse, tags=["models"])
 def models_download_status():
     """Current model-download state (idle | running | done | error) + repo_id,
     message, and error once failed. Polled by the model info card so a download
@@ -1160,7 +2609,7 @@ class ModelImportRequest(BaseModel):
     name: str | None = None
 
 
-@app.post("/models/import")
+@router.post("/models/import", response_model=ImportResponse, tags=["models"])
 def models_import(request: ModelImportRequest):
     """Import a policy checkpoint folder already on the server machine by
     COPYING it into the local models dir (the source folder is left intact).
@@ -1180,11 +2629,108 @@ def models_import(request: ModelImportRequest):
 # ============================================================================
 
 
-@app.post("/jobs/training", status_code=201)
+def _job_label(job_id: str) -> str:
+    """A run named the way its row names it: `#46 'alias' (id)`.
+
+    For refusal messages that have to point at a *different* run than the one
+    the user acted on — "delete X first" is only actionable if X is findable in
+    the list. All three parts earn their place: the NUMBER is what the UI shows
+    and what a person can repeat back; the NAME is shared by every run on a
+    resume chain, so it locates the lineage but not the run; the ID is the
+    unambiguous one and the only one that survives a rename.
+
+    Degrades a part at a time — an unnumbered record (pre-backfill) or an
+    unnamed one just drops that piece, and an id the registry no longer holds
+    falls back to the bare id.
+    """
+    try:
+        record = job_registry.get(job_id)
+    except JobNotFoundError:
+        return repr(job_id)
+    name = (record.display_name or record.name or "").strip()
+    label = f"{name!r} ({job_id})" if name else repr(job_id)
+    return f"#{record.job_number} {label}" if record.job_number > 0 else label
+
+
+def _is_finished_run(job_id: str) -> bool:
+    """True when the run reached its target — i.e. holds finished training.
+
+    Used to keep refusal messages from casually recommending its deletion. An
+    unresolvable id reads as False: the message degrades to the plainer advice
+    rather than inventing a reason to keep something that may not exist.
+    """
+    try:
+        return job_registry.get(job_id).state == "done"
+    except JobNotFoundError:
+        return False
+
+
+def _wire_job_record(record: JobRecord) -> JobRecord:
+    """The wire view of a JobRecord: `output_dir` relative to the training
+    output root.
+
+    A run's output_dir is `<output_root>/<id>/run` — an absolute path into
+    this machine's home directory, shipped verbatim in every /jobs response
+    (and, under `--lan`, to everyone on the network; the delete route already
+    scrubs the same path from its error bodies for exactly this reason). No
+    consumer needs the prefix: the frontend uses output_dir for display and
+    search only, and the LanNodeJobRunner discards it. An IMPORTED record's
+    output_dir is the user's own import path — data, not a leak — and it
+    lives outside the root, so the prefix test leaves it (and any legacy
+    out-of-root record) untouched. Registry-internal callers keep the
+    absolute form: this wraps route returns only, on the copies the registry
+    read paths already hand out."""
+    out = record.output_dir or ""
+    root = str(job_registry._output_root)
+    if out == root or out.startswith(root + os.sep):
+        return record.model_copy(update={"output_dir": os.path.relpath(out, root)})
+    return record
+
+
+@router.post("/jobs/training", status_code=201, response_model=JobRecord, tags=["jobs"])
 async def create_training_job(req: Request):
-    raw = await req.json()
-    body = StartTrainingBody.from_legacy(raw)
+    # The body is parsed BY HAND (from_legacy accepts two shapes, which no
+    # single response-model annotation can express), so the two failures
+    # FastAPI normally absorbs — unparsable JSON, a body that fails pydantic
+    # validation — surfaced here as uncaught exceptions, i.e. 500s that told
+    # the caller nothing. Re-raise both as RequestValidationError so the
+    # app-wide handler answers exactly what a declared body would have: 422,
+    # FastAPI's error-list `detail` shape, `request.validation` beside it.
+    try:
+        raw = await req.json()
+    except json.JSONDecodeError as exc:
+        raise RequestValidationError(
+            [{"type": "json_invalid", "loc": ("body", exc.pos), "msg": "JSON decode error", "input": {}}]
+        ) from exc
+    if not isinstance(raw, dict):
+        # from_legacy assumes a JSON object (it probes raw["config"]); a valid
+        # non-object body ("[]", "5") is the same caller mistake as a failed
+        # field, not a crash.
+        raise RequestValidationError(
+            [
+                {
+                    "type": "model_attributes_type",
+                    "loc": ("body",),
+                    "msg": "Input should be an object",
+                    "input": raw,
+                }
+            ]
+        )
+    try:
+        body = StartTrainingBody.from_legacy(raw)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
     cfg = body.config
+    # A lan_node target without a node is unroutable — refuse with the same
+    # 422 + code a malformed body would get, before any slower preflight.
+    # (JobRegistry.start re-checks as belt-and-braces, mirroring the flavor
+    # guard; that copy surfaces as a plain 400 for non-HTTP callers.)
+    if body.target is not None and body.target.runner == "lan_node" and not body.target.node_instance_id:
+        raise ApiError(
+            status_code=422,
+            detail="target.node_instance_id is required when target.runner is 'lan_node'",
+            code=ErrorCode.REQUEST_VALIDATION,
+        )
     # Soft warning (not a block): lerobot saves/logs on `step % freq == 0`, so a
     # frequency larger than the total step count means the action never fires —
     # no checkpoint gets saved / no metrics logged. Almost always a config
@@ -1205,6 +2751,13 @@ async def create_training_job(req: Request):
     # Hard block (not a warning): when resuming, the total step count must be
     # strictly above the checkpoint's step — lerobot requires --steps be raised
     # above the resumed checkpoint, and steps == checkpoint would train nothing.
+    #
+    # This is the FAST half only, and cannot be the whole guard: it reads the
+    # request's `resume_from_step`, which is None whenever the caller picked
+    # "latest checkpoint" and left the step for the registry to resolve. Those
+    # requests walk straight past this. JobRegistry.start re-asks the same
+    # question at the bottom of its resume block, once the step is a number;
+    # that one is the authority, and it raises ValueError -> the 400 below.
     if cfg.resume_from_step is not None and cfg.steps <= cfg.resume_from_step:
         logger.warning(
             "Rejecting resume: steps (%d) <= checkpoint step (%d).",
@@ -1219,18 +2772,76 @@ async def create_training_job(req: Request):
             ),
         )
     try:
-        record = job_registry.start(body.config, body.target)
-    except JobAlreadyRunningError as exc:
-        raise HTTPException(status_code=409, detail=f"Job already running: {exc}") from exc
-    except DatasetNotOnHubError as exc:
-        # Cloud run on a local-only dataset. 409: the caller must upload the
-        # dataset first (the browser flow does this automatically before
-        # submitting, so this fires for non-UI callers).
+        # Off the event loop: start()'s remote preflight makes real network
+        # calls (hub status, the emptiness probe, lan_node peer verification),
+        # each worth a full round-trip timeout on the slow/flaky connections
+        # this app is designed for — run inline they'd stall every other
+        # request for the duration.
+        record = await asyncio.to_thread(job_registry.start, body.config, body.target)
+    except (DatasetNotOnHubError, DatasetHubCopyEmptyError) as exc:
+        # Remote run on a dataset the remote side can't fetch: local-only
+        # (upload it first — the browser flow does so automatically, so this
+        # fires for non-UI callers), or a Hub repo that exists but is empty
+        # (an interrupted upload) with no local copy the runner could refill
+        # it from. 409 both ways: a conflict with Hub state the caller has to
+        # resolve before the run can proceed, not a malformed request.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except JobAlreadyContinuedError as exc:
+        # Sticks only: the source already has a continuation, so a second one
+        # would fork it. 409 for the same reason the mid-chain delete refusal
+        # is a 409 — a conflict with existing state, not a malformed request —
+        # and routed here the same way, with the ids turned into a message at
+        # this layer rather than baked into the exception.
+        #
+        # The message has to TEACH the way out, because the way out is not
+        # obvious from the refusal — but which way out is honest depends on what
+        # is standing in the way, and getting that wrong is worse than saying
+        # nothing. Two shapes:
+        #
+        #  - ONE unfinished continuation (every lineage the sticks rule can
+        #    create): deleting it is cheap and correct, so say so.
+        #  - a LEGACY FORK, or a continuation that ran to completion: "delete
+        #    the continuation(s) first" is advice to throw away work. On the
+        #    user's own registry this fired for a parent whose two children
+        #    included a finished 30k run — the single run in that lineage
+        #    nobody should delete. Recommend fine-tune instead: it starts a
+        #    fresh schedule from the same weights, is not restricted to one per
+        #    run, and needs nothing deleted.
+        continued_by = ", ".join(_job_label(cid) for cid in exc.child_ids)
+        source = _job_label(exc.job_id)
+        finished = [_job_label(cid) for cid in exc.child_ids if _is_finished_run(cid)]
+        if len(exc.child_ids) == 1 and not finished:
+            remedy = f"A run can be continued once, so delete {continued_by} first, then resume {source}."
+        else:
+            cost = (
+                f", including the finished {'runs' if len(finished) > 1 else 'run'} {', '.join(finished)}"
+                if finished
+                else ""
+            )
+            remedy = (
+                f"A run can be continued once, so resuming {source} would mean first "
+                f"deleting {continued_by}{cost}. Fine-tune from {source}'s checkpoint "
+                "instead — that starts a fresh schedule from the same weights, needs "
+                "nothing deleted, and is not limited to one per run."
+            )
+        raise HTTPException(
+            status_code=409,
+            detail=f"{source} was already continued by {continued_by}. {remedy}",
+        ) from exc
+    except NodeNotFoundError as exc:
+        # The request named a node this install has never registered — a bad
+        # reference in the request, so 400 (not the DELETE route's 404: there
+        # is no /nodes/{id} resource being addressed here).
+        raise ApiError(status_code=400, detail=str(exc), code=ErrorCode.NODE_NOT_FOUND) from exc
+    except NodeUnreachableError as exc:
+        # Same status the node routes use for a peer that didn't answer.
+        # Raised by the pre-record resolve (no record) or by the runner's
+        # submission (record already finalised `failed` by the registry).
+        raise ApiError(status_code=502, detail=str(exc), code=ErrorCode.NODE_UNREACHABLE) from exc
     except ValueError as exc:
         # e.g. "flavor is required when runner is hf_cloud"
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return record
+    return _wire_job_record(record)
 
 
 class ImportModelRequest(BaseModel):
@@ -1238,7 +2849,7 @@ class ImportModelRequest(BaseModel):
     name: str | None = None
 
 
-@app.post("/jobs/import", status_code=201)
+@router.post("/jobs/import", status_code=201, response_model=JobRecord, tags=["jobs"])
 def import_model(body: ImportModelRequest):
     """Register an external model (local dir or HF repo) as a pseudo-job.
 
@@ -1246,22 +2857,23 @@ def import_model(body: ImportModelRequest):
     returns the EXISTING record (id and display alias preserved), and the
     response carries `already_imported: true` with a 200 (not 201) so the
     frontend can say "already imported" instead of pretending a new entry
-    was created."""
+    was created. That branch is a JSONResponse and passes through the
+    declared response_model untouched — the model documents the 201."""
     try:
         existing = job_registry.find_imported(body.source)
         record = job_registry.register_imported(body.source, body.name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if existing is not None and existing.id == record.id:
-        payload = record.model_dump(mode="json")
+        payload = _wire_job_record(record).model_dump(mode="json")
         payload["already_imported"] = True
         return JSONResponse(status_code=200, content=payload)
-    return record
+    return _wire_job_record(record)
 
 
-@app.get("/jobs")
+@router.get("/jobs", response_model=JobListResponse, tags=["jobs"])
 def list_jobs(limit: int = 10):
-    return {"jobs": job_registry.list(limit=limit)}
+    return {"jobs": [_wire_job_record(r) for r in job_registry.list(limit=limit)]}
 
 
 # A MakerMods Lab cloud-training run repo is named "<policy>_<namespace>_<dataset>_<ts>"
@@ -1281,6 +2893,245 @@ _HUB_ACTIVE_STAGES = {"RUNNING", "QUEUED", "SCHEDULING"}
 def _hub_job_stage(ji) -> str:
     """Uppercased status stage of a huggingface_hub JobInfo ('' when absent)."""
     return (ji.status.stage or "").upper() if ji.status else ""
+
+
+# The label keys a submitted job may carry, newest first. `makermodslab_run` is
+# what hf_cloud._RUN_LABEL writes now; the dotted key is read but never written
+# — the Hub now rejects a "key=value" tag containing a dot, so it was renamed,
+# and every job submitted before that still carries the old one.
+_HUB_RUN_LABELS = ("makermodslab_run", "makermodslab.run")
+
+
+def _hub_job_argv(ji) -> list:
+    """A Hub job's argv as one flat list, POSITIONS PRESERVED.
+
+    `arguments` is where the Hub splits argv for some submission paths; ours
+    rides entirely in `command`. Both are scanned so neither shape is missed.
+
+    Non-string tokens are deliberately NOT dropped. Removing them would close
+    the gap they leave and make two tokens adjacent that never were, so
+    `--policy.type` followed by a non-string would read the token after it as
+    its value. They are left in place and rejected by `_argv_value` instead.
+    """
+    return [*(getattr(ji, "command", None) or []), *(getattr(ji, "arguments", None) or [])]
+
+
+def _argv_value(argv: list, flag: str) -> str | None:
+    """The value of `--flag value` or `--flag=value` in argv; None if absent.
+
+    Both spellings occur in the same command line: build_training_command
+    (train.py) emits the space form for most flags but the '=' form for
+    `--config_path` / `--policy.pretrained_path`, where lerobot's own
+    pre-parser only accepts '='. Empty and whitespace-only values read as
+    absent — an empty flag value carries no more information than no flag.
+
+    A space-form value that is itself option-shaped is rejected. A dangling
+    `--policy.pretrained_path` immediately before `--resume true` would
+    otherwise yield the base model "--resume", and with it a confident
+    "Fine-tune" chip on a run that is nothing of the kind. No value we look for
+    can legitimately begin with "--": they are repo ids, policy names and step
+    counts.
+    """
+    prefix = flag + "="
+    for i, tok in enumerate(argv):
+        if not isinstance(tok, str):
+            continue
+        value = None
+        if tok == flag and i + 1 < len(argv):
+            nxt = argv[i + 1]
+            if isinstance(nxt, str) and not nxt.startswith("--"):
+                value = nxt
+        elif tok.startswith(prefix):
+            value = tok[len(prefix) :]
+        if value is not None and value.strip():
+            return value.strip()
+    return None
+
+
+def _hub_job_run_name(ji) -> str | None:
+    """The training run's name for a Hub job, or None when it can't be derived.
+
+    Every cloud run launches on the same image, so the frontend's
+    docker_image fallback titles ALL of them "huggingface/lerobot-gpu:latest".
+    A run launched from this machine is spared that because a local JobRecord
+    carries its name — one launched from a teammate's machine has no such
+    record, and the name has to come off the Hub instead.
+
+    Two sources, preferred first:
+    1. The run label hf_cloud stamps at submission (either spelling).
+    2. `--policy.repo_id` in the job's own argv. Every cloud run publishes to
+       "<user>/<run slug>", so this recovers a name for jobs submitted before
+       labelling existed — the whole existing backlog.
+    """
+    labels = getattr(ji, "labels", None) or {}
+    for key in _HUB_RUN_LABELS:
+        labelled = labels.get(key)
+        if isinstance(labelled, str) and labelled.strip():
+            return labelled.strip()
+
+    repo_id = _argv_value(_hub_job_argv(ji), "--policy.repo_id")
+    # The slug after the namespace is the run id the library titles by.
+    return repo_id.rsplit("/", 1)[-1] if repo_id else None
+
+
+def _hub_job_provenance(ji) -> dict:
+    """What a Hub job started FROM, read off its own argv.
+
+    Four kinds, so a card can say what a run IS at a glance:
+
+      * `finetune`   — fresh optimizer from a base checkpoint the user chose.
+      * `foundation` — fresh optimizer from the public foundation checkpoint a
+                       VLA policy defaults to. NOT a fine-tune in the sense the
+                       user means: JobRegistry.start pins
+                       `policy_pretrained_path` to lerobot/smolvla_base (and the
+                       pi0 family's equivalents) for ANY such run that names no
+                       starting point, so treating a bare `--policy.pretrained_path`
+                       as a fine-tune would mislabel every from-scratch VLA run.
+      * `resume`     — a continuation of an earlier run.
+      * `scratch`    — random weights.
+
+    Read from argv rather than from Hub labels because a label cannot carry a
+    repo id at all: the Hub validates label keys and values under its `tags`
+    rules (alphanumeric, '-', '_', '=' — see _RUN_LABEL in runners/hf_cloud.py),
+    and every repo id contains a '/'. argv also covers the whole existing
+    backlog, and is what actually ran.
+
+    `--config_path` is deliberately NOT consulted. On a cloud continuation it
+    holds a CONTAINER path ("/tmp/makermodslab/train/checkpoints/.../train_config.json",
+    set in runners/hf_cloud.py) that names nothing the user could recognize. The
+    real source rides in the wrapper's own `--resume-from=<repo>@checkpoints/<step>`
+    directive, which is part of the submitted command and so visible here.
+
+    Absent facts are omitted rather than guessed: build_training_command's
+    resume branch emits neither `--dataset.repo_id` nor `--policy.type` (lerobot
+    reconstructs both from the checkpoint config), so a continuation simply has
+    no value for them.
+    """
+    argv = _hub_job_argv(ji)
+    out: dict[str, object] = {
+        "kind": "scratch",
+        "base_ref": None,
+        "base_repo": None,
+        "base_step": None,
+        "base_job_id": None,
+        "dataset_repo_id": _argv_value(argv, "--dataset.repo_id"),
+        "policy_type": _argv_value(argv, "--policy.type"),
+        "steps": _argv_value(argv, "--steps"),
+    }
+
+    pretrained = _argv_value(argv, "--policy.pretrained_path")
+    resume_from = _argv_value(argv, "--resume-from")
+
+    if resume_from:
+        out["kind"] = "resume"
+        out["base_ref"] = resume_from
+    elif pretrained:
+        # A run whose base is one of the public foundation checkpoints was
+        # defaulted there, not pointed there by the user.
+        out["kind"] = "foundation" if pretrained in _KNOWN_FOUNDATION_BASE_REPO_IDS else "finetune"
+        out["base_ref"] = pretrained
+    elif (_argv_value(argv, "--resume") or "").lower() == "true":
+        # Submitted before the wrapper carried --resume-from; we know it
+        # continued something but not what.
+        out["kind"] = "resume"
+
+    base_ref = out["base_ref"]
+    if isinstance(base_ref, str):
+        # hub_ref_* fall back to the whole ref when it isn't step-suffixed, so a
+        # plain repo id passes through as its own repo with no step.
+        repo = hub_ref_repo_id(base_ref)
+        step = hub_ref_step_label(base_ref)
+        if step == base_ref and "@checkpoints/" in base_ref:
+            # hub_ref_* only split a DIGIT step dir, but hf_cloud can emit
+            # "<repo>@checkpoints/last". Without this the whole raw ref would
+            # land in base_repo and be rendered at the user (R2).
+            repo, _, step = base_ref.partition("@checkpoints/")
+        out["base_repo"] = repo
+        out["base_step"] = step if step != base_ref else None
+        # A "<user>/<job id>_checkpoints" base is a STAGING repo holding a local
+        # run's uploaded checkpoint (checkpoints_staging_repo_id in jobs.py).
+        # The job id inside it is the thing a person recognizes; the repo id is
+        # plumbing. Recovered here, next to the rule that mints it, rather than
+        # sniffed for in the frontend.
+        slug = repo.rsplit("/", 1)[-1]
+        if slug.endswith(CHECKPOINTS_STAGING_SUFFIX):
+            out["base_job_id"] = slug[: -len(CHECKPOINTS_STAGING_SUFFIX)]
+
+    return out
+
+
+# The trainer flags worth reading back off a Hub job, and the JSON key each one
+# becomes on the listing row. Deliberately a small allowlist rather than "parse
+# everything": these four are what an untracked row renders (title, policy chip,
+# dataset/steps on the card), and every one of them is a field a tracked
+# JobRecord already carries, so a foreign run reads like a local one.
+_HUB_JOB_TRAINER_FLAGS = ("policy.type", "dataset.repo_id", "steps", "policy.repo_id")
+
+
+def _hub_job_trainer_args(ji) -> dict[str, str]:
+    """The allowlisted `--flag value` pairs out of a Hub job's own argv.
+
+    A cloud run's whole trainer invocation is stored on the job, so what a
+    foreign run trains — its policy, dataset, and step target — is already in
+    the listing response we fetch, with no extra Hub call. This reads it back.
+
+    The command we submit is
+    ``python -c <wrapper source> <spec> [directives] -- <trainer argv>``, so
+    parsing starts after the first BARE ``--`` sentinel where there is one: the
+    wrapper source is a single argv token, but the wrapper-side directives
+    before the sentinel (e.g. ``--resume-from=...``) are not ours to read as
+    trainer flags. `arguments` is where the Hub splits argv for some submission
+    paths; ours rides entirely in `command`, so both are scanned.
+
+    Both spellings are accepted (``--flag value`` and ``--flag=value``) because
+    build_training_command emits each in different places. A flag repeated wins
+    on its first occurrence; an unparsable or valueless flag is simply absent
+    rather than raising — this decorates a listing and must never be able to
+    500 it.
+    """
+    argv = [*(getattr(ji, "command", None) or []), *(getattr(ji, "arguments", None) or [])]
+    argv = [tok for tok in argv if isinstance(tok, str)]
+    if "--" in argv:
+        argv = argv[argv.index("--") + 1 :]
+
+    out: dict[str, str] = {}
+    for i, tok in enumerate(argv):
+        for flag in _HUB_JOB_TRAINER_FLAGS:
+            if flag in out:
+                continue
+            value = None
+            if tok == f"--{flag}" and i + 1 < len(argv):
+                value = argv[i + 1]
+            elif tok.startswith(f"--{flag}="):
+                value = tok.split("=", 1)[1]
+            # A following token that is itself a flag means this one was passed
+            # without a value; leave it absent rather than recording "--next".
+            if value and not value.startswith("--"):
+                out[flag] = value.strip()
+    return out
+
+
+def _hub_job_identity(ji) -> dict[str, Any]:
+    """The run-identity half of a `/jobs/hub` row: what this job trains.
+
+    Every value is best-effort and independently nullable — a RESUMED cloud run
+    passes `--config_path` instead of `--policy.type`/`--dataset.repo_id`
+    (build_training_command reconstructs those from the checkpoint), so a
+    continuation legitimately reports a repo and steps with no policy or
+    dataset. The frontend reserves the columns and renders a blank, which is the
+    honest answer; inventing one from the run name would be a guess.
+    """
+    args = _hub_job_trainer_args(ji)
+    try:
+        total_steps: int | None = int(args["steps"])
+    except (KeyError, ValueError):
+        total_steps = None
+    return {
+        "policy_type": args.get("policy.type"),
+        "dataset": args.get("dataset.repo_id"),
+        "total_steps": total_steps,
+        "hf_repo_id": args.get("policy.repo_id"),
+    }
 
 
 # Errors a per-author Hub model listing may raise that must degrade to "empty for
@@ -1385,7 +3236,12 @@ def _fan_out_model_authors(authors: list[str], call) -> list:
     return [r for r in results if r is not None]
 
 
-@app.get("/jobs/hub")
+@router.get(
+    "/jobs/hub",
+    response_model=HubJobsResponse,
+    response_model_exclude_unset=True,
+    tags=["jobs"],
+)
 def list_hub_jobs():
     """List the user's HF Cloud compute Jobs and their uploaded LeRobot model
     repos on huggingface.co.
@@ -1481,6 +3337,7 @@ def list_hub_jobs():
         "jobs": [
             {
                 "id": ji.id,
+                "name": _hub_job_run_name(ji),
                 "created_at": ji.created_at.isoformat() if ji.created_at else None,
                 "docker_image": ji.docker_image,
                 "space_id": ji.space_id,
@@ -1488,6 +3345,16 @@ def list_hub_jobs():
                 "status": ({"stage": ji.status.stage, "message": ji.status.message} if ji.status else None),
                 "owner": ji.owner.name if ji.owner else None,
                 "url": ji.url,
+                # What the run trains (policy/dataset/steps/repo), read back off
+                # the job's own argv so a foreign run's card reads like a local
+                # one.
+                **_hub_job_identity(ji),
+                # What the run started FROM (kind + base checkpoint), parsed off
+                # the same argv. Every cloud run ships the same image and flavor,
+                # so without this a card launched from another machine has almost
+                # nothing on it that distinguishes one run from the next. Spread
+                # last: its `policy_type` is computed identically to identity's.
+                **_hub_job_provenance(ji),
             }
             for ji in jobs
         ],
@@ -1499,7 +3366,7 @@ def list_hub_jobs():
     return response
 
 
-@app.delete("/jobs/hub/models/{repo_id:path}")
+@router.delete("/jobs/hub/models/{repo_id:path}", response_model=HubModelDeleteResponse, tags=["jobs"])
 def delete_hub_model(repo_id: str):
     """Permanently delete a model repo from the Hugging Face Hub.
 
@@ -1540,6 +3407,29 @@ def delete_hub_model(repo_id: str):
             ),
         )
 
+    # A QUEUED local run may be holding a deferred ref to exactly this repo:
+    # a fine-tune's base checkpoint (queued_hub_ref) or a cloud parent's
+    # checkpoint a continuation downloads at promotion (queued_resume_ref) —
+    # both frequently under the user's own namespace (staging repos, their
+    # own cloud runs' output repos). Deleting the repo now fails that run
+    # hours later with a download error nobody could tie to this click. Same
+    # refusal family as every other queued-dependency guard.
+    queued_readers = sorted(
+        r.id
+        for r in job_registry.list_queue()
+        if repo_id in {hub_ref_repo_id(ref) for ref in (r.queued_hub_ref, r.queued_resume_ref) if ref}
+    )
+    if queued_readers:
+        waiting = ", ".join(repr(qid) for qid in queued_readers[:10])
+        raise ApiError(
+            status_code=409,
+            detail=(
+                f"Repo {repo_id!r} holds the checkpoint queued run(s) {waiting} will train "
+                "from. Cancel them first, or wait for them to finish."
+            ),
+            code=ErrorCode.JOB_HAS_QUEUED_DEPENDENTS,
+        )
+
     api = shared_hf_api()
     try:
         # missing_ok=True: a repo that's already gone (404) is a no-op success,
@@ -1559,12 +3449,16 @@ def delete_hub_model(repo_id: str):
         raise HTTPException(status_code=502, detail=f"Hub delete failed: {exc}") from exc
 
     # The listing changed — drop the cached /jobs/hub response so the removed
-    # repo doesn't linger until the TTL expires.
+    # repo doesn't linger until the TTL expires. The models/skills listing has
+    # its own Hub cache and its own last-good fallback, so it needs telling
+    # separately: without this the deleted repo survives the TTL AND, worse,
+    # persists as a retained "stale" row every time a later fan-out degrades.
+    model_browser.forget_hub_repo(repo_id)
     invalidate_hub_jobs_cache()
     return {"status": "success", "repo_id": repo_id}
 
 
-@app.post("/jobs/hub/jobs/{job_id}/dismiss")
+@router.post("/jobs/hub/jobs/{job_id}/dismiss", response_model=HubJobDismissResponse, tags=["jobs"])
 def dismiss_hub_job(job_id: str):
     """Hide a Hub job from the /jobs/hub listing.
 
@@ -1580,38 +3474,67 @@ def dismiss_hub_job(job_id: str):
     return {"status": "success", "job_id": job_id.strip()}
 
 
-@app.get("/jobs/{job_id}")
+# NEW surface, so it lives on v1_router (never the flat mount). It still MUST
+# match before GET /jobs/{job_id}: that route's single {job_id} segment happily
+# matches the literal "queue", answering this request with a 404 for a job of
+# that name — the same reason /jobs/hub sits above it. The two live on
+# different routers, so the ordering is enforced where the routers are
+# included: v1_router joins the /api/v1 mount BEFORE the shared router does.
+# (The POST twin, /jobs/queue/reorder, is not at risk — every POST
+# /jobs/{job_id}/… route ends in a literal segment.)
+@v1_router.get("/jobs/queue", response_model=JobQueueResponse, tags=["jobs"])
+def list_job_queue():
+    """The whole local training queue, in the order it will run.
+
+    Separate from `GET /jobs` because that is a capped, newest-first PAGE of
+    history and this is a complete list. Deriving the queue from that page was
+    wrong twice over: a queued record carries its SUBMIT time, so queued runs
+    crowd the top of the page and pushed the actually-running job off it, and
+    past the page size the queue itself was truncated — which silently dropped
+    the runs at the HEAD of the line and made every reorder a 409, since
+    `reorder_queue` requires the whole list.
+    """
+    return {"jobs": [_wire_job_record(r) for r in job_registry.list_queue()]}
+
+
+@router.get("/jobs/{job_id}", response_model=JobRecord, tags=["jobs"])
 def get_job(job_id: str):
     try:
-        return job_registry.get(job_id)
+        return _wire_job_record(job_registry.get(job_id))
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+        raise ApiError(
+            status_code=404, detail=f"Job {job_id!r} not found", code=ErrorCode.JOB_NOT_FOUND
+        ) from exc
 
 
-@app.get("/jobs/{job_id}/logs")
+@router.get("/jobs/{job_id}/logs", response_model=JobLogsResponse, tags=["jobs"])
 def get_job_logs(job_id: str):
     try:
         logs = job_registry.drain_logs(job_id)
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+        raise ApiError(
+            status_code=404, detail=f"Job {job_id!r} not found", code=ErrorCode.JOB_NOT_FOUND
+        ) from exc
     return {"logs": logs}
 
 
-@app.get("/jobs/{job_id}/log-file")
+@router.get("/jobs/{job_id}/log-file", response_model=JobLogsResponse, tags=["jobs"])
 def get_job_log_file(job_id: str):
     """Return the entire on-disk log file for a job. Drains the live queue too
     so the next /logs poll returns only lines that arrived after this call."""
     try:
         logs = job_registry.read_persisted_logs(job_id)
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+        raise ApiError(
+            status_code=404, detail=f"Job {job_id!r} not found", code=ErrorCode.JOB_NOT_FOUND
+        ) from exc
     # Best-effort drain so the frontend doesn't double-display.
     with contextlib.suppress(JobNotFoundError):
         job_registry.drain_logs(job_id)
     return {"logs": logs}
 
 
-@app.get("/jobs/{job_id}/metrics-history")
+@router.get("/jobs/{job_id}/metrics-history", response_model=JobMetricsHistoryResponse, tags=["jobs"])
 def get_job_metrics_history(job_id: str):
     """Return the per-step loss/lr/grad-norm series reconstructed from the
     job's log.jsonl. Used to seed the monitoring charts so curves persist
@@ -1619,36 +3542,58 @@ def get_job_metrics_history(job_id: str):
     try:
         points = job_registry.read_metrics_history(job_id)
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+        raise ApiError(
+            status_code=404, detail=f"Job {job_id!r} not found", code=ErrorCode.JOB_NOT_FOUND
+        ) from exc
     return {"points": points}
 
 
-@app.get("/jobs/{job_id}/checkpoints")
-def get_job_checkpoints(job_id: str):
-    """List the checkpoints saved for this job, ascending by step."""
+@router.get("/jobs/{job_id}/checkpoints", response_model=JobCheckpointsResponse, tags=["jobs"])
+def get_job_checkpoints(job_id: str, lineage: bool = False):
+    """List the checkpoints saved for this job, ascending by step.
+
+    ``lineage=true`` widens that to the whole resume chain — this run plus the
+    runs it resumed. Opt-in rather than the default so existing callers keep
+    their exact semantics; the skill picker asks for it because a chain is one
+    model and splitting its steps across rows is what this fixes.
+    """
     try:
+        if lineage:
+            return {"checkpoints": job_registry.list_chain_checkpoints(job_id)}
         return {"checkpoints": job_registry.list_checkpoints(job_id)}
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+        raise ApiError(
+            status_code=404, detail=f"Job {job_id!r} not found", code=ErrorCode.JOB_NOT_FOUND
+        ) from exc
 
 
-@app.get("/jobs/{job_id}/checkpoints/{step}/policy-config")
+@router.get(
+    "/jobs/{job_id}/checkpoints/{step}/policy-config",
+    response_model=CheckpointPolicyConfigResponse,
+    tags=["jobs"],
+)
 def get_checkpoint_policy_config(job_id: str, step: int):
     """Return the UX-relevant slice of a checkpoint's pretrained_model config:
-    policy_type, image_features (per-camera height/width), requires_task, and
-    the flat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference
-    modal uses to flag a single-arm/bimanual mismatch."""
+    policy_type, image_features (per-camera height/width), requires_task, the
+    flat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference
+    modal uses to flag a single-arm/bimanual mismatch, the n_action_steps /
+    chunk_size geometry (n_action_steps is the ceiling on a remote-inference
+    horizon), and trained_on_robot_type (the arm the checkpoint was trained on,
+    for the fine-tune panel's cross-arm warning; null when it can't be
+    established)."""
     try:
         return job_registry.get_policy_config_summary(job_id, step)
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+        raise ApiError(
+            status_code=404, detail=f"Job {job_id!r} not found", code=ErrorCode.JOB_NOT_FOUND
+        ) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.get("/jobs/{job_id}/checkpoints/{step}/download")
+@router.get("/jobs/{job_id}/checkpoints/{step}/download")
 def download_checkpoint(job_id: str, step: int):
     """Stream a zip of a local checkpoint's `pretrained_model/` directory.
 
@@ -1707,7 +3652,7 @@ class RenameJobBody(BaseModel):
     new_name: str
 
 
-@app.post("/jobs/{job_id}/rename")
+@router.post("/jobs/{job_id}/rename", response_model=JobRecord, tags=["jobs"])
 def rename_job(job_id: str, body: RenameJobBody):
     """Set a job's display alias (shown in place of the auto-generated name).
 
@@ -1719,24 +3664,158 @@ def rename_job(job_id: str, body: RenameJobBody):
     display-only and need not be unique.
     """
     try:
-        return job_registry.rename(job_id, body.new_name)
+        return _wire_job_record(job_registry.rename(job_id, body.new_name))
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+        raise ApiError(
+            status_code=404, detail=f"Job {job_id!r} not found", code=ErrorCode.JOB_NOT_FOUND
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/jobs/{job_id}/stop")
-def stop_job(job_id: str):
+class ReorderQueueRequest(BaseModel):
+    # The WHOLE queue, first to run first. A partial list is refused rather
+    # than merged — see JobRegistry.reorder_queue.
+    #
+    # Bounded because the queue is: it holds runs a user submitted by hand, one
+    # at a time, and a machine with a single local training slot will not have
+    # thousands waiting. Unbounded, a 20k-id body was validated INSIDE the
+    # registry lock (freezing every /jobs* request behind the set math) and came
+    # back as a 360 KB error detail echoing every bad id. 422 here costs neither.
+    # Each ID is bounded too: capping only the count left 512 × multi-KB
+    # strings building megabyte 400s out of echoed input (generated ids top out
+    # around 150 chars — see jobs._NAMED_ID_MAX_CHARS, the render-side backstop).
+    job_ids: list[Annotated[str, StringConstraints(max_length=200)]] = Field(max_length=512)
+
+
+# NEW surface → v1_router (see the /jobs/queue GET above). Declared before
+# /jobs/{job_id}/... so the intent is readable together with stop; FastAPI
+# matches this path fine either way, since every {job_id} route ends in a
+# literal segment ("rename", "stop", …) that "queue" isn't.
+@v1_router.post("/jobs/queue/reorder", response_model=JobQueueResponse, tags=["jobs"])
+def reorder_job_queue(body: ReorderQueueRequest):
+    """Set the order of the local training queue.
+
+    Local runs are one-at-a-time, so a second Start enqueues rather than
+    failing; this is how the user changes their mind about what goes next.
+    Only queued jobs can be reordered — the run already on the GPU is not in
+    the list, and a job that started while the drag was in flight makes the
+    request stale (409).
+    """
     try:
-        return job_registry.stop(job_id)
+        return {"jobs": [_wire_job_record(r) for r in job_registry.reorder_queue(body.job_ids)]}
+    except ValueError as exc:
+        # The request itself is wrong — an id that names no run at all, or one
+        # listed twice. 400, not the 409 below: retrying it unchanged can never
+        # succeed, and the detail names the offending ids so a non-UI caller can
+        # fix them. An id that names a real run which has LEFT the queue is not
+        # this case: that is the race below, and it retries successfully.
+        raise ApiError(status_code=400, detail=str(exc), code=ErrorCode.REQUEST_VALIDATION) from exc
+    except QueueChangedError as exc:
+        # A well-formed list that lost its race. Retrying after a refetch is
+        # exactly the right advice here, which is why the code appears only
+        # here: job.queue_stale is the one refusal in this family a plain
+        # refetch-and-retry clears.
+        raise ApiError(
+            status_code=409,
+            detail=(
+                "The training queue changed while you were reordering it — "
+                "a job started, finished, or was cancelled. The list has been "
+                "refreshed; try again."
+            ),
+            code=ErrorCode.JOB_QUEUE_STALE,
+        ) from exc
+
+
+@router.post(
+    "/jobs/{job_id}/stop",
+    response_model=JobRecord,
+    tags=["jobs"],
+    # A repeated ?expect_state= must not silently resolve to one of its two
+    # contradictory values — see _refuse_repeated_query_keys.
+    dependencies=[Depends(_refuse_repeated_query_keys)],
+)
+def stop_job(job_id: str, expect_state: JobState | None = None):
+    """Stop a running job, or cancel a queued one.
+
+    `expect_state` is optional and is the caller's precondition: pass the state
+    the UI was showing when it drew the button. Cancel and kill are the same
+    request here, so a Cancel drawn against a stale queue would otherwise
+    SIGTERM a run the watchdog promoted in the meantime.
+
+    Typed as `JobState`, not `str`, to match `JobRegistry.stop`: an unknown value
+    used to reach the comparison, fail it, and come back as a 409 saying the job
+    "changed while you were looking at it" — reporting a client's typo as a race,
+    which no retry can ever clear. It is now a 422, and `/openapi.json`
+    advertises the real member set instead of "any string".
+    """
+    try:
+        return _wire_job_record(job_registry.stop(job_id, expect_state=expect_state))
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+        raise ApiError(
+            status_code=404, detail=f"Job {job_id!r} not found", code=ErrorCode.JOB_NOT_FOUND
+        ) from exc
+    except JobStateChangedError as exc:
+        raise ApiError(
+            status_code=409,
+            detail=(
+                f"Job {job_id!r} is {exc.actual!r}, not {exc.expected!r} — it changed while "
+                "you were looking at it. Refresh and decide again."
+            ),
+            code=ErrorCode.JOB_STATE_CHANGED,
+        ) from exc
     except JobNotRunningError as exc:
-        raise HTTPException(status_code=409, detail=f"Job {job_id!r} is not running") from exc
+        raise ApiError(
+            status_code=409,
+            detail=f"Job {job_id!r} is neither running nor queued",
+            code=ErrorCode.JOB_NOT_RUNNING,
+        ) from exc
+    # Cancelling a QUEUED run removes its record, so it carries the same two
+    # refusals as DELETE. Stopping a running run does not — it leaves a record
+    # behind — so these can only fire on the cancel path.
+    except JobHasChildrenError as exc:
+        continued_by = ", ".join(repr(cid) for cid in exc.child_ids)
+        raise ApiError(
+            status_code=409,
+            detail=(
+                f"Job {job_id!r} was continued by {continued_by}, which would be left "
+                "pointing at a cancelled run. Cancel the continuation(s) first."
+            ),
+            code=ErrorCode.JOB_HAS_CHILDREN,
+        ) from exc
+    except JobSourceOfQueuedRunError as exc:
+        waiting = ", ".join(repr(qid) for qid in exc.queued_ids)
+        raise ApiError(
+            status_code=409,
+            detail=(
+                f"Job {job_id!r} holds the checkpoint queued run(s) {waiting} will train "
+                "from. Cancel those first."
+            ),
+            code=ErrorCode.JOB_HAS_QUEUED_DEPENDENTS,
+        ) from exc
+    except JobRemovalFailedError as exc:
+        # 500, not 409: nothing about the request was wrong. Say plainly that
+        # the run is untouched, because the alternative reading — "cancel
+        # half-worked" — is what would make a user walk away from a run that is
+        # still going to train.
+        logger.exception("Could not cancel job %s", job_id)
+        raise ApiError(
+            status_code=500,
+            # `strerror` only — see the delete twin below. The full OSError
+            # carries the job directory's absolute path, and this body is
+            # returned to the caller.
+            detail=(
+                f"Could not cancel job {job_id!r}: {exc.reason.strerror}. The run is still "
+                "queued and will still start when the slot frees — nothing was removed, so "
+                "it is safe to try again."
+            ),
+            code=ErrorCode.JOB_REMOVAL_FAILED,
+        ) from exc
 
 
-@app.delete("/jobs/{job_id}", status_code=204)
+# 204 No Content — there is no body for a response_model to describe, so the
+# route sits in RESPONSE_MODEL_EXEMPT (tests/test_api_contract.py) instead.
+@router.delete("/jobs/{job_id}", status_code=204, tags=["jobs"])
 def delete_job(job_id: str):
     try:
         record = job_registry.get(job_id)
@@ -1745,6 +3824,69 @@ def delete_job(job_id: str):
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
     except JobNotRunningError as exc:
         raise HTTPException(status_code=409, detail=f"Job {job_id!r} is running; stop it first") from exc
+    except JobPublishInProgressError as exc:
+        # The background Hub publish is reading this run's checkpoint dirs
+        # right now; deleting them mid-upload kills the publish with an
+        # opaque error. Same refusal POST /models/delete gives.
+        raise ApiError(
+            status_code=409,
+            detail=(
+                f"Job {job_id!r} is being published to the Hub — wait for the "
+                "publish to finish before deleting it."
+            ),
+            code=ErrorCode.JOB_PUBLISH_IN_PROGRESS,
+        ) from exc
+    except JobHasChildrenError as exc:
+        # Mid-chain delete: name the runs that continue from this one so the
+        # user can work inwards from the tip instead of guessing.
+        continued_by = ", ".join(repr(cid) for cid in exc.child_ids)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Job {job_id!r} was continued by {continued_by}, which would be left "
+                "pointing at a deleted run. Delete the continuation(s) first."
+            ),
+        ) from exc
+    except JobSourceOfQueuedRunError as exc:
+        # Same shape as the mid-chain refusal above, for the dependency
+        # build_child_index does not model: a queued fine-tune froze this run's
+        # checkpoint PATH at submit time and reads it when the slot frees, so
+        # deleting the directory now fails that run hours from now with a
+        # not-found traceback the user could not connect to this click.
+        waiting = ", ".join(repr(qid) for qid in exc.queued_ids)
+        raise ApiError(
+            status_code=409,
+            detail=(
+                f"Job {job_id!r} holds the checkpoint queued run(s) {waiting} will train "
+                "from. Cancel them first, or wait for them to finish."
+            ),
+            code=ErrorCode.JOB_HAS_QUEUED_DEPENDENTS,
+        ) from exc
+    except JobRemovalFailedError as exc:
+        # 500, not 409: nothing about the request was wrong. Say that the run is
+        # untouched, because the alternative reading — "delete half-worked" — is
+        # what would leave a user surprised to see it again after a restart.
+        # Where it is untouched depends on what it was: `delete` refuses only a
+        # RUNNING run, so a queued one reaches here, and telling that user it is
+        # "still in your history" describes the wrong place — it is still in the
+        # queue and still going to train, which is the part they need to act on.
+        logger.exception("Could not delete job %s", job_id)
+        still = (
+            "still queued and will still start when the slot frees"
+            if record.state == "queued"
+            else "untouched and still in your history"
+        )
+        raise ApiError(
+            status_code=500,
+            # `strerror` only: the full OSError carries the absolute path of the
+            # job directory, and this body goes to whoever made the request —
+            # including anyone on the LAN under `--lan`. The path is in the log.
+            detail=(
+                f"Could not delete job {job_id!r}: {exc.reason.strerror}. The run is "
+                f"{still} — nothing was removed, so it is safe to try again."
+            ),
+            code=ErrorCode.JOB_REMOVAL_FAILED,
+        ) from exc
     # Deleting a tracked cloud run removes the local record, but its Hub job
     # would resurface in /jobs/hub as an untracked card on the next poll (the
     # HF Jobs API has no delete). Mark it dismissed so the removal sticks.
@@ -1777,7 +3919,7 @@ def _format_accelerator(accelerator) -> str | None:
     return f"{quantity}× {name}" if quantity and quantity != "1" else name
 
 
-@app.get("/jobs/runners/hardware")
+@router.get("/jobs/runners/hardware", response_model=RunnersHardwareResponse, tags=["jobs"])
 def get_runners_hardware():
     """Return HF Jobs flavor catalog + auth state for the TargetCard.
 
@@ -1825,68 +3967,138 @@ def get_runners_hardware():
 # ============================================================================
 
 
-@app.get("/system/training-extra")
+@router.get("/system/training-extra", response_model=ExtraStatus, tags=["system"])
 def get_training_extra():
     """Return whether the LeRobot training extra (accelerate) is importable."""
     return handle_get_training_extra()
 
 
-@app.post("/system/training-extra/install")
+@router.post("/system/training-extra/install", response_model=InstallStartResponse, tags=["system"])
 def install_training_extra():
     """Spawn `pip install accelerate` as a background subprocess. No-op if already running."""
     return handle_install_training_extra()
 
 
-@app.get("/system/training-extra/install-status")
+@router.get("/system/training-extra/install-status", response_model=InstallStatusResponse, tags=["system"])
 def install_training_extra_status():
     """Return current install state plus any pending log lines (drained on read)."""
     return handle_install_training_extra_status()
 
 
-@app.get("/system/wandb-extra")
+@router.get("/system/wandb-extra", response_model=ExtraStatus, tags=["system"])
 def get_wandb_extra():
     """Return whether the `wandb` package is importable in this MakerMods Lab process."""
     return handle_get_wandb_extra()
 
 
-@app.post("/system/wandb-extra/install")
+@router.post("/system/wandb-extra/install", response_model=InstallStartResponse, tags=["system"])
 def install_wandb_extra():
     """Spawn `pip install wandb` as a background subprocess. No-op if already running."""
     return handle_install_wandb_extra()
 
 
-@app.get("/system/wandb-extra/install-status")
+@router.get("/system/wandb-extra/install-status", response_model=InstallStatusResponse, tags=["system"])
 def install_wandb_extra_status():
     """Return current wandb install state plus any pending log lines (drained on read)."""
     return handle_install_wandb_extra_status()
 
 
-@app.get("/system/policy-extra/{policy_type}")
+@router.get("/system/policy-extra/{policy_type}", response_model=PolicyExtraStatus, tags=["system"])
 def get_policy_extra(policy_type: str):
     """Whether the optional LeRobot extra a policy needs (e.g. transformers for
     smolvla/pi0, diffusers for diffusion) is importable. Core policies report available."""
     return handle_get_policy_extra(policy_type)
 
 
-@app.post("/system/policy-extra/{policy_type}/install")
+@router.post(
+    "/system/policy-extra/{policy_type}/install", response_model=InstallStartResponse, tags=["system"]
+)
 def install_policy_extra(policy_type: str):
     """Spawn `pip install lerobot[<extra>]` for the policy's extra in the background."""
     return handle_install_policy_extra(policy_type)
 
 
-@app.get("/system/policy-extra/{policy_type}/install-status")
+@router.get(
+    "/system/policy-extra/{policy_type}/install-status",
+    response_model=InstallStatusResponse,
+    tags=["system"],
+)
 def install_policy_extra_status(policy_type: str):
     """Return the policy extra's install state plus any pending log lines (drained on read)."""
     return handle_install_policy_extra_status(policy_type)
 
 
-@app.get("/system/update-check")
+# The busy matrix's discriminants, for the restart refusal: the same
+# robot.busy.<feature> code the holder's own start-refusals use, so a client
+# learns WHAT holds the machine from the code alone.
+_HOLDER_BUSY_CODES: dict[str, ErrorCode] = {
+    "recording": ErrorCode.ROBOT_BUSY_RECORDING,
+    "teleoperation": ErrorCode.ROBOT_BUSY_TELEOPERATION,
+    "inference": ErrorCode.ROBOT_BUSY_INFERENCE,
+    "replay": ErrorCode.ROBOT_BUSY_REPLAY,
+    "calibration": ErrorCode.ROBOT_BUSY_CALIBRATION,
+    "auto_calibration": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
+    "wiggle": ErrorCode.ROBOT_BUSY_WIGGLE,
+}
+
+
+@v1_router.post("/system/restart", response_model=RestartResponse, tags=["system"])
+def restart_server():
+    """Re-exec this server process in place (same argv/env/PID), so a remote
+    operator — the node-proxy POST /api/v1/nodes/{id}/restart — can bounce a
+    headless station without a shell on it. Answers FIRST, re-execs after a
+    short grace delay so this response reaches the client.
+
+    Refusals, all 409: a live robot flow (robot.busy.<feature> — killing the
+    server mid-flow drops the hardware threads with it), a running or queued
+    training run (robot.busy.training — the loader retires both on startup),
+    and a process that cannot safely re-exec (system.restart_unsupported: a
+    dev reload worker, a non-entry-point launch, or Windows)."""
+    holder = held_by()
+    if holder is not None:
+        raise ApiError(
+            status_code=409,
+            detail=f"Cannot restart while {holder} is active — stop it first.",
+            code=_HOLDER_BUSY_CODES.get(holder, ErrorCode.SESSION_HELD),
+        )
+    running = training_is_active()
+    if running is not None:
+        raise ApiError(
+            status_code=409,
+            detail=f"Cannot restart while a local training run ({running}) is active — stop it first.",
+            code=ErrorCode.ROBOT_BUSY_TRAINING,
+        )
+    queued = job_registry.list_queue()
+    if queued:
+        raise ApiError(
+            status_code=409,
+            detail=(
+                f"Cannot restart with {len(queued)} queued training run(s) — "
+                "the restart would retire the queue. Cancel them first."
+            ),
+            code=ErrorCode.ROBOT_BUSY_TRAINING,
+        )
+    installing = install_in_progress()
+    if installing is not None:
+        raise ApiError(
+            status_code=409,
+            detail=f"Cannot restart while '{installing}' is installing — wait for it to finish.",
+            code=ErrorCode.SYSTEM_INSTALL_IN_PROGRESS,
+        )
+    supported, why = restart_supported()
+    if not supported:
+        raise ApiError(status_code=409, detail=why, code=ErrorCode.SYSTEM_RESTART_UNSUPPORTED)
+    schedule_restart()
+    return {"restarting": True, "message": "Restarting — the server will be back in a few seconds."}
+
+
+@router.get("/system/update-check", response_model=UpdateStatus, tags=["system"])
 def update_check():
     """Report whether a newer MakerMods Lab commit exists on GitHub (cached, silent on failure)."""
     return handle_update_check()
 
 
-@app.post("/system/update")
+@router.post("/system/update", response_model=UpdateResult, tags=["system"])
 def run_update():
     """Run the pip upgrade in-process; the user must restart MakerMods Lab afterwards."""
     return handle_run_update()
@@ -1897,55 +4109,96 @@ def run_update():
 
 # ============================================================================
 # Calibration endpoints
-@app.post("/start-calibration")
+@router.post("/start-calibration")
 def start_calibration(request: CalibrationRequest):
-    """Start calibration process"""
+    """Start calibration process.
+
+    Legacy/external entry point: it takes a device + port directly rather than
+    a robot name, so there is no record to read an arm type from and it always
+    runs the SO-101 range sweep. The Maker arm's zero-pose flow is reached
+    through the sessions surface (POST /api/v1/sessions, kind "calibration"),
+    which resolves the arm type from the robot record.
+    """
     return calibration_manager.start_calibration(request)
 
 
-@app.post("/stop-calibration")
+@router.post("/stop-calibration")
 def stop_calibration():
-    """Stop calibration process"""
+    """Stop calibration process.
+
+    Stops whichever calibration flow is live. Stopping is never owner-gated
+    and the two managers are mutually exclusive, so trying the step wizard
+    first and falling through is unambiguous.
+    """
+    if step_calibration_is_active():
+        return step_calibration_manager.stop()
     return calibration_manager.stop_calibration_process()
 
 
-@app.get("/calibration-status")
-def calibration_status():
-    """Get current calibration status"""
+@router.get("/calibration-status")
+def calibration_status(arm_type: str | None = None):
+    """Get current calibration status, from whichever flow is live.
+
+    The two status dataclasses are field-compatible where they overlap, so one
+    client shape reads both. `image_url` and `live_positions` are the step
+    wizard's own fields and default (null / False) for the SO-101 sweep, so
+    the frontend reads one shape whichever manager answers.
+    """
     from dataclasses import asdict
 
-    status = calibration_manager.get_status()
-    return asdict(status)
+    from .arm_capabilities import calibration_kind, require_known_arm_type
+
+    if arm_type is not None:
+        require_known_arm_type(arm_type)
+    # An explicit family keeps terminal wizard results visible after release.
+    if (arm_type is not None and calibration_kind(arm_type) == "steps") or (
+        arm_type is None and step_calibration_is_active()
+    ):
+        return asdict(step_calibration_manager.get_status())
+    payload = asdict(calibration_manager.get_status())
+    payload.setdefault("image_url", None)
+    payload.setdefault("live_positions", False)
+    return payload
 
 
-@app.post("/complete-calibration-step")
-def complete_calibration_step():
-    """Complete the current calibration step"""
+class CompleteCalibrationStepRequest(BaseModel):
+    # The step number the client is confirming (the step wizard sends the one
+    # on screen). Optional: the range-sweep flow and older clients send no
+    # body. When present, a confirm for any other step is refused rather than
+    # carried over to the step the family published next.
+    step: int | None = None
+
+
+@router.post("/complete-calibration-step")
+def complete_calibration_step(request: CompleteCalibrationStepRequest | None = None):
+    """Complete the current calibration step (either flow)."""
+    if step_calibration_is_active():
+        return step_calibration_manager.complete_step(request.step if request else None)
     return calibration_manager.complete_step()
 
 
 # --- Auto-calibration (drives the arm under torque; runs the vendored script) ---
 
 
-@app.post("/start-auto-calibration")
+@router.post("/start-auto-calibration")
 def start_auto_calibration(request: AutoCalibrationRequest):
     """Start auto-calibration as a subprocess. The arm moves on its own."""
     return auto_calibration_manager.start(request)
 
 
-@app.post("/stop-auto-calibration")
+@router.post("/stop-auto-calibration")
 def stop_auto_calibration():
     """Stop a running auto-calibration."""
     return auto_calibration_manager.stop()
 
 
-@app.get("/auto-calibration-status")
+@router.get("/auto-calibration-status")
 def auto_calibration_status():
     """Current auto-calibration state + streamed log lines."""
     return auto_calibration_manager.get_status()
 
 
-@app.post("/start-auto-calibration-batch")
+@router.post("/start-auto-calibration-batch")
 def start_auto_calibration_batch(request: AutoCalibrationBatchRequest):
     """Auto-calibrate a user-selected subset of arms CONCURRENTLY. Each arm runs
     its own subprocess on its own serial port with an independent outcome
@@ -1954,28 +4207,30 @@ def start_auto_calibration_batch(request: AutoCalibrationBatchRequest):
     return auto_calibration_batch_manager.start(request)
 
 
-@app.post("/stop-auto-calibration-batch")
+@router.post("/stop-auto-calibration-batch")
 def stop_auto_calibration_batch():
     """Stop ALL running arms of a batch auto-calibration, releasing each arm's
     torque independently."""
     return auto_calibration_batch_manager.stop()
 
 
-@app.get("/auto-calibration-batch-status")
+@router.get("/auto-calibration-batch-status")
 def auto_calibration_batch_status():
     """Per-arm status + logs and overall counts for a batch auto-calibration."""
     return auto_calibration_batch_manager.get_status()
 
 
-@app.get("/calibration-configs/{device_type}")
-def get_calibration_configs(device_type: str):
+@router.get("/calibration-configs/{device_type}")
+def get_calibration_configs(device_type: str, arm_type: str = "so101", leader_kind: str | None = None):
     """Get all calibration config files for a specific device type"""
+    # `?arm_type=nope` is a 400, never the SO-101 library — and outside the
+    # try, so the coded ApiError reaches the app-wide handler. Same on every
+    # calibration-configs route below.
+    require_known_arm_type(arm_type)
+    require_leader_kind(arm_type, leader_kind)
     try:
-        if device_type == "robot":
-            config_path = FOLLOWER_CONFIG_PATH
-        elif device_type == "teleop":
-            config_path = LEADER_CONFIG_PATH
-        else:
+        config_path = calibration_dir_for_device(device_type, arm_type, leader_kind)
+        if config_path is None:
             return {"success": False, "message": "Invalid device type"}
 
         # Get all JSON files in the config directory
@@ -2004,15 +4259,16 @@ def get_calibration_configs(device_type: str):
         return {"success": False, "message": str(e)}
 
 
-@app.delete("/calibration-configs/{device_type}/{config_name}")
-def delete_calibration_config(device_type: str, config_name: str):
+@router.delete("/calibration-configs/{device_type}/{config_name}")
+def delete_calibration_config(
+    device_type: str, config_name: str, arm_type: str = "so101", leader_kind: str | None = None
+):
     """Delete a calibration config file"""
+    require_known_arm_type(arm_type)
+    require_leader_kind(arm_type, leader_kind)
     try:
-        if device_type == "robot":
-            config_path = FOLLOWER_CONFIG_PATH
-        elif device_type == "teleop":
-            config_path = LEADER_CONFIG_PATH
-        else:
+        config_path = calibration_dir_for_device(device_type, arm_type, leader_kind)
+        if config_path is None:
             return {"success": False, "message": "Invalid device type"}
 
         # config_name is interpolated into a filename, so reject path-traversal
@@ -2040,7 +4296,7 @@ def delete_calibration_config(device_type: str, config_name: str):
         # those arms return to the "needs calibration" state instead of
         # dangling on a missing file. The response lists them so the UI can
         # refresh the affected robots.
-        unassigned = clear_config_references(device_type, config_name)
+        unassigned = clear_config_references(device_type, config_name, arm_type, leader_kind)
         if unassigned:
             robots = ", ".join(u["robot"] for u in unassigned)
             message = (
@@ -2060,8 +4316,10 @@ def delete_calibration_config(device_type: str, config_name: str):
         return {"success": False, "message": str(e)}
 
 
-@app.get("/calibration-configs/{device_type}/{config_name}/download")
-def download_calibration_config(device_type: str, config_name: str):
+@router.get("/calibration-configs/{device_type}/{config_name}/download")
+def download_calibration_config(
+    device_type: str, config_name: str, arm_type: str = "so101", leader_kind: str | None = None
+):
     """
     Download one arm's calibration as a raw lerobot calibration JSON file.
 
@@ -2069,11 +4327,10 @@ def download_calibration_config(device_type: str, config_name: str):
     drop-in: shareable, hand-copyable, and re-importable anywhere. The arm's
     side/name are supplied by the caller on re-import, not stored in the file.
     """
-    if device_type == "robot":
-        config_path = FOLLOWER_CONFIG_PATH
-    elif device_type == "teleop":
-        config_path = LEADER_CONFIG_PATH
-    else:
+    require_known_arm_type(arm_type)
+    require_leader_kind(arm_type, leader_kind)
+    config_path = calibration_dir_for_device(device_type, arm_type, leader_kind)
+    if config_path is None:
         return JSONResponse(status_code=400, content={"success": False, "message": "Invalid device type"})
 
     # config_name is interpolated into a filename, so reject path-traversal
@@ -2109,19 +4366,23 @@ def download_calibration_config(device_type: str, config_name: str):
     )
 
 
-@app.post("/calibration-configs/{device_type}/upload")
-def upload_calibration_config(device_type: str, body: dict):
+@router.post("/calibration-configs/{device_type}/upload")
+def upload_calibration_config(
+    device_type: str, body: dict, arm_type: str = "so101", leader_kind: str | None = None
+):
     """
     Import a calibration into a side's config dir. Body: {"name": "...",
     "data": {<raw lerobot calibration>}}. The data is shape-validated; an
     existing name is never overwritten (409 → caller renames).
     """
+    require_known_arm_type(arm_type)
+    require_leader_kind(arm_type, leader_kind)
     name = (body or {}).get("name", "")
     data = (body or {}).get("data")
     if not isinstance(name, str):
         return JSONResponse(status_code=400, content={"success": False, "message": "name must be a string"})
 
-    ok, reason, saved = save_imported_calibration(device_type, name, data)
+    ok, reason, saved = save_imported_calibration(device_type, name, data, arm_type, leader_kind)
     if ok:
         return {"success": True, "name": saved}
 
@@ -2144,19 +4405,23 @@ def upload_calibration_config(device_type: str, body: dict):
     return JSONResponse(status_code=500, content={"success": False, "message": "Import failed"})
 
 
-@app.post("/calibration-configs/{device_type}/{config_name}/rename")
-def rename_calibration_config_endpoint(device_type: str, config_name: str, body: dict):
+@router.post("/calibration-configs/{device_type}/{config_name}/rename")
+def rename_calibration_config_endpoint(
+    device_type: str, config_name: str, body: dict, arm_type: str = "so101", leader_kind: str | None = None
+):
     """
     Rename a calibration config file. Body: {"new_name": "..."}. Never
     overwrites; robot records referencing the old name are repointed.
     """
+    require_known_arm_type(arm_type)
+    require_leader_kind(arm_type, leader_kind)
     new_name = (body or {}).get("new_name", "")
     if not isinstance(new_name, str):
         return JSONResponse(
             status_code=400, content={"success": False, "message": "new_name must be a string"}
         )
 
-    ok, reason = rename_calibration_config(device_type, config_name, new_name)
+    ok, reason = rename_calibration_config(device_type, config_name, new_name, arm_type, leader_kind)
     if ok:
         return {"success": True, "name": new_name.strip().removesuffix(".json")}
 
@@ -2171,16 +4436,26 @@ def rename_calibration_config_endpoint(device_type: str, config_name: str, body:
 
 class OpenCalibrationFolderRequest(BaseModel):
     device_type: str  # "teleop" (leader) or "robot" (follower)
+    # Which family's library to open (any registered id; an unknown one is a
+    # 400). Each family keeps its own directories (so_leader/so_follower vs
+    # rebot_102_leader/maker_follower, ...).
+    arm_type: str = "so101"
+    # Which of the family's leaders, for the teleop side of a multi-leader
+    # family (the Metal arm's own leader keeps a library apart from the Star
+    # leader's). Missing = the family's default; an unknown kind is a 400.
+    leader_kind: str | None = None
 
 
-@app.post("/open-calibration-folder")
+@router.post("/open-calibration-folder")
 def open_calibration_folder(request: OpenCalibrationFolderRequest):
     """Open a side's calibration folder in the OS file browser (Finder/Explorer/
     xdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.
     The dir is created if missing so a fresh install opens an empty folder rather
-    than failing. An unknown device_type is rejected with 400.
+    than failing. An unknown device_type or arm_type is rejected with 400.
     """
-    path = calibration_dir_for_device(request.device_type)
+    require_known_arm_type(request.arm_type)
+    require_leader_kind(request.arm_type, request.leader_kind)
+    path = calibration_dir_for_device(request.device_type, request.arm_type, request.leader_kind)
     if path is None:
         return JSONResponse(
             status_code=400,
@@ -2202,7 +4477,14 @@ def open_calibration_folder(request: OpenCalibrationFolderRequest):
 # ============================================================================
 
 
-@app.get("/available-ports")
+# exclude_none: success carries `ports`, failure carries `message` — the other
+# key is absent, never null, so None-exclusion reproduces each branch exactly.
+@router.get(
+    "/available-ports",
+    response_model=AvailablePortsResponse,
+    response_model_exclude_none=True,
+    tags=["system"],
+)
 def get_available_ports():
     """Get all available serial ports"""
     try:
@@ -2217,7 +4499,7 @@ class WiggleRequest(BaseModel):
     port: str
 
 
-@app.post("/wiggle")
+@router.post("/wiggle")
 async def wiggle(request: WiggleRequest):
     """Wiggle the gripper on a port so the user can see which arm it is."""
     return await wiggle_gripper(request.port)
@@ -2228,14 +4510,177 @@ class IdentifyArmRequest(BaseModel):
     ports: list[str] | None = None
 
 
-@app.post("/identify-arm")
+class MakerProbePortsRequest(BaseModel):
+    # Candidate ports to probe; empty/omitted = every detected serial port.
+    ports: list[str] | None = None
+    # Which family's protocol the follower probe should speak (RobStride for
+    # "maker", Damiao for "metal", an extension's own for its family). Any
+    # registered id; the handler refuses an unknown one (400
+    # robot.arm_type.unavailable) and a family without a protocol probe (400
+    # robot.not_ready) by the family's flags. Defaults to maker so a client
+    # that predates the Metal arm is unchanged.
+    arm_type: str = "maker"
+    # Which of the family's leaders the rig is driven by (the record's
+    # leader_kind). A leader that answers the follower's protocol (the Metal
+    # arm's own leader) cannot be told from it, and the probe says so.
+    leader_kind: str | None = None
+
+
+class MakerIdentifyArmRequest(BaseModel):
+    # "robot" (the follower) or "teleop" (the leader). Unlike the SO-101, the
+    # two halves of a CAN rig need different bus drivers, so the caller must
+    # say which side it is asking about.
+    device_type: str
+    ports: list[str] | None = None
+    # Any registered family (every one implements identify_by_motion); an
+    # unknown id is refused. A family whose follower bus energizes on open
+    # (the Metal arm's Damiao handshake) refuses the follower side itself.
+    arm_type: str = "maker"
+    # The record's leader kind: an energized leader refuses the gesture too,
+    # and the answer then names the gripper wiggle as the fallback.
+    leader_kind: str | None = None
+
+
+class CanGripperWiggleRequest(BaseModel):
+    # Any registered family; only one with a gripper wiggle (the manifest's
+    # supports_gripper_wiggle) answers with more than a refusal.
+    arm_type: str
+    # "robot" (a follower port) or "teleop" (a leader port — only an
+    # energized leader has a gripper motor to move).
+    device_type: str
+    # The ONE port whose gripper to jog.
+    port: str
+    leader_kind: str | None = None
+
+
+@v1_router.post("/maker/probe-ports", response_model=MakerProbePortsResponse, tags=["system"])
+async def probe_maker_arm_ports(request: MakerProbePortsRequest):
+    """Find which ports carry a Maker follower and which carry its Star 102 leader.
+
+    A CAN rig's two halves speak different protocols on different adapters
+    (RobStride/Damiao over CAN vs FashionStar over UART), so unlike the SO-101
+    this needs NO gesture from the user — asking each port which protocol
+    answers is enough. The maker probe is strictly read-only; the METAL
+    follower probe briefly enables the gravity-neutral base joint and disables
+    it again (the Damiao handshake is the enable command — see
+    maker_ports._open_metal_follower_bus).
+
+    Refused by the family's flag, never by id: a family whose two halves
+    share one protocol (the SO-101) has nothing to ask a port and is told to
+    identify by the gesture instead.
+    """
+    require_known_arm_type(request.arm_type)
+    require_leader_kind(request.arm_type, request.leader_kind)
+    family = arm_registry.get(request.arm_type)
+    if family.follower_probe_protocol is None:
+        raise ApiError(
+            status_code=400,
+            detail=(
+                f"The {family.short_label} has no protocol probe: its leader and follower speak "
+                "the same protocol. Identify the arm by the hand gesture instead."
+            ),
+            code=ErrorCode.ROBOT_NOT_READY,
+        )
+    return await family.probe_ports(request.ports, **leader_kwargs(family, request.leader_kind))
+
+
+# exclude_none: success carries `port`, failure omits it entirely (never null),
+# so None-exclusion reproduces each branch exactly — same contract as
+# /identify-arm above.
+@v1_router.post(
+    "/maker/identify-arm",
+    response_model=MakerIdentifyArmResponse,
+    response_model_exclude_none=True,
+    tags=["system"],
+)
+async def identify_maker_arm(request: MakerIdentifyArmRequest):
+    """Tell one Maker arm from its twin by watching for a hand gesture.
+
+    Only needed for a BIMANUAL Maker robot: both arms ship with identical CAN
+    and servo ids, so probing alone cannot say which is left and which is
+    right. The user swings one arm's base and we report the port that saw it.
+    Read-only — no motor writes. Any registered family (each implements the
+    gesture); an unknown id is a 400.
+    """
+    require_known_arm_type(request.arm_type)
+    require_leader_kind(request.arm_type, request.leader_kind)
+    family = arm_registry.get(request.arm_type)
+    return await family.identify_by_motion(
+        request.device_type, request.ports, **leader_kwargs(family, request.leader_kind)
+    )
+
+
+# exclude_none: `code` rides only on a busy refusal, like every other
+# hardware handler's refusal dict.
+@v1_router.post(
+    "/maker/wiggle-gripper",
+    response_model=CanGripperWiggleResponse,
+    response_model_exclude_none=True,
+    tags=["system"],
+)
+async def wiggle_can_gripper_port(request: CanGripperWiggleRequest):
+    """Jog ONE port's gripper so the user can see which CAN arm is on it.
+
+    The identification of last resort (can_wiggle.py): a Metal rig driven by
+    a second Metal arm answers Damiao on every port, so the probe cannot say
+    which is the leader and the gesture is refused on both sides (opening a
+    Damiao bus energizes it). This opens the port with ONLY the gripper
+    motor on the bus, jogs the jaws a few degrees inside their soft limits,
+    and disables the motor again. Claims the wiggle mutex (robot.busy.wiggle)
+    and is refused while any session holds the hardware. A family without a
+    gripper wiggle answers a plain refusal.
+    """
+    require_known_arm_type(request.arm_type)
+    require_leader_kind(request.arm_type, request.leader_kind)
+    family = arm_registry.get(request.arm_type)
+    return await family.identify_by_gripper_wiggle(
+        request.device_type, request.port, **leader_kwargs(family, request.leader_kind)
+    )
+
+
+@v1_router.get("/arms", response_model=ArmFamiliesResponse, tags=["system"])
+def list_arm_families():
+    """The arms manifest: every registered arm family and what it can do.
+
+    The one document the UI reads arm capabilities from, so a family an
+    extension registers renders with no frontend change. Registry order,
+    default family FIRST — a client scanning `robot_type_markers` checks the
+    default family LAST (its markers are the loosest), exactly as
+    arm_capabilities.arm_type_from_robot_type does. See arms/manifest.py.
+    """
+    return {"arms": arms_manifest()}
+
+
+@v1_router.post("/arms/release-torque", response_model=ReleaseCanTorqueResponse, tags=["system"])
+async def release_can_torque(request: ReleaseCanTorqueRequest):
+    """De-energize a CAN follower after a crash left it holding torque.
+
+    A SIGKILL or power loss leaves Damiao motors rigid at their last command
+    with no session and no device object to clean up through. This reopens
+    the named bus WITHOUT the energizing handshake, broadcasts the disable,
+    and closes. Refused (409 session.held) while any live session holds the
+    hardware; not a session itself — no lease, no session events (see
+    can_recovery.py).
+    """
+    return await asyncio.to_thread(handle_release_can_torque, request)
+
+
+@router.post("/identify-arm")
 async def identify_arm(request: IdentifyArmRequest):
     """The inverse of /wiggle: the user swings an arm's base (shoulder pan) by
     hand and we report which port saw the motion. Read-only — no motor writes."""
-    return await identify_arm_by_motion(request.ports)
+    # The SO-101's two halves share one bus driver, so the side is immaterial.
+    return await arm_registry.default().identify_by_motion("robot", request.ports)
 
 
-@app.get("/supply-voltage")
+# exclude_none: success carries `voltage`, failure carries `message` — never
+# both, never null (see read_supply_voltage), so None-exclusion is faithful.
+@router.get(
+    "/supply-voltage",
+    response_model=SupplyVoltageResponse,
+    response_model_exclude_none=True,
+    tags=["system"],
+)
 async def supply_voltage(port: str = ""):
     """One-shot, read-only supply-voltage reading (Present_Voltage) from the arm
     on `port`. Connects, reads, and releases the port immediately — never holds
@@ -2406,7 +4851,15 @@ def _linux_cameras() -> list[dict[str, Any]]:
     return cameras
 
 
-@app.get("/available-cameras")
+# exclude_none: `message` exists only on the error branch and `unique_id` only
+# on macOS entries — both absent (never null) otherwise, so None-exclusion
+# reproduces the platform-specific bodies exactly.
+@router.get(
+    "/available-cameras",
+    response_model=AvailableCamerasResponse,
+    response_model_exclude_none=True,
+    tags=["system"],
+)
 def get_available_cameras():
     """List cameras with the same index ordering cv2 will use to record.
 
@@ -2446,7 +4899,21 @@ def get_available_cameras():
         return {"status": "error", "message": str(e), "cameras": []}
 
 
-@app.get("/camera-preview/{index}")
+@v1_router.get(
+    "/recording-preview/{camera_name}",
+    response_class=Response,
+    responses={200: {"content": {"image/jpeg": {}}}, 503: {"description": "No recording frame available"}},
+    tags=["recording"],
+)
+def recording_camera_preview(camera_name: str):
+    """Latest recorder RGB frame by observation key; no device access."""
+    frame = recording_preview.jpeg(camera_name)
+    if frame is None:
+        raise HTTPException(status_code=503, detail="Waiting for a recording camera frame")
+    return Response(frame, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@router.get("/camera-preview/{index}")
 def camera_preview_stream(index: int, unique_id: str | None = None):
     """MJPEG preview stream of a camera attached to the *server* machine.
 
@@ -2460,9 +4927,13 @@ def camera_preview_stream(index: int, unique_id: str | None = None):
 
     ``unique_id`` (AVFoundation uniqueID, from /available-cameras) re-anchors
     the index to the physical device before opening: cv2 resolves indices
-    against this process's startup device snapshot, which diverges from the
+    against this process's device snapshot, which diverges from the
     fresh-subprocess enumeration after a replug — without the re-anchor the
     stream can silently show a different camera (see makermodslab/camera_identity.py).
+    The identity is also what the preview registry shares captures by, so the
+    resolver hands back both: the index to open and the key to file it under.
+    Keying by the bare index aliased two different cameras onto one handle
+    whenever the device set renumbered mid-session.
 
     Returns 409 while recording or inference is active (they own the cv2
     devices) and 503 when the camera can't be opened. Teleoperation drives the
@@ -2479,15 +4950,30 @@ def camera_preview_stream(index: int, unique_id: str | None = None):
             status_code=409,
             detail="Inference is active — the cameras are in use. Stop the run to preview them.",
         )
-    resolved = resolve_cv2_index(unique_id, index)
-    if resolved is None:
+    if remote_host.hosting_active or remote_host.releasing:
+        raise HTTPException(
+            status_code=409,
+            detail="Hosting is active — the cameras are in use. Stop hosting to preview them.",
+        )
+    identified = identify_cv2_index(unique_id, index)
+    if identified is None:
         raise HTTPException(
             status_code=503,
-            detail="Camera not visible to the server — it was plugged in after MakerMods Lab "
-            "started. Restart MakerMods Lab to use it.",
+            # Two causes reach here and the server cannot tell them apart
+            # without plumbing that would not change the remedy: the camera
+            # was attached after startup and this process never saw it, or
+            # macOS is denying MakerMods Lab camera access, in which case the
+            # enumeration truthfully reports nothing and cv2 could not open
+            # the device either. Naming both beats asserting the first and
+            # sending the user to a restart that cannot help.
+            detail="Camera not visible to the server — either it was plugged in after "
+            "MakerMods Lab started, or macOS is not granting MakerMods Lab camera access "
+            "(System Settings → Privacy & Security → Camera). Grant access if it is missing, "
+            "then restart MakerMods Lab.",
         )
+    resolved, key = identified
     try:
-        stream = camera_preview_manager.open_stream(resolved)
+        stream = camera_preview_manager.open_stream(resolved, key)
     except CameraOpenError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return StreamingResponse(stream, media_type="multipart/x-mixed-replace; boundary=frame")
@@ -2496,7 +4982,7 @@ def camera_preview_stream(index: int, unique_id: str | None = None):
 RobotSideLiteral = Literal["leader", "follower"]
 
 
-@app.get("/robot-port/{robot_type}")
+@router.get("/robot-port/{robot_type}", response_model=RobotPortResponse, tags=["system"])
 def get_robot_port(robot_type: RobotSideLiteral):
     """Get the saved port for a robot type"""
     saved_port = get_saved_robot_port(robot_type)
@@ -2513,16 +4999,22 @@ def _record_with_clean(record: dict) -> dict:
 
     `is_clean` folds every arm of the mode (gates teleop/record, which drive
     leaders AND followers); `follower_ready` scopes to the follower side so
-    follower-only activities (inference, replay) aren't blocked by a leader arm
-    they never touch."""
+    follower-only activities (inference, replay, hosting) aren't blocked by a
+    leader arm they never touch; `leader_ready` is the mirror for remote
+    teleoperation, which drives a STATION's follower with this node's leader.
+    The record's `arms` layout says which of these the UI should even show.
+    `arm_available` says whether the record's arm type is a family this install
+    has registered; unknown ids remain visible but cannot start hardware."""
     return {
         **record,
+        "arm_available": is_known_arm_type(record.get("arm_type")),
         "is_clean": is_robot_record_clean(record),
         "follower_ready": is_robot_record_clean(record, arms="follower"),
+        "leader_ready": is_robot_record_clean(record, arms="leader"),
     }
 
 
-@app.get("/robots")
+@router.get("/robots")
 def get_robots():
     """List all saved robot records."""
     try:
@@ -2533,7 +5025,7 @@ def get_robots():
         return {"status": "error", "message": str(e), "robots": []}
 
 
-@app.get("/robots/{name}")
+@router.get("/robots/{name}")
 def get_robot(name: str):
     """Get a single robot record by name."""
     if not is_valid_robot_name(name):
@@ -2544,7 +5036,7 @@ def get_robot(name: str):
     return {"status": "success", "robot": _record_with_clean(record)}
 
 
-@app.post("/robots/{name}")
+@router.post("/robots/{name}")
 def upsert_robot(name: str, data: dict, create: bool = False):
     """
     Upsert a robot record.
@@ -2560,6 +5052,54 @@ def upsert_robot(name: str, data: dict, create: bool = False):
 
     body = data or {}
     existing = get_robot_record(name) or {}
+
+    if "gripper_hold_torque_nm" in body or "gripper_current_limit_a" in body:
+        from .gripper_settings import supports_gripper_effort_control, validate_gripper_hold_torque
+
+        try:
+            merged = {**existing, **body}
+            if not existing and not create:
+                return JSONResponse(
+                    status_code=404, content={"status": "error", "message": "Robot not found"}
+                )
+            if "gripper_hold_torque_nm" in body:
+                validate_gripper_hold_torque(body["gripper_hold_torque_nm"])
+                if not supports_gripper_effort_control(merged.get("arm_type")):
+                    raise ValueError("Holding torque is supported only for Metal followers")
+            if (
+                merged.get("gripper_current_limit_a") is not None
+                and merged.get("gripper_hold_torque_nm") is not None
+            ):
+                raise ValueError("Choose holding torque or current limiting, not both")
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"status": "error", "message": str(exc)})
+
+    if "gripper_current_limit_a" in body:
+        from .gripper_settings import validate_gripper_current
+
+        try:
+            if not existing and not create:
+                return JSONResponse(
+                    status_code=404, content={"status": "error", "message": "Robot not found"}
+                )
+            validate_gripper_current(body["gripper_current_limit_a"])
+            if not supports_gripper_effort_control(body.get("arm_type") or existing.get("arm_type")):
+                raise ValueError("Gripper current limiting is supported only for Metal followers")
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"status": "error", "message": str(exc)})
+
+    # An arm type nothing registered is refused on BOTH the create and the
+    # patch path — the whole body, so a record is never left half-switched
+    # (the disk layer would otherwise ignore the key and merge the rest). An
+    # absent or null arm_type is "unspecified" and passes (the disk layer
+    # then keeps the existing value, or the SO-101 default on create).
+    require_known_arm_type(body.get("arm_type"))
+    # A leader kind is validated against the family the record WILL have:
+    # the body's arm type when it names one, else the stored one (the SO-101
+    # default on create). Refused whole, like an unknown arm type.
+    if "leader_kind" in body and body["leader_kind"] is not None:
+        effective_arm_type = body.get("arm_type") or existing.get("arm_type")
+        require_leader_kind(effective_arm_type, body["leader_kind"])
 
     # Mode is fixed at creation. A bimanual rig is a different machine (different
     # robot_type on datasets, forced _left/_right calibration naming, different
@@ -2629,6 +5169,21 @@ def upsert_robot(name: str, data: dict, create: bool = False):
             )
 
     try:
+        gripper_application = None
+        if "gripper_hold_torque_nm" in body and not create:
+            from .metal_gripper import GripperSafetyError, apply_live_hold_torque
+
+            try:
+                gripper_application = apply_live_hold_torque(name, body["gripper_hold_torque_nm"])
+            except GripperSafetyError as exc:
+                return JSONResponse(status_code=409, content={"status": "error", "message": str(exc)})
+        if "gripper_current_limit_a" in body and not create and body.get("gripper_hold_torque_nm") is None:
+            from .metal_gripper import GripperSafetyError, apply_live_current
+
+            try:
+                gripper_application = apply_live_current(name, body["gripper_current_limit_a"])
+            except GripperSafetyError as exc:
+                return JSONResponse(status_code=409, content={"status": "error", "message": str(exc)})
         if create:
             if get_robot_record(name) is not None:
                 return JSONResponse(
@@ -2641,13 +5196,31 @@ def upsert_robot(name: str, data: dict, create: bool = False):
         record = get_robot_record(name)
         if record is None:
             return {"status": "success", "robot": None}
-        return {"status": "success", "robot": _record_with_clean(record)}
+        return {
+            "status": "success",
+            "robot": _record_with_clean(record),
+            "gripper_application": gripper_application,
+        }
     except Exception as e:
         logger.error(f"Error upserting robot {name}: {e}")
+        if gripper_application == "live":
+            from .metal_gripper import stop_live_grippers
+
+            stop_live_grippers(
+                name,
+                "Could not save applied gripper limit; grip released. Restart after fixing the save error.",
+            )
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
-@app.post("/robots/{name}/rename")
+@v1_router.get("/robots/{name}/gripper-status", response_model=GripperStatusResponse, tags=["robots"])
+def get_gripper_status(name: str):
+    from .metal_gripper import gripper_status
+
+    return {"grippers": gripper_status(name)}
+
+
+@router.post("/robots/{name}/rename")
 def rename_robot(name: str, data: dict):
     """
     Rename a robot record. Body: {"new_name": "..."}. Calibration files are not
@@ -2673,7 +5246,7 @@ def rename_robot(name: str, data: dict):
     return JSONResponse(status_code=status_code, content={"status": "error", "message": message})
 
 
-@app.delete("/robots/{name}")
+@router.delete("/robots/{name}")
 def delete_robot(name: str):
     """Delete a robot record."""
     if not is_valid_robot_name(name):
@@ -2684,15 +5257,112 @@ def delete_robot(name: str):
 
 
 @app.on_event("startup")
+def migrate_state_home():
+    """Move pre-split state from lerobot's cache into MAKERMODSLAB_HOME.
+
+    Registered FIRST so it runs before any other startup work; every reader
+    of the moved entries is lazy (robot records, ports, the node registry's
+    saved peers, the instance id), so startup is early enough. Skipped under
+    a MAKERMODSLAB_HOME override — see utils/config.HOME_IS_OVERRIDDEN.
+    """
+    if HOME_IS_OVERRIDDEN:
+        return
+    migrate_legacy_state()
+
+
+@app.on_event("startup")
 def startup_event():
     """One-time startup diagnostics surfaced in the server terminal."""
     warn_if_cuda_mismatch()
+    # A Modal app OUTLIVES the `modal run` client that started it (the client
+    # only tells Modal to stop on SIGINT), so a Lab that was hard-killed —
+    # SIGKILL, a crash, a power cut — can leave an A100 billing with nobody
+    # attached. If the last run left an app id on disk and nothing is running
+    # here, stop it. On a background thread, best-effort, and it never blocks
+    # or refuses a launch; what it did shows up as the idle status's message.
+    modal_launcher.reap_orphan_app_async()
+
+
+@app.on_event("startup")
+def start_station_mode():
+    """`makermodslab --host <robot>`: keep that robot hosted for remote
+    teleoperation (remote_host.start_station_mode) — parked from startup,
+    re-armed after any local session, no browser required."""
+    if os.environ.get(remote_host.STATION_ENV) == "1":
+        remote_host.start_station_mode(
+            os.environ.get(remote_host.STATION_ROBOT_ENV, "").strip() or None, manager
+        )
+
+
+# Strong reference so the loop's task set can't drop the pump mid-flight.
+_avf_pump_task: asyncio.Task | None = None
+
+
+@app.on_event("startup")
+async def start_avfoundation_pump():
+    """Keep the in-process camera list live on macOS (hotplug/replug).
+
+    Async handler on purpose: it runs inside the event loop (main thread),
+    which is where the pump must live — AVFoundation's device-cache updates
+    only drain on the main thread's runloop (see camera_identity). A sync
+    startup handler would run in the threadpool and couldn't schedule it.
+    No-op off macOS.
+    """
+    global _avf_pump_task
+    _avf_pump_task = asyncio.create_task(pump_avfoundation_runloop())
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up resources when FastAPI shuts down"""
     logger.info("🔄 FastAPI shutting down, cleaning up...")
+
+    # FIRST, before anything below takes its (bounded but real) time: stop the
+    # job watchdog, so the local training queue cannot promote a run while we
+    # are shutting down.
+    #
+    # `_drain_queue` runs every second from a thread uvicorn does not manage, so
+    # without this a queued run could still be promoted after uvicorn has
+    # stopped accepting the HTTP requests that are the only other way to start
+    # one. The run already training is then ended deliberately further down (see
+    # `stop_local_for_shutdown`), because its stdout pipe dies with this process
+    # regardless — the exit-status file + TailingJobRunner still cover a worker
+    # reload that this same process survives.
+    job_registry.shutdown()
+
+    # Same for the station supervisor (`--host`): it re-arms hosting every few
+    # seconds whenever nothing holds the hardware, and the stops below are
+    # exactly "nothing holds the hardware" from its point of view.
+    remote_host.stop_station_mode()
+
+    # THEN the GPU, before anything else here spends its (bounded but real)
+    # time, because this is the one child that is BILLED BY THE MINUTE and the
+    # one whose death has to be a specific signal. `modal run` tears its app
+    # down from `except KeyboardInterrupt` and nowhere else, so the client has
+    # to receive a SIGINT and be given a moment to make that call; if this
+    # process leaves first — a uvicorn --reload restart on any save under
+    # makermodslab/, a Ctrl-C on the dev launcher, a `makermodslab --stop` —
+    # the client is orphaned or killed and a Modal A100 keeps running for the
+    # 5-7 minutes Modal's own heartbeat timeout takes to notice.
+    #
+    # Synchronous (in a thread) rather than fire-and-forget, for the same
+    # reason: a stop that outlives the process it runs in is not a stop. It
+    # costs ~2s when a GPU is up and returns immediately when none is.
+    #
+    # Ahead of the arm stops below on purpose. A remote run whose policy
+    # vanishes for the second or two this takes is a robot side that stops
+    # receiving actions and holds — and it is being stopped moments later
+    # anyway, by the same handler, with its own return-to-rest.
+    try:
+        if await asyncio.to_thread(modal_launcher.stop_for_shutdown):
+            logger.info("Stopped the GPU policy server on shutdown")
+    except Exception:
+        logger.exception("Failed to stop the GPU policy server during shutdown")
+
+    # Stop the AVFoundation pump first so its next tick can't interleave with
+    # shutdown (and so --reload restarts don't log a destroyed-pending-task).
+    if _avf_pump_task is not None:
+        _avf_pump_task.cancel()
 
     # Teleoperation and recording drive the follower(s) as background threads
     # INSIDE this process (teleoperation_thread / recording_thread); auto-
@@ -2711,18 +5381,69 @@ async def shutdown_event():
     # ever has real work — gathered concurrently anyway, both because it's
     # cheap and as a defensive measure if that invariant is ever violated,
     # rather than paying each stop's worst case one after another.
+    #
+    # REMOTE INFERENCE belongs here rather than beside the GPU stop above, and
+    # it is the sharpest case on the list: its child is spawned with
+    # `start_new_session=True`, so the SIGTERM/SIGINT that ends this worker
+    # never reaches it, and it ignores stdin EOF by design — `STOP` on that
+    # stdin is the ONLY thing that makes it return the arm before releasing
+    # torque. It is deliberately AFTER the GPU stop (which has already
+    # completed above, awaited, so the two never overlap): the child losing its
+    # policy for a second is a robot side that stops receiving actions and
+    # holds, which is exactly the state a return-to-rest wants to start from,
+    # whereas stopping the arm first would leave a GPU billing while we waited
+    # out its return.
     results = await asyncio.gather(
         asyncio.to_thread(stop_teleoperation_and_wait),
         asyncio.to_thread(stop_recording_and_wait),
         asyncio.to_thread(auto_calibration_manager.stop_and_wait),
         asyncio.to_thread(auto_calibration_batch_manager.stop_and_wait),
         asyncio.to_thread(handle_stop_inference),
+        asyncio.to_thread(stop_replay_and_wait),
+        asyncio.to_thread(remote_inference.stop_for_shutdown),
+        # Hosting drives the follower from an in-process thread like teleop
+        # does — an engaged arm returns to rest, then torque is released.
+        # Remote teleoperation only holds the leader, but it must leave the
+        # room so the station parks the follower now rather than after its
+        # silent-loss grace.
+        asyncio.to_thread(remote_host.stop_hosting_for_shutdown),
+        asyncio.to_thread(remote_teleoperate.stop_for_shutdown),
         return_exceptions=True,
     )
-    labels = ("teleoperation", "recording", "auto-calibration", "auto-calibration batch", "inference")
+    labels = (
+        "teleoperation",
+        "recording",
+        "auto-calibration",
+        "auto-calibration batch",
+        "inference",
+        "replay",
+        "remote inference",
+        "hosting",
+        "remote teleoperation",
+    )
     for label, result in zip(labels, results, strict=True):
         if isinstance(result, Exception):
             logger.exception(f"Failed to stop {label} during shutdown", exc_info=result)
+
+    # Local training is not on the list above because it drives no hardware —
+    # but it does die with this process regardless of what we do here. The
+    # trainer's stdout is a pipe this process owns, so the moment we exit its
+    # next write raises BrokenPipeError and it exits 1, with the traceback
+    # going into the closed pipe: no log line, and a history entry reading
+    # "Subprocess exited with code 1" that looks exactly like a broken model.
+    # (`start_new_session=True` escapes the process group, not the pipe.) So we
+    # end it deliberately instead, and file it as `interrupted` with a reason.
+    # Cloud runs are untouched — they keep going on HF's GPUs.
+    try:
+        stopped = await asyncio.to_thread(job_registry.stop_local_for_shutdown)
+        if stopped:
+            logger.info(
+                "Stopped %d local training job(s) on shutdown: %s",
+                len(stopped),
+                ", ".join(stopped),
+            )
+    except Exception:
+        logger.exception("Failed to stop local training jobs during shutdown")
 
     if manager:
         manager.stop_broadcast_thread()
@@ -2775,8 +5496,35 @@ class SPAStaticFiles(StaticFiles):
             raise
 
 
+def _v1_operation_id(route: APIRoute) -> str:
+    """v1 operation ids are the bare handler names — the method names an SDK
+    generator emits — so handlers must be uniquely named (contract-tested)."""
+    return route.name
+
+
+# Flat mount first (default operation ids), then /api/v1 with clean ids.
+# Both precede the SPA mount below: starlette matches in registration order,
+# so anything registered after the "/" mount would be unreachable.
+app.include_router(router)
+# v1-only surface: included ONCE, versioned — never on the flat mount. It
+# joins /api/v1 BEFORE the shared router does, and that order is load-bearing:
+# starlette matches in registration order, and the shared router's
+# GET /jobs/{job_id} would otherwise swallow the v1-only GET /jobs/queue
+# (a single {job_id} segment happily matches the literal "queue").
+app.include_router(v1_router, prefix="/api/v1", generate_unique_id_function=_v1_operation_id)
+app.include_router(router, prefix="/api/v1", generate_unique_id_function=_v1_operation_id)
+
+
+def ui_enabled() -> bool:
+    """Whether this process serves the built frontend.
+
+    MAKERMODSLAB_NO_UI=1 (the --no-ui flag) turns a node into a pure API
+    server — same binary, headless role."""
+    return FRONTEND_DIST.exists() and os.environ.get("MAKERMODSLAB_NO_UI") != "1"
+
+
 # Serve the built frontend at /. Must be mounted last so API routes win.
-if FRONTEND_DIST.exists():
+if ui_enabled():
     app.mount("/", SPAStaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
 else:
     logger.warning(

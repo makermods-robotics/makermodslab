@@ -31,8 +31,14 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
+      # frontend/public/media holds the calibration demo clips — deliberate,
+      # documented video assets (see that directory's README for the encode
+      # spec that keeps them small). The 1 MB guard is here to catch blobs
+      # committed by accident, and a video can never pass it, so the path is
+      # excluded rather than the limit raised for everything.
       - id: check-added-large-files
         args: ['--maxkb=1024']
+        exclude: '^frontend/public/media/'
       - id: debug-statements
       - id: check-merge-conflict
       - id: check-case-conflict
@@ -109,3 +115,16 @@ repos:
   #   hooks:
   #     - id: interrogate
   #       args: ["-vv", "--config=pyproject.toml"]
+
+  ##### API contract #####
+  - repo: local
+    hooks:
+      - id: export-openapi
+        name: Regenerate docs/api/openapi.json
+        # Keeps the committed OpenAPI snapshot in the same commit as the code
+        # change that altered the surface; tests/test_api_contract.py enforces
+        # freshness in CI as the backstop.
+        entry: uv run python -m makermodslab.scripts.export_openapi
+        language: system
+        files: ^makermodslab/.*\.py$
+        pass_filenames: false

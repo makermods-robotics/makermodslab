@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   Archive,
@@ -32,19 +33,28 @@ import AddModelFromHubDialog from "@/components/landing/AddModelFromHubDialog";
 import ImportModelFromDiskDialog from "@/components/landing/ImportModelFromDiskDialog";
 import {
   formatCount,
-  isMineSkill,
-  skillTitle,
-} from "@/components/launchpad/SkillCard";
+  isMinePolicy,
+  policyDisplayTitle,
+} from "@/components/launchpad/PolicyCard";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import DatasetDetailDialog from "@/components/dialogs/DatasetDetailDialog";
-import SkillManageDialog from "@/components/dialogs/SkillManageDialog";
+import PolicyManageDialog from "@/components/dialogs/PolicyManageDialog";
+
+/** The backend's dataset `source` enum → its label KEY for the mono subtitle
+ * line. The enum values are data; the map holds keys, not resolved copy, so it
+ * doesn't freeze whichever language loaded first. */
+const DATASET_SOURCE_KEY = {
+  both: "library.sheet.datasets.source.both",
+  hub: "library.sheet.datasets.source.hub",
+  local: "library.sheet.datasets.source.local",
+} as const;
 
 export interface LibrarySheetProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-type Tab = "skills" | "datasets";
+type Tab = "policies" | "datasets";
 
 const SegButton: React.FC<{
   active: boolean;
@@ -66,12 +76,13 @@ const SegButton: React.FC<{
 
 /**
  * "My library" slide-over — a right-anchored sheet (Radix Dialog primitive) with
- * My skills / My datasets tabs. Skill rows Run on the corner robot (→ Deploy,
+ * My policies / My datasets tabs. Policy rows Run on the corner robot (→ Deploy,
  * prefilled); dataset rows open the dataset detail dialog. Footer offers a new
- * skill (→ studio Collect) and Merge datasets (the existing MergeDatasetsDialog,
+ * policy (→ studio Collect) and Merge datasets (the existing MergeDatasetsDialog,
  * reused unmodified).
  */
 const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
+  const { t } = useTranslation();
   const { openStudio } = useStudio();
   const { auth } = useHfAuth();
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -81,11 +92,11 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
     useModels();
   const { datasets, loading: datasetsLoading, refresh: refreshDatasets } =
     useDatasets();
-  const [tab, setTab] = useState<Tab>("skills");
+  const [tab, setTab] = useState<Tab>("policies");
   const [mergeOpen, setMergeOpen] = useState(false);
   const [detailRepo, setDetailRepo] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
-  const [manageSkill, setManageSkill] = useState<ModelItem | null>(null);
+  const [managePolicy, setManagePolicy] = useState<ModelItem | null>(null);
   const [manageOpen, setManageOpen] = useState(false);
   const [addDatasetOpen, setAddDatasetOpen] = useState(false);
   const [importDatasetOpen, setImportDatasetOpen] = useState(false);
@@ -101,7 +112,9 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
   // pin is best-effort, selection still works if the save call fails.
   const handleAddDatasetFromHub = async (repoId: string, download: boolean) => {
     setSelectedDataset(repoId);
-    toast({ title: "Dataset saved", description: repoId });
+    // Every toast here describes itself with a repo id — data, rendered
+    // verbatim; only the title is ours to translate.
+    toast({ title: t("library.sheet.toast.datasetSaved"), description: repoId });
     try {
       await saveCustomDataset(baseUrl, fetchWithHeaders, repoId);
       refreshDatasets();
@@ -111,10 +124,14 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
     if (!download) return;
     try {
       await downloadDataset(baseUrl, fetchWithHeaders, repoId);
-      toast({ title: "Download started", description: repoId });
+      toast({
+        title: t("library.sheet.toast.downloadStarted"),
+        description: repoId,
+      });
     } catch (e) {
       toast({
-        title: "Couldn't start download",
+        title: t("library.sheet.toast.downloadFailed"),
+        // The backend's own explanation — left in its original language.
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -126,12 +143,15 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
   const handleDatasetImported = (repoId: string) => {
     setSelectedDataset(repoId);
     refreshDatasets();
-    toast({ title: "Dataset imported", description: repoId });
+    toast({
+      title: t("library.sheet.toast.datasetImported"),
+      description: repoId,
+    });
   };
 
   // Models twins of the two handlers above (ported from ModelsPanel).
   const handleAddModelFromHub = async (repoId: string, download: boolean) => {
-    toast({ title: "Model saved", description: repoId });
+    toast({ title: t("library.sheet.toast.modelSaved"), description: repoId });
     try {
       await saveCustomModel(baseUrl, fetchWithHeaders, repoId);
       refreshModels();
@@ -141,10 +161,13 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
     if (!download) return;
     try {
       await downloadModel(baseUrl, fetchWithHeaders, repoId);
-      toast({ title: "Download started", description: repoId });
+      toast({
+        title: t("library.sheet.toast.downloadStarted"),
+        description: repoId,
+      });
     } catch (e) {
       toast({
-        title: "Couldn't start download",
+        title: t("library.sheet.toast.downloadFailed"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -153,11 +176,14 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
 
   const handleModelImported = (repoId: string) => {
     refreshModels();
-    toast({ title: "Model imported", description: repoId });
+    toast({
+      title: t("library.sheet.toast.modelImported"),
+      description: repoId,
+    });
   };
 
-  const mySkills = useMemo(
-    () => models.filter((m) => isMineSkill(m, username)),
+  const myPolicies = useMemo(
+    () => models.filter((m) => isMinePolicy(m, username)),
     [models, username],
   );
 
@@ -176,7 +202,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
     [videoFilteredDatasets, username],
   );
 
-  const runSkill = (model: ModelItem) => {
+  const runPolicy = (model: ModelItem) => {
     // Only a Hub-ONLY model goes through the repo-id lazy-import path; a model
     // with a local copy (`local`/`both`) deploys through its existing job
     // registry entry (the run id is its job id) — re-importing would duplicate
@@ -202,10 +228,10 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
           <DialogPrimitive.Content className="fixed inset-y-0 right-0 z-50 flex w-full max-w-sm flex-col border-l border-border bg-background shadow-2 duration-300 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right">
             <div className="flex items-center justify-between border-b border-border px-4 py-3">
               <DialogPrimitive.Title className="font-display text-lg font-semibold tracking-tight">
-                My library
+                {t("library.sheet.title")}
               </DialogPrimitive.Title>
               <DialogPrimitive.Close
-                aria-label="Close library"
+                aria-label={t("library.sheet.close")}
                 className="rounded-sm p-1 text-muted-foreground opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring"
               >
                 <X className="h-4 w-4" />
@@ -215,31 +241,31 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
             <div className="flex-1 overflow-y-auto p-4">
               <div className="mb-4 flex gap-1 rounded-lg border border-border bg-muted p-1">
                 <SegButton
-                  active={tab === "skills"}
-                  onClick={() => setTab("skills")}
+                  active={tab === "policies"}
+                  onClick={() => setTab("policies")}
                 >
-                  My skills
+                  {t("library.sheet.tabs.policies")}
                 </SegButton>
                 <SegButton
                   active={tab === "datasets"}
                   onClick={() => setTab("datasets")}
                 >
-                  My datasets
+                  {t("library.sheet.tabs.datasets")}
                 </SegButton>
               </div>
 
-              {tab === "skills" ? (
+              {tab === "policies" ? (
                 <div className="flex flex-col gap-2">
                   {modelsLoading ? (
                     <p className="px-1 py-6 text-center text-sm text-muted-foreground">
-                      Loading skills…
+                      {t("library.sheet.policies.loading")}
                     </p>
-                  ) : mySkills.length === 0 ? (
+                  ) : myPolicies.length === 0 ? (
                     <p className="px-1 py-6 text-center text-sm text-muted-foreground">
-                      No skills of yours yet — create one below.
+                      {t("library.sheet.policies.empty")}
                     </p>
                   ) : (
-                    mySkills.map((m) => (
+                    myPolicies.map((m) => (
                       <div
                         key={m.id}
                         className="flex items-center gap-2 rounded-md border border-border bg-card p-3 transition-colors hover:border-ring"
@@ -247,26 +273,35 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                         <button
                           type="button"
                           onClick={() => {
-                            setManageSkill(m);
+                            setManagePolicy(m);
                             setManageOpen(true);
                           }}
                           className="min-w-0 flex-1 text-left"
-                          aria-label={`Manage ${skillTitle(m)}`}
+                          aria-label={t("library.sheet.policies.manage", {
+                            name: policyDisplayTitle(t, m),
+                          })}
                         >
                           <div className="flex items-center gap-2">
                             <span className="truncate font-medium">
-                              {skillTitle(m)}
+                              {policyDisplayTitle(t, m)}
                             </span>
                           </div>
                           <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+                            {/* Policy type is data (an enum name the backend
+                                owns); the step count arrives pre-formatted
+                                ("16k"), so it goes in as `steps` rather than
+                                i18next's `count`. The `m.source` fallback is
+                                the raw enum — data too. */}
                             {[
                               m.policy_type
                                 ? policyTypeDisplayName(m.policy_type)
                                 : null,
                               m.steps != null
-                                ? `${formatCount(m.steps)} steps`
+                                ? t("library.sheet.steps", {
+                                    steps: formatCount(m.steps),
+                                  })
                                 : null,
-                              m.private ? "private" : null,
+                              m.private ? t("library.sheet.private") : null,
                             ]
                               .filter(Boolean)
                               .join(" · ") || m.source}
@@ -274,9 +309,11 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                         </button>
                         <Button
                           size="sm"
-                          onClick={() => runSkill(m)}
+                          onClick={() => runPolicy(m)}
                           className="shrink-0"
-                          aria-label={`Run ${skillTitle(m)}`}
+                          aria-label={t("library.sheet.policies.run", {
+                            name: policyDisplayTitle(t, m),
+                          })}
                         >
                           <Play className="h-3.5 w-3.5" />
                         </Button>
@@ -288,11 +325,11 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                 <div className="flex flex-col gap-2">
                   {datasetsLoading ? (
                     <p className="px-1 py-6 text-center text-sm text-muted-foreground">
-                      Loading datasets…
+                      {t("library.sheet.datasets.loading")}
                     </p>
                   ) : myDatasets.length === 0 ? (
                     <p className="px-1 py-6 text-center text-sm text-muted-foreground">
-                      No datasets of yours yet — record one to get started.
+                      {t("library.sheet.datasets.empty")}
                     </p>
                   ) : (
                     myDatasets.map((d) => (
@@ -307,12 +344,12 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                             {d.repo_id}
                           </span>
                           <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
-                            {d.source === "both"
-                              ? "local + Hub"
-                              : d.source === "hub"
-                                ? "on Hub"
-                                : "local only"}
-                            {d.private ? " · private" : ""}
+                            {[
+                              t(DATASET_SOURCE_KEY[d.source]),
+                              d.private ? t("library.sheet.private") : null,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ")}
                           </p>
                         </div>
                       </button>
@@ -323,7 +360,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
             </div>
 
             <div className="flex flex-col gap-2 border-t border-border p-4">
-              {tab === "skills" ? (
+              {tab === "policies" ? (
                 <div className="flex gap-2">
                   <Button
                     variant="ghost"
@@ -332,7 +369,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                     className="flex-1 gap-1.5"
                   >
                     <CloudDownload className="h-3.5 w-3.5" />
-                    Add from Hub
+                    {t("library.sheet.actions.addFromHub")}
                   </Button>
                   <Button
                     variant="ghost"
@@ -341,7 +378,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                     className="flex-1 gap-1.5"
                   >
                     <FolderInput className="h-3.5 w-3.5" />
-                    Import from disk
+                    {t("library.sheet.actions.importFromDisk")}
                   </Button>
                 </div>
               ) : (
@@ -354,7 +391,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                       className="flex-1 gap-1.5"
                     >
                       <CloudDownload className="h-3.5 w-3.5" />
-                      Add from Hub
+                      {t("library.sheet.actions.addFromHub")}
                     </Button>
                     <Button
                       variant="ghost"
@@ -363,7 +400,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                       className="flex-1 gap-1.5"
                     >
                       <FolderInput className="h-3.5 w-3.5" />
-                      Import from disk
+                      {t("library.sheet.actions.importFromDisk")}
                     </Button>
                   </div>
                   <Button
@@ -373,7 +410,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                     className="w-full gap-1.5"
                   >
                     <Archive className="h-3.5 w-3.5" />
-                    Manage caches
+                    {t("library.sheet.actions.manageCaches")}
                   </Button>
                 </>
               )}
@@ -386,7 +423,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                 className="w-full gap-2"
               >
                 <Plus className="h-4 w-4" />
-                New Skill
+                {t("library.sheet.actions.newPolicy")}
               </Button>
               <Button
                 variant="ghost"
@@ -394,7 +431,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                 className="w-full gap-2"
               >
                 <GitMerge className="h-4 w-4" />
-                Merge datasets
+                {t("library.sheet.actions.mergeDatasets")}
               </Button>
             </div>
           </DialogPrimitive.Content>
@@ -417,14 +454,14 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
         onStudioAction={() => onOpenChange(false)}
       />
 
-      <SkillManageDialog
-        model={manageSkill}
+      <PolicyManageDialog
+        model={managePolicy}
         open={manageOpen}
         onOpenChange={setManageOpen}
         onChanged={refreshModels}
         onRun={(m) => {
           setManageOpen(false);
-          runSkill(m);
+          runPolicy(m);
         }}
       />
 

@@ -1,0 +1,305 @@
+# Copyright 2026 MakerMods. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Response models for the "jobs" route group (training-job lifecycle, Hub
+jobs/models listing, checkpoints). See the package docstring for the fidelity
+rules; the shape authority is always the handler, named next to each model.
+
+The registry shapes are re-exported straight from makermodslab/jobs.py: the
+handlers there already build responses FROM these very Pydantic models
+(JobRecord, LogLine, MetricsHistoryPoint, JobCheckpoint), so schema and wire
+format cannot drift. JobRecord itself is deliberately ONE model for all three
+runners (local / hf_cloud / imported): the record is uniform-with-nulls, not a
+union — every key is persisted and serialized on every record, and the
+runner-specific fields (process_pid for local, hf_* for hf_cloud) are simply
+null outside their runner. Only /jobs/hub is heterogeneous BY BRANCH: the
+unauthenticated body carries no jobs_permission key at all (never null), while
+sibling keys in the authenticated rows (name, created_at, status, owner,
+last_modified) are legitimately null — so that one route serializes with
+``response_model_exclude_unset=True`` and every other route takes a plain
+model with its real nulls declared.
+"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel
+
+# The registry's own wire models — the handlers return these instances (or
+# dicts wrapping them), so re-exporting is what keeps schema == wire.
+from makermodslab.jobs import JobCheckpoint, JobRecord, LogLine, MetricsHistoryPoint
+
+__all__ = [
+    "CheckpointImageFeature",
+    "CheckpointPolicyConfigResponse",
+    "HubJobDismissResponse",
+    "HubJobItem",
+    "HubJobStatus",
+    "HubJobsResponse",
+    "HubModelDeleteResponse",
+    "HubModelItem",
+    "JobCheckpoint",
+    "JobCheckpointsResponse",
+    "JobListResponse",
+    "JobLogsResponse",
+    "JobQueueResponse",
+    "JobMetricsHistoryResponse",
+    "JobRecord",
+    "LogLine",
+    "MetricsHistoryPoint",
+    "RunnerFlavor",
+    "RunnersHardwareResponse",
+]
+
+
+class JobListResponse(BaseModel):
+    """server.py list_jobs — JobRegistry.list() records (checkpoint_count and
+    the resume lineage annotated at read time), newest first."""
+
+    jobs: list[JobRecord]
+
+
+class JobQueueResponse(BaseModel):
+    """server.py list_job_queue / reorder_job_queue — the WHOLE local training
+    queue (JobRegistry.list_queue / reorder_queue), in the order it will run,
+    each record annotated with its 1-based queue_position. Same JobRecord model
+    as the history list — a queued record is uniform-with-defaults, not a
+    different shape — but the ordering contract differs (run order, uncapped),
+    which is why this is not JobListResponse."""
+
+    jobs: list[JobRecord]
+
+
+class JobLogsResponse(BaseModel):
+    """server.py get_job_logs / get_job_log_file — both return {"logs": [...]}
+    of the same LogLine model: the live drained tail for /logs, the whole
+    persisted log.jsonl for /log-file (JSON, not a file download)."""
+
+    logs: list[LogLine]
+
+
+class JobMetricsHistoryResponse(BaseModel):
+    """server.py get_job_metrics_history — the per-step series JobRegistry.
+    read_metrics_history reconstructs from log.jsonl across the resume chain."""
+
+    points: list[MetricsHistoryPoint]
+
+
+class JobCheckpointsResponse(BaseModel):
+    """server.py get_job_checkpoints — JobRegistry.list_checkpoints, ascending
+    by step.
+
+    ``?lineage=true`` serves the same shape from list_chain_checkpoints (the
+    whole resume chain); those rows are the ones that carry JobCheckpoint's
+    owner_* stamps, which a single-run listing leaves null."""
+
+    checkpoints: list[JobCheckpoint]
+
+
+class CheckpointImageFeature(BaseModel):
+    """One camera's expected input size in a checkpoint's policy config
+    (jobs.py JobRegistry.get_policy_config_summary)."""
+
+    height: int
+    width: int
+
+
+class CheckpointPolicyConfigResponse(BaseModel):
+    """jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice
+    of a checkpoint's pretrained_model/config.json. policy_type passes through
+    from the file's "type" key (null when absent); state_dim/action_dim are
+    null when the checkpoint omits the feature. trained_on_robot_type is the
+    raw lerobot robot_type of the checkpoint's training dataset (recovered via
+    train_config.json), null when it can't be established — the fine-tune
+    panel compares it against the selected dataset's arm.
+
+    supports_rtc says whether this architecture can run the Real-Time Chunking
+    inference engine; null means the policy type isn't one the server knows
+    (a fork newer than jobs.policy_type_supports_rtc's table), which the client
+    must read as "offer it and let the server decide", not as "no". The route
+    declares no exclude_none/exclude_unset, so the key is always present.
+
+    n_action_steps / chunk_size are the checkpoint's chunk geometry, null when
+    the config omits them. n_action_steps is the CEILING on a remote-inference
+    horizon — a declared horizon above it makes the two Portal peers disagree
+    about the action-chunk shape, and every packet is then dropped in silence.
+
+    dataset_repo_id is the dataset the checkpoint was trained on, read from its
+    own train_config.json — null when the lineage offers no real id (an
+    imported flat model repo, or a record still carrying the "(imported)"
+    placeholder, which is never reported as a repo id). Clients should prefer
+    it over the owning job record's config.dataset_repo_id: the record is a
+    placeholder for imports, and on a resume chain the tip's record does not
+    describe a checkpoint owned by an ancestor."""
+
+    policy_type: str | None
+    image_features: dict[str, CheckpointImageFeature]
+    requires_task: bool
+    supports_rtc: bool | None
+    # Whether the two GPU-launch knobs apply to THIS checkpoint (S3.8f), so a
+    # launch panel can disable a select with a reason instead of sending a
+    # value that will be dropped.
+    #
+    # supports_model_dtype is "this config carries a `model_dtype` field" —
+    # answered from the saved config rather than a table of policy types,
+    # because a config.json is a dataclass dump and key presence IS the class
+    # having the field. In this pin only MolmoAct2 does.
+    supports_model_dtype: bool
+    # Whether the checkpoint's family samples its actions in steps at all
+    # (smolvla, pi0, pi05, MolmoAct2 do; ACT and pi0_fast do not). A SEPARATE
+    # field from the default below on purpose: null there is both "no such
+    # knob" and "the knob exists and this checkpoint saved nothing this side
+    # can resolve" — a pi05 with a null `num_inference_steps` is the second.
+    supports_flow_steps: bool
+    # Whether extra camera views may be DECLARED on this checkpoint at launch
+    # (S3.8g) — true only for a family whose image-view count is a property of
+    # its lerobot wrapper rather than of its architecture
+    # (`utils.system.VARIABLE_VIEW_POLICY_TYPES`; in this pin, MolmoAct2 alone).
+    #
+    # Answered from a TABLE of policy types rather than from key presence the
+    # way `supports_model_dtype` is, because there is no field in a config.json
+    # that says "this vision tower takes any number of pictures" — it is a fact
+    # about the family's processor, established by reading it. False for a type
+    # this pin has never heard of, which is the safe direction: the checkpoint
+    # then runs with the views it was published with.
+    supports_extra_image_roles: bool
+    # The steps-per-chunk the checkpoint would run with, when it can be known.
+    # Null both for a policy with no such knob (ACT, pi0_fast) and for one that
+    # saved no value whose applying default is not readable from here.
+    # MolmoAct2 is NOT the latter: it saves `num_inference_steps: null` and
+    # then runs at 10 — the pin's own backbone default — so it answers 10.
+    # "Unknown" stays the honest answer for the rest, and a client must read
+    # null as "do not print a number", never as "no default".
+    flow_steps_default: int | None
+    state_dim: int | None
+    action_dim: int | None
+    n_action_steps: int | None
+    chunk_size: int | None
+    trained_on_robot_type: str | None
+    dataset_repo_id: str | None
+
+
+class HubJobStatus(BaseModel):
+    """The {stage, message} pair of one Hub job (server.py list_hub_jobs, from
+    huggingface_hub's JobStatus)."""
+
+    stage: str
+    message: str | None
+
+
+class HubJobItem(BaseModel):
+    """One row of GET /jobs/hub `jobs` (server.py list_hub_jobs). Every key is
+    always present; the nullables mirror huggingface_hub's JobInfo (docker_image
+    and space_id are mutually exclusive on the Hub side, status/owner can be
+    absent objects → null, name is _hub_job_run_name's best effort).
+
+    `policy_type` / `dataset` / `total_steps` / `hf_repo_id` are the run's
+    identity, recovered from the job's own argv by _hub_job_identity so a run
+    launched on another machine reads like a tracked one. Each is independently
+    nullable and for a real reason: a RESUMED cloud run carries `--config_path`
+    instead of `--policy.type` / `--dataset.repo_id`, so it reports a repo and a
+    step target with no policy or dataset.
+
+    `kind` and the `base_*` / `dataset_repo_id` / `steps` fields are what the run
+    started FROM, parsed by _hub_job_provenance off the same argv (kind chip +
+    base-checkpoint row on the card). `kind` is always one of
+    scratch/foundation/finetune/resume; the rest are null when the argv doesn't
+    answer them. All of it is decoration on a listing — never identity — so a
+    row that answers none of them still renders."""
+
+    id: str
+    name: str | None
+    created_at: str | None
+    docker_image: str | None
+    space_id: str | None
+    flavor: str | None
+    status: HubJobStatus | None
+    owner: str | None
+    url: str
+    policy_type: str | None
+    dataset: str | None
+    total_steps: int | None
+    hf_repo_id: str | None
+    kind: Literal["scratch", "foundation", "finetune", "resume"] | None = None
+    base_ref: str | None = None
+    base_repo: str | None = None
+    base_step: str | None = None
+    base_job_id: str | None = None
+    dataset_repo_id: str | None = None
+    steps: str | None = None
+
+
+class HubModelItem(BaseModel):
+    """One row of GET /jobs/hub `models` (server.py list_hub_jobs `_add`)."""
+
+    repo_id: str
+    last_modified: str | None
+    private: bool
+
+
+class HubJobsResponse(BaseModel):
+    """server.py list_hub_jobs. Heterogeneous by branch: the unauthenticated
+    body is exactly {authenticated, jobs, models} — jobs_permission is absent
+    there (never null), and present (true/false) when authenticated. The route
+    serializes with exclude_unset so each branch keeps its exact keys while the
+    rows' legitimate nulls (name, created_at, status, …) still go out."""
+
+    authenticated: bool
+    jobs_permission: bool | None = None
+    jobs: list[HubJobItem]
+    models: list[HubModelItem]
+
+
+class HubModelDeleteResponse(BaseModel):
+    """server.py delete_hub_model (success path only; refusals raise) —
+    idempotent, so an already-gone repo reports success too."""
+
+    status: Literal["success"]
+    repo_id: str
+
+
+class HubJobDismissResponse(BaseModel):
+    """server.py dismiss_hub_job — job_id is the stripped id that was persisted
+    to the dismissal file, not necessarily the caller's raw input."""
+
+    status: Literal["success"]
+    job_id: str
+
+
+class RunnerFlavor(BaseModel):
+    """One HF Jobs hardware flavor (server.py get_runners_hardware, flattened
+    from huggingface_hub's JobHardwareInfo). accelerator is the label
+    _format_accelerator renders ("2× Nvidia A100"), null on cpu-* flavors, as
+    is vram (the Hub words it as a string, "16 GB"). unit_cost_usd is
+    `int | float` so it passes through exactly as the Hub sent it."""
+
+    name: str
+    pretty_name: str
+    cpu: str
+    ram: str
+    accelerator: str | None
+    vram: str | None
+    unit_cost_usd: int | float
+    unit_label: str
+
+
+class RunnersHardwareResponse(BaseModel):
+    """server.py get_runners_hardware — every branch (unauthenticated, flavor
+    fetch failed, cached catalog) carries all three keys; username is null (not
+    absent) when unauthenticated."""
+
+    authenticated: bool
+    username: str | None
+    flavors: list[RunnerFlavor]

@@ -11,6 +11,10 @@ export interface DatasetItem {
    * their own namespace, no local copy). Such a row is "removed" by unpinning
    * (removeCustomDataset), never a destructive delete. */
   saved_custom?: boolean;
+  /** Carries per-episode sampling weights (a weighted merge). Present for
+   * datasets with a local copy; absent for Hub-only rows, where it is unknown
+   * rather than false — so read it as `weighted === true`, never `!weighted`. */
+  weighted?: boolean;
 }
 
 export async function listDatasets(
@@ -18,7 +22,7 @@ export async function listDatasets(
   fetcher: Fetcher,
   signal?: AbortSignal,
 ): Promise<DatasetItem[]> {
-  return apiRequest<DatasetItem[]>(baseUrl, fetcher, "/datasets", {
+  return apiRequest<DatasetItem[]>(baseUrl, fetcher, "/api/v1/datasets", {
     signal,
     action: "List datasets",
   });
@@ -31,7 +35,7 @@ export async function saveCustomDataset(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ success: boolean; repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/datasets/custom", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/custom", {
     method: "POST",
     body: { repo_id: repoId },
     action: "Save custom dataset",
@@ -46,7 +50,7 @@ export async function hideDataset(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ success: boolean; repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/datasets/hide", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/hide", {
     method: "POST",
     body: { repo_id: repoId },
     action: "Hide dataset",
@@ -60,7 +64,7 @@ export async function removeCustomDataset(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ success: boolean; repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/datasets/custom", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/custom", {
     method: "DELETE",
     body: { repo_id: repoId },
     action: "Remove custom dataset",
@@ -88,7 +92,7 @@ export async function downloadDataset(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ started: boolean; repo_id: string; message: string }> {
-  return apiRequest(baseUrl, fetcher, "/datasets/download", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/download", {
     method: "POST",
     body: { repo_id: repoId },
     action: "Download dataset",
@@ -106,7 +110,7 @@ export async function getDatasetDownloadStatus(
   return apiRequest<DatasetDownloadStatus>(
     baseUrl,
     fetcher,
-    "/datasets/download-status",
+    "/api/v1/datasets/download-status",
     { action: "Download status", signal },
   );
 }
@@ -122,17 +126,22 @@ export async function importDataset(
   path: string,
   name?: string,
 ): Promise<{ repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/datasets/import", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/import", {
     method: "POST",
     body: { path, name },
     action: "Import dataset",
   });
 }
 
-/** One task string with how many episodes use it (0 = count unavailable). */
+/** One task string with how many episodes use it.
+ *
+ * `null` means UNKNOWN — episode metadata that could not be read, or a Hub
+ * summary whose per-episode files were never fetched. `0` means the task is
+ * genuinely used by no episode. Never sort on null: an unreadable file must not
+ * get to decide which task ranks first. */
 export interface DatasetTask {
   task: string;
-  num_episodes: number;
+  num_episodes: number | null;
 }
 
 export interface DatasetInfo {
@@ -142,9 +151,16 @@ export interface DatasetInfo {
   fps: number | null;
   robot_type: string | null;
   cameras: string[];
-  tasks: DatasetTask[];
+  /** `null` (Hub summaries only) means the task file could not be read — a
+   * blip, an HTTP 5xx. `[]` is a dataset that genuinely lists no task. Render
+   * null as "couldn't read", never as "no task", and do not cache it. A local
+   * dataset always sends an array. */
+  tasks: DatasetTask[] | null;
   /** On-disk size for a local dataset; null for a Hub summary (not on disk). */
   size_bytes: number | null;
+  /** Carries per-episode sampling weights. Local datasets only; absent means
+   * unknown (Hub-only), not false. */
+  weighted?: boolean;
   /** "local" = full detail from the local cache; "hub" = the meta/info.json
    * summary of a not-yet-downloaded Hub dataset (no tasks/size; rename not
    * applicable). Treat absent as "local". */
@@ -163,7 +179,7 @@ export async function getDatasetInfo(
   return apiRequest<DatasetInfo>(
     baseUrl,
     fetcher,
-    `/datasets/info?repo_id=${encodeURIComponent(repoId)}`,
+    `/api/v1/datasets/info?repo_id=${encodeURIComponent(repoId)}`,
     { signal, action: "Dataset info" },
   );
 }
@@ -173,6 +189,11 @@ export interface EpisodeSummary {
   length: number;
   duration: number;
   tasks: string[];
+  /** How often this episode is sampled during training, relative to a weight of
+   * 1. Written at merge time (see makermodslab/merge.py); absent from an older
+   * backend's response, and absent means 1 — so read it as `sampling_weight ??
+   * 1`, never as a bare number. */
+  sampling_weight?: number;
   /** Per-camera {from, to} seconds locating this episode's slice WITHIN its
    * (possibly shared) video file — v3.0 packs consecutive episodes into the
    * same mp4 per camera, so playback must seek to `from` and stop at `to`
@@ -193,9 +214,49 @@ export async function listEpisodes(
   return apiRequest<EpisodeSummary[]>(
     baseUrl,
     fetcher,
-    `/datasets/episodes?repo_id=${encodeURIComponent(repoId)}`,
+    `/api/v1/datasets/episodes?repo_id=${encodeURIComponent(repoId)}`,
     { signal, action: "List episodes" },
   );
+}
+
+/** Episode indices excluded from training for a dataset (curation, not
+ * deletion — the episode stays on disk/Hub, it's just left out of the
+ * subset a training run is launched with). GET
+ * /api/v1/datasets/excluded-episodes. */
+export async function getExcludedEpisodes(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  signal?: AbortSignal,
+): Promise<number[]> {
+  const body = await apiRequest<{ repo_id: string; episode_indices: number[] }>(
+    baseUrl,
+    fetcher,
+    `/api/v1/datasets/excluded-episodes?repo_id=${encodeURIComponent(repoId)}`,
+    { signal, action: "Get excluded episodes" },
+  );
+  return body.episode_indices;
+}
+
+/** Replace the excluded-episode set for a dataset. NEVER touches the
+ * dataset's files or Hub copy. PUT /api/v1/datasets/excluded-episodes. */
+export async function setExcludedEpisodes(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  episodeIndices: number[],
+): Promise<number[]> {
+  const body = await apiRequest<{ repo_id: string; episode_indices: number[] }>(
+    baseUrl,
+    fetcher,
+    "/api/v1/datasets/excluded-episodes",
+    {
+      method: "PUT",
+      body: { repo_id: repoId, episode_indices: episodeIndices },
+      action: "Set excluded episodes",
+    },
+  );
+  return body.episode_indices;
 }
 
 export interface EpisodeJointSeries {
@@ -216,7 +277,7 @@ export async function getEpisodeJoints(
   return apiRequest<EpisodeJointSeries>(
     baseUrl,
     fetcher,
-    `/datasets/episode-joints?repo_id=${encodeURIComponent(repoId)}&episode_index=${episodeIndex}`,
+    `/api/v1/datasets/episode-joints?repo_id=${encodeURIComponent(repoId)}&episode_index=${episodeIndex}`,
     { signal, action: "Load episode joint data" },
   );
 }
@@ -236,7 +297,7 @@ export function episodeVideoUrl(
     episode_index: String(episodeIndex),
     camera,
   });
-  return `${baseUrl}/datasets/episode-video?${params.toString()}`;
+  return `${baseUrl}/api/v1/datasets/episode-video?${params.toString()}`;
 }
 
 /** Where a dataset with this id lives. "local_only" = a local copy exists but
@@ -249,6 +310,12 @@ export interface HubStatus {
   repo_id: string;
   status: HubStatusValue;
   url: string | null;
+  /** Qualifies "on_hub": false when that repo exists but holds no dataset —
+   * an upload that died partway leaves behind the empty repo its first call
+   * created. Such a repo is NOT a backup of the local copy, so the card must
+   * not present it as one. null = no claim (not on_hub, no local copy to
+   * protect, or the check couldn't be made). */
+  hub_has_data: boolean | null;
 }
 
 /** Hub existence check, fetched lazily/separately so it never blocks the
@@ -262,7 +329,7 @@ export async function getDatasetHubStatus(
   return apiRequest<HubStatus>(
     baseUrl,
     fetcher,
-    `/datasets/hub-status?repo_id=${encodeURIComponent(repoId)}`,
+    `/api/v1/datasets/hub-status?repo_id=${encodeURIComponent(repoId)}`,
     { signal, action: "Hub status" },
   );
 }
@@ -288,7 +355,7 @@ export async function getDatasetHubSettings(
   return apiRequest<HubSettings>(
     baseUrl,
     fetcher,
-    `/datasets/hub-settings?repo_id=${encodeURIComponent(repoId)}`,
+    `/api/v1/datasets/hub-settings?repo_id=${encodeURIComponent(repoId)}`,
     { signal, action: "Hub settings" },
   );
 }
@@ -303,7 +370,7 @@ export async function setDatasetVisibility(
   isPrivate: boolean,
   signal?: AbortSignal,
 ): Promise<{ repo_id: string; private: boolean }> {
-  return apiRequest(baseUrl, fetcher, "/datasets/visibility", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/visibility", {
     method: "POST",
     body: { repo_id: repoId, private: isPrivate },
     action: "Set visibility",
@@ -322,7 +389,7 @@ export async function setDatasetTags(
   tags: string[],
   signal?: AbortSignal,
 ): Promise<{ repo_id: string; tags: string[] }> {
-  return apiRequest(baseUrl, fetcher, "/datasets/tags", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/tags", {
     method: "POST",
     body: { repo_id: repoId, tags },
     action: "Set tags",
@@ -355,7 +422,7 @@ export async function uploadDataset(
   isPrivate: boolean,
   signal?: AbortSignal,
 ): Promise<{ started: boolean; repo_id: string; message: string }> {
-  return apiRequest(baseUrl, fetcher, "/upload-dataset", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/upload-dataset", {
     method: "POST",
     body: { dataset_repo_id: repoId, tags, private: isPrivate },
     action: "Upload dataset",
@@ -370,7 +437,7 @@ export async function getDatasetUploadStatus(
   fetcher: Fetcher,
   signal?: AbortSignal,
 ): Promise<UploadStatus> {
-  return apiRequest<UploadStatus>(baseUrl, fetcher, "/upload-status", {
+  return apiRequest<UploadStatus>(baseUrl, fetcher, "/api/v1/upload-status", {
     action: "Upload status",
     signal,
   });
@@ -381,26 +448,36 @@ export async function deleteDataset(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ success: boolean; message?: string }> {
-  return apiRequest(baseUrl, fetcher, "/delete-dataset", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/delete-dataset", {
     method: "POST",
     body: { dataset_repo_id: repoId },
     action: "Delete dataset",
   });
 }
 
+/** What happened to the dataset's Hub copy during a rename: "renamed" — the
+ * Hub copy was moved to match; "none" — the Hub was reachable and confirmed
+ * it has no copy; "skipped" — the Hub step didn't run (offline, logged out,
+ * or a namespace this account can't write to), so a Hub copy, if any, KEPT
+ * ITS OLD NAME. The local rename always happens regardless. */
+export type DatasetRenameHubResult = "renamed" | "none" | "skipped";
+
 /**
  * Rename a locally-cached dataset by moving its directory. `newName` is the
  * NAME PART ONLY — the namespace prefix stays fixed (so `ns/old` -> `ns/new`).
- * Returns the new repo_id. Throws ApiError on a rejected rename (invalid name,
- * target exists, dataset in use), with the backend's message in `.detail`.
+ * Returns the new repo_id plus `hub`, which reports whether the Hub copy was
+ * renamed too — the caller must surface it rather than claim a Hub rename
+ * happened unconditionally (a "skipped" Hub copy is still live under the old
+ * name). Throws ApiError on a rejected rename (invalid name, target exists,
+ * dataset in use), with the backend's message in `.detail`.
  */
 export async function renameDataset(
   baseUrl: string,
   fetcher: Fetcher,
   repoId: string,
   newName: string,
-): Promise<{ success: boolean; repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/datasets/rename", {
+): Promise<{ success: boolean; repo_id: string; hub: DatasetRenameHubResult }> {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/rename", {
     method: "POST",
     body: { repo_id: repoId, new_name: newName },
     action: "Rename dataset",
@@ -416,16 +493,57 @@ export interface MergeStatus {
   logs: { timestamp: number; message: string }[];
 }
 
+/** Largest per-source weight the backend accepts (mirrors
+ * `MAX_SOURCE_WEIGHT` in makermodslab/merge.py — keep the two in step). */
+export const MAX_SOURCE_WEIGHT = 20;
+
+export interface MergeStartResult {
+  started: boolean;
+  message: string;
+  // Present (and `started` false) when the sources differ ONLY by a column the
+  // merge is willing to drop — in practice the `intervention` flag a coaching
+  // dataset carries and a recorded one doesn't. Not an error: re-submit with
+  // `dropFeatures` set to these names once the user has agreed. See
+  // DROPPABLE_FEATURES in makermodslab/merge.py for why dropping it is lossless.
+  droppable_features?: string[];
+  // Present (and `started` false) when the sources span more than one arm
+  // family — an advisory the user confirms rather than a hard block. Re-submit
+  // with `acknowledgeWarnings: true` to proceed.
+  warnings?: string[];
+}
+
+/** Start a merge. `sourceWeights` is a per-source integer repeat count,
+ * positionally aligned with `sourceRepoIds`; omit it (or pass all 1s) for an
+ * unweighted merge. A source with weight 3 contributes its episodes three
+ * times, so training samples them three times as often.
+ *
+ * When the sources differ only by a droppable column the merge is refused with
+ * `started: false` and `droppable_features`; re-call with `dropFeatures` set to
+ * those names. When the sources span more than one arm family it is refused
+ * with `started: false` and a non-empty `warnings`; re-call with
+ * `acknowledgeWarnings: true` to proceed. */
 export async function startDatasetMerge(
   baseUrl: string,
   fetcher: Fetcher,
   sourceRepoIds: string[],
   outputRepoId: string,
-): Promise<{ started: boolean; message: string }> {
+  sourceWeights?: number[],
+  dropFeatures: string[] = [],
+  acknowledgeWarnings?: boolean,
+): Promise<MergeStartResult> {
+  // Only send weights when at least one is non-default, so an ordinary merge
+  // keeps the exact request body it had before weights existed.
+  const weighted = sourceWeights?.some((w) => w !== 1) ?? false;
   // apiRequest JSON.stringifies `body` itself — pass a raw object, not a string.
-  return apiRequest(baseUrl, fetcher, "/datasets/merge", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/merge", {
     method: "POST",
-    body: { source_repo_ids: sourceRepoIds, output_repo_id: outputRepoId },
+    body: {
+      source_repo_ids: sourceRepoIds,
+      output_repo_id: outputRepoId,
+      ...(weighted ? { source_weights: sourceWeights } : {}),
+      drop_features: dropFeatures,
+      ...(acknowledgeWarnings ? { acknowledge_warnings: true } : {}),
+    },
     action: "Merge datasets",
   });
 }
@@ -434,7 +552,7 @@ export async function getDatasetMergeStatus(
   baseUrl: string,
   fetcher: Fetcher,
 ): Promise<MergeStatus> {
-  return apiRequest<MergeStatus>(baseUrl, fetcher, "/datasets/merge/status", {
+  return apiRequest<MergeStatus>(baseUrl, fetcher, "/api/v1/datasets/merge/status", {
     action: "Merge status",
   });
 }

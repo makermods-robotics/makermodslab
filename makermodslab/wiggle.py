@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,8 +13,9 @@
 # limitations under the License.
 """
 Wiggle-to-find-port: drive the gripper on a given serial port a few times so the
-user can see which physical arm is on that port. Uses raw motor positions, so no
-calibration is required. Only upstream lerobot APIs are used.
+user can see which physical arm is on that port. SO-101 uses raw servo positions;
+Maker and Metal use a gripper-only CAN bus and their configured position limits.
+Every jog returns to its captured starting position before disconnecting.
 """
 
 import asyncio
@@ -23,6 +24,9 @@ import time
 
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
+
+from .api_errors import ErrorCode
+from .session_events import notify_session_changed
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +50,8 @@ def plan_wiggle(
 
     Any prior calibration writes Min/Max_Position_Limit into the servo EEPROM and the
     firmware silently clamps Goal_Position to them — a jog planned against the factory
-    0-4095 range can then move the wrong way (e.g. gripper parked past its max: "+200"
-    clamps *down*). If `current` sits at or outside the window, the jog is centered just
-    inside the nearest limit instead, which pulls the gripper slightly in-range first.
+    0-4095 range can then move the wrong way. Keep the original rest position,
+    even at a limit. Refuse to move if firmware limits would prevent returning.
     """
     lo = max(min_limit, 0)
     hi = min(max_limit, 4095)
@@ -57,8 +60,12 @@ def plan_wiggle(
             f"Gripper's programmed position limits ({min_limit}-{max_limit}) are too narrow "
             "to wiggle in. Recalibrate this arm and try again."
         )
-    rest = min(max(current, lo + offset), hi - offset)
-    return rest + offset, rest - offset, rest
+    if not lo <= current <= hi:
+        raise ValueError(
+            "Gripper is outside its programmed position limits; cannot return to its "
+            "original position. Recalibrate this arm before wiggling."
+        )
+    return min(current + offset, hi), max(current - offset, lo), current
 
 
 def _wiggle_gripper_sync(port: str) -> None:
@@ -80,18 +87,35 @@ def _wiggle_gripper_sync(port: str) -> None:
 
         high, low, rest = plan_wiggle(current, min_limit, max_limit)
 
-        for _ in range(_WIGGLE_REPEATS):
-            bus.write("Goal_Position", "gripper", high, normalize=False)
-            time.sleep(0.3)
-            bus.write("Goal_Position", "gripper", low, normalize=False)
-            time.sleep(0.3)
-
-        # Settle at the rest point (== the start position unless the gripper was
-        # parked at/outside a programmed limit).
-        bus.write("Goal_Position", "gripper", rest, normalize=False)
-        time.sleep(0.3)
+        try:
+            # Load the captured position before torque so an old goal cannot
+            # snap the gripper open when it was initially unpowered.
+            bus.write("Goal_Position", "gripper", rest, normalize=False)
+            bus.enable_torque("gripper")
+            for _ in range(_WIGGLE_REPEATS):
+                bus.write("Goal_Position", "gripper", high, normalize=False)
+                time.sleep(0.3)
+                bus.write("Goal_Position", "gripper", low, normalize=False)
+                time.sleep(0.3)
+        finally:
+            # Also attempt the return when a jog fails partway through.
+            bus.write("Goal_Position", "gripper", rest, normalize=False)
+            _wait_for_rest(
+                lambda: bus.sync_read("Present_Position", "gripper", normalize=False)["gripper"],
+                rest,
+                tolerance=10,
+            )
     finally:
         bus.disconnect()
+
+
+def _wait_for_rest(read_position, rest: float, tolerance: float) -> None:
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        time.sleep(0.05)
+        if abs(read_position() - rest) <= tolerance:
+            return
+    raise RuntimeError("Gripper did not return to its original position.")
 
 
 async def wiggle_gripper(port: str) -> dict:
@@ -120,39 +144,91 @@ async def wiggle_gripper(port: str) -> dict:
         auto_calibrate as _auto_calibrate,
         calibrate as _calibrate,
         record as _record,
+        remote_host as _remote_host,
+        remote_inference as _remote_inference,
+        remote_teleoperate as _remote_teleoperate,
+        replay as _replay,
         rollout as _rollout,
         teleoperate as _teleoperate,
     )
 
     if wiggle_active:
-        return {"success": False, "message": "A gripper wiggle is already in progress."}
+        return {
+            "success": False,
+            "message": "A gripper wiggle is already in progress.",
+            "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+        }
+    if _remote_host.hosting_active:
+        return {
+            "success": False,
+            "message": "This robot is hosted for remote teleoperation. Stop hosting first.",
+            "code": ErrorCode.ROBOT_BUSY_HOSTING,
+        }
+    if _remote_teleoperate.remote_teleoperation_active:
+        return {
+            "success": False,
+            "message": "Remote teleoperation is currently active. Stop it first.",
+            "code": ErrorCode.ROBOT_BUSY_REMOTE_TELEOPERATION,
+        }
     if _teleoperate.teleoperation_active:
         return {
             "success": False,
             "message": "Teleoperation is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
         }
     if _record.recording_active:
         return {
             "success": False,
             "message": "Recording is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_RECORDING,
         }
     if _rollout.inference_active:
         return {
             "success": False,
             "message": "Inference is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+        }
+    if _remote_inference.remote_inference_is_active():
+        return {
+            "success": False,
+            "message": "Remote inference is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
         }
     if _calibrate.calibration_is_active():
         return {
             "success": False,
             "message": "Calibration is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
         }
     if _auto_calibrate.auto_calibration_is_active():
         return {
             "success": False,
             "message": "Auto-calibration is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
+        }
+    if _replay.replay_active:
+        return {
+            "success": False,
+            "message": "Replay is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_REPLAY,
+        }
+    # Lazy, because jobs imports this module back the same way.
+    from . import jobs as _jobs
+
+    if (training := _jobs.training_is_active()) is not None:
+        return {
+            "success": False,
+            "message": (
+                f"Training run '{training}' is using this machine — wait for it to stop before wiggling."
+            ),
+            "code": ErrorCode.ROBOT_BUSY_TRAINING,
         }
 
     wiggle_active = True
+    # The claim above is the real state transition — broadcast the hint so
+    # every WS client learns the robot is busy (wiggle has no status
+    # endpoint of its own; consumers see the busy state via start refusals).
+    notify_session_changed("wiggle", True)
     try:
         await asyncio.wait_for(
             asyncio.to_thread(_run_wiggle_and_clear_flag, port.strip()),
@@ -186,3 +262,6 @@ def _run_wiggle_and_clear_flag(port: str) -> None:
         _wiggle_gripper_sync(port)
     finally:
         wiggle_active = False
+        # Final release, tied to the thread's REAL exit (like the flag) so
+        # the hint can never claim idle while the port is still held.
+        notify_session_changed("wiggle", False)

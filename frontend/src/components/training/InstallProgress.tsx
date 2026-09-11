@@ -1,4 +1,6 @@
 import React from "react";
+import { Trans, useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -25,14 +27,22 @@ interface InstallProgressProps {
   doneDescription: React.ReactNode;
 }
 
-export function installTitle(state: InstallState, idleTitle: string): string {
+/** The dialog/card title for an install flow. Takes `t` rather than resolving
+ * copy at module scope: every caller is already inside a component. `idleTitle`
+ * arrives already translated from the caller, which owns the "what is missing"
+ * wording. */
+export function installTitle(
+  t: TFunction,
+  state: InstallState,
+  idleTitle: string,
+): string {
   switch (state) {
     case "done":
-      return "Install Complete";
+      return t("training.install.titleDone");
     case "error":
-      return "Install Failed";
+      return t("training.install.titleError");
     case "installing":
-      return "Installing…";
+      return t("training.install.titleInstalling");
     default:
       return idleTitle;
   }
@@ -59,15 +69,17 @@ export const InstallProgress: React.FC<InstallProgressProps> = ({
   doneDescription,
 }) => {
   const { toast } = useToast();
+  const { t } = useTranslation();
 
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(installHint);
-      toast({ title: "Copied", description: installHint });
+      // `installHint` is the backend's own command string — shown verbatim.
+      toast({ title: t("training.install.copiedTitle"), description: installHint });
     } catch {
       toast({
-        title: "Copy failed",
-        description: "Select the command and copy manually.",
+        title: t("training.install.copyFailedTitle"),
+        description: t("training.install.copyFailedDescription"),
         variant: "destructive",
       });
     }
@@ -87,7 +99,7 @@ export const InstallProgress: React.FC<InstallProgressProps> = ({
               size="icon"
               onClick={handleCopy}
               className="text-muted-foreground hover:text-foreground"
-              aria-label="Copy install command"
+              aria-label={t("training.install.copyAria")}
             >
               <Copy className="w-4 h-4" />
             </Button>
@@ -96,18 +108,20 @@ export const InstallProgress: React.FC<InstallProgressProps> = ({
             onClick={onInstall}
             className="bg-primary hover:bg-primary/90 text-primary-foreground font-semibold"
           >
-            Install Now
+            {t("training.install.installNow")}
           </Button>
         </>
       )}
 
       {state === "installing" && (
         <p className="text-muted-foreground">
-          Installing{" "}
-          <code className="px-1 py-0.5 rounded bg-muted text-info">
-            {packageName}
-          </code>
-          . This usually takes about 10 seconds.
+          <Trans
+            i18nKey="training.install.installing"
+            values={{ packageName }}
+            components={[
+              <code key="0" className="px-1 py-0.5 rounded bg-muted text-info" />,
+            ]}
+          />
         </p>
       )}
 
@@ -117,12 +131,16 @@ export const InstallProgress: React.FC<InstallProgressProps> = ({
 
       {state === "error" && (
         <>
-          <p className="text-destructive">{error || "Install failed."}</p>
+          {/* The backend's own error text when there is one; the local
+              fallback is the only part that is ours to translate. */}
+          <p className="text-destructive">
+            {error || t("training.install.failedFallback")}
+          </p>
           <Button
             onClick={onRetry}
             className="bg-secondary hover:bg-secondary/80 text-secondary-foreground"
           >
-            Try again
+            {t("training.install.tryAgain")}
           </Button>
         </>
       )}
@@ -145,11 +163,11 @@ export const InstallProgress: React.FC<InstallProgressProps> = ({
 // processes that see the new install immediately), and the backend probes
 // availability live per request — so no server restart is needed. Reload the
 // page to pick it up.
-export const ReadyInstructions: React.FC<{ purpose: string }> = ({
-  purpose,
-}) => (
-  <p>
-    Install complete — {purpose} is available immediately, no restart needed.
-    Reload the page if it doesn't unlock on its own.
-  </p>
+//
+// Takes the finished sentence rather than a noun to slot into one: English
+// built "Install complete — {purpose} is available…" from a bare noun phrase
+// ("training", "W&B logging", "ACT inference"), which no translation survives.
+// Each caller passes its own complete `training.install.ready*` string.
+export const ReadyInstructions: React.FC<{ text: string }> = ({ text }) => (
+  <p>{text}</p>
 );

@@ -1,0 +1,1242 @@
+# Copyright 2026 MakerMods. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The /api/v1/sessions surface: session identity + server-side robot resolution.
+
+Two things live here, deliberately together:
+
+- :class:`SessionTracker` — gives every robot-driving session an identity
+  (id / started_at / revision / phase) by OBSERVING the session_events seam.
+  It does NOT own the mutex: the feature modules' active flags stay the single
+  source of truth, and the tracker never initiates or blocks anything. Because
+  the seam fires at the real transitions of every feature, identity attaches
+  to sessions started through the LEGACY endpoints too (the un-migrated UI) —
+  those just carry ``robot``/``owner`` of ``None``, since only the start
+  wrapper below knows them.
+
+- the ``handle_*`` functions the router calls — the resolution wrappers. A
+  client names a saved robot and the kind-specific options; everything
+  hardware-shaped (ports, configs, mode, right-arm fields, cameras) is
+  resolved server-side from the robot record into the feature's existing
+  request model, and the feature's existing ``handle_start_*`` does the actual
+  work (and keeps enforcing the mutex).
+
+The lease — server-authoritative ownership with a timeout fail-safe. This is
+a HARDWARE-SAFETY mechanism: an abandoned session (client crashed, wifi died,
+tab gone) must not leave an arm energized forever, so a leased session that
+stops heartbeating is safety-stopped by the expiry watchdog. The attachment
+rule is the compatibility linchpin: a session gets a lease ONLY when created
+via POST /api/v1/sessions with an ``owner``. Owner-less POSTs and
+legacy-endpoint starts get NO lease and are NEVER timeout-stopped — the
+un-migrated UI polls the legacy status endpoints, heartbeats nothing, and
+must not be killed under it. Enforcement becomes universal only once the UI
+migrates (the next commit). Stopping is deliberately NEVER owner-gated (see
+``handle_stop_session``): a physical arm must always be stoppable by whoever
+can reach the API — ``session.not_owner`` guards heartbeat (and future
+owner-gated mutations), never stop.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+import uuid
+from collections.abc import Callable
+from typing import Any
+
+from pydantic import ValidationError
+
+from . import session_events
+from .api_errors import ApiError, ErrorCode
+from .schemas.sessions import (
+    LEASE_TIMEOUT_AUTO_CALIBRATION_S,
+    LEASE_TIMEOUT_DEFAULT_S,
+    LEASE_TIMEOUT_MAX_S,
+    LEASE_TIMEOUT_MIN_S,
+    OWNER_MAX_LENGTH,
+    AutoCalibrationOptions,
+    CalibrationOptions,
+    HostingOptions,
+    InferenceOptions,
+    RecordingOptions,
+    RemoteInferenceOptions,
+    RemoteTeleoperationOptions,
+    ReplayOptions,
+    SessionStartBody,
+    TeleoperationOptions,
+)
+from .utils.config import (
+    default_slot_config_name,
+    get_robot_record,
+    is_robot_record_clean,
+    is_valid_robot_name,
+    record_cameras_by_name,
+)
+
+logger = logging.getLogger(__name__)
+
+# Kinds a client can START through POST /api/v1/sessions. Only wiggle is left
+# on its legacy flow endpoint (a few seconds of open-loop gripper motion — no
+# stop handler, nothing to lease) — the tracker observes it all the same.
+STARTABLE_KINDS = (
+    "teleoperation",
+    "recording",
+    "inference",
+    "replay",
+    "calibration",
+    "auto_calibration",
+    "hosting",
+    "remote_inference",
+    "remote_teleoperation",
+)
+
+# Kinds that never open the leader bus, mirroring the frontend's robotSetupGap
+# distinction: an unassigned leader port / missing leader calibration must not
+# block them (bimanual = both followers, still no leaders). remote_inference is
+# in unconditionally — unlike inference it has no coaching exception, because a
+# remote session has no handover to a leader arm at all.
+_FOLLOWER_ONLY_KINDS = frozenset({"inference", "replay", "hosting", "remote_inference"})
+
+# Kinds that never open the FOLLOWER bus: remote teleoperation drives a
+# station's follower with this node's leader, so a laptop record with no
+# follower fields at all is the expected shape.
+_LEADER_ONLY_KINDS = frozenset({"remote_teleoperation"})
+
+# Setup kinds: calibration CREATES the record's calibrations (and writes the
+# port back on success), so the record-clean readiness gate the driving kinds
+# use would refuse exactly the robots these flows exist to fix. Their builders
+# check the one thing they do need — a port for each targeted slot.
+_SETUP_KINDS = frozenset({"calibration", "auto_calibration"})
+
+_OPTIONS_MODELS = {
+    "teleoperation": TeleoperationOptions,
+    "recording": RecordingOptions,
+    "inference": InferenceOptions,
+    "remote_inference": RemoteInferenceOptions,
+    "replay": ReplayOptions,
+    "calibration": CalibrationOptions,
+    "auto_calibration": AutoCalibrationOptions,
+    "hosting": HostingOptions,
+    "remote_teleoperation": RemoteTeleoperationOptions,
+}
+
+
+class SessionTracker:
+    """Identity for the one robot-driving session, maintained by observation.
+
+    Fed every ``session_changed`` event through the seam's subscriber list:
+    a claim (active=True with no current session of that kind) mints the
+    identity, phase events bump ``revision``, the release clears it and keeps
+    a small ``last_ended`` summary. All state lives behind one lock; readers
+    get copies.
+
+    The lease rides on the current session as an internal dict
+    ``{owner, timeout_s, deadline, expired}`` — ``deadline`` is on the
+    injected monotonic ``clock`` and never leaves the process (clients see a
+    computed ``expires_in_s`` via :func:`_public_session`).
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._lock = threading.Lock()
+        self._clock = clock
+        self._current: dict[str, Any] | None = None
+        self._last_ended: dict[str, Any] | None = None
+
+    def _snapshot_locked(self) -> dict[str, Any]:
+        """Copy of the current session, with the nested lease dict copied too
+        (a shared lease dict would leak later mutations into old snapshots).
+        Caller holds the lock."""
+        snap = dict(self._current)
+        if snap["lease"] is not None:
+            snap["lease"] = dict(snap["lease"])
+        return snap
+
+    def observe(self, event: dict) -> None:
+        """Consume one seam event. Runs inside notify_session_changed's
+        per-subscriber try/except — must stay cheap and never block."""
+        session = event.get("session") or {}
+        kind = session.get("kind")
+        phase = session.get("phase")
+        released_lease = False
+        with self._lock:
+            if session.get("active"):
+                if self._current is not None and self._current["kind"] == kind:
+                    # A phase transition of the live session.
+                    self._current["revision"] += 1
+                    self._current["phase"] = phase
+                    return
+                if self._current is not None:
+                    # The mutex makes this unreachable; if it ever fires, the
+                    # new claim wins — flags are the truth, identity follows.
+                    logger.warning(
+                        f"session claim for {kind!r} while a {self._current['kind']!r} "
+                        f"session was still tracked; replacing it"
+                    )
+                self._current = {
+                    "id": uuid.uuid4().hex,
+                    "kind": kind,
+                    "robot": None,
+                    "owner": None,
+                    "started_at": time.time(),
+                    "revision": 1,
+                    "phase": phase,
+                    "lease": None,
+                }
+            elif self._current is not None and self._current["kind"] == kind:
+                lease = self._current["lease"]
+                self._last_ended = {
+                    "id": self._current["id"],
+                    "kind": kind,
+                    "ended_at": time.time(),
+                    "phase": phase,
+                    # The reserved code string, so a client can tell a safety
+                    # stop from a normal ending.
+                    "reason": str(ErrorCode.SESSION_LEASE_EXPIRED)
+                    if lease is not None and lease["expired"]
+                    else None,
+                }
+                self._current = None
+                released_lease = lease is not None
+            # A release with no matching session (idle double-stop, or an
+            # event for a kind we never saw claim) is ignored.
+        if released_lease:
+            # Outside the lock (never nest tracker → watchdog): the leased
+            # session is gone, so the watchdog has nothing left to guard.
+            _retire_watchdog()
+
+    def attribute(self, kind: str, robot: str | None = None, owner: str | None = None) -> dict | None:
+        """Attach what only the start wrapper knows (robot, owner) to the
+        current session, if it is of `kind`. Enrichment, not a transition —
+        the revision does not bump. Returns a snapshot, or None when no
+        session of that kind is current."""
+        with self._lock:
+            if self._current is None or self._current["kind"] != kind:
+                return None
+            if robot is not None:
+                self._current["robot"] = robot
+            if owner is not None:
+                self._current["owner"] = owner
+            return self._snapshot_locked()
+
+    def attach_lease(self, kind: str, owner: str, timeout_s: float) -> dict | None:
+        """Put a lease on the current session, if it is of `kind`. Only the
+        start wrapper calls this (the ONLY way a session gets a lease — see
+        the module docstring). Returns a snapshot, or None when no session of
+        that kind is current (it ended before the lease could attach)."""
+        with self._lock:
+            if self._current is None or self._current["kind"] != kind:
+                return None
+            self._current["lease"] = {
+                "owner": owner,
+                "timeout_s": timeout_s,
+                "deadline": self._clock() + timeout_s,
+                "expired": False,
+            }
+            return self._snapshot_locked()
+
+    def renew_lease(self, session_id: str, owner: str) -> tuple[str, dict | None]:
+        """Push the lease deadline out by its timeout — the heartbeat.
+
+        Returns ``(status, snapshot)`` with status one of ``"renewed"``,
+        ``"no_lease"`` (current session but nothing to renew — the caller's
+        documented no-op), ``"expired"`` (the expiry stop is dispatched but
+        the release hasn't landed), ``"not_owner"``, or ``"not_found"``
+        (snapshot None). One method so check-and-renew is atomic."""
+        with self._lock:
+            if self._current is None or self._current["id"] != session_id:
+                return "not_found", None
+            lease = self._current["lease"]
+            if lease is None:
+                return "no_lease", self._snapshot_locked()
+            if lease["expired"]:
+                return "expired", self._snapshot_locked()
+            if lease["owner"] != owner:
+                return "not_owner", self._snapshot_locked()
+            lease["deadline"] = self._clock() + lease["timeout_s"]
+            return "renewed", self._snapshot_locked()
+
+    def mark_lease_expired(self, session_id: str) -> dict | None:
+        """Atomically flip the lease to expired, exactly once. Returns the
+        snapshot iff `session_id` is still current, leased, and not already
+        marked — the expiry dispatcher's claim ticket: a None means someone
+        else (a natural release, or an earlier check) got there first."""
+        with self._lock:
+            cur = self._current
+            if cur is None or cur["id"] != session_id or cur["lease"] is None or cur["lease"]["expired"]:
+                return None
+            cur["lease"]["expired"] = True
+            return self._snapshot_locked()
+
+    def current(self) -> dict | None:
+        with self._lock:
+            return self._snapshot_locked() if self._current is not None else None
+
+    def last_ended(self) -> dict | None:
+        with self._lock:
+            return dict(self._last_ended) if self._last_ended is not None else None
+
+    def reset(self) -> None:
+        """Drop all tracked state (tests only — production identity only ever
+        moves by observation). Retires the watchdog too, so no test leaves a
+        live thread guarding nothing."""
+        with self._lock:
+            self._current = None
+            self._last_ended = None
+        _retire_watchdog()
+
+
+tracker = SessionTracker()
+session_events.subscribe(tracker.observe)
+
+
+# --- the lease's timeout fail-safe: expiry check + watchdog ------------------
+
+# Phases that mean a stop is already winding the session down (teleoperation /
+# recording's release grace, replay / recording / inference's stopping) — the
+# stop handler in flight already handles the hardware; expiry must not
+# dispatch a second stop into it.
+_WINDING_DOWN_PHASES = frozenset({"releasing", "stopping"})
+
+_WATCHDOG_TICK_S = 1.0
+
+_watchdog_lock = threading.Lock()
+_watchdog_thread: threading.Thread | None = None
+
+
+def _public_session(snap: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Externalize a tracker snapshot: the lease's monotonic ``deadline`` (and
+    the ``expired`` marker) are internal — clients get
+    ``{owner, timeout_s, expires_in_s}``, expires_in_s computed at read time
+    and never negative."""
+    if snap is None:
+        return None
+    out = {k: v for k, v in snap.items() if k != "lease"}
+    lease = snap["lease"]
+    out["lease"] = (
+        {
+            "owner": lease["owner"],
+            "timeout_s": lease["timeout_s"],
+            "expires_in_s": max(0.0, lease["deadline"] - tracker._clock()),
+        }
+        if lease is not None
+        else None
+    )
+    return out
+
+
+def check_expiry(now: float | None = None) -> dict[str, Any] | None:
+    """Safety-stop the current session iff its lease deadline has passed.
+
+    Pure decision logic over the tracker's state (the watchdog thread just
+    calls it on a tick; tests call it directly with a fake ``now``):
+
+    - no current session, no lease, or the deadline not yet reached → None.
+      An UNLEASED session is never timeout-stopped, whatever ``now`` is —
+      the compatibility linchpin in the module docstring.
+    - a session already winding down (release-grace / stopping phases, or the
+      expiry stop already dispatched — the lease's ``expired`` marker) → None:
+      the stop in flight handles the hardware, never double-dispatch.
+    - expired → mark the lease (mark_lease_expired is the atomic claim ticket,
+      so a release racing this check makes it a no-op), then dispatch the SAME
+      per-kind stop path the stop endpoint uses. The release event that stop
+      produces lands in the tracker, which records ``last_ended`` with reason
+      ``session.lease_expired``.
+
+    Returns the stopped session's snapshot, or None when nothing was stopped.
+    """
+    snap = tracker.current()
+    if snap is None:
+        return None
+    lease = snap["lease"]
+    if lease is None or lease["expired"]:
+        return None
+    if (tracker._clock() if now is None else now) < lease["deadline"]:
+        return None
+    if snap["phase"] in _WINDING_DOWN_PHASES:
+        return None
+    marked = tracker.mark_lease_expired(snap["id"])
+    if marked is None:
+        # The session released (or another check claimed it) between the
+        # snapshot and the mark — nothing left to stop.
+        return None
+    logger.error(
+        f"SESSION LEASE EXPIRED: no heartbeat from owner {lease['owner']!r} within "
+        f"{lease['timeout_s']:.0f}s — SAFETY-STOPPING the {snap['kind']} session {snap['id']} "
+        f"to de-energize the arm"
+    )
+    _dispatch_stop(snap["kind"])
+    return marked
+
+
+def _ensure_watchdog() -> None:
+    """Start the expiry watchdog if it isn't running — lazily, only when a
+    lease attaches (unleased sessions need no guard, so legacy flows never
+    pay for a thread). Mirrors ConnectionManager.start_broadcast_thread."""
+    global _watchdog_thread
+    with _watchdog_lock:
+        if _watchdog_thread is not None and _watchdog_thread.is_alive():
+            return
+        _watchdog_thread = threading.Thread(target=_watchdog_loop, name="session-lease-watchdog", daemon=True)
+        _watchdog_thread.start()
+        logger.info("Session-lease watchdog started")
+
+
+def _retire_watchdog() -> None:
+    """Signal the watchdog to exit. Never joins (ConnectionManager's
+    stop_broadcast_thread discipline): the daemon notices the cleared slot
+    within its tick and exits, and a rapid retire→ensure cycle is safe via
+    the thread-identity check in the loop."""
+    global _watchdog_thread
+    with _watchdog_lock:
+        _watchdog_thread = None
+
+
+def _watchdog_loop() -> None:
+    """~1 Hz expiry ticks while a leased session exists.
+
+    Exits when retired/replaced (the identity check) or when it finds no
+    leased session left — the latter re-checked under the watchdog lock, so a
+    lease attaching concurrently serializes against _ensure_watchdog and gets
+    a fresh thread rather than an exiting one. Lock nesting is one-way only
+    (watchdog → tracker): the tracker's callers of _retire_watchdog release
+    the tracker lock first. The loop must never die on a stop handler's
+    exception — a safety net has to outlive the things it catches."""
+    global _watchdog_thread
+    me = threading.current_thread()
+    while True:
+        with _watchdog_lock:
+            if _watchdog_thread is not me:
+                return  # retired or replaced
+            snap = tracker.current()
+            if snap is None or snap["lease"] is None:
+                _watchdog_thread = None
+                logger.info("Session-lease watchdog stopped: no leased session remains")
+                return
+        try:
+            check_expiry()
+        except Exception:
+            logger.exception(
+                "Session-lease watchdog: expiry check failed; the watchdog stays up "
+                "(the arm may still be energized — check the session manually)"
+            )
+        time.sleep(_WATCHDOG_TICK_S)
+
+
+# --- start: server-side robot resolution ------------------------------------
+
+
+def _held_by() -> str | None:
+    """Which feature's active flag currently holds the hardware, if any.
+
+    The same reciprocal flags every ``handle_start_*`` checks — read here
+    BEFORE robot resolution because exclusivity is a property of the node's
+    one set of hardware, not of the robot named in the request (pinned by
+    tests/test_api_errors.py::test_sessions_surface_uses_reserved_codes)."""
+    from . import (
+        auto_calibrate,
+        calibrate,
+        record,
+        remote_host,
+        remote_inference,
+        remote_teleoperate,
+        replay,
+        rollout,
+        teleoperate,
+        wiggle,
+    )
+
+    if teleoperate.teleoperation_active:
+        return "teleoperation"
+    if record.recording_active:
+        return "recording"
+    if rollout.inference_active:
+        return "inference"
+    if remote_inference.remote_inference_active:
+        return "remote_inference"
+    if replay.replay_active:
+        return "replay"
+    if calibrate.calibration_is_active():
+        return "calibration"
+    if auto_calibrate.auto_calibration_is_active():
+        return "auto_calibration"
+    if wiggle.wiggle_active:
+        return "wiggle"
+    if remote_host.hosting_active:
+        return "hosting"
+    if remote_teleoperate.remote_teleoperation_active:
+        return "remote_teleoperation"
+    return None
+
+
+def held_by() -> str | None:
+    """Public read of the busy matrix, for callers OUTSIDE the session surface
+    (the restart guard): which feature's flag holds the hardware, or None."""
+    return _held_by()
+
+
+def _raise_held(holder_kind: str | None, message: str) -> None:
+    """409 session.held, with details naming the holder as precisely as the
+    tracker can: its session id when the tracker saw the claim, else null
+    (e.g. the flag was raised before this process's seam existed — or by a
+    test)."""
+    snapshot = tracker.current()
+    holder_id = snapshot["id"] if snapshot and snapshot["kind"] == holder_kind else None
+    raise ApiError(
+        status_code=409,
+        detail=message,
+        code=ErrorCode.SESSION_HELD,
+        details={"holder": {"kind": holder_kind, "session_id": holder_id}},
+    )
+
+
+def _build_teleoperation_request(record: dict, opts: TeleoperationOptions):
+    from .teleoperate import TeleoperateRequest
+
+    return TeleoperateRequest(
+        leader_port=record["leader_port"],
+        follower_port=record["follower_port"],
+        leader_config=record["leader_config"],
+        follower_config=record["follower_config"],
+        mode=record["mode"],
+        right_leader_port=record["right_leader_port"],
+        right_follower_port=record["right_follower_port"],
+        right_leader_config=record["right_leader_config"],
+        right_follower_config=record["right_follower_config"],
+        robot_name=record["name"],
+        arm_type=record["arm_type"],
+        leader_kind=record["leader_kind"],
+        skip_identity_check=opts.skip_identity_check,
+    )
+
+
+def _build_hosting_request(record: dict, opts: HostingOptions):
+    from .remote_host import HostingRequest
+
+    return HostingRequest(
+        follower_port=record["follower_port"],
+        follower_config=record["follower_config"],
+        mode=record["mode"],
+        right_follower_port=record["right_follower_port"],
+        right_follower_config=record["right_follower_config"],
+        robot_name=record["name"],
+        arm_type=record["arm_type"],
+        # Cameras resolve from the record here, exactly like recording: the
+        # options never carry devices.
+        cameras=record_cameras_by_name(record.get("cameras") or []),
+        fps=opts.fps,
+        video_codec=opts.video_codec,
+        skip_identity_check=opts.skip_identity_check,
+    )
+
+
+def _build_remote_teleoperation_request(record: dict, opts: RemoteTeleoperationOptions):
+    from .remote_teleoperate import RemoteTeleoperateRequest
+
+    return RemoteTeleoperateRequest(
+        leader_port=record["leader_port"],
+        leader_config=record["leader_config"],
+        mode=record["mode"],
+        right_leader_port=record["right_leader_port"],
+        right_leader_config=record["right_leader_config"],
+        robot_name=record["name"],
+        arm_type=record["arm_type"],
+        leader_kind=record["leader_kind"],
+        station=opts.station,
+        skip_identity_check=opts.skip_identity_check,
+    )
+
+
+def _build_recording_request(record: dict, opts: RecordingOptions):
+    from .record import RecordingRequest
+
+    # robot_name makes record.py resolve the session's cameras from this same
+    # record server-side — the sessions surface adds no camera plumbing.
+    return RecordingRequest(
+        leader_port=record["leader_port"],
+        follower_port=record["follower_port"],
+        leader_config=record["leader_config"],
+        follower_config=record["follower_config"],
+        mode=record["mode"],
+        right_leader_port=record["right_leader_port"],
+        right_follower_port=record["right_follower_port"],
+        right_leader_config=record["right_leader_config"],
+        right_follower_config=record["right_follower_config"],
+        robot_name=record["name"],
+        arm_type=record["arm_type"],
+        leader_kind=record["leader_kind"],
+        dataset_repo_id=opts.dataset_repo_id,
+        single_task=opts.single_task,
+        num_episodes=opts.num_episodes,
+        episode_time_s=opts.episode_time_s,
+        reset_time_s=opts.reset_time_s,
+        fps=opts.fps,
+        video=opts.video,
+        push_to_hub=opts.push_to_hub,
+        tags=opts.tags,
+        private=opts.private,
+        resume=opts.resume,
+        streaming_encoding=opts.streaming_encoding,
+        skip_identity_check=opts.skip_identity_check,
+        per_episode_task=opts.per_episode_task,
+    )
+
+
+def _build_inference_request(record: dict, opts: InferenceOptions):
+    from .rollout import InferenceRequest
+
+    # Follower-only: inference never opens the leader bus, so only the
+    # follower half of the record travels (right follower iff bimanual).
+    # COACHING is the one exception — the operator takes over THROUGH the
+    # leader — so its arms come off the same record, and only then. Sending
+    # them unconditionally would hand every plain rollout a leader port it has
+    # no business holding.
+    leader = (
+        {
+            "leader_port": record["leader_port"],
+            "leader_config": record["leader_config"],
+            "right_leader_port": record["right_leader_port"],
+            "right_leader_config": record["right_leader_config"],
+        }
+        if opts.coaching
+        else {}
+    )
+    return InferenceRequest(
+        follower_port=record["follower_port"],
+        follower_config=record["follower_config"],
+        mode=record["mode"],
+        right_follower_port=record["right_follower_port"],
+        right_follower_config=record["right_follower_config"],
+        robot_name=record["name"],
+        arm_type=record["arm_type"],
+        policy_ref=opts.policy_ref,
+        task=opts.task,
+        camera_bindings=opts.camera_bindings,
+        camera_dims=opts.camera_dims,
+        duration_s=opts.duration_s,
+        checkpoint_state_dim=opts.checkpoint_state_dim,
+        eval_episodes=opts.eval_episodes,
+        skip_identity_check=opts.skip_identity_check,
+        inference_engine=opts.inference_engine,
+        temporal_ensemble_coeff=opts.temporal_ensemble_coeff,
+        coaching=opts.coaching,
+        target_corrections=opts.target_corrections,
+        coaching_dataset_name=opts.coaching_dataset_name,
+        **leader,
+    )
+
+
+def _build_replay_request(record: dict, opts: ReplayOptions):
+    from .replay import ReplayRequest
+
+    return ReplayRequest(
+        repo_id=opts.repo_id,
+        episode_index=opts.episode_index,
+        follower_port=record["follower_port"],
+        follower_config=record["follower_config"],
+        robot_name=record["name"],
+        arm_type=record["arm_type"],
+        skip_identity_check=opts.skip_identity_check,
+    )
+
+
+def _build_remote_inference_request(record: dict, opts: RemoteInferenceOptions):
+    from .remote_inference import RemoteInferenceRequest
+
+    # Follower-only, unconditionally: the GPU is the policy, and no leader arm
+    # is ever opened. Unlike inference there is no coaching exception — a
+    # remote session has no handover.
+    #
+    # There are no right_follower_* fields to forward: remote inference REFUSES
+    # bimanual outright (arm_capabilities.supports_remote_inference — the
+    # first-action ease-in is single-Feetech-bus only), so the request model
+    # carries no right half at all. `mode` still travels, because that refusal
+    # and rollout's arm-count guard are what read it.
+    #
+    # Cameras are NOT plumbed here: `robot_name` makes remote_inference resolve
+    # them from this same record via rollout's `_session_cameras` /
+    # `bind_robot_cameras`, exactly as recording and inference do. The two
+    # dicts below are the POLICY's side of that binding, nothing more —
+    # resolving a device here would be the one way to break Portal's schema
+    # fingerprint (a run that connects, looks healthy and gets zero chunks).
+    return RemoteInferenceRequest(
+        follower_port=record["follower_port"],
+        follower_config=record["follower_config"],
+        mode=record["mode"],
+        robot_name=record["name"],
+        arm_type=record["arm_type"],
+        policy_ref=opts.policy_ref,
+        policy_hub_id=opts.policy_hub_id,
+        task=opts.task,
+        camera_bindings=opts.camera_bindings,
+        camera_dims=opts.camera_dims,
+        checkpoint_state_dim=opts.checkpoint_state_dim,
+        duration_s=opts.duration_s,
+        horizon=opts.horizon,
+        fps=opts.fps,
+        video_codec=opts.video_codec,
+        # Which chunk player drives the arm, and its one engine-specific knob.
+        # Threaded, never defaulted here: the request model's default is `sync`
+        # and silently dropping a caller's `rtc` would run the arm under a
+        # different regime than they asked for — the same reason
+        # InferenceOptions had to grow `inference_engine`.
+        engine=opts.engine,
+        s_min=opts.s_min,
+        lpf_hz=opts.lpf_hz,
+        lpf_order=opts.lpf_order,
+        video_quality=opts.video_quality,
+        video_bitrate_kbps=opts.video_bitrate_kbps,
+        camera_send_hz=opts.camera_send_hz,
+        latency_k=opts.latency_k,
+        skip_identity_check=opts.skip_identity_check,
+    )
+
+
+# --- the setup kinds: per-slot resolution --------------------------------------
+
+
+def _slot_fields(device_type: str, arm: str) -> tuple[str, str]:
+    """The robot record's (port_field, config_field) for one physical arm slot
+    — the same mapping calibrate.py's and auto_calibrate.py's record
+    write-backs use ("left" is also the single-arm pair)."""
+    is_right = arm == "right"
+    if device_type == "teleop":
+        return (
+            "right_leader_port" if is_right else "leader_port",
+            "right_leader_config" if is_right else "leader_config",
+        )
+    return (
+        "right_follower_port" if is_right else "follower_port",
+        "right_follower_config" if is_right else "follower_config",
+    )
+
+
+def _resolve_slot(record: dict, device_type: str, arm: str, port: str | None, config_file: str | None):
+    """Resolve one calibration target slot into (port, config_file).
+
+    An explicit `port`/`config_file` in the options wins (calibration is the
+    setup flow — see CalibrationOptions); otherwise the record's saved slot
+    values, with the config falling back to the robot's default name for the
+    slot ("<robot>"/"<robot>_<arm>" for SO-101; the CAN families mint the arm
+    type in — see default_slot_config_name for why the shared Star-leader
+    library makes that necessary). No port anywhere → 400 robot.not_ready:
+    you can't calibrate an arm whose bus we can't open."""
+    port_field, config_field = _slot_fields(device_type, arm)
+    resolved_port = port or record.get(port_field) or ""
+    if not resolved_port:
+        side = "leader" if device_type == "teleop" else "follower"
+        raise ApiError(
+            status_code=400,
+            detail=f"Robot {record['name']!r} has no port assigned for its {arm} {side} arm; "
+            "assign (or pass) a port before calibrating it.",
+            code=ErrorCode.ROBOT_NOT_READY,
+        )
+    default_name = default_slot_config_name(record["name"], record.get("mode"), arm, record.get("arm_type"))
+    resolved_config = config_file or record.get(config_field) or default_name
+    return resolved_port, resolved_config
+
+
+def _build_calibration_request(record: dict, opts: CalibrationOptions):
+    """Build the calibration request matching this robot's arm type.
+
+    The family's calibration_kind picks the procedure: ``range_sweep`` is the
+    SO-101 sweep manager's request, ``steps`` the step wizard's, and ``panel``
+    has no server-side procedure at all (the extension's own page runs it).
+    The two request models share their common fields on purpose — only the
+    class differs, and _dispatch_start reads that class to pick the manager.
+    The step request additionally carries the record's arm_type: the wizard
+    serves every ``steps`` family, and the arm type decides which family's
+    procedure runs and which library the name-collision check reads.
+    """
+    from .arm_capabilities import calibration_kind
+    from .calibrate import CalibrationRequest
+    from .step_calibrate import StepCalibrationRequest
+
+    kind = calibration_kind(record["arm_type"])
+    if kind == "panel":
+        raise ApiError(
+            status_code=400,
+            detail=(
+                "This arm is calibrated through its extension's own panel; "
+                "open it from the robot's config window."
+            ),
+            code=ErrorCode.ROBOT_NOT_READY,
+        )
+    port, config_file = _resolve_slot(record, opts.device_type, opts.arm, opts.port, opts.config_file)
+    common = {
+        "device_type": opts.device_type,
+        "port": port,
+        "config_file": config_file,
+        "robot_name": record["name"],
+        "overwrite": opts.overwrite,
+        "arm": opts.arm,
+    }
+    if kind == "steps":
+        return StepCalibrationRequest(
+            arm_type=record["arm_type"], leader_kind=record["leader_kind"], **common
+        )
+    return CalibrationRequest(**common)
+
+
+def _build_auto_calibration_request(record: dict, opts: AutoCalibrationOptions):
+    """(see below) — refuses outright on an arm type that has no auto-calibration."""
+    """Always the BATCH request, even for one arm — the batch of one is
+    exactly how the UI runs a single arm, and the aggregate auto_calibration
+    session-event kind makes the whole batch one session (see
+    AutoCalibrationOptions)."""
+    from .arm_capabilities import supports_auto_calibration
+    from .auto_calibrate import AutoCalibrationBatchArm, AutoCalibrationBatchRequest
+
+    if not supports_auto_calibration(record["arm_type"]):
+        # The vendored autocal drives the arm under torque against its stops
+        # and writes Feetech EEPROM — there is no equivalent for a CAN arm,
+        # and none is needed: the CAN arms' limits are fixed constants, so
+        # calibrating one means setting zero (kind "calibration").
+        raise ApiError(
+            status_code=400,
+            detail=(
+                "This arm has no automatic calibration — its joint limits are fixed. "
+                "Run a zero-pose calibration instead."
+            ),
+            code=ErrorCode.ROBOT_NOT_READY,
+        )
+
+    arms = []
+    for arm_opt in opts.arms:
+        port, config_file = _resolve_slot(
+            record, arm_opt.device_type, arm_opt.arm, arm_opt.port, arm_opt.config_file
+        )
+        arms.append(
+            AutoCalibrationBatchArm(
+                device_type=arm_opt.device_type, port=port, config_file=config_file, arm=arm_opt.arm
+            )
+        )
+    return AutoCalibrationBatchRequest(
+        arms=arms,
+        robot_name=record["name"],
+        overwrite=opts.overwrite,
+        # The record's persisted per-robot torque cap is the default; an
+        # explicit option (the UI's slider draft) overrides it.
+        motor_power=opts.motor_power if opts.motor_power is not None else record.get("motor_power"),
+    )
+
+
+_REQUEST_BUILDERS = {
+    "teleoperation": _build_teleoperation_request,
+    "recording": _build_recording_request,
+    "inference": _build_inference_request,
+    "remote_inference": _build_remote_inference_request,
+    "replay": _build_replay_request,
+    "calibration": _build_calibration_request,
+    "auto_calibration": _build_auto_calibration_request,
+    "hosting": _build_hosting_request,
+    "remote_teleoperation": _build_remote_teleoperation_request,
+}
+
+
+def _dispatch_start(kind: str, request, websocket_manager) -> dict[str, Any]:
+    from . import (
+        auto_calibrate,
+        calibrate,
+        record,
+        remote_host,
+        remote_inference,
+        remote_teleoperate,
+        replay,
+        rollout,
+        step_calibrate,
+        teleoperate,
+    )
+
+    if kind == "teleoperation":
+        return teleoperate.handle_start_teleoperation(request, websocket_manager)
+    if kind == "hosting":
+        return remote_host.handle_start_hosting(request, websocket_manager)
+    if kind == "remote_teleoperation":
+        return remote_teleoperate.handle_start_remote_teleoperation(request, websocket_manager)
+    if kind == "recording":
+        return record.handle_start_recording(request)
+    if kind == "inference":
+        return rollout.handle_start_inference(request)
+    if kind == "calibration":
+        # One session kind, two managers. The SO-101 sweeps each joint's
+        # range; a "steps" family (the CAN arms' zero pose) runs its own
+        # procedure through the step wizard. _build_calibration_request has
+        # already built the matching request type, so this only picks the
+        # manager.
+        if isinstance(request, step_calibrate.StepCalibrationRequest):
+            return step_calibrate.step_calibration_manager.start(request)
+        return calibrate.calibration_manager.start_calibration(request)
+    if kind == "auto_calibration":
+        return auto_calibrate.auto_calibration_batch_manager.start(request)
+    if kind == "remote_inference":
+        # EXPLICIT, and it must stay above the fall-through: replay is this
+        # function's implicit default, so a kind added without its own branch
+        # silently replays somebody's dataset onto the arm instead. The handler
+        # takes the request alone — remote inference deliberately does not feed
+        # broadcast_joint_data_sync (its telemetry is the 1 Hz status poll).
+        return remote_inference.handle_start_remote_inference(request)
+    return replay.handle_start_replay(request, websocket_manager)
+
+
+def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict[str, Any]:
+    """Start a session by robot name; the router returns the dict as a 201.
+
+    Flow: hardware-hold gate (409 session.held) → robot record resolution
+    (404 robot.not_found) → readiness with the arms the kind actually drives
+    (400 robot.not_ready; the setup kinds instead require only a port per
+    targeted slot) → owner/lease-timeout and per-kind options validation
+    (422 request.validation) → build the feature's request model from the
+    record → the feature's own start handler. A busy-coded refusal from the
+    feature (the gate raced another start) maps to 409 session.held as well;
+    any other refusal passes through with its own status/code (name_taken
+    defaults to 409).
+
+    An ``owner`` attaches a lease (timeout ``lease_timeout_s``, default 60s,
+    10–600 inclusive) and starts the expiry watchdog; no owner, no lease, no
+    timeout-stop (see the module docstring).
+    """
+    kind = body.kind
+
+    held = _held_by()
+    if held == "hosting" and kind != "hosting":
+        # Station mode's "local wins when idle": a PARKED, UNSEATED hosting
+        # session yields to a flow started at the station (and the station
+        # supervisor re-arms hosting once that flow ends). Engaged or seated,
+        # it is a held session like any other.
+        from . import remote_host
+
+        if remote_host.yield_for_local():
+            held = _held_by()
+    if held is not None:
+        _raise_held(
+            held,
+            f"The robot hardware is held by an active {held} session. Stop it first.",
+        )
+
+    record = get_robot_record(body.robot) if is_valid_robot_name(body.robot) else None
+    if record is None:
+        raise ApiError(
+            status_code=404,
+            detail=f"No robot named {body.robot!r}.",
+            code=ErrorCode.ROBOT_NOT_FOUND,
+        )
+
+    # BEFORE the readiness gate: a record whose arm type nothing registered
+    # (an extension not installed, a hand-edited file) can never be ready, and
+    # the 400 must name THAT reason — not "needs ports and calibrations". Every
+    # builder below resolves the family from this value, so this is also what
+    # keeps the registry's UnknownArmType unreachable from here.
+    from .arm_capabilities import require_known_arm_type, require_leader_available, require_leader_kind
+
+    require_known_arm_type(record["arm_type"])
+    # And a leader kind the family offers — for every kind, calibration
+    # included (it opens the leader the record names, so a hand-edited
+    # unknown one must not reach the family).
+    require_leader_kind(record["arm_type"], record["leader_kind"])
+
+    # The setup kinds skip the record-clean gate (they exist to make records
+    # clean); their builders below still refuse a slot with no port.
+    if kind not in _SETUP_KINDS:
+        # Inference is normally follower-only, but a COACHING inference session
+        # DRIVES THE LEADER ARM — the operator takes over through it and the
+        # runner enables torque on it during the handover — so it needs the same
+        # "all arms" readiness the non-follower-only kinds get.
+        #
+        # This exception was lost when the branch was restacked, and losing it is
+        # not cosmetic: a coaching session then starts with only the follower
+        # checked and reserved, so the leader arm is never verified present and
+        # never held against another feature grabbing its port.
+        follower_only = kind in _FOLLOWER_ONLY_KINDS and not (
+            kind == "inference" and bool(body.options.get("coaching"))
+        )
+        arms = "follower" if follower_only else ("leader" if kind in _LEADER_ONLY_KINDS else "all")
+        # A leader this install cannot drive (the Metal leader without its
+        # extra) is named BEFORE the readiness gate, which would otherwise
+        # blame the ports and calibrations for a missing dependency.
+        if arms in {"leader", "all"}:
+            require_leader_available(record["arm_type"], record["leader_kind"])
+        if not is_robot_record_clean(record, arms=arms):
+            needs = {"follower": "follower arm", "leader": "leader arm"}.get(arms, "arms")
+            raise ApiError(
+                status_code=400,
+                detail=f"Robot {body.robot!r} is not fully set up for {kind}: "
+                f"its {needs} need ports and existing calibrations.",
+                code=ErrorCode.ROBOT_NOT_READY,
+            )
+
+    # Owner / lease-timeout shape checks live here rather than as pydantic
+    # Field constraints so the refusal carries the coded 422 shape, exactly
+    # like the options validation below.
+    if body.owner is not None and not (1 <= len(body.owner) <= OWNER_MAX_LENGTH):
+        raise ApiError(
+            status_code=422,
+            detail=f"`owner` must be a non-empty string of at most {OWNER_MAX_LENGTH} characters.",
+            code=ErrorCode.REQUEST_VALIDATION,
+        )
+    lease_timeout_s = body.lease_timeout_s
+    if lease_timeout_s is None:
+        lease_timeout_s = (
+            LEASE_TIMEOUT_AUTO_CALIBRATION_S if body.kind == "auto_calibration" else LEASE_TIMEOUT_DEFAULT_S
+        )
+    if not (LEASE_TIMEOUT_MIN_S <= lease_timeout_s <= LEASE_TIMEOUT_MAX_S):
+        raise ApiError(
+            status_code=422,
+            detail=f"`lease_timeout_s` must be between {LEASE_TIMEOUT_MIN_S:.0f} and "
+            f"{LEASE_TIMEOUT_MAX_S:.0f} seconds.",
+            code=ErrorCode.REQUEST_VALIDATION,
+        )
+
+    try:
+        opts = _OPTIONS_MODELS[kind].model_validate(body.options)
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(str(p) for p in err['loc']) or 'options'}: {err['msg']}" for err in exc.errors()
+        )
+        raise ApiError(
+            status_code=422,
+            detail=f"Invalid {kind} options: {problems}",
+            code=ErrorCode.REQUEST_VALIDATION,
+        ) from exc
+
+    request = _REQUEST_BUILDERS[kind](record, opts)
+    result = _dispatch_start(kind, request, websocket_manager)
+    if not result.get("success", False):
+        message = result.get("message", f"Failed to start {kind}")
+        code = str(result.get("code") or "")
+        if code.startswith("robot.busy."):
+            # Raced another start past the gate above. The discriminant names
+            # the holder except for `releasing`, where the tracker may still
+            # know which session is winding down.
+            discriminant = code.rsplit(".", 1)[-1]
+            if discriminant in session_events.SESSION_KINDS:
+                holder = discriminant
+            else:
+                snapshot = tracker.current()
+                holder = snapshot["kind"] if snapshot else None
+            _raise_held(holder, message)
+        # The calibration flows' name-collision refusal carries no status_code
+        # of its own (legacy callers read it out of a 200 body) — it is a
+        # conflict, not a server fault.
+        default_status = 409 if code == "name_taken" else 500
+        raise ApiError(
+            status_code=result.get("status_code", default_status),
+            detail=message,
+            code=result.get("code"),
+        )
+
+    # The claim event fired synchronously inside handle_start_* — the tracker
+    # already minted the identity; attach what only this wrapper knows.
+    session = tracker.attribute(kind, robot=body.robot, owner=body.owner)
+    if session is None:
+        logger.error(f"{kind} start reported success but the tracker saw no claim event")
+        raise ApiError(
+            status_code=500,
+            detail=f"The {kind} session started but its identity could not be established.",
+            code=ErrorCode.INTERNAL_UNEXPECTED,
+        )
+    if body.owner is not None:
+        # The ONLY place a lease attaches (module docstring). None here means
+        # the session already ended between attribute and now — nothing left
+        # to guard, so no lease and no watchdog.
+        leased = tracker.attach_lease(kind, owner=body.owner, timeout_s=lease_timeout_s)
+        if leased is not None:
+            session = leased
+            _ensure_watchdog()
+    # Warn-but-allow findings from the feature's start (teleoperation/replay
+    # arm-identity checks) ride the 201 so the client can surface them — the
+    # legacy start responses carried them and the sessions surface must not
+    # drop them. The handlers join their findings into one `warning` string;
+    # relay it verbatim as a single entry.
+    warning = result.get("warning")
+    return {"session": _public_session(session), "warnings": [warning] if warning else None}
+
+
+# --- current / stop ----------------------------------------------------------
+
+
+def handle_current_session() -> dict[str, Any]:
+    """Identity of the current session, lease included — a pure read. It
+    deliberately does NOT renew the lease: reads are for any observer, while
+    renewal is the owner's deliberate act (the heartbeat endpoint)."""
+    return {"session": _public_session(tracker.current()), "last_ended": tracker.last_ended()}
+
+
+def handle_heartbeat_session(session_id: str, owner: str) -> dict[str, Any]:
+    """Renew the current session's lease deadline — the owner's deliberate
+    act; the router returns the dict as a 200.
+
+    404 session.not_found unless `session_id` names the current session — a
+    heartbeat for an expiry-stopped session whose release has already landed
+    gets the same answer (the session is simply gone; there is no special
+    path). 409 session.lease_expired only in the window where the expiry
+    watchdog has dispatched the stop but the release event hasn't landed yet.
+    409 session.not_owner when the lease belongs to someone else. A current
+    session with NO lease makes this a no-op 200 — heartbeating an unleased
+    session is harmless, which eases client rollout while lease attachment is
+    still opt-in.
+    """
+    if not (1 <= len(owner) <= OWNER_MAX_LENGTH):
+        raise ApiError(
+            status_code=422,
+            detail=f"`owner` must be a non-empty string of at most {OWNER_MAX_LENGTH} characters.",
+            code=ErrorCode.REQUEST_VALIDATION,
+        )
+    status, snap = tracker.renew_lease(session_id, owner)
+    if status == "not_found":
+        raise ApiError(
+            status_code=404,
+            detail=f"No active session with id {session_id!r}.",
+            code=ErrorCode.SESSION_NOT_FOUND,
+        )
+    if status == "expired":
+        raise ApiError(
+            status_code=409,
+            detail="The session's lease expired and its safety stop is already in progress.",
+            code=ErrorCode.SESSION_LEASE_EXPIRED,
+        )
+    if status == "not_owner":
+        raise ApiError(
+            status_code=409,
+            detail="The session's lease belongs to a different owner.",
+            code=ErrorCode.SESSION_NOT_OWNER,
+        )
+    # "renewed", or the documented "no_lease" no-op.
+    return {"session": _public_session(snap)}
+
+
+def _dispatch_stop(kind: str) -> dict[str, Any]:
+    from . import (
+        auto_calibrate,
+        calibrate,
+        record,
+        remote_host,
+        remote_inference,
+        remote_teleoperate,
+        replay,
+        rollout,
+        step_calibrate,
+        teleoperate,
+    )
+
+    if kind == "teleoperation":
+        return teleoperate.handle_stop_teleoperation()
+    if kind == "hosting":
+        return remote_host.handle_stop_hosting()
+    if kind == "remote_teleoperation":
+        return remote_teleoperate.handle_stop_remote_teleoperation()
+    if kind == "recording":
+        return record.handle_stop_recording()
+    if kind == "inference":
+        return rollout.handle_stop_inference()
+    if kind == "remote_inference":
+        # The safety path: check_expiry routes an abandoned session through
+        # here, and this stop is a STOP on the child's stdin (return to the
+        # captured start pose, THEN release torque) — never a signal.
+        return remote_inference.handle_stop_remote_inference()
+    if kind == "replay":
+        return replay.handle_stop_replay()
+    if kind == "calibration":
+        # Stopping is never owner-gated and the tracker only knows the KIND,
+        # not which manager is live — so stop whichever one actually is
+        # (mirroring the auto_calibration arm just below).
+        if step_calibrate.step_calibration_is_active():
+            return step_calibrate.step_calibration_manager.stop()
+        return calibrate.calibration_manager.stop_calibration_process()
+    if kind == "auto_calibration":
+        # The aggregate spans the single-arm manager and the batch manager —
+        # stop whichever is live (a stop of the idle one reports failure).
+        result = auto_calibrate.auto_calibration_manager.stop()
+        if not result.get("success"):
+            batch = auto_calibrate.auto_calibration_batch_manager.stop()
+            if batch.get("success"):
+                return batch
+        return result
+    # wiggle: a few seconds of open-loop gripper motion with no stop handler.
+    raise ApiError(
+        status_code=409,
+        detail="A gripper wiggle finishes on its own within seconds and cannot be stopped.",
+        code=ErrorCode.ROBOT_BUSY_WIGGLE,
+    )
+
+
+def handle_stop_session(session_id: str) -> dict[str, Any]:
+    """Stop the current session, but only under its own id.
+
+    The id-match is the operation-identity guarantee: a stop aimed at a
+    session that has already ended (and possibly been replaced) is a 404
+    session.not_found, never a stop of whatever runs now. Works for
+    legacy-started sessions too — the observer gave them ids.
+
+    Deliberately NEVER owner-gated: a physical arm must always be stoppable
+    by whoever can reach the API — safety outranks ownership, so a leased
+    session accepts a stop from anyone (session.not_owner guards heartbeat
+    and future owner-gated mutations, not stop).
+
+    The kind's stop result passes through verbatim beside the final identity;
+    a kind whose stop is not immediate (teleoperation's release grace) may
+    still show as current, in its releasing phase.
+    """
+    before = tracker.current()
+    if before is None or before["id"] != session_id:
+        raise ApiError(
+            status_code=404,
+            detail=f"No active session with id {session_id!r}.",
+            code=ErrorCode.SESSION_NOT_FOUND,
+        )
+    result = _dispatch_stop(before["kind"])
+
+    after = tracker.current()
+    if after is not None and after["id"] == before["id"]:
+        session = after
+    else:
+        # Released synchronously during the stop call — report the identity it
+        # ended with (the release event's phase, when the tracker kept it).
+        session = before
+        ended = tracker.last_ended()
+        if ended is not None and ended["id"] == before["id"]:
+            session = dict(before, phase=ended["phase"])
+    return {"session": _public_session(session), "result": result}
+
+
+def handle_coaching_command_for_session(session_id: str, command: str) -> dict[str, Any]:
+    """Forward one coaching (DAgger) command to the current inference session.
+
+    Session-scoped like `handle_stop_session`: `session_id` must name the
+    session that is actually running (404 `session.not_found` otherwise), so a
+    stale command can never hit a session it did not mean. Whether it is a
+    coaching session, and which phase each verb is legal from, is the runner's
+    call — `rollout.handle_coaching_command` returns a coded 409 for a plain
+    inference session, so no kind check is duplicated here.
+
+    Deliberately NOT owner-gated, exactly like stop: a physical arm must stay
+    controllable by whoever can reach the API.
+    """
+    from . import rollout
+
+    before = tracker.current()
+    if before is None or before["id"] != session_id:
+        raise ApiError(
+            status_code=404,
+            detail=f"No active session with id {session_id!r}.",
+            code=ErrorCode.SESSION_NOT_FOUND,
+        )
+    result = rollout.handle_coaching_command(command)
+    if not result.get("success"):
+        raise ApiError(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "The coaching command failed."),
+            code=result.get("code"),
+        )
+    return {"result": result}

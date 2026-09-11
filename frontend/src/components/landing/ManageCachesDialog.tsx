@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   Dialog,
   DialogContent,
@@ -7,11 +8,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Loader2, Trash2, HardDrive } from "lucide-react";
+import { AlertTriangle, Loader2, Trash2, HardDrive } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import {
   DatasetItem,
   deleteDataset,
+  getDatasetHubStatus,
   getDatasetInfo,
 } from "@/lib/replayApi";
 
@@ -37,6 +39,7 @@ const ManageCachesDialog: React.FC<Props> = ({
   datasets,
   onCleared,
 }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
 
   // Datasets whose local cache can be cleared = cached AND on the Hub.
@@ -48,6 +51,17 @@ const ManageCachesDialog: React.FC<Props> = ({
   // Repo ids currently being cleared (per-row spinner + disabled buttons).
   const [clearing, setClearing] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  // Rows whose Hub repo EXISTS but holds no dataset (hub_has_data === false):
+  // an upload that died after creating the repo. This dialog's whole premise —
+  // "the Hub copy stays" — is false for them: clearing would delete the only
+  // real copy. They stay listed (so the state is visible) but aren't clearable
+  // until a re-upload fills the repo. No claim (null) leaves a row clearable.
+  const [notBackedUp, setNotBackedUp] = useState<Set<string>>(new Set());
+  // Rows whose hub-status fetch has SETTLED (answered or failed). Until then a
+  // row is not clearable: the guard above only holds once the answer is in,
+  // and the slow-network window where the fetch is still in flight is exactly
+  // when a half-uploaded repo would otherwise be one click from deletion.
+  const [statusSettled, setStatusSettled] = useState<Set<string>>(new Set());
 
   // On open: reset transient state and fetch sizes.
   useEffect(() => {
@@ -55,6 +69,8 @@ const ManageCachesDialog: React.FC<Props> = ({
     setError(null);
     setClearing(new Set());
     setSizes({});
+    setNotBackedUp(new Set());
+    setStatusSettled(new Set());
 
     let cancelled = false;
     for (const d of cached) {
@@ -68,6 +84,18 @@ const ManageCachesDialog: React.FC<Props> = ({
         })
         .catch(() => {
           // Size unavailable — the row just shows no size.
+        });
+      getDatasetHubStatus(baseUrl, fetchWithHeaders, d.repo_id)
+        .then((s) => {
+          if (!cancelled && s.hub_has_data === false)
+            setNotBackedUp((prev) => new Set(prev).add(d.repo_id));
+        })
+        .catch(() => {
+          // No claim — the row becomes clearable, like hub_has_data === null.
+        })
+        .finally(() => {
+          if (!cancelled)
+            setStatusSettled((prev) => new Set(prev).add(d.repo_id));
         });
     }
 
@@ -85,7 +113,11 @@ const ManageCachesDialog: React.FC<Props> = ({
     try {
       const res = await deleteDataset(baseUrl, fetchWithHeaders, repoId);
       if (!res.success) {
-        setError(res.message ?? `Could not clear the cache for ${repoId}.`);
+        // `res.message` is the backend's own explanation — English server
+        // prose, surfaced verbatim. Only our fallback is translated.
+        setError(
+          res.message ?? t("landing.manageCaches.clearFailed", { repoId }),
+        );
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -100,9 +132,15 @@ const ManageCachesDialog: React.FC<Props> = ({
     }
   };
 
+  // Rows "Clear all" may touch: never one whose Hub repo is known-empty, and
+  // never one whose status is still in flight (it could turn out to be).
+  const clearable = cached.filter(
+    (d) => statusSettled.has(d.repo_id) && !notBackedUp.has(d.repo_id),
+  );
+
   const clearAll = async () => {
     setError(null);
-    for (const d of cached) {
+    for (const d of clearable) {
       // Sequential so failures surface one at a time and the backend isn't
       // hammered with concurrent deletes.
       await clearOne(d.repo_id);
@@ -116,31 +154,40 @@ const ManageCachesDialog: React.FC<Props> = ({
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <HardDrive className="w-5 h-5" /> Manage cached datasets
+            <HardDrive className="w-5 h-5" />{" "}
+            {t("landing.manageCaches.title")}
           </DialogTitle>
           <DialogDescription className="text-muted-foreground">
-            Free disk space by clearing the local cache of datasets that also
-            live on the Hugging Face Hub. The Hub copy stays — clearing only
-            removes the local copy.
+            {t("landing.manageCaches.description")}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
           {cached.length === 0 ? (
             <p className="rounded-md border border-border p-3 text-sm text-muted-foreground">
-              No HF datasets are cached locally.
+              {t("landing.manageCaches.empty")}
             </p>
           ) : (
             <div className="max-h-72 overflow-auto rounded-md border border-border divide-y divide-border">
               {cached.map((d) => {
                 const size = sizes[d.repo_id];
                 const isClearing = clearing.has(d.repo_id);
+                const unsafe =
+                  notBackedUp.has(d.repo_id) || !statusSettled.has(d.repo_id);
                 return (
                   <div
                     key={d.repo_id}
                     className="flex items-start gap-2 p-2 text-sm"
                   >
-                    <span className="min-w-0 flex-1 break-all">{d.repo_id}</span>
+                    <div className="min-w-0 flex-1">
+                      <span className="break-all">{d.repo_id}</span>
+                      {notBackedUp.has(d.repo_id) && (
+                        <p className="mt-0.5 flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400">
+                          <AlertTriangle className="h-3 w-3 shrink-0" />
+                          {t("landing.manageCaches.notBackedUp")}
+                        </p>
+                      )}
+                    </div>
                     {size != null && (
                       <span className="shrink-0 text-xs text-muted-foreground">
                         {formatBytes(size)}
@@ -149,18 +196,19 @@ const ManageCachesDialog: React.FC<Props> = ({
                     <Button
                       variant="outline"
                       size="sm"
-                      disabled={isClearing || busy}
+                      disabled={isClearing || busy || unsafe}
                       onClick={() => clearOne(d.repo_id)}
                       className="h-7 shrink-0"
                     >
                       {isClearing ? (
                         <>
                           <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                          Clearing…
+                          {t("landing.manageCaches.clearing")}
                         </>
                       ) : (
                         <>
-                          <Trash2 className="mr-1.5 h-3.5 w-3.5" /> Clear cache
+                          <Trash2 className="mr-1.5 h-3.5 w-3.5" />{" "}
+                          {t("landing.manageCaches.clear")}
                         </>
                       )}
                     </Button>
@@ -177,9 +225,9 @@ const ManageCachesDialog: React.FC<Props> = ({
               variant="outline"
               onClick={() => onOpenChange(false)}
             >
-              Close
+              {t("common.close")}
             </Button>
-            {cached.length > 0 && (
+            {clearable.length > 0 && (
               <Button
                 onClick={clearAll}
                 disabled={busy}
@@ -187,12 +235,15 @@ const ManageCachesDialog: React.FC<Props> = ({
               >
                 {busy ? (
                   <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Clearing…
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />{" "}
+                    {t("landing.manageCaches.clearing")}
                   </>
                 ) : (
                   <>
-                    <Trash2 className="mr-2 h-4 w-4" /> Clear all (
-                    {cached.length})
+                    <Trash2 className="mr-2 h-4 w-4" />{" "}
+                    {t("landing.manageCaches.clearAll", {
+                      n: clearable.length,
+                    })}
                   </>
                 )}
               </Button>

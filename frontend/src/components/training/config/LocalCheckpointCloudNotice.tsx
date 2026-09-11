@@ -1,34 +1,54 @@
 import React from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { AlertTriangle, Lock, UploadCloud } from "lucide-react";
 
 interface LocalCheckpointCloudNoticeProps {
-  /** The run being continued, for a notice that names what moves. */
+  /** Which crossing this is: a local run being CONTINUED on the cloud (the
+   * whole checkpoint moves, weights and optimizer state), or a local base being
+   * FINE-TUNED there (only its weights move — a fine-tune starts a fresh
+   * optimizer and never reads the rest). */
+  mode: "resume" | "finetune";
+  /** The run being continued / the base being fine-tuned, for a notice that
+   * names what moves. */
   runName: string;
-  /** The checkpoint step the continuation resumes from; null ⇒ the latest. */
+  /** The checkpoint step involved; null ⇒ the latest. */
   step: number | null;
 }
 
 /**
- * Amber notice shown when a run that trained LOCALLY is being continued on
- * Hugging Face Cloud. The pod resumes from the Hub, so the parent's checkpoint
- * — weights AND optimizer state — has to be uploaded first (F7's local→cloud
- * direction).
+ * Amber notice shown when a run targeting Hugging Face Cloud depends on a
+ * checkpoint that exists only on this machine. The pod reads its checkpoints
+ * from the Hub, so those bytes have to be uploaded first — F7's local→cloud
+ * direction, in both of its modes (see `mode`).
  *
  * The twin of LocalDatasetCloudNotice, and deliberately louder about privacy
  * than its dataset sibling: a dataset upload is public by default because a
- * dataset is a thing people share, while this is an intermediate artifact of
- * someone's own run that the user never asked to publish. It goes to a private
- * repo, and the notice says so before the click rather than after — an upload
- * is a disclosure, so it is never a silent side effect of Continue. The backend
- * enforces the same rule: it refuses this launch unless the request carries the
+ * dataset is a thing people share, while this is an artifact of someone's own
+ * run that the user never asked to publish. It goes to a private repo, and the
+ * notice says so before the click rather than after — an upload is a
+ * disclosure, so it is never a silent side effect of launching. The backend
+ * enforces the same rule: it refuses the launch unless the request carries the
  * consent this notice is asking for.
+ *
+ * Each mode owns COMPLETE sentences in the catalog rather than sharing a
+ * template with a spliced-in clause: what moves, and what to do instead when
+ * the Hub is unreachable, differ per mode in more than one place.
  */
 const LocalCheckpointCloudNotice: React.FC<LocalCheckpointCloudNoticeProps> = ({
+  mode,
   runName,
   step,
 }) => {
+  const { t } = useTranslation();
+  // A noun phrase naming which checkpoint moves. {{step}} keeps its existing
+  // (non-locale-aware) formatting and is passed in pre-formatted.
   const stepLabel =
-    step != null ? `step ${step.toLocaleString()}` : "its latest checkpoint";
+    step != null
+      ? t("training.checkpointNotice.stepLabel", {
+          step: step.toLocaleString(),
+        })
+      : t("training.checkpointNotice.latestLabel");
+  const isFinetune = mode === "finetune";
 
   return (
     <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-700 dark:text-amber-100">
@@ -36,23 +56,34 @@ const LocalCheckpointCloudNotice: React.FC<LocalCheckpointCloudNoticeProps> = ({
         <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-amber-600 dark:text-amber-300" />
         <div className="w-full">
           <div className="font-semibold">
-            This checkpoint is only on this machine
+            {t("training.checkpointNotice.title")}
           </div>
           <p className="mt-1 text-amber-700/80 dark:text-amber-200/80">
-            Hugging Face Cloud continues from the Hub, so {stepLabel} of{" "}
-            <span className="font-medium">{runName}</span> — its weights and
-            optimizer state — will be uploaded to a{" "}
-            <span className="font-medium">private</span> repo in your account
-            before the job starts. Continuing the same checkpoint again reuses
-            that upload.
+            <Trans
+              i18nKey={
+                isFinetune
+                  ? "training.checkpointNotice.bodyFinetune"
+                  : "training.checkpointNotice.bodyResume"
+              }
+              values={{ stepLabel, runName }}
+              components={[
+                <span key="0" className="font-medium" />,
+                <span key="1" className="font-medium" />,
+              ]}
+            />
           </p>
           <p className="mt-2 flex items-center gap-2 text-amber-700/70 dark:text-amber-200/70">
             <Lock className="w-4 h-4" />
-            Private to your account — nothing is published.
+            {t("training.checkpointNotice.privacy")}
           </p>
           <p className="mt-1 flex items-center gap-2 text-amber-700/70 dark:text-amber-200/70">
             <UploadCloud className="w-4 h-4" />
-            Use “Upload &amp; continue training” below to upload, then launch.
+            {/* Quotes the Start button's own label, so the two can't drift. */}
+            {t("training.cloudNotice.uploadHint", {
+              action: isFinetune
+                ? t("training.configurator.button.uploadAndStart")
+                : t("training.configurator.button.uploadAndContinue"),
+            })}
           </p>
         </div>
       </div>

@@ -12,12 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import json
 import logging
 import os
 import platform
 import re
+import secrets
 import shutil
+import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
@@ -25,19 +29,254 @@ logger = logging.getLogger(__name__)
 
 RobotSide = Literal["leader", "follower"]
 
-# Define the calibration config paths (shared between features)
+# ---------------------------------------------------------------------------
+# Where MakerMods Lab keeps ITS OWN state.
+#
+# lerobot owns ``~/.cache/huggingface/lerobot``: datasets, models, the
+# calibration libraries its device classes read, and training outputs (local
+# policies live there because they ARE models). Everything that is MakerMods
+# Lab's rather than lerobot's — robot records, saved ports, UI bookkeeping,
+# node identity, the bimanual staging area, and (next) extensions — lives under
+# this root instead, so a user finds the app's files under the app's name and
+# a lerobot cache wipe does not take the robot setup with it.
+#
+# ``MAKERMODSLAB_HOME`` overrides the root (containers, a shared machine, and
+# the test suite, which points it at a tmp dir before anything is imported).
+# An override also switches OFF the legacy migration below: whoever set it is
+# pointing at a place they chose, and silently moving old files there would
+# be a surprise — the test suite relies on exactly that to never touch a
+# developer's real state.
+# ---------------------------------------------------------------------------
+LEGACY_STATE_ROOT = os.path.expanduser("~/.cache/huggingface/lerobot")
+
+
+def resolve_makermodslab_home(env: Mapping[str, str] | None = None) -> str:
+    """The MakerMods Lab state root: ``$MAKERMODSLAB_HOME`` or ``~/.makermods/makermodslab``."""
+    env = os.environ if env is None else env
+    override = env.get("MAKERMODSLAB_HOME")
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    return os.path.expanduser(os.path.join("~", ".makermods", "makermodslab"))
+
+
+MAKERMODSLAB_HOME = resolve_makermodslab_home()
+HOME_IS_OVERRIDDEN = bool(os.environ.get("MAKERMODSLAB_HOME"))
+
+# Define the calibration config paths (shared between features). These stay
+# under lerobot's cache: lerobot's device classes read their calibration from
+# there, and the library IS lerobot calibration data.
 CALIBRATION_BASE_PATH_TELEOP = os.path.expanduser("~/.cache/huggingface/lerobot/calibration/teleoperators")
 CALIBRATION_BASE_PATH_ROBOTS = os.path.expanduser("~/.cache/huggingface/lerobot/calibration/robots")
 LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "so_leader")
 FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "so_follower")
 
+# The hardware families a robot record can describe. "so101" is the SO-101
+# leader/follower pair (Feetech STS3215 over USB serial); "maker" is the Maker
+# Arm v1 — a 7-DOF RobStride CAN follower driven by a Star Arm 102 (reBot 102)
+# leader on FashionStar UART servos. The two share no bus protocol, no
+# calibration procedure and no port-detection method, so the arm type is the
+# discriminant every hardware path branches on.
+# The registry (makermodslab/arms) is the ONLY source of truth for which
+# families exist, and it is open: an extension can register one after this
+# module is imported. Nothing here captures the set (a tuple or a Literal
+# taken at import is stale the moment that happens); is_known_arm_type asks
+# the registry on every call. DEFAULT_ARM_TYPE is bound below the library
+# constants, where the registry is imported.
+
+# lerobot derives a device's calibration directory from the device CLASS's
+# `name` attribute (Robot.__init__ / Teleoperator.__init__ ->
+# HF_LEROBOT_CALIBRATION/<robots|teleoperators>/<name>). These constants must
+# therefore match those class names EXACTLY — "so_leader"/"so_follower" for
+# the SO-101 pair, "rebot_102_leader" for the Star Arm 102 leader, and
+# "maker_follower"/"metal_follower" for the CAN followers. Renaming a device
+# class upstream silently strands a whole library here.
+#
+# The LEADER path is shared by the Maker AND Metal arms: their leader presets
+# (`rebot_102_leader_maker` / `rebot_102_leader_metal`) are config-only
+# variants of the one RebotArm102Leader class, and the class name is what
+# picks the directory. That sharing is why default_slot_config_name below
+# mints per-arm-type ids — the two presets carry different direction and range
+# mappings even though the physical leader zero pose is shared, so a name
+# collision would silently reuse calibration metadata for the wrong follower.
+MAKER_LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "rebot_102_leader")
+# The Maker arm's SECOND leader kind ("star_trigger": the same Star Arm 102
+# fitted with MakerMods' trigger gripper, lerobot's rebot_102_leader_maker_trigger
+# preset). Same lerobot class as the lever leader, so lerobot would derive the
+# SAME directory for it; the registry refuses two leader kinds of one family in
+# one library, so this one is the Lab's own name and every single-arm CAN
+# leader config carries its library as an explicit calibration_dir.
+MAKER_TRIGGER_LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "rebot_102_leader_trigger")
+MAKER_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "maker_follower")
+METAL_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "metal_follower")
+# The Metal arm's SECOND leader (leader kind "metal": a gravity-compensated
+# Metal arm, lerobot's `metal_leader` class) keeps a library of its own —
+# lerobot derives it from that class name — separate from the Star leader's.
+METAL_LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "metal_leader")
+
+# Imported HERE, after every library constant, on purpose: importing the arms
+# package registers the built-in families, and registration validates each
+# family's calibration dirs by calling its dir methods — which resolve the
+# constants above off THIS module. Imported at the top, a process whose first
+# import is utils.config would reach that check with the constants not yet
+# bound (a circular import), so the import sits below what it needs.
+from ..arms import registry as arm_registry  # noqa: E402
+
+DEFAULT_ARM_TYPE = arm_registry.DEFAULT_ID
+
+
+def is_known_arm_type(value: object) -> bool:
+    """True iff ``value`` is a string the arm registry has a family for.
+
+    Read live from the registry on every call — a set captured at import is
+    stale the moment an extension registers a family. False for a non-string
+    (a corrupted field) as well as for an unknown string.
+    """
+    return isinstance(value, str) and value in arm_registry.ids()
+
+
+def normalize_arm_type(value: object) -> str:
+    """The arm type a stored/received value means: MISSING defaults, a string is kept.
+
+    ``None``, ``""`` and any non-string read as DEFAULT_ARM_TYPE — records
+    written before the Maker arm existed carry no arm_type and ARE SO-101s.
+    A string is returned UNCHANGED, known or not: an unknown id is a family
+    this install does not have, and it is preserved so the record can be
+    listed as unavailable (``arm_available: false``) and every start refused
+    with robot.arm_type.unavailable, instead of silently becoming an SO-101
+    and opening a Feetech serial path at whatever the hardware really is.
+    The callers that need a family go through the registry, which raises
+    UnknownArmType on an unknown id; the API gates
+    (arm_capabilities.require_known_arm_type) make that raise unreachable
+    from a request.
+    """
+    if isinstance(value, str) and value:
+        return value
+    return DEFAULT_ARM_TYPE
+
+
+# Each arm type owns a SEPARATE calibration library: a Maker zero-pose
+# calibration is meaningless to an SO-101 and vice versa, and lerobot would not
+# look for it in the other directory anyway. Nothing merges the two listings.
+#
+# Each built-in family NAMES its library constants (ArmFamily.leader_library_attr
+# / follower_library_attr) and resolves them off this module at CALL time rather
+# than capturing a path at import, so a test (or an install with a relocated
+# cache) that monkeypatches LEADER_CONFIG_PATH still steers every caller — a
+# frozen table would silently ignore the patch. An extension family answers
+# its dir methods with lerobot_calibration_dir() instead.
+
+
+def lerobot_calibration_dir(kind: Literal["robots", "teleoperators"], class_name: str) -> str:
+    """The calibration dir lerobot derives from a device class's ``name``.
+
+    lerobot reads a device's calibration from ``<base>/<class name>/`` —
+    ``CALIBRATION_BASE_PATH_ROBOTS`` for a robot (follower), ``..._TELEOP``
+    for a teleoperator (leader). An extension family returns this from its
+    ``leader_calibration_dir()`` / ``follower_calibration_dir()`` rather than
+    re-deriving the path; resolved at call time, like the built-ins'
+    constants, so a redirected base path is honoured.
+    """
+    base = CALIBRATION_BASE_PATH_ROBOTS if kind == "robots" else CALIBRATION_BASE_PATH_TELEOP
+    return os.path.join(base, class_name)
+
+
+def normalize_leader_kind(arm_type: object, value: object) -> str:
+    """The leader kind a stored/received value means: MISSING → the family's
+    default, a string kept as is (known or not — an unknown one lists and is
+    refused, never silently defaulted; see ArmFamily.leader_option). For an
+    arm type nothing registered there is no default to give: the raw value
+    (or "") is kept, and the record is unavailable anyway."""
+    if isinstance(value, str) and value:
+        return value
+    resolved = normalize_arm_type(arm_type)
+    if not is_known_arm_type(resolved):
+        return ""
+    return arm_registry.get(resolved).normalize_leader_kind(None)
+
+
+def _leader_kwargs(arm_type: object, leader_kind: object) -> dict[str, str]:
+    from ..arms.base import leader_kwargs
+
+    return leader_kwargs(arm_registry.get(normalize_arm_type(arm_type)), leader_kind)
+
+
+def leader_config_path_for(arm_type: object = DEFAULT_ARM_TYPE, leader_kind: object = None) -> str:
+    """The calibration library dir holding this arm type's LEADER configs.
+
+    Maker and Metal share one library (both leaders are the Star Arm 102 —
+    same device class, different joint-mapping preset); the per-arm-type
+    separation there is carried by the minted config NAMES instead
+    (default_slot_config_name). ``leader_kind`` picks the library of a family
+    with more than one leader (the Metal arm's own leader keeps a separate
+    one); a missing kind is the family's default.
+    """
+    family = arm_registry.get(normalize_arm_type(arm_type))
+    return family.leader_calibration_dir(**_leader_kwargs(arm_type, leader_kind))
+
+
+def follower_config_path_for(arm_type: object = DEFAULT_ARM_TYPE) -> str:
+    """The calibration library dir holding this arm type's FOLLOWER configs."""
+    return arm_registry.get(normalize_arm_type(arm_type)).follower_calibration_dir()
+
+
+def default_slot_config_name(record_name: str, mode: object, arm: str, arm_type: object) -> str:
+    """The default calibration id for a robot record's empty slot.
+
+    SO-101 keeps its historical defaults ("<name>", "<name>_<arm>" bimanual).
+    The CAN families mint the arm type into the name ("<name>_metal",
+    "<name>_metal_<arm>") because their Star-leader calibrations live in ONE
+    shared directory while the presets' zero poses differ — an unsuffixed
+    default would let a Maker robot and a Metal robot silently share a zero
+    that is wrong for one of them. Followers get the same suffix purely for
+    consistency (their libraries are already separate).
+
+    Only a default: a slot that already names a calibration keeps it. The
+    single-mode rule is the family's (ArmFamily.default_calibration_name);
+    the bimanual ``_<arm>`` suffix is the same for every family.
+    """
+    base = arm_registry.get(normalize_arm_type(arm_type)).default_calibration_name(record_name)
+    return f"{base}_{arm}" if mode == "bimanual" else base
+
+
 # Define port storage path
-PORT_CONFIG_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/ports")
+PORT_CONFIG_PATH = os.path.join(MAKERMODSLAB_HOME, "ports")
 LEADER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "leader_port.txt")
 FOLLOWER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "follower_port.txt")
 
 # Robot config records (per-robot JSON metadata)
-ROBOTS_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/robots")
+ROBOTS_PATH = os.path.join(MAKERMODSLAB_HOME, "robots")
+
+# BENCH-ONLY LiveKit credentials for running the drtc entrypoints by hand
+# (`python -m makermodslab.drtc.robot_sync` / `.policy` against some LiveKit
+# server): a dotenv file holding LIVEKIT_URL / LIVEKIT_ROOM and either a
+# LIVEKIT_TOKEN or an API key/secret to mint one from (drtc/_env.py).
+#
+# THE SERVER NEVER READS IT. Remote inference has one transport, the bundled
+# SFU (`makermodslab --sfu`, sfu.py): the session mints the url, the room and
+# every participant's token in-process from LIVEKIT_KEY_FILE, and the GPU
+# launcher hands the container a token the same way. It lives beside the rest
+# of our state so a wheel install and a source checkout read the same file.
+DRTC_ENV_PATH = os.path.join(MAKERMODSLAB_HOME, "livekit.env")
+
+# Remote-inference session logs, one file per run (remote_inference._LOG_DIR
+# appends "sessions/"). The directory predates the bundled SFU, when the
+# retired tools/drtc scripts also logged livekit-server and cloudflared here.
+DRTC_LOG_DIR = os.path.expanduser("~/.cache/huggingface/lerobot/logs/drtc")
+
+# The Modal app the GPU launcher last started: {app_id, profile, started_at}.
+#
+# It exists because a Modal app OUTLIVES the local `modal run` client that
+# started it: the client tears the app down only on SIGINT (it disconnects from
+# its `except KeyboardInterrupt`), so a client that dies to SIGTERM/SIGKILL — a
+# uvicorn --reload restart, a Ctrl-C on the dev launcher, a hard kill — leaves
+# an A100 billing until Modal's own heartbeat timeout reaps it minutes later.
+# Recording the app id on disk is what lets a LATER process (this one after a
+# restart) run `modal app stop` for a client nobody can reach any more.
+#
+# Deliberately tiny and disposable: it names no credential, and losing it costs
+# at most one orphan reap. Written when the launcher first sees the app id in
+# the child's output, cleared once the app is confirmed stopped.
+DRTC_GPU_APP_FILE = os.path.join(MAKERMODSLAB_HOME, "drtc_gpu_app.json")
 
 # Staging root for bimanual (BiSO) sessions. lerobot's BiSO devices take ONE
 # calibration_dir + ONE base id and load each sub-arm as "<base>_left.json" /
@@ -48,7 +287,7 @@ ROBOTS_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/robots")
 # root as "<base>_left.json"/"<base>_right.json" for lerobot to load. The copy is
 # unconditional every session (see stage_bimanual_calibrations) so a recalibrated
 # library file always refreshes its stale staging alias.
-MAKERMODSLAB_BISO_STAGING_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/makermodslab_biso")
+MAKERMODSLAB_BISO_STAGING_PATH = os.path.join(MAKERMODSLAB_HOME, "biso_staging")
 
 # Fallback base id when a bimanual start request carries no robot name (older
 # frontends). Filesystem-safe and stable; a single unnamed bimanual robot reuses
@@ -58,26 +297,64 @@ DEFAULT_BIMANUAL_BASE = "bimanual"
 # Hub-job ids the user dismissed from the jobs UI (JSON list of strings). The
 # HF Jobs API has no delete — a finished job stays in list_jobs() indefinitely
 # — so hiding a dead run from the untracked list must be persisted locally.
-DISMISSED_HUB_JOBS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/dismissed_hub_jobs.json")
+DISMISSED_HUB_JOBS_FILE = os.path.join(MAKERMODSLAB_HOME, "dismissed_hub_jobs.json")
 
 # Hub dataset repo ids the user typed straight into the picker and chose to keep
 # ("Use org/name"). They aren't in the user's own namespace listing and have no
 # local copy, so they'd vanish after selection unless we persist them here and
 # fold them back into the merged /datasets listing.
-SAVED_CUSTOM_DATASETS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/saved_custom_datasets.json")
+SAVED_CUSTOM_DATASETS_FILE = os.path.join(MAKERMODSLAB_HOME, "saved_custom_datasets.json")
 
 # Hub MODEL repo ids the user pinned via the "Add model" chooser — the models
 # mirror of SAVED_CUSTOM_DATASETS_FILE (same rationale: a foreign-namespace repo
 # with no local copy vanishes from the /models listing unless persisted here).
-SAVED_CUSTOM_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/saved_custom_models.json")
+SAVED_CUSTOM_MODELS_FILE = os.path.join(MAKERMODSLAB_HOME, "saved_custom_models.json")
 
 # Hub dataset/model repo ids the user removed from their pickers ("hidden").
 # Hiding NEVER touches the Hub repo — it only filters the merged listing, so a
 # repo the user's own namespace listing keeps returning stays gone until they
 # re-add it (re-pinning auto-unhides). Persisted like the dismissed hub jobs
 # (JSON list on disk, a set in memory).
-SAVED_HIDDEN_DATASETS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_datasets.json")
-SAVED_HIDDEN_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_models.json")
+SAVED_HIDDEN_DATASETS_FILE = os.path.join(MAKERMODSLAB_HOME, "hidden_datasets.json")
+SAVED_HIDDEN_MODELS_FILE = os.path.join(MAKERMODSLAB_HOME, "hidden_models.json")
+
+# Per-dataset episode indices the user excluded from training (curation, not
+# deletion — the episode stays on disk and in every listing/upload, it's just
+# left out of the --dataset.episodes subset a training run is launched with).
+# JSON object keyed by repo_id -> list[int], unlike the flat repo-id lists
+# above, since the thing being persisted is per-dataset state, not membership
+# in one shared collection.
+EXCLUDED_EPISODES_FILE = os.path.join(MAKERMODSLAB_HOME, "excluded_episodes.json")
+
+# Stable per-install identity, minted on first read. The node registry uses it
+# to recognize a peer across restarts and address changes (a machine's IP or
+# MagicDNS name can change; its instance id doesn't).
+INSTANCE_ID_FILE = os.path.join(MAKERMODSLAB_HOME, "instance_id.txt")
+
+# The node registry's saved peer list: [{"url": ..., "name": ...}, ...]. Only
+# url + name are persisted — identity (instance_id/version/capabilities) is
+# deliberately NOT: a peer is re-verified against its live /api/v1/health on
+# load/probe, so stale identity can never be served from disk.
+NODES_FILE = os.path.join(MAKERMODSLAB_HOME, "nodes.json")
+
+# The bundled LiveKit SFU's API key/secret (sfu.py, `makermodslab --sfu`):
+# one pair per install, minted on the first --sfu run, in the `key: secret`
+# YAML shape livekit-server's --key-file reads. Mode 0600 — the secret signs
+# every room token, so it never rides in a command line or an env var; both
+# the SFU child and the token route read this file. Deleting it rotates the
+# pair (tokens minted before the restart stop validating, nothing else).
+LIVEKIT_KEY_FILE = os.path.join(MAKERMODSLAB_HOME, "livekit_keys.yaml")
+
+# The livekit-server config the launcher renders per run (sfu.render_config).
+# Regenerated on every --sfu start; its path is also the identity signal
+# `makermodslab --stop` uses to recognise the SFU child as ours.
+LIVEKIT_CONFIG_FILE = os.path.join(MAKERMODSLAB_HOME, "livekit_config.yaml")
+
+# Station mode's remembered choice: {"robot": name} — which saved robot this
+# machine hosts for remote teleoperation. Written by `--host <robot>` and by
+# the station UI's picker; read by a bare `--host`. Absent/blank = no choice
+# yet (a lone hostable robot is picked automatically, else the UI chooses).
+STATION_FILE = os.path.join(MAKERMODSLAB_HOME, "station.json")
 
 # Tag stamped on every dataset pushed to the Hub from MakerMods Lab, so we can later
 # query the Hub for MakerMods Lab-produced datasets and compute usage metrics.
@@ -106,6 +383,134 @@ def with_makermodslab_tag(tags: list[str] | None) -> list[str]:
     return out
 
 
+# State that versions before the MAKERMODSLAB_HOME split wrote beside lerobot's
+# files: (name under LEGACY_STATE_ROOT, this module's attribute holding the new
+# path). The attribute is looked up AT CALL TIME so a redirected constant (the
+# test fixtures) is honoured. Calibration libraries and training outputs are
+# deliberately absent — they stay where lerobot reads them.
+_LEGACY_STATE_ENTRIES: tuple[tuple[str, str], ...] = (
+    ("ports", "PORT_CONFIG_PATH"),
+    ("robots", "ROBOTS_PATH"),
+    ("makermodslab_biso", "MAKERMODSLAB_BISO_STAGING_PATH"),
+    ("dismissed_hub_jobs.json", "DISMISSED_HUB_JOBS_FILE"),
+    ("saved_custom_datasets.json", "SAVED_CUSTOM_DATASETS_FILE"),
+    ("saved_custom_models.json", "SAVED_CUSTOM_MODELS_FILE"),
+    ("hidden_datasets.json", "SAVED_HIDDEN_DATASETS_FILE"),
+    ("hidden_models.json", "SAVED_HIDDEN_MODELS_FILE"),
+    ("excluded_episodes.json", "EXCLUDED_EPISODES_FILE"),
+    ("instance_id.txt", "INSTANCE_ID_FILE"),
+    ("nodes.json", "NODES_FILE"),
+)
+
+
+def _remove_path(path: str) -> None:
+    """Best-effort removal of a file, symlink or directory tree."""
+    if os.path.islink(path) or os.path.isfile(path):
+        with contextlib.suppress(OSError):
+            os.remove(path)
+    elif os.path.isdir(path):
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _move_entry(src: str, dst: str) -> bool:
+    """Move ``src`` to ``dst`` without ever leaving a half-written ``dst``.
+
+    ``shutil.move`` is a rename on one filesystem but copy-then-delete across
+    two — and ``~/.cache/huggingface`` symlinked onto a big external drive is
+    a common lerobot setup, which puts the two roots on different volumes. A
+    copy that dies half-way (disk full, one unreadable file) would leave a
+    partial ``dst`` that the destination-wins rule then treats as the live
+    state forever. So the move lands in a sibling ``<dst>.migrating`` first
+    and is renamed into place only once complete; on failure the sibling is
+    removed and ``src`` is untouched (``shutil.move`` deletes the source only
+    after a full copy).
+    """
+    staging = dst + ".migrating"
+    _remove_path(staging)
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.move(src, staging)
+        os.replace(staging, dst)
+    except OSError as exc:
+        logger.warning("Could not migrate %s -> %s: %s", src, dst, exc)
+        _remove_path(staging)
+        return False
+    return True
+
+
+def _merge_dir(src: str, dst: str) -> tuple[int, int]:
+    """Move the entries of legacy dir ``src`` that ``dst`` lacks; keep the rest.
+
+    Returns (moved, left). ``src`` is removed once nothing is left in it.
+    """
+    moved = left = 0
+    for name in sorted(os.listdir(src)):
+        s, d = os.path.join(src, name), os.path.join(dst, name)
+        if os.path.lexists(d):
+            left += 1
+        elif _move_entry(s, d):
+            moved += 1
+        else:
+            left += 1
+    if left == 0:
+        with contextlib.suppress(OSError):
+            os.rmdir(src)
+    return moved, left
+
+
+def migrate_legacy_state(legacy_root: str | None = None) -> list[str]:
+    """Move MakerMods Lab state written beside lerobot's cache into MAKERMODSLAB_HOME.
+
+    One-shot and idempotent. A FILE entry moves only when nothing exists at
+    the new path: a destination that already exists is the live state and
+    wins, so an old version run after the split cannot clobber newer files on
+    the next upgrade, and a second call is a no-op. A DIRECTORY entry that
+    exists at both places is merged name by name under the same rule — the
+    new location's directories get created empty by ordinary reads
+    (``list_robot_records`` makes ``robots/`` on every listing), so a
+    new → old → new round-trip would otherwise strand every robot record the
+    old version wrote in between. Whatever is left behind is named in one
+    WARNING per start, so a user can find it. A failed move is logged and
+    skipped; the app then starts with that entry at its defaults rather than
+    refusing to start. Returns the destinations written.
+
+    The caller decides WHEN this runs (server startup, before the first read
+    of any entry — every reader here is lazy) and whether it runs at all
+    (never under a ``MAKERMODSLAB_HOME`` override; see HOME_IS_OVERRIDDEN).
+    """
+    root = LEGACY_STATE_ROOT if legacy_root is None else legacy_root
+    written: list[str] = []
+    left_behind: list[str] = []
+    for legacy_name, attr in _LEGACY_STATE_ENTRIES:
+        src = os.path.join(root, legacy_name)
+        dst = globals()[attr]
+        if not os.path.lexists(src):
+            continue
+        if not os.path.lexists(dst):
+            if _move_entry(src, dst):
+                written.append(dst)
+            continue
+        if os.path.isdir(src) and not os.path.islink(src) and os.path.isdir(dst):
+            moved, left = _merge_dir(src, dst)
+            if moved:
+                written.append(dst)
+            if left:
+                left_behind.append(src)
+        else:
+            left_behind.append(src)
+    if written:
+        logger.info(
+            "Moved %d MakerMods Lab state entries from %s to %s", len(written), root, MAKERMODSLAB_HOME
+        )
+    if left_behind:
+        logger.warning(
+            "Legacy MakerMods Lab state left in place because a newer copy exists under %s: %s",
+            MAKERMODSLAB_HOME,
+            ", ".join(left_behind),
+        )
+    return written
+
+
 def _atomic_write_text(path: str, content: str) -> None:
     """Write to <path>.tmp then os.replace, so a crash mid-write never leaves
     a half-written file on disk."""
@@ -115,6 +520,114 @@ def _atomic_write_text(path: str, content: str) -> None:
     with open(tmp, "w") as f:
         f.write(content)
     os.replace(tmp, path)
+
+
+def load_saved_nodes() -> list[dict[str, str | None]]:
+    """The saved peer rows from NODES_FILE, each ``{"url": str, "name": str|None}``.
+
+    Missing, corrupt, or wrong-shaped content yields [] (an empty registry is
+    always a safe starting point); rows without a string url are dropped.
+    """
+    try:
+        with open(NODES_FILE) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    rows: list[dict[str, str | None]] = []
+    for row in data:
+        if isinstance(row, dict) and isinstance(row.get("url"), str):
+            name = row.get("name")
+            rows.append({"url": row["url"], "name": name if isinstance(name, str) else None})
+    return rows
+
+
+def save_saved_nodes(rows: list[dict[str, str | None]]) -> None:
+    """Persist the peer rows (url + name only) to NODES_FILE atomically."""
+    _atomic_write_text(NODES_FILE, json.dumps(rows, indent=2))
+
+
+_instance_id_cache: str | None = None
+
+
+def get_instance_id() -> str:
+    """This install's stable identity: a 32-hex-char id, persisted on first use.
+
+    Cached after the first read; a wiped cache dir simply mints a new identity
+    (a fresh install IS a new node as far as peers are concerned).
+    """
+    global _instance_id_cache
+    if _instance_id_cache is not None:
+        return _instance_id_cache
+    try:
+        with open(INSTANCE_ID_FILE) as f:
+            stored = f.read().strip()
+    except OSError:
+        stored = ""
+    if not re.fullmatch(r"[0-9a-f]{32}", stored):
+        stored = uuid.uuid4().hex
+        _atomic_write_text(INSTANCE_ID_FILE, stored + "\n")
+    _instance_id_cache = stored
+    return stored
+
+
+def load_station_robot(path: str | None = None) -> str | None:
+    """The remembered hosted-robot name, or None (missing/corrupt/blank)."""
+    try:
+        with open(path or STATION_FILE) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    robot = data.get("robot") if isinstance(data, dict) else None
+    return robot if isinstance(robot, str) and is_valid_robot_name(robot) else None
+
+
+def save_station_robot(robot: str | None, path: str | None = None) -> None:
+    """Persist (or clear, with None) the station's hosted-robot choice."""
+    _atomic_write_text(path or STATION_FILE, json.dumps({"robot": robot}, indent=2) + "\n")
+
+
+def parse_livekit_keys(text: str) -> dict[str, str]:
+    """`key: secret` lines (livekit-server's key-file format) -> {key: secret}.
+
+    Blank lines and `#` comments are skipped; a line without a colon or with
+    an empty side is ignored rather than raised on, so a hand-edited file
+    degrades to "no keys" (and a fresh pair gets minted) instead of crashing
+    the launcher.
+    """
+    keys: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, _, secret = line.partition(":")
+        key, secret = key.strip(), secret.strip()
+        if key and secret:
+            keys[key] = secret
+    return keys
+
+
+def load_or_create_livekit_keys(path: str = LIVEKIT_KEY_FILE) -> tuple[str, str]:
+    """This install's SFU API key/secret pair, minted on first use.
+
+    Returns the first pair in the file (livekit-server accepts several; we
+    only ever write one). A missing, unreadable, or keyless file gets a fresh
+    pair written atomically with mode 0600.
+    """
+    try:
+        with open(path) as f:
+            existing = parse_livekit_keys(f.read())
+    except OSError:
+        existing = {}
+    if existing:
+        key, secret = next(iter(existing.items()))
+        return key, secret
+    key = f"mml_{secrets.token_hex(8)}"
+    secret = secrets.token_urlsafe(48)
+    _atomic_write_text(path, f"{key}: {secret}\n")
+    os.chmod(path, 0o600)
+    return key, secret
 
 
 def _port_file_for(robot_type: RobotSide) -> str:
@@ -140,17 +653,32 @@ def _require_assigned_config(config: str, side: str) -> None:
         )
 
 
-def setup_calibration_files(leader_config: str, follower_config: str):
-    """Setup calibration files in the correct locations for teleoperation and recording"""
+def setup_calibration_files(
+    leader_config: str,
+    follower_config: str,
+    arm_type: object = DEFAULT_ARM_TYPE,
+    leader_kind: object = None,
+):
+    """Setup calibration files in the correct locations for teleoperation and recording.
+
+    ``arm_type`` selects which library pair to read/write — an SO-101 session
+    stages from so_leader/so_follower, a Maker session from
+    rebot_102_leader/maker_follower. Those ARE lerobot's expected locations for
+    each device class, so this stays a validating no-op copy within one dir.
+    ``leader_kind`` picks the leader library of a multi-leader family.
+    """
     _require_assigned_config(leader_config, "leader")
     _require_assigned_config(follower_config, "follower")
     # Extract config names from file paths (remove .json extension)
     leader_config_name = os.path.splitext(leader_config)[0]
     follower_config_name = os.path.splitext(follower_config)[0]
 
+    leader_library = leader_config_path_for(arm_type, leader_kind)
+    follower_library = follower_config_path_for(arm_type)
+
     # Log the full paths to check if files exist
-    leader_config_full_path = os.path.join(LEADER_CONFIG_PATH, leader_config)
-    follower_config_full_path = os.path.join(FOLLOWER_CONFIG_PATH, follower_config)
+    leader_config_full_path = os.path.join(leader_library, leader_config)
+    follower_config_full_path = os.path.join(follower_library, follower_config)
 
     logger.info("Checking calibration files:")
     logger.info(f"Leader config path: {leader_config_full_path}")
@@ -159,8 +687,8 @@ def setup_calibration_files(leader_config: str, follower_config: str):
     logger.info(f"Follower config exists: {os.path.exists(follower_config_full_path)}")
 
     # Create calibration directories if they don't exist
-    leader_calibration_dir = LEADER_CONFIG_PATH
-    follower_calibration_dir = FOLLOWER_CONFIG_PATH
+    leader_calibration_dir = leader_library
+    follower_calibration_dir = follower_library
     os.makedirs(leader_calibration_dir, exist_ok=True)
     os.makedirs(follower_calibration_dir, exist_ok=True)
 
@@ -189,21 +717,42 @@ def setup_calibration_files(leader_config: str, follower_config: str):
     return leader_config_name, follower_config_name
 
 
-def setup_follower_calibration_file(follower_config: str):
+def setup_leader_calibration_file(
+    leader_config: str, arm_type: object = DEFAULT_ARM_TYPE, leader_kind: object = None
+) -> str:
+    """Leader twin of setup_follower_calibration_file (remote teleoperation
+    opens ONLY the leader). Validates the assigned config exists in the arm
+    type's leader library and returns its stem — lerobot's `id`.
+    ``leader_kind`` selects the library for a multi-leader family."""
+    _require_assigned_config(leader_config, "leader")
+    leader_config_name = os.path.splitext(leader_config)[0]
+    leader_library = leader_config_path_for(arm_type, leader_kind)
+    target = os.path.join(leader_library, f"{leader_config_name}.json")
+    if not os.path.exists(target):
+        raise FileNotFoundError(
+            f"Leader calibration file not found: {target}. Calibrate the leader arm "
+            "(or assign an existing calibration) before starting."
+        )
+    return leader_config_name
+
+
+def setup_follower_calibration_file(follower_config: str, arm_type: object = DEFAULT_ARM_TYPE):
     """Setup follower calibration file in the correct location for replay functionality"""
     _require_assigned_config(follower_config, "follower")
     # Extract config name from file path (remove .json extension)
     follower_config_name = os.path.splitext(follower_config)[0]
 
+    follower_library = follower_config_path_for(arm_type)
+
     # Log the full path to check if file exists
-    follower_config_full_path = os.path.join(FOLLOWER_CONFIG_PATH, follower_config)
+    follower_config_full_path = os.path.join(follower_library, follower_config)
 
     logger.info("Checking follower calibration file:")
     logger.info(f"Follower config path: {follower_config_full_path}")
     logger.info(f"Follower config exists: {os.path.exists(follower_config_full_path)}")
 
     # Create calibration directory if it doesn't exist
-    follower_calibration_dir = FOLLOWER_CONFIG_PATH
+    follower_calibration_dir = follower_library
     os.makedirs(follower_calibration_dir, exist_ok=True)
 
     # Copy calibration file to the correct location if it's not already there
@@ -283,11 +832,24 @@ _BIMANUAL_CONFIG_FIELDS = (
     "right_follower_config",
 )
 _ROBOT_STRING_FIELDS = _SINGLE_CONFIG_FIELDS + _BIMANUAL_CONFIG_FIELDS
+
+# Which arm SIDES this machine has plugged in — the record's layout, which is
+# a UI-and-readiness hint, not a hardware fact the sessions branch on (each
+# session kind gates on the arm scope it actually drives, see
+# is_robot_record_clean). "both" is a local leader/follower pair (every record
+# written before the remote kinds existed reads back as this); "follower" is a
+# station that only hosts / runs policies / replays; "leader" is a controller
+# that only drives a REMOTE follower. Bimanual composes with it (two leaders,
+# two followers, or both pairs).
+ROBOT_ARMS = ("both", "follower", "leader")
+_DEFAULT_ARMS = "both"
 _ROBOT_LIST_FIELDS = ("cameras",)
+# The leader half of the slots — what a leader-kind switch invalidates.
+_LEADER_SLOT_FIELDS = ("leader_port", "leader_config", "right_leader_port", "right_leader_config")
 
 # Auto-calibration drive torque, as a percentage of full torque. Threaded into
 # the vendored autocal subprocess as --torque-limit (percent × 10; see
-# makermodslab/auto_calibrate.py). Regular sessions (teleop/record/skill runs) run
+# makermodslab/auto_calibrate.py). Regular sessions (teleop/record/policy runs) run
 # at stock LeRobot torque and ignore this value (makermodslab/motor_power.py
 # reset_torque_limit). Bounded below because under ~10% the arm can't reliably
 # move its own weight; default = the vendored script's own DEFAULT_TORQUE_LIMIT
@@ -328,8 +890,45 @@ def is_valid_robot_name(name: str) -> bool:
     return not any(bad in name for bad in _INVALID_NAME_CHARS)
 
 
+# Display names for training runs (JobRecord.name / display_name). Long enough
+# for any sentence a card can render, short enough that a pasted document can't
+# become a "name" that bloats every listing response carrying it.
+JOB_NAME_MAX_LENGTH = 200
+
+
+def validate_job_name(name: str) -> str:
+    """Validate a training-run display name; returns the trimmed name.
+
+    THE shared validator for both paths that accept one — submit
+    (`TrainingRequest.job_name`, via JobRegistry.start) and
+    `JobRegistry.rename` — so what one path refuses the other can't store.
+    Raises ValueError with a user-facing message (both callers surface it as
+    HTTP 400). Deliberately a boundary check, not a pydantic model constraint:
+    legacy records persisted before validation existed must keep loading."""
+    trimmed = name.strip()
+    if not trimmed:
+        raise ValueError("Display name cannot be empty.")
+    if len(trimmed) > JOB_NAME_MAX_LENGTH:
+        raise ValueError(f"Display name is too long — keep it under {JOB_NAME_MAX_LENGTH} characters.")
+    if not is_valid_robot_name(trimmed):
+        raise ValueError("Invalid display name.")
+    return trimmed
+
+
 def _empty_record(name: str) -> dict:
-    record: dict = {"name": name, "mode": _DEFAULT_MODE, "motor_power": DEFAULT_MOTOR_POWER}
+    record: dict = {
+        "name": name,
+        "mode": _DEFAULT_MODE,
+        "arms": _DEFAULT_ARMS,
+        "arm_type": DEFAULT_ARM_TYPE,
+        # "" = the family's default leader (normalized on read); a record
+        # written before leader kinds existed reads back as that default.
+        "leader_kind": "",
+        "motor_power": DEFAULT_MOTOR_POWER,
+        # Alternative mode-4 experiment. Holding defaults are family-specific.
+        "gripper_current_limit_a": None,
+        "gripper_hold_torque_nm": None,
+    }
     for field in _ROBOT_STRING_FIELDS:
         record[field] = ""
     for field in _ROBOT_LIST_FIELDS:
@@ -362,10 +961,31 @@ def get_robot_record(name: str) -> dict | None:
     # Guard against an unknown mode on disk.
     if record.get("mode") not in _VALID_MODES:
         record["mode"] = _DEFAULT_MODE
+    # Records written before the remote kinds existed carry no layout; they
+    # are local pairs by definition.
+    if record.get("arms") not in ROBOT_ARMS:
+        record["arms"] = _DEFAULT_ARMS
+    # Records written before the Maker arm existed carry no arm_type; they are
+    # SO-101s by definition, which is exactly what normalize_arm_type returns.
+    # A hand-edited UNKNOWN string is kept as is: the record lists as
+    # unavailable and refuses to start, rather than masquerading as an SO-101.
+    record["arm_type"] = normalize_arm_type(record.get("arm_type"))
+    if "gripper_hold_torque_nm" not in data:
+        from ..gripper_settings import default_gripper_hold_torque
+
+        record["gripper_hold_torque_nm"] = default_gripper_hold_torque(
+            record["arm_type"], record.get("gripper_current_limit_a")
+        )
+    # Same rule for the leader kind: missing (every record written before it
+    # existed) reads as the family's default; an unknown string is kept, so
+    # it lists and is refused rather than silently driving the wrong leader.
+    record["leader_kind"] = normalize_leader_kind(record["arm_type"], record.get("leader_kind"))
     # Older records have no motor_power (→ full power via _empty_record); an
     # out-of-range or corrupted value on disk is clamped so every consumer
     # sees a safe 10-100 integer.
     record["motor_power"] = clamp_motor_power(record.get("motor_power"))
+    # Preserve invalid persisted gripper values here: session setup validates
+    # strictly and refuses them, rather than silently removing a safety cap.
     return record
 
 
@@ -405,6 +1025,27 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
         return False
 
     record = existing if existing is not None else _empty_record(name)
+    # Decided BEFORE the merge below, because the switch blanks hardware-bound
+    # fields and must not blank ones this same payload is setting. Only a
+    # KNOWN arm type switches: arm_type is not in _ROBOT_STRING_FIELDS, so an
+    # unknown one handed to this layer writes nothing at all (the API layer
+    # refuses it with 400 robot.arm_type.unavailable before it gets here; a
+    # hand edit of the JSON is the only way an unknown id lands on disk).
+    switching_arm_type = is_known_arm_type(data.get("arm_type")) and data["arm_type"] != record.get(
+        "arm_type"
+    )
+    # A leader-kind switch blanks the LEADER slots only (below): the two
+    # leaders are different hardware on different adapters, with separate
+    # calibration libraries, so the old port and calibration name are stale
+    # for the new one — but the followers are untouched. Validated by the API
+    # layer (require_leader_kind) before it gets here, like arm_type.
+    new_leader_kind = data.get("leader_kind")
+    switching_leader_kind = (
+        isinstance(new_leader_kind, str)
+        and not switching_arm_type
+        and normalize_leader_kind(record.get("arm_type"), new_leader_kind)
+        != normalize_leader_kind(record.get("arm_type"), record.get("leader_kind"))
+    )
     for field in _ROBOT_STRING_FIELDS:
         if field in data and isinstance(data[field], str):
             record[field] = data[field]
@@ -416,9 +1057,53 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
     value = data.get("motor_power")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         record["motor_power"] = clamp_motor_power(value)
+    if "gripper_current_limit_a" in data:
+        from ..gripper_settings import validate_gripper_current
+
+        record["gripper_current_limit_a"] = validate_gripper_current(data["gripper_current_limit_a"])
+    if "gripper_hold_torque_nm" in data:
+        from ..gripper_settings import validate_gripper_hold_torque
+
+        record["gripper_hold_torque_nm"] = validate_gripper_hold_torque(data["gripper_hold_torque_nm"])
+    elif existing is None or switching_arm_type:
+        from ..gripper_settings import default_gripper_hold_torque
+
+        record["gripper_hold_torque_nm"] = default_gripper_hold_torque(
+            data.get("arm_type", record["arm_type"]), record.get("gripper_current_limit_a")
+        )
+    if record.get("gripper_current_limit_a") is not None and record.get("gripper_hold_torque_nm") is not None:
+        raise ValueError("Choose holding torque or current limiting, not both")
     if data.get("mode") in _VALID_MODES:
         record["mode"] = data["mode"]
     record.setdefault("mode", _DEFAULT_MODE)
+    if data.get("arms") in ROBOT_ARMS:
+        record["arms"] = data["arms"]
+    record.setdefault("arms", _DEFAULT_ARMS)
+    # Switching arm type invalidates every hardware-bound field on the record.
+    # The ports name physically different adapters (a Feetech USB-serial bridge
+    # vs a CANable + a FashionStar UART bridge) and the calibration names point
+    # into the OTHER arm type's library, where they do not exist — a stale
+    # reference would fail deep inside lerobot's connect() as a missing-file
+    # error instead of here as "this arm needs setting up". Blank them so the
+    # robot lands back in the normal needs-calibration state. Fields set by
+    # THIS payload survive: a caller that switches type and assigns new ports
+    # in one request means both.
+    if switching_arm_type:
+        record["arm_type"] = data["arm_type"]
+        for stale in _ROBOT_STRING_FIELDS:
+            if stale not in data:
+                record[stale] = ""
+        # The new family's leaders are different hardware: back to its default
+        # unless this same payload names one.
+        record["leader_kind"] = new_leader_kind if isinstance(new_leader_kind, str) else ""
+    elif isinstance(new_leader_kind, str):
+        record["leader_kind"] = new_leader_kind
+        if switching_leader_kind:
+            for stale in _LEADER_SLOT_FIELDS:
+                if stale not in data:
+                    record[stale] = ""
+    record.setdefault("arm_type", DEFAULT_ARM_TYPE)
+    record.setdefault("leader_kind", "")
     record["name"] = name
 
     path = _robot_record_path(name)
@@ -653,10 +1338,14 @@ def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
     - "follower" — follower side only (inference, replay never open the leader
       bus, so an unassigned leader port / missing leader calibration must not
       block them; bimanual = both followers, still no leaders).
+    - "leader"   — leader side only (remote teleoperation drives a STATION's
+      follower with this node's leader; a laptop record with no follower at
+      all is exactly the expected shape).
     """
     if not record:
         return False
     follower_only = arms == "follower"
+    leader_only = arms == "leader"
 
     # Config fields are stems; the file on disk is "<stem>.json". Tolerate a
     # stored value that still carries the extension (defensive).
@@ -668,20 +1357,52 @@ def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
     required_fields = _SINGLE_CONFIG_FIELDS + (_BIMANUAL_CONFIG_FIELDS if bimanual else ())
     if follower_only:
         required_fields = tuple(f for f in required_fields if "follower" in f)
+    elif leader_only:
+        required_fields = tuple(f for f in required_fields if "leader" in f)
     for field in required_fields:
         value = record.get(field, "")
         if not isinstance(value, str) or not value.strip():
             return False
 
-    config_files = [
-        _file_for(FOLLOWER_CONFIG_PATH, record["follower_config"]),
-    ]
+    # An arm type nothing registered can never be ready — there is no family
+    # to build its devices from, and no library to look its calibrations up
+    # in (the lookup below would raise UnknownArmType). Checked BEFORE the
+    # library resolution for that reason. Normalized first: a record with NO
+    # arm_type (a raw dict, or one written before arm types existed) is an
+    # SO-101, the same reading the library lookups below give it.
+    if not is_known_arm_type(normalize_arm_type(record.get("arm_type"))):
+        return False
+
+    # Resolve the libraries by THIS record's arm type: the SO-101 and Maker
+    # pairs keep separate directories, so checking the SO-101 ones for a Maker
+    # robot looks for a file that was never going to be there and the robot can
+    # never read as ready.
+    follower_library = follower_config_path_for(record.get("arm_type"))
+    # The leader library is the selected LEADER's: an unknown leader kind (a
+    # hand-edited record) or one this install cannot drive (its extra is not
+    # installed) leaves nothing to open on that side, so the record is not
+    # ready for a flow that needs the leader — follower-only flows are.
+    leader_library = None
     if not follower_only:
-        config_files.append(_file_for(LEADER_CONFIG_PATH, record["leader_config"]))
+        family = arm_registry.get(normalize_arm_type(record.get("arm_type")))
+        try:
+            option = family.leader_option(record.get("leader_kind"))
+        except KeyError:
+            return False
+        if not option.available:
+            return False
+        leader_library = leader_config_path_for(record.get("arm_type"), record.get("leader_kind"))
+
+    config_files = []
+    if not leader_only:
+        config_files.append(_file_for(follower_library, record["follower_config"]))
+    if not follower_only:
+        config_files.append(_file_for(leader_library, record["leader_config"]))
     if bimanual:
-        config_files.append(_file_for(FOLLOWER_CONFIG_PATH, record["right_follower_config"]))
+        if not leader_only:
+            config_files.append(_file_for(follower_library, record["right_follower_config"]))
         if not follower_only:
-            config_files.append(_file_for(LEADER_CONFIG_PATH, record["right_leader_config"]))
+            config_files.append(_file_for(leader_library, record["right_leader_config"]))
     return all(os.path.exists(p) for p in config_files)
 
 
@@ -772,6 +1493,8 @@ def stage_bimanual_calibrations(
     leader_right: str,
     follower_left: str,
     follower_right: str,
+    arm_type: object = DEFAULT_ARM_TYPE,
+    leader_kind: object = None,
 ) -> tuple[str, str, str]:
     """Stage the four arbitrarily-named library calibrations for a BiSO session.
 
@@ -789,15 +1512,52 @@ def stage_bimanual_calibrations(
     """
     leader_staging = _bimanual_leader_staging_dir(base)
     follower_staging = _bimanual_follower_staging_dir(base)
-    _stage_one_side(LEADER_CONFIG_PATH, leader_staging, base, leader_left, leader_right, "leader")
-    _stage_one_side(FOLLOWER_CONFIG_PATH, follower_staging, base, follower_left, follower_right, "follower")
+    _stage_one_side(
+        leader_config_path_for(arm_type, leader_kind),
+        leader_staging,
+        base,
+        leader_left,
+        leader_right,
+        "leader",
+    )
+    _stage_one_side(
+        follower_config_path_for(arm_type),
+        follower_staging,
+        base,
+        follower_left,
+        follower_right,
+        "follower",
+    )
     return leader_staging, follower_staging, base
+
+
+def stage_bimanual_leader_calibrations(
+    base: str,
+    leader_left: str,
+    leader_right: str,
+    arm_type: object = DEFAULT_ARM_TYPE,
+    leader_kind: object = None,
+) -> tuple[str, str]:
+    """Leader twin of stage_bimanual_follower_calibrations (remote
+    teleoperation opens only the leaders). Returns (leader_staging_dir, base).
+    ``leader_kind`` selects the source library for a multi-leader family."""
+    leader_staging = _bimanual_leader_staging_dir(base)
+    _stage_one_side(
+        leader_config_path_for(arm_type, leader_kind),
+        leader_staging,
+        base,
+        leader_left,
+        leader_right,
+        "leader",
+    )
+    return leader_staging, base
 
 
 def stage_bimanual_follower_calibrations(
     base: str,
     follower_left: str,
     follower_right: str,
+    arm_type: object = DEFAULT_ARM_TYPE,
 ) -> tuple[str, str]:
     """Stage only the two follower calibrations for a follower-only BiSO session.
 
@@ -809,7 +1569,14 @@ def stage_bimanual_follower_calibrations(
     base).
     """
     follower_staging = _bimanual_follower_staging_dir(base)
-    _stage_one_side(FOLLOWER_CONFIG_PATH, follower_staging, base, follower_left, follower_right, "follower")
+    _stage_one_side(
+        follower_config_path_for(arm_type),
+        follower_staging,
+        base,
+        follower_left,
+        follower_right,
+        "follower",
+    )
     return follower_staging, base
 
 
@@ -1107,6 +1874,48 @@ def remove_hidden_model(repo_id: str) -> bool:
     return _HIDDEN_MODELS.remove(repo_id)
 
 
+def _read_excluded_episodes_file() -> dict[str, list[int]]:
+    """The whole excluded-episodes map. A missing/corrupt/non-object file
+    degrades to empty — this is cosmetic curation state, so it must never
+    raise or block training."""
+    path = EXCLUDED_EPISODES_FILE
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.error(f"Failed to read excluded episodes: {e}")
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, list[int]] = {}
+    for repo_id, indices in data.items():
+        if isinstance(repo_id, str) and isinstance(indices, list):
+            out[repo_id] = sorted({i for i in indices if isinstance(i, int)})
+    return out
+
+
+def get_excluded_episodes(repo_id: str) -> list[int]:
+    """Episode indices excluded from training for this dataset. Empty for a
+    dataset with no exclusions, or when the file is missing/corrupt."""
+    return _read_excluded_episodes_file().get(repo_id, [])
+
+
+def set_excluded_episodes(repo_id: str, episode_indices: list[int]) -> None:
+    """Replace the excluded-episode set for one dataset. An empty list clears
+    the dataset's entry entirely rather than persisting a blank one. NEVER
+    touches the dataset's files or Hub copy — this is a training-time filter
+    applied client-side when building the run request, not a deletion."""
+    data = _read_excluded_episodes_file()
+    cleaned = sorted({i for i in episode_indices if isinstance(i, int)})
+    if cleaned:
+        data[repo_id] = cleaned
+    else:
+        data.pop(repo_id, None)
+    _atomic_write_text(EXCLUDED_EPISODES_FILE, json.dumps(data, indent=2))
+
+
 # ---------------------------------------------------------------------------
 # Calibration config import
 # ---------------------------------------------------------------------------
@@ -1115,12 +1924,20 @@ def remove_hidden_model(repo_id: str) -> bool:
 _CALIBRATION_MOTOR_FIELDS = ("id", "drive_mode", "homing_offset", "range_min", "range_max")
 
 
-def calibration_dir_for_device(device_type: str) -> str | None:
-    """Map an API device_type ("teleop"/"robot") to its calibration dir, or None."""
+def calibration_dir_for_device(
+    device_type: str, arm_type: object = DEFAULT_ARM_TYPE, leader_kind: object = None
+) -> str | None:
+    """Map an API device_type ("teleop"/"robot") to its calibration dir, or None.
+
+    ``arm_type`` picks the library: the SO-101 pair and the Maker pair keep
+    entirely separate directories (see _CALIBRATION_DIRS), so a caller that
+    forgets to thread it through reads the SO-101 library by default.
+    ``leader_kind`` picks the leader library of a multi-leader family.
+    """
     if device_type == "robot":
-        return FOLLOWER_CONFIG_PATH
+        return follower_config_path_for(arm_type)
     if device_type == "teleop":
-        return LEADER_CONFIG_PATH
+        return leader_config_path_for(arm_type, leader_kind)
     return None
 
 
@@ -1196,14 +2013,21 @@ def validate_calibration_data(data: object) -> tuple[bool, str]:
     return True, ""
 
 
-def save_imported_calibration(device_type: str, name: str, data: object) -> tuple[bool, str, str]:
+def save_imported_calibration(
+    device_type: str,
+    name: str,
+    data: object,
+    arm_type: object = DEFAULT_ARM_TYPE,
+    leader_kind: object = None,
+) -> tuple[bool, str, str]:
     """
     Validate and persist an uploaded calibration as <name>.json under the side's
-    config dir. Never overwrites an existing file. Returns (ok, reason, name)
-    where `name` is the normalized config name (extension stripped). Reason codes:
-    "invalid_device", "invalid_name", "invalid_data:<msg>", "name_taken", "".
+    config dir for this arm type. Never overwrites an existing file. Returns
+    (ok, reason, name) where `name` is the normalized config name (extension
+    stripped). Reason codes: "invalid_device", "invalid_name",
+    "invalid_data:<msg>", "name_taken", "".
     """
-    config_path = calibration_dir_for_device(device_type)
+    config_path = calibration_dir_for_device(device_type, arm_type, leader_kind)
     if config_path is None:
         return False, "invalid_device", ""
 
@@ -1224,18 +2048,44 @@ def save_imported_calibration(device_type: str, name: str, data: object) -> tupl
         return False, "name_taken", name
 
     _atomic_write_text(file_path, json.dumps(data, indent=2))
-    logger.info(f"Imported calibration {device_type}/{name}")
+    logger.info(f"Imported calibration {normalize_arm_type(arm_type)}/{device_type}/{name}")
     return True, "", name
 
 
-def rename_calibration_config(device_type: str, old_name: str, new_name: str) -> tuple[bool, str]:
+def _record_uses_library(rec: dict, device_type: str, arm_type: str, leader_kind: object) -> bool:
+    """True when a robot record's slot for ``device_type`` names files in the
+    library ``(arm_type, leader_kind)`` addresses. Arm type first (the
+    libraries are separate namespaces); on the leader side ALSO the leader
+    library, because a family with two leaders keeps two, and a record driven
+    by the other leader names a different file under the same stem."""
+    if rec.get("arm_type") != arm_type:
+        return False
+    if device_type != "teleop":
+        return True
+    try:
+        return leader_config_path_for(arm_type, rec.get("leader_kind")) == leader_config_path_for(
+            arm_type, leader_kind
+        )
+    except KeyError:
+        return False  # a hand-edited record naming a leader the family does not offer
+
+
+def rename_calibration_config(
+    device_type: str,
+    old_name: str,
+    new_name: str,
+    arm_type: object = DEFAULT_ARM_TYPE,
+    leader_kind: object = None,
+) -> tuple[bool, str]:
     """
     Rename a calibration config file within a side's dir. Never overwrites an
-    existing target. Robot records that referenced the old name (on this side)
-    are repointed to the new name so they stay valid. Returns (ok, reason):
-    "invalid_device", "invalid_name", "not_found", "name_taken", "".
+    existing target. Robot records that referenced the old name (on this side,
+    AND of this arm type) are repointed to the new name so they stay valid.
+    Returns (ok, reason): "invalid_device", "invalid_name", "not_found",
+    "name_taken", "".
     """
-    config_path = calibration_dir_for_device(device_type)
+    arm_type = normalize_arm_type(arm_type)
+    config_path = calibration_dir_for_device(device_type, arm_type, leader_kind)
     if config_path is None:
         return False, "invalid_device"
 
@@ -1259,27 +2109,40 @@ def rename_calibration_config(device_type: str, old_name: str, new_name: str) ->
     os.rename(old_path, new_path)
 
     # Repoint any robot records that used the old config on this side — both the
-    # primary/left slot and the bimanual right slot live in the same dir.
+    # primary/left slot and the bimanual right slot live in the same dir. Only
+    # records of the SAME arm type: the two libraries are separate namespaces,
+    # so an SO-101 record naming "arm_a" is a different file from a Maker record
+    # naming "arm_a" and must not be dragged along by this rename.
     fields = (
         ("leader_config", "right_leader_config")
         if device_type == "teleop"
         else ("follower_config", "right_follower_config")
     )
     for rec in list_robot_records():
+        if not _record_uses_library(rec, device_type, arm_type, leader_kind):
+            continue
         patch = {f: new_stem for f in fields if rec.get(f) == old_stem}
         if patch:
             save_robot_record(rec["name"], patch, allow_create=False)
 
-    logger.info(f"Renamed calibration {device_type}/{old_stem} -> {new_stem}")
+    logger.info(f"Renamed calibration {arm_type}/{device_type}/{old_stem} -> {new_stem}")
     return True, ""
 
 
-def clear_config_references(device_type: str, config_name: str) -> list[dict]:
+def clear_config_references(
+    device_type: str,
+    config_name: str,
+    arm_type: object = DEFAULT_ARM_TYPE,
+    leader_kind: object = None,
+) -> list[dict]:
     """Blank every robot-record field (on this side) that references this
-    calibration config, across ALL robot records — both the primary/left slot
-    and the bimanual right slot, regardless of mode. A stale right_* reference
-    in a single-mode record is cleared too: it points at a file that no longer
-    exists, so leaving it would resurface a dangling name on a mode switch.
+    calibration config, across all robot records OF THIS ARM TYPE — both the
+    primary/left slot and the bimanual right slot, regardless of mode. A stale
+    right_* reference in a single-mode record is cleared too: it points at a
+    file that no longer exists, so leaving it would resurface a dangling name
+    on a mode switch. Records of the other arm type are skipped: their config
+    names live in a separate library, so an identical name there is a different
+    file that this delete did not touch.
 
     Called when a calibration config is deleted: instead of refusing the
     delete, the referencing arms are unassigned and return to the "needs
@@ -1294,9 +2157,12 @@ def clear_config_references(device_type: str, config_name: str) -> list[dict]:
         if device_type == "teleop"
         else ("follower_config", "right_follower_config")
     )
+    arm_type = normalize_arm_type(arm_type)
     stem = config_name.removesuffix(".json")
     cleared: list[dict] = []
     for rec in list_robot_records():
+        if not _record_uses_library(rec, device_type, arm_type, leader_kind):
+            continue
         hit = [f for f in fields if rec.get(f) == stem]
         if hit:
             save_robot_record(rec["name"], dict.fromkeys(hit, ""), allow_create=False)

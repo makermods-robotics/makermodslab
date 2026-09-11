@@ -21,7 +21,7 @@ lives in app/jobs.py.
 import re
 
 import torch
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from makermodslab.utils.config import REQUIRED_HUB_TAGS
 
@@ -153,25 +153,42 @@ class TrainingRequest(BaseModel):
     dataset_root: str | None = None
     dataset_episodes: list[int] | None = None
 
-    # Policy configuration
-    policy_type: str = "act"
+    # Policy configuration. Constrained to a bare lowercase slug because the
+    # value is the FIRST SEGMENT of the generated job id, and the job id is the
+    # job DIRECTORY name under outputs/train/: a path-shaped policy_type
+    # ("/tmp/x", "../evil") made `output_root / job_id` resolve outside the
+    # root entirely (Path's `/` discards the left side for an absolute right
+    # side), so the registry created and persisted a job dir outside its
+    # sandbox under an id no /jobs/{job_id} route could ever address. The
+    # pattern admits every lerobot policy type (act, pi0_fast, gaussian_actor,
+    # …) and everything _clean_policy_type can store; jobs._job_dir refuses
+    # escaping ids independently, as defense in depth.
+    policy_type: str = Field(default="act", pattern=r"^[a-z0-9_]+$")
 
-    # Core training parameters
-    steps: int = 10000
-    batch_size: int = 8
+    # Core training parameters. Bounded at the model so both the wire (422)
+    # and direct registry callers refuse them: steps=0 launched a trainer
+    # whose `range(step, steps)` is empty — a `done` phantom that poisons its
+    # lineage (see start()'s step-target guard) — and negatives/zero for
+    # batch_size crash the dataloader minutes after the request returned 201.
+    # num_workers=0 is legitimate (torch's main-process loading), so it is
+    # floored at 0, not 1.
+    steps: int = Field(default=10000, gt=0)
+    batch_size: int = Field(default=8, gt=0)
     seed: int | None = 1000
-    num_workers: int = 4
+    num_workers: int = Field(default=4, ge=0)
 
     # Logging and checkpointing
     # log_freq drives how often lerobot prints loss/lr (and thus the chart's
     # resolution — one point per log line). Lower = smoother curves but noisier
-    # per-window averages and more log volume.
-    log_freq: int = 50
-    save_freq: int = 1000
+    # per-window averages and more log volume. Both frequencies feed lerobot's
+    # `step % freq` — 0 is a ZeroDivisionError inside the trainer, so gt=0.
+    log_freq: int = Field(default=50, gt=0)
+    save_freq: int = Field(default=1000, gt=0)
     # lerobot 0.6.0 renamed the training CLI flag --eval_freq -> --env_eval_freq
     # (lerobot_train's argparse rejects --eval_freq with rc=2). Frontend never
     # sends this field, so the request contract is unchanged for clients.
-    env_eval_freq: int = 0
+    # 0 means "never evaluate" and is the default, so ge=0 rather than gt.
+    env_eval_freq: int = Field(default=0, ge=0)
     save_checkpoint: bool = True
 
     # Output configuration
@@ -182,6 +199,31 @@ class TrainingRequest(BaseModel):
     # needs the checkpoint's train_config.json to reconstruct the run).
     resume_from_job_id: str | None = None
     resume_from_step: int | None = None
+    # CHAIN REWIND. `resume_from_job_id` is the LINEAGE EDGE — always the leaf
+    # the user clicked, so chains stay linear (parent -> leaf -> this run). This
+    # field is the PROVENANCE: which run's storage the chosen checkpoint bytes
+    # actually come from, when the user rewound to an ancestor's checkpoint
+    # rather than the leaf's own. None ⇒ the leaf owns it (every plain
+    # tip-resume, and every record written before rewind existed — so no
+    # migration).
+    #
+    # It cannot be derived from the step, which is why it is carried
+    # explicitly: rewind itself produces same-step-different-owner checkpoints
+    # on ONE linear path. Rewind a leaf to its trunk's step 2000, and the new
+    # run saves its own 4000 and 6000 alongside the trunk's 4000 and the old
+    # leaf's 6000 — all four on the new run's single ancestor path. Guessing
+    # the owner from the step would silently train from different weights than
+    # the user picked. JobRegistry.start refuses an owner that is not on the
+    # leaf's ancestor path or does not hold the named step.
+    #
+    # WIDER THAN THE UI, deliberately (user decision 2026-08-10). The app's
+    # Continue is latest-only: it always resumes the newest checkpoint on the
+    # lineage, so the only owner it ever names is the one that happens to hold
+    # that checkpoint — an ancestor exactly when the leaf saved nothing of its
+    # own. An arbitrary rewind is reachable only by calling the API directly.
+    # The guards below are therefore not dead code protecting a UI path; they
+    # are the whole validation for a surface the UI no longer narrows first.
+    resume_from_checkpoint_job_id: str | None = None
     # Set by the "Fine-tune" flow: start a FRESH run (fresh optimizer, step 0)
     # whose weights are initialized from an imported/existing checkpoint. Unlike
     # resume, this needs no optimizer/step state — weights-only is exactly the
@@ -212,6 +254,14 @@ class TrainingRequest(BaseModel):
     # other path — nothing is uploaded when the checkpoint is already on the Hub,
     # including a re-resume of a step a previous continuation already pushed.
     upload_resume_checkpoint: bool = False
+    # The fine-tune twin of the consent above: a fine-tune whose BASE checkpoint
+    # lives only on this machine, launched on cloud compute. The base's weights
+    # (pretrained_model/ only — a fine-tune never reads training_state/) are
+    # staged to the same private per-source Hub repo a cloud resume uses, and
+    # the registry refuses the launch without this consent. Ignored whenever the
+    # base is already on the Hub, including a re-fine-tune of a step an earlier
+    # launch already staged.
+    upload_finetune_checkpoint: bool = False
     # Set by the registry (never by a client) when `resume_from_hub_repo` is the
     # staging repo above rather than a cloud parent's own output repo. It tells
     # the cloud runner not to adopt the source repo as this run's OUTPUT repo:
@@ -230,11 +280,12 @@ class TrainingRequest(BaseModel):
     wandb_mode: str | None = "online"
     wandb_disable_artifact: bool = False
 
-    # Environment / evaluation
+    # Environment / evaluation. Same bounds rationale as the core numbers
+    # above: 0 episodes / batch 0 are never a meaningful request.
     env_type: str | None = None
     env_task: str | None = None
-    eval_n_episodes: int = 10
-    eval_batch_size: int = 50
+    eval_n_episodes: int = Field(default=10, gt=0)
+    eval_batch_size: int = Field(default=50, gt=0)
     eval_use_async_envs: bool = False
 
     # Policy-specific
@@ -304,8 +355,19 @@ def _policy_optimizer_flags(request: "TrainingRequest") -> list[str]:
     return flags
 
 
+#: Trainer entry points. The weighted one is MakerMods Lab's own shim: same argv,
+#: same config parsing, but it patches lerobot's hardcoded sampler in-process so
+#: per-episode `sampling_weight` is honoured (see makermodslab/train_weighted.py).
+_TRAINER_MODULE = "lerobot.scripts.lerobot_train"
+_WEIGHTED_TRAINER_MODULE = "makermodslab.train_weighted"
+
+
 def build_training_command(
-    request: TrainingRequest, output_dir: str, python_executable: str = "python"
+    request: TrainingRequest,
+    output_dir: str,
+    python_executable: str = "python",
+    weighted: bool = False,
+    video_backend: str | None = None,
 ) -> list[str]:
     """Build the argv list to invoke `<python_executable> -m lerobot.scripts.lerobot_train`.
 
@@ -318,8 +380,32 @@ def build_training_command(
     so the subprocess uses the same interpreter as MakerMods Lab itself — otherwise
     PATH lookup picks up a different env (uv tool venv, miniforge3 base, etc.)
     that lacks lerobot.
+
+    `weighted` swaps the trainer module for MakerMods Lab's weighted-sampling
+    shim. It is a fact about the DATASET, not about the request — the caller
+    resolves it from the dataset's own `meta/episodes` (see
+    `datasets.dataset_is_weighted`), because a client must not be able to claim a
+    dataset is or isn't weighted. Defaults to False so every existing call site
+    keeps producing byte-identical argv (R2). Both runners set it: the local one
+    from `dataset_is_weighted` directly, the cloud one likewise — the HF Jobs
+    container has no `makermodslab`, so the cloud wrapper materializes
+    `sampling.py` / `train_weighted.py` pod-side onto `PYTHONPATH` before
+    launching the trainer (see `runners/hf_cloud._WRAPPER_TEMPLATE`).
+
+    `video_backend` overrides lerobot's dataset video decoder when set — the
+    LOCAL runner passes "pyav" when torchcodec's native libraries don't load
+    on this host (see utils.system.torchcodec_loads); the cloud runner leaves
+    it None (the container ships working FFmpeg). Emitted on the resume branch
+    too: the checkpoint's train_config.json records whatever backend the
+    ORIGINAL host used, and a resume can land on a host where that backend
+    doesn't load (a plain string field, so the draccus raw-string merge that
+    forbids list-typed overrides here is not a concern).
     """
-    cmd: list[str] = [python_executable, "-m", "lerobot.scripts.lerobot_train"]
+    cmd: list[str] = [
+        python_executable,
+        "-m",
+        _WEIGHTED_TRAINER_MODULE if weighted else _TRAINER_MODULE,
+    ]
 
     # Resume: lerobot reconstructs the whole run (policy, dataset, optimizer,
     # batch size, …) from the checkpoint's train_config.json, so we pass ONLY
@@ -367,10 +453,14 @@ def build_training_command(
             cmd.extend(["--policy.private", "false"])
         if request.job_name:
             cmd.extend(["--job_name", request.job_name])
+        if video_backend:
+            cmd.extend(["--dataset.video_backend", video_backend])
         return cmd
 
     # Dataset
     cmd.extend(["--dataset.repo_id", request.dataset_repo_id])
+    if video_backend:
+        cmd.extend(["--dataset.video_backend", video_backend])
     if request.dataset_revision:
         cmd.extend(["--dataset.revision", request.dataset_revision])
     if request.dataset_root:

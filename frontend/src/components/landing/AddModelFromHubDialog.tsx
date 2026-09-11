@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { Download, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -35,6 +36,7 @@ const AddModelFromHubDialog: React.FC<AddModelFromHubDialogProps> = ({
   onOpenChange,
   onAdd,
 }) => {
+  const { t } = useTranslation();
   const [repoId, setRepoId] = useState("");
   const [download, setDownload] = useState(false);
 
@@ -59,12 +61,9 @@ const AddModelFromHubDialog: React.FC<AddModelFromHubDialogProps> = ({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>
-            Add a model from Hugging Face
-          </DialogTitle>
+          <DialogTitle>{t("landing.addModelFromHub.title")}</DialogTitle>
           <DialogDescription className="text-muted-foreground">
-            Enter a Hub model id to add it to your list. It appears under
-            “Hugging Face” and inference fetches it on demand.
+            {t("landing.addModelFromHub.description")}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -76,7 +75,7 @@ const AddModelFromHubDialog: React.FC<AddModelFromHubDialogProps> = ({
         >
           <div>
             <Label htmlFor="hub-model-id" className="text-muted-foreground">
-              Hub model id
+              {t("landing.addModelFromHub.idLabel")}
             </Label>
             <Input
               id="hub-model-id"
@@ -91,7 +90,12 @@ const AddModelFromHubDialog: React.FC<AddModelFromHubDialogProps> = ({
             />
             {showError && (
               <p className="mt-1 text-xs text-destructive">
-                Enter a Hub model id as <span className="font-mono">org/name</span>.
+                {/* "org/name" is a format literal, so it rides inside the
+                    sentence as <Trans> markup rather than a concatenation. */}
+                <Trans
+                  i18nKey="landing.addModelFromHub.idError"
+                  components={[<span key="0" className="font-mono" />]}
+                />
               </p>
             )}
           </div>
@@ -103,10 +107,9 @@ const AddModelFromHubDialog: React.FC<AddModelFromHubDialogProps> = ({
               className="mt-0.5 h-4 w-4 accent-blue-500"
             />
             <span>
-              Download to this machine now
+              {t("landing.addModelFromHub.downloadNow")}
               <span className="block text-xs text-muted-foreground">
-                Fetches the checkpoint into the local models cache in the
-                background, so inference works offline.
+                {t("landing.addModelFromHub.downloadNowHint")}
               </span>
             </span>
           </label>
@@ -117,7 +120,7 @@ const AddModelFromHubDialog: React.FC<AddModelFromHubDialogProps> = ({
               onClick={() => onOpenChange(false)}
               className=""
             >
-              Cancel
+              {t("common.cancel")}
             </Button>
             <Button
               type="submit"
@@ -129,7 +132,9 @@ const AddModelFromHubDialog: React.FC<AddModelFromHubDialogProps> = ({
               ) : (
                 <Plus className="w-4 h-4 mr-2" />
               )}
-              {download ? "Add & download" : "Add model"}
+              {download
+                ? t("landing.addModelFromHub.submitWithDownload")
+                : t("landing.addModelFromHub.submit")}
             </Button>
           </DialogFooter>
         </form>

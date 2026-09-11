@@ -1,5 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { useEyebrowClass } from "@/components/studio/panel/primitives";
+import { cn } from "@/lib/utils";
 import { TrainingStatus } from "../types";
 import { Activity, Clock, Gauge, TrendingDown } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
@@ -112,6 +115,9 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
   getProgressPercentage,
   formatTime,
 }) => {
+  const { t } = useTranslation();
+  // `.eyebrow`'s tracking over-spaces CJK; useEyebrowClass drops it there.
+  const eyebrow = useEyebrowClass();
   const [lossHistory, setLossHistory] = useState<LossPoint[]>([]);
   const [lrHistory, setLrHistory] = useState<LrPoint[]>([]);
   const lastStepRef = useRef(0);
@@ -216,8 +222,10 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
   // "Training starting…" instead of a misleading 0/0 0% reading.
   const isStarting =
     trainingStatus.training_active && trainingStatus.total_steps === 0;
+  // The step counts keep their existing toLocaleString formatting — only the
+  // pre-first-tick message is copy.
   const stepLabel = isStarting
-    ? "Training starting…"
+    ? t("training.monitoring.startingUp")
     : `${trainingStatus.current_step.toLocaleString()} / ${trainingStatus.total_steps.toLocaleString()}`;
   const etaLabel =
     trainingStatus.eta_seconds != null
@@ -230,8 +238,9 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
         <CardContent className="p-5">
           <div className="mb-3 flex items-baseline justify-between gap-3">
             <div>
-              <h3 className="eyebrow flex items-center gap-1.5">
-                <Activity className="h-3.5 w-3.5" /> Progress
+              <h3 className={cn(eyebrow, "flex items-center gap-1.5")}>
+                <Activity className="h-3.5 w-3.5" />{" "}
+                {t("training.monitoring.progress")}
               </h3>
               <div className="mt-1 text-base font-semibold tabular-nums text-foreground">
                 {stepLabel}
@@ -240,7 +249,7 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
             <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
               <Clock className="h-3.5 w-3.5" />
               <span>
-                ETA{" "}
+                {t("training.monitoring.eta")}{" "}
                 <span className="font-semibold tabular-nums text-foreground">
                   {etaLabel}
                 </span>
@@ -254,7 +263,9 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
               style={{ width: `${progress}%` }}
             />
             <div className="absolute inset-0 flex items-center justify-center text-xs font-semibold text-white tabular-nums drop-shadow">
-              {isStarting ? "warming up…" : `${progress.toFixed(1)}%`}
+              {isStarting
+                ? t("training.monitoring.warmingUp")
+                : `${progress.toFixed(1)}%`}
             </div>
           </div>
         </CardContent>
@@ -263,8 +274,9 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card className="bg-card border-border rounded-md">
           <CardHeader className="pb-2">
-            <h3 className="eyebrow flex items-center gap-1.5">
-              <TrendingDown className="h-3.5 w-3.5" /> Loss
+            <h3 className={cn(eyebrow, "flex items-center gap-1.5")}>
+              <TrendingDown className="h-3.5 w-3.5" />{" "}
+              {t("training.monitoring.loss")}
             </h3>
             <div className="text-base font-semibold tabular-nums text-foreground">
               {trainingStatus.current_loss?.toFixed(4) ?? "—"}
@@ -274,7 +286,7 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
             <div className="h-48">
               {lossHistory.length === 0 ? (
                 <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
-                  Waiting for first metric tick…
+                  {t("training.monitoring.waitingForMetrics")}
                 </div>
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
@@ -315,8 +327,9 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
 
         <Card className="bg-card border-border rounded-md">
           <CardHeader className="pb-2">
-            <h3 className="eyebrow flex items-center gap-1.5">
-              <Gauge className="h-3.5 w-3.5" /> Learning rate
+            <h3 className={cn(eyebrow, "flex items-center gap-1.5")}>
+              <Gauge className="h-3.5 w-3.5" />{" "}
+              {t("training.monitoring.learningRate")}
             </h3>
             <div className="text-base font-semibold tabular-nums text-foreground">
               {trainingStatus.current_lr?.toExponential(2) ?? "—"}
@@ -326,7 +339,7 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
             <div className="h-48">
               {lrHistory.length === 0 ? (
                 <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
-                  Waiting for first metric tick…
+                  {t("training.monitoring.waitingForMetrics")}
                 </div>
               ) : (
                 <ResponsiveContainer width="100%" height="100%">

@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -569,7 +569,7 @@ def _patch_teleop_devices(monkeypatch: pytest.MonkeyPatch, follower: _GuardDevic
     monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda le, fo: ("leader_a", "follower_a"),
+        lambda leader, follower, arm_type="so101": ("leader_a", "follower_a"),
     )
     monkeypatch.setattr(teleop, "SO101Follower", lambda config: follower)
     monkeypatch.setattr(teleop, "SO101Leader", lambda config: leader)
