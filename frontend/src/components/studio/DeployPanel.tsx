@@ -57,8 +57,7 @@ import { getDatasetInfo } from "@/lib/replayApi";
 import { SkillItem } from "@/lib/modelsApi";
 import { useSkills } from "@/hooks/useSkills";
 import { importSourceForModel } from "@/lib/inferenceLaunch";
-import { deployBlockedReason } from "./deployGuards";
-import type { DeployRunMode } from "./deployGuards";
+import { deployBlockedReason, type DeployRunMode } from "./deployGuards";
 import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
 import { useRemoteInferenceStatus } from "@/hooks/useRemoteInferenceStatus";
 import {
@@ -166,6 +165,11 @@ const MAX_COACHING_CORRECTIONS = 100;
 // independent questions instead — where the policy runs, and what the operator
 // does — and this is the pair collapsed into the vocabulary the backend and
 // `deployGuards` already speak.
+//
+// Aliased to deployGuards' DeployRunMode rather than redeclared: the literal
+// union used to be spelled out separately here and twice more in
+// deployTaskPrefill, so a mode neither side knew about could slip through with
+// nothing to catch a missed spot.
 //
 // "remote" is the DRTC run: the same checkpoint, the same robot, the same
 // cameras — but the policy runs on a remote GPU and the two meet in a LiveKit

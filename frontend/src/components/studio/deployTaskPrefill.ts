@@ -15,6 +15,7 @@
 
 import { ApiError } from "@/lib/apiClient";
 import type { DatasetInfo, DatasetTask } from "@/lib/replayApi";
+import type { DeployRunMode } from "./deployGuards";
 
 /** What the panel knows about the training dataset's tasks.
  *
@@ -185,7 +186,7 @@ export function taskIsAmbiguous(state: TaskPrefillState, typed: string): boolean
  * value from here either. */
 export function taskFieldVisible(
   requiresTask: boolean,
-  runMode: "single" | "eval" | "coach" | "remote",
+  runMode: DeployRunMode,
 ): boolean {
   return requiresTask || runMode === "coach";
 }
@@ -200,7 +201,7 @@ export function effectiveTaskFor(
   typed: string,
   state: TaskPrefillState,
   requiresTask: boolean,
-  runMode: "single" | "eval" | "coach" | "remote",
+  runMode: DeployRunMode,
 ): string {
   if (!taskFieldVisible(requiresTask, runMode)) return "";
   return typed.trim() || defaultTaskFrom(state);
