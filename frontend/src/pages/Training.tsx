@@ -38,7 +38,21 @@ const ConfigurationMode: React.FC = () => {
     policyType?: string;
   } | null;
   const resumeSource = navState?.resume ?? null;
-  const finetuneSource = navState?.finetune ?? null;
+  const navFinetuneSource = navState?.finetune ?? null;
+  // Router state is immutable, but the base-checkpoint picker has to be able to
+  // change the chosen step — and that choice must live ABOVE the configurator,
+  // which gets remounted (by a key change, or by Fast Refresh in dev) and would
+  // otherwise silently revert the pick to the source's latest checkpoint.
+  const [finetuneSource, setFinetuneSource] = useState<FinetuneSeed | null>(
+    navFinetuneSource,
+  );
+  // A fresh navigation to a different base replaces the local copy.
+  const navFinetuneJobId = navFinetuneSource?.jobId;
+  useEffect(() => {
+    setFinetuneSource(navFinetuneSource ?? null);
+    // Keyed on the run id: re-running on every render would clobber the pick.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navFinetuneJobId]);
   const preselectedPolicyType = navState?.policyType ?? null;
 
   // Dataset is chosen upstream (single source of truth); a resume inherits the
@@ -70,12 +84,28 @@ const ConfigurationMode: React.FC = () => {
     <div className="min-h-screen bg-background text-foreground">
       <div className="mx-auto max-w-3xl px-4 py-6">
         <TrainingConfigurator
-          key={`${resumeSource?.jobId ?? ""}::${finetuneSource?.jobId ?? ""}`}
+          // Same composite the studio's Train panel keys on: the seeds are read
+          // once as initial state, so the step (and a resume's checkpoint
+          // owner) has to be in the key too — a second seed for the same run
+          // would otherwise update the banner and the step validation while the
+          // payload kept the first pick.
+          // The fine-tune step is NOT in this key (see TrainPanel for the full
+          // reasoning): the picker edits it, and remounting on each pick both
+          // cleared the form and reset the pick. The configurator reads that
+          // step live off the seed instead.
+          key={`${resumeSource?.jobId ?? ""}@${resumeSource?.step ?? ""}@${
+            resumeSource?.checkpointJobId ?? ""
+          }::${finetuneSource?.jobId ?? ""}`}
           policyType={policyType}
           onPolicyTypeChange={setPolicyType}
           datasetRepoId={datasetRepoId}
           resumeSeed={resumeSource}
           finetuneSeed={finetuneSource}
+          onFinetuneCheckpointChange={(c) =>
+            setFinetuneSource((prev) =>
+              prev ? { ...prev, step: c.step, checkpointSource: c.source } : prev,
+            )
+          }
         />
       </div>
     </div>

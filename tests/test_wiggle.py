@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -82,6 +82,15 @@ async def test_wiggle_gripper_blocked_when_auto_calibration_active(monkeypatch: 
     result = await wiggle_gripper("/dev/fake")
     assert result["success"] is False
     assert "Auto-calibration" in result["message"]
+
+
+async def test_wiggle_gripper_blocked_when_replay_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    from makermodslab.wiggle import wiggle_gripper
+
+    monkeypatch.setattr("makermodslab.replay.replay_active", True)
+    result = await wiggle_gripper("/dev/fake")
+    assert result["success"] is False
+    assert "replay" in result["message"].lower()
 
 
 async def test_wiggle_gripper_clears_wiggle_active_after_success(
@@ -197,26 +206,173 @@ def test_plan_wiggle_centered_position_wiggles_in_place() -> None:
     assert plan_wiggle(2000, 0, 4095) == (2200, 1800, 2000)
 
 
-def test_plan_wiggle_position_beyond_max_limit_plans_inside_window() -> None:
+def test_plan_wiggle_position_beyond_max_limit_refuses_motion() -> None:
     # Real case: gripper parked at 3676 with programmed limits 1387-2707;
     # "+200" used to clamp down to 2707 and jog the wrong way first.
-    high, low, rest = plan_wiggle(3676, 1387, 2707)
-    assert (high, low, rest) == (2707, 2307, 2507)
+    with pytest.raises(ValueError, match="cannot return"):
+        plan_wiggle(3676, 1387, 2707)
 
 
-def test_plan_wiggle_position_near_min_limit_shifts_up() -> None:
+def test_plan_wiggle_position_near_min_limit_preserves_start() -> None:
     # Real case: gripper at 1461 with min limit 1387 — the -200 jog clamped.
     high, low, rest = plan_wiggle(1461, 1387, 2707)
-    assert (high, low, rest) == (1787, 1387, 1587)
+    assert (high, low, rest) == (1661, 1387, 1461)
 
 
 def test_plan_wiggle_limits_wider_than_factory_range_are_clamped() -> None:
     high, low, rest = plan_wiggle(50, -500, 9000)
     assert low >= 0
     assert high <= 4095
-    assert rest == 200
+    assert rest == 50
 
 
 def test_plan_wiggle_too_narrow_window_raises_legible_error() -> None:
     with pytest.raises(ValueError, match="too narrow"):
         plan_wiggle(2000, 1900, 2100)
+
+
+@pytest.mark.parametrize("current", [1387, 1461, 2000, 2690, 2707])
+def test_plan_wiggle_preserves_closed_open_and_partial_positions(current: int) -> None:
+    high, low, rest = plan_wiggle(current, 1387, 2707)
+    assert 1387 <= low < high <= 2707
+    assert rest == current
+
+
+class GripperBus:
+    """A servo that follows goals, with an optional one-shot transport failure."""
+
+    def __init__(self, current, fail_jog=False):
+        self.current = current
+        self.initial = current
+        self.fail_jog = fail_jog
+        self.goals = []
+        self.is_connected = False
+        self.disconnected = False
+
+    def connect(self, **kwargs):
+        self.is_connected = True
+
+    def disconnect(self, **kwargs):
+        self.disconnected = True
+        self.is_connected = False
+
+    def read(self, name, motor, **kwargs):
+        assert motor == "gripper"
+        return {"Min_Position_Limit": 1387, "Max_Position_Limit": 2707, "Present_Position": self.current}[
+            name
+        ]
+
+    def sync_read(self, name, motor, **kwargs):
+        return {motor: self.read(name, motor)}
+
+    def write(self, name, motor, value, **kwargs):
+        assert motor == "gripper"
+        if name != "Goal_Position":
+            return
+        self.goals.append(value)
+        if self.fail_jog and value != self.initial:
+            self.fail_jog = False
+            raise OSError("jog failed")
+        self.current = value
+
+    def enable_torque(self, motor):
+        assert motor == "gripper"
+
+    def disable_torque(self):
+        pass
+
+
+@pytest.mark.parametrize("current", [1387, 1461, 2000, 2707])
+@pytest.mark.parametrize("fail_jog", [False, True])
+def test_feetech_wiggle_returns_before_disconnect(monkeypatch, current, fail_jog):
+    import makermodslab.wiggle as wiggle
+
+    bus = GripperBus(current, fail_jog)
+    monkeypatch.setattr(wiggle, "FeetechMotorsBus", lambda **kwargs: bus)
+    monkeypatch.setattr(wiggle.time, "sleep", lambda _: None)
+    if fail_jog:
+        with pytest.raises(OSError, match="jog failed"):
+            wiggle._wiggle_gripper_sync("fake")
+    else:
+        wiggle._wiggle_gripper_sync("fake")
+    assert bus.goals[-1] == current
+    assert bus.current == current
+    assert bus.disconnected
+
+
+@pytest.mark.parametrize(
+    "family,current", [("maker", -120.1), ("maker", -2.5), ("metal", 0.0), ("metal", 100.0)]
+)
+@pytest.mark.parametrize("fail_jog", [False, True])
+def test_can_wiggle_only_drives_gripper_and_returns(monkeypatch, family, current, fail_jog):
+    import importlib
+
+    import makermodslab.wiggle as wiggle
+    from makermodslab import can_wiggle
+
+    bus = GripperBus(current, fail_jog)
+    protocol, class_name = (
+        ("robstride", "RobstrideMotorsBus") if family == "maker" else ("damiao", "DamiaoMotorsBus")
+    )
+
+    def make_bus(**kwargs):
+        assert list(kwargs["motors"]) == ["gripper"]
+        assert kwargs["motors"]["gripper"].id == 7
+        return bus
+
+    monkeypatch.setattr(importlib.import_module(f"lerobot.motors.{protocol}"), class_name, make_bus)
+    monkeypatch.setattr(wiggle.time, "sleep", lambda _: None)
+    if fail_jog:
+        with pytest.raises(OSError, match="jog failed"):
+            can_wiggle.drive_gripper_wiggle(
+                can_wiggle._open_gripper_bus(family, "fake"),
+                can_wiggle.gripper_limits(family),
+                sleep=lambda _: None,
+            )
+    else:
+        can_wiggle.drive_gripper_wiggle(
+            can_wiggle._open_gripper_bus(family, "fake"),
+            can_wiggle.gripper_limits(family),
+            sleep=lambda _: None,
+        )
+    assert bus.goals[-1] == current
+    assert bus.current == current
+    assert bus.disconnected
+
+
+def test_wiggle_endpoint_routes_can_families(client, monkeypatch):
+    import makermodslab.wiggle as wiggle
+
+    calls = []
+    monkeypatch.setattr(wiggle, "wiggle_active", False)
+    monkeypatch.setattr(
+        "makermodslab.can_wiggle._run_and_clear_flag", lambda family, port: calls.append((port, family))
+    )
+    for family in ("maker", "metal"):
+        result = client.post(
+            "/api/v1/maker/wiggle-gripper", json={"port": "fake", "arm_type": family, "device_type": "robot"}
+        )
+        assert result.json()["success"] is True
+        wiggle.wiggle_active = False
+    assert calls == [("fake", "maker"), ("fake", "metal")]
+
+
+def test_wiggle_outside_limits_does_not_send_any_goal(monkeypatch):
+    import makermodslab.wiggle as wiggle
+
+    bus = GripperBus(3676)
+    monkeypatch.setattr(wiggle, "FeetechMotorsBus", lambda **kwargs: bus)
+    with pytest.raises(ValueError, match="cannot return"):
+        wiggle._wiggle_gripper_sync("fake")
+    assert bus.goals == []
+    assert bus.disconnected
+
+
+def test_return_timeout_is_reported(monkeypatch):
+    import makermodslab.wiggle as wiggle
+
+    ticks = iter([0.0, 0.5, 1.0, 2.0])
+    monkeypatch.setattr(wiggle.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(wiggle.time, "sleep", lambda _: None)
+    with pytest.raises(RuntimeError, match="did not return"):
+        wiggle._wait_for_rest(lambda: 1500, rest=2000, tolerance=10)

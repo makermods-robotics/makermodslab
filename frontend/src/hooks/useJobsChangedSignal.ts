@@ -33,7 +33,7 @@ export const useJobsChangedSignal = (
     const connect = () => {
       if (cancelled) return;
       try {
-        ws = new WebSocket(`${wsBaseUrl}/ws/joint-data`);
+        ws = new WebSocket(`${wsBaseUrl}/api/v1/ws/joint-data`);
       } catch {
         reconnectTimer = setTimeout(connect, 3000);
         return;

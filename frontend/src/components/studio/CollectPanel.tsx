@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { Check, GitMerge, RefreshCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -10,13 +10,18 @@ import {
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { useHfAuth } from "@/contexts/HfAuthContext";
-import { useRobots, robotSetupGap } from "@/hooks/useRobots";
+import { useRobots } from "@/hooks/useRobots";
 import { useDatasets } from "@/hooks/useDatasets";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
-import { validateDatasetName } from "@/lib/datasetName";
+import {
+  datasetNameIssue,
+  formatDatasetNameIssue,
+} from "@/lib/datasetName";
 import { useStudio } from "@/contexts/StudioContext";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
+import type { MergeStatus } from "@/lib/replayApi";
 import RecordingForm from "@/components/studio/RecordingForm";
+import CollectHandoff from "@/components/studio/CollectHandoff";
 import RecordingSessionDialog, {
   RecordedInfo,
   RecordingConfig,
@@ -53,19 +58,28 @@ import type { DatasetItem } from "@/lib/replayApi";
  */
 const CollectPanel: React.FC = () => {
   const { auth } = useHfAuth();
+  const { t } = useTranslation();
   const { selectedRecord } = useRobots();
   const { datasets, loading: datasetsLoading, refresh } = useDatasets();
   const { selectedDataset, setSelectedDataset } = useSelectedDataset();
-  const navigate = useNavigate();
   const { toast } = useToast();
 
   // The recording-form draft lives in StudioContext so filled-in parameters
   // survive route changes (this panel unmounts with the Launchpad route).
-  const { collectForm, updateCollectForm, closeStudio } = useStudio();
+  const {
+    collectForm,
+    updateCollectForm,
+    mergePrefill,
+    clearMergePrefill,
+    openStudio,
+    lastRecorded,
+    setLastRecorded,
+  } = useStudio();
   const {
     formOpen,
     datasetName,
     singleTask,
+    perEpisodeTask,
     numEpisodes,
     episodeTimeS,
     resetTimeS,
@@ -83,6 +97,16 @@ const CollectPanel: React.FC = () => {
   // while the form is open (still expandable by hand).
   const [libraryOpen, setLibraryOpen] = useState(!formOpen);
   const [mergeOpen, setMergeOpen] = useState(false);
+  // Mirrors the merge dialog's own state so closing it mid-run does not throw
+  // away the fine-tune half of a coaching handoff.
+  const [mergeStatus, setMergeStatus] = useState<MergeStatus | null>(null);
+
+  // A coaching session that just ended asked for this merge, with both halves
+  // already chosen. Opening it here rather than at the call site keeps the
+  // dialog owned by the panel that owns the dataset list it needs.
+  useEffect(() => {
+    if (mergePrefill) setMergeOpen(true);
+  }, [mergePrefill]);
 
   // The episode viewer — opened by a dataset card's "view" button, separate
   // from selecting the card for recording.
@@ -144,34 +168,34 @@ const CollectPanel: React.FC = () => {
   const handleStartRecording = async () => {
     if (!selectedRecord) {
       toast({
-        title: "No robot selected",
-        description:
-          "Select or create a robot first — use the robot menu in the top-right corner.",
+        title: t("studio.collect.toast.noRobotTitle"),
+        description: t("studio.collect.toast.noRobotBody"),
         variant: "destructive",
       });
       return;
     }
     const robot = selectedRecord;
-    if (!robot.is_clean) {
+    // No is_clean gate here any more: record readiness is the SERVER's check
+    // now (400 robot.not_ready from POST /api/v1/sessions, rendered by the
+    // session dialog's start-failure toast). The Start button below still
+    // disables on the same condition as a courtesy.
+    // With per-episode tasks there is no dataset-level task to require — each
+    // episode names its own during the session.
+    if (!datasetName || (!perEpisodeTask && !singleTask.trim())) {
       toast({
-        title: "Robot not ready",
-        description: `${robot.name} ${robotSetupGap(robot)}. Open Robot settings before recording.`,
+        title: t("studio.collect.toast.missingDetailsTitle"),
+        description: t("studio.collect.toast.missingDetailsBody"),
         variant: "destructive",
       });
       return;
     }
-    if (!datasetName || !singleTask) {
-      toast({
-        title: "Missing dataset details",
-        description: "Please enter a dataset name and task description.",
-        variant: "destructive",
-      });
-      return;
-    }
-    const nameError = validateDatasetName(datasetName);
+    const nameIssue = datasetNameIssue(datasetName);
+    const nameError = nameIssue ? formatDatasetNameIssue(t, nameIssue) : null;
     if (nameError) {
       toast({
-        title: "Invalid dataset name",
+        title: t("studio.collect.toast.invalidNameTitle"),
+        // validateDatasetName's own message — client-side, but owned by
+        // lib/datasetName.ts, so it is shown exactly as returned.
         description: nameError,
         variant: "destructive",
       });
@@ -185,92 +209,100 @@ const CollectPanel: React.FC = () => {
 
     if (cameras.length > 0 && releaseStreamsRef.current) {
       toast({
-        title: "Preparing camera resources",
-        description: `Releasing ${cameras.length} camera stream(s) for recording...`,
+        title: t("studio.collect.toast.preparingCamerasTitle"),
+        description: t("studio.collect.toast.releasingStreams", {
+          count: cameras.length,
+        }),
       });
       releaseStreamsRef.current();
       await new Promise((resolve) => setTimeout(resolve, 500));
       toast({
-        title: "Camera resources ready",
-        description:
-          "Camera streams released successfully. Starting recording...",
+        title: t("studio.collect.toast.camerasReadyTitle"),
+        description: t("studio.collect.toast.camerasReadyBody"),
       });
     }
 
+    // Robot NAME + dataset-shaped options only: the session dialog POSTs this
+    // to /api/v1/sessions and the server resolves everything hardware-shaped
+    // (ports, configs, mode, right-arm fields, cameras) from the saved record.
     const recordingConfig = {
-      leader_port: robot.leader_port,
-      follower_port: robot.follower_port,
-      leader_config: robot.leader_config,
-      follower_config: robot.follower_config,
-      // Bimanual: forward mode + the right arm so the backend records a BiSO pair.
-      mode: robot.mode,
-      right_leader_port: robot.right_leader_port,
-      right_follower_port: robot.right_follower_port,
-      right_leader_config: robot.right_leader_config,
-      right_follower_config: robot.right_follower_config,
-      // Robot name → the record the backend resolves this session's CAMERAS
-      // from (the request carries no camera payload). Bimanual also uses it as
-      // the BiSO staging base id, naming the per-session staging dir; it does
-      // not affect which calibration drives which arm.
-      robot_name: robot.name,
+      robot: robot.name,
       dataset_repo_id: datasetRepoId,
-      single_task: singleTask,
+      // Per-episode-task sessions carry no dataset-level task; the first
+      // episode's prompt just starts blank.
+      single_task: perEpisodeTask ? "" : singleTask,
+      per_episode_task: perEpisodeTask,
       num_episodes: numEpisodes,
       episode_time_s: episodeTimeS,
-      reset_time_s: resetTimeS,
+      reset_time_s: perEpisodeTask ? 0 : resetTimeS,
       fps: 30,
       video: true,
       push_to_hub: false,
       resume: false,
       streaming_encoding: streamingEncoding,
-      // No `cameras` here on purpose: the backend resolves this session's
-      // cameras from the robot record named above.
     };
 
     setActiveRecording(recordingConfig);
   };
 
   // Every exit path of the session dialog lands here. A `recorded` payload
-  // (clean finish / "keep episodes") closes the studio and stamps the router
-  // state the CollectHandoff banner reads — same contract the old /recording
-  // page fulfilled by navigating home.
+  // (clean finish / "keep episodes") hands the session off to the banner at the
+  // top of this panel.
+  //
+  // The studio deliberately stays OPEN. This used to closeStudio() and
+  // navigate("/") — the contract the old /recording page fulfilled by going
+  // home — which dropped the user on the Launchpad after every session, away
+  // from the library and Train panel that are the actual next steps. The
+  // payload moved to StudioContext at the same time, because with no
+  // navigation there is no router state to stamp.
   const handleRecordingExit = useCallback(
     (recorded?: RecordedInfo) => {
       setActiveRecording(null);
       setSessionCount((n) => n + 1);
       if (recorded) {
-        // A dataset was saved: fold the record-new form so the next studio
-        // visit opens onto the library (with the fresh dataset preselected by
-        // CollectHandoff). A discarded (empty) session keeps the form + draft
-        // open for a retry.
+        // A dataset was saved: fold the record-new form so the panel opens onto
+        // the library (with the fresh dataset preselected by CollectHandoff). A
+        // discarded (empty) session keeps the form + draft open for a retry.
         if (!recorded.discarded_empty) {
           updateCollectForm({ formOpen: false });
           setLibraryOpen(true);
         }
-        closeStudio();
-        navigate("/", { state: { recorded } });
+        setLastRecorded(recorded);
       }
     },
-    [closeStudio, navigate, updateCollectForm],
+    [setLastRecorded, updateCollectForm],
   );
 
   // Gate for the pinned Start button: robot ready + every required parameter
-  // filled in (name valid per the backend's rules, task described).
+  // filled in (name valid per the backend's rules, task described — unless
+  // each episode names its own task, which drops the dataset-level one).
   const canStart =
     !!selectedRecord &&
     selectedRecord.is_clean &&
-    validateDatasetName(datasetName) === null &&
-    singleTask.trim().length > 0;
+    datasetNameIssue(datasetName) === null &&
+    (perEpisodeTask || singleTask.trim().length > 0);
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
-      <PanelHeader step="1" title="Collect" />
+      <PanelHeader
+        step="1"
+        title={t("studio.collect.title")}
+        dataTour="studio-collect"
+      />
+
+      {/* Post-session handoff. Renders nothing until a session saves something,
+          but stays mounted so its Hub auto-push and dataset preselection are
+          not conditional on the user looking at this panel. */}
+      <CollectHandoff
+        recorded={lastRecorded}
+        onDismiss={() => setLastRecorded(null)}
+      />
 
       {/* Record new dataset — the form slides open in place (no dialog). */}
       <Collapsible open={formOpen} onOpenChange={toggleForm} className="space-y-5">
         <CollapsibleTrigger asChild>
           <PanelEntryControl open={formOpen} dotClassName="bg-red-500">
-            Record new dataset
+            {t("studio.collect.entry")}
           </PanelEntryControl>
         </CollapsibleTrigger>
         <CollapsibleContent className={SLIDE}>
@@ -281,6 +313,8 @@ const CollectPanel: React.FC = () => {
             setDatasetName={(v) => updateCollectForm({ datasetName: v })}
             singleTask={singleTask}
             setSingleTask={(v) => updateCollectForm({ singleTask: v })}
+            perEpisodeTask={perEpisodeTask}
+            setPerEpisodeTask={(v) => updateCollectForm({ perEpisodeTask: v })}
             numEpisodes={numEpisodes}
             setNumEpisodes={(v) => updateCollectForm({ numEpisodes: v })}
             episodeTimeS={episodeTimeS}
@@ -298,32 +332,35 @@ const CollectPanel: React.FC = () => {
         </CollapsibleContent>
       </Collapsible>
 
-      {/* Start recording — pinned directly above the dataset library so the
-          panel's primary action sits at the same level as Train's Start and
-          Deploy's Start/Stop. Disabled until the robot is ready and the
-          required parameters are filled in. */}
-      <div className="mt-auto pt-2">
-        <Button
-          onClick={handleStartRecording}
-          disabled={!canStart}
-          className="w-full gap-2"
-        >
-          <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
-          Start recording
-        </Button>
-      </div>
+      {/* Start recording — directly under the form, at the panel's normal
+          gap-5 rhythm, same as Train's Start and Deploy's Start/Stop. Nothing
+          in the column is bottom-pinned any more: everything top-packs and the
+          column scrolls when it overflows. Disabled until the robot is ready
+          and the required parameters are filled in. */}
+      <Button
+        onClick={handleStartRecording}
+        disabled={!canStart}
+        className="w-full gap-2"
+      >
+        <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
+        {t("studio.collect.start")}
+      </Button>
 
-      {/* Dataset library — the user's own datasets, pinned to the panel foot
-          like Train's jobs and Deploy's models. The selected-dataset chip
-          lives in the header row, beside Merge. */}
-      <LibrarySection className="mt-0">
+      {/* Dataset library — the user's own datasets. LibrarySection's own
+          stretch now stands (no mt-0 override): the opener and Start row
+          top-pack, the free space falls between them and this, and the library
+          sits at the column foot so its "Show all" footer lines up with Train's
+          and Deploy's. Its body is a fixed-height viewport, so expanding
+          scrolls inside it and the footer never moves. The selected-dataset
+          chip lives in the header row, beside Merge. */}
+      <LibrarySection>
         <Collapsible
           open={libraryOpen}
           onOpenChange={setLibraryOpen}
-          className="space-y-3"
+          className="flex min-h-0 flex-1 flex-col space-y-3"
         >
           <LibraryHeader
-            title="Your datasets"
+            title={t("studio.collect.library.title")}
             count={libraryDatasets.length}
             open={libraryOpen}
             actions={
@@ -338,8 +375,8 @@ const CollectPanel: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => setSelectedDataset(null)}
-                      aria-label="Clear selected dataset"
-                      title="Clear selected dataset"
+                      aria-label={t("studio.collect.library.clearSelected")}
+                      title={t("studio.collect.library.clearSelected")}
                       className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
                     >
                       <X className="h-3 w-3" />
@@ -353,7 +390,7 @@ const CollectPanel: React.FC = () => {
                   className="h-7 shrink-0 gap-1.5 px-2 text-xs"
                 >
                   <GitMerge className="h-3.5 w-3.5" />
-                  Merge datasets
+                  {t("studio.collect.library.merge")}
                 </Button>
                 <button
                   type="button"
@@ -361,8 +398,8 @@ const CollectPanel: React.FC = () => {
                     clearDatasetInfoCache();
                     refresh();
                   }}
-                  aria-label="Refresh dataset list"
-                  title="Refresh dataset list"
+                  aria-label={t("studio.collect.library.refresh")}
+                  title={t("studio.collect.library.refresh")}
                   className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
                 >
                   <RefreshCw
@@ -375,7 +412,9 @@ const CollectPanel: React.FC = () => {
               </>
             }
           />
-          <CollapsibleContent className={SLIDE}>
+          <CollapsibleContent
+            className={cn(SLIDE, "flex min-h-0 flex-1 flex-col")}
+          >
             <DatasetLibraryList
               datasets={libraryDatasets}
               loading={datasetsLoading}
@@ -393,11 +432,40 @@ const CollectPanel: React.FC = () => {
 
       <MergeDatasetsDialog
         open={mergeOpen}
-        onOpenChange={setMergeOpen}
+        onOpenChange={(next) => {
+          setMergeOpen(next);
+          // Closing consumes the prefill — UNLESS a merge it started is still
+          // running. A real merge takes minutes, and Radix fires this for
+          // Escape and outside-click as well as the X, so an operator who
+          // stepped away used to come back to a merged dataset and no
+          // fine-tune, with nothing saying why the one button they pressed
+          // had not finished.
+          if (!next && mergeStatus?.state !== "running") clearMergePrefill();
+        }}
+        onStatusChange={setMergeStatus}
         datasets={libraryDatasets}
-        onMerged={() => {
+        initialSources={mergePrefill?.sources}
+        initialOutput={mergePrefill?.suggestedOutput}
+        onMerged={(outputRepoId) => {
           clearDatasetInfoCache();
           refresh();
+          // The second half of the coaching loop. Corrections merged into the
+          // training set are still only a dataset; what the operator actually
+          // wanted was a better policy, and leaving them to find the training
+          // panel and re-pick both the base checkpoint and the dataset they
+          // just built is where the old prose-only handoff lost people.
+          const base = mergePrefill?.finetuneBaseJobId;
+          if (base && outputRepoId) {
+            clearMergePrefill();
+            setMergeOpen(false);
+            openStudio("train", {
+              train: {
+                baseJobId: base,
+                baseName: mergePrefill?.finetuneBaseName,
+                datasetRepoId: outputRepoId,
+              },
+            });
+          }
         }}
       />
 
