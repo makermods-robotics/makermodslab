@@ -1,4 +1,5 @@
 import React from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { AlertTriangle, Lock, UploadCloud, WifiOff } from "lucide-react";
 
 interface LocalCheckpointCloudNoticeProps {
@@ -31,6 +32,10 @@ interface LocalCheckpointCloudNoticeProps {
  * disclosure, so it is never a silent side effect of launching. The backend
  * enforces the same rule: it refuses the launch unless the request carries the
  * consent this notice is asking for.
+ *
+ * Each mode owns COMPLETE sentences in the catalog rather than sharing a
+ * template with a spliced-in clause: what moves, and what to do instead when
+ * the Hub is unreachable, differ per mode in more than one place.
  */
 const LocalCheckpointCloudNotice: React.FC<LocalCheckpointCloudNoticeProps> = ({
   mode,
@@ -38,8 +43,15 @@ const LocalCheckpointCloudNotice: React.FC<LocalCheckpointCloudNoticeProps> = ({
   step,
   offline,
 }) => {
+  const { t } = useTranslation();
+  // A noun phrase naming which checkpoint moves. {{step}} keeps its existing
+  // (non-locale-aware) formatting and is passed in pre-formatted.
   const stepLabel =
-    step != null ? `step ${step.toLocaleString()}` : "its latest checkpoint";
+    step != null
+      ? t("training.checkpointNotice.stepLabel", {
+          step: step.toLocaleString(),
+        })
+      : t("training.checkpointNotice.latestLabel");
   const isFinetune = mode === "finetune";
 
   if (offline) {
@@ -49,23 +61,21 @@ const LocalCheckpointCloudNotice: React.FC<LocalCheckpointCloudNoticeProps> = ({
           <WifiOff className="w-4 h-4 mt-0.5 shrink-0 text-amber-600 dark:text-amber-300" />
           <div>
             <div className="font-semibold">
-              This checkpoint is only on this machine
+              {t("training.checkpointNotice.title")}
             </div>
             <p className="mt-1 text-amber-700/80 dark:text-amber-200/80">
-              {isFinetune
-                ? "Hugging Face Cloud loads base weights from the Hub"
-                : "Hugging Face Cloud continues from the Hub"}
-              , but the server is in offline mode (
-              <code className="text-amber-700 dark:text-amber-100">
-                HF_HUB_OFFLINE
-              </code>
-              ), so {stepLabel} of{" "}
-              <span className="font-medium">{runName}</span> can't be uploaded.
-              Switch off offline mode, or{" "}
-              {isFinetune
-                ? "run this fine-tune locally"
-                : "continue this run locally"}
-              .
+              <Trans
+                i18nKey={
+                  isFinetune
+                    ? "training.checkpointNotice.offlineFinetune"
+                    : "training.checkpointNotice.offlineResume"
+                }
+                values={{ stepLabel, runName }}
+                components={[
+                  <code key="0" className="text-amber-700 dark:text-amber-100" />,
+                  <span key="1" className="font-medium" />,
+                ]}
+              />
             </p>
           </div>
         </div>
@@ -79,36 +89,34 @@ const LocalCheckpointCloudNotice: React.FC<LocalCheckpointCloudNoticeProps> = ({
         <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-amber-600 dark:text-amber-300" />
         <div className="w-full">
           <div className="font-semibold">
-            This checkpoint is only on this machine
+            {t("training.checkpointNotice.title")}
           </div>
-          {isFinetune ? (
-            <p className="mt-1 text-amber-700/80 dark:text-amber-200/80">
-              Hugging Face Cloud loads base weights from the Hub, so {stepLabel}{" "}
-              of <span className="font-medium">{runName}</span> — its weights,
-              not its optimizer state — will be uploaded to a{" "}
-              <span className="font-medium">private</span> repo in your account
-              before the job starts. Fine-tuning the same checkpoint again
-              reuses that upload.
-            </p>
-          ) : (
-            <p className="mt-1 text-amber-700/80 dark:text-amber-200/80">
-              Hugging Face Cloud continues from the Hub, so {stepLabel} of{" "}
-              <span className="font-medium">{runName}</span> — its weights and
-              optimizer state — will be uploaded to a{" "}
-              <span className="font-medium">private</span> repo in your account
-              before the job starts. Continuing the same checkpoint again reuses
-              that upload.
-            </p>
-          )}
+          <p className="mt-1 text-amber-700/80 dark:text-amber-200/80">
+            <Trans
+              i18nKey={
+                isFinetune
+                  ? "training.checkpointNotice.bodyFinetune"
+                  : "training.checkpointNotice.bodyResume"
+              }
+              values={{ stepLabel, runName }}
+              components={[
+                <span key="0" className="font-medium" />,
+                <span key="1" className="font-medium" />,
+              ]}
+            />
+          </p>
           <p className="mt-2 flex items-center gap-2 text-amber-700/70 dark:text-amber-200/70">
             <Lock className="w-4 h-4" />
-            Private to your account — nothing is published.
+            {t("training.checkpointNotice.privacy")}
           </p>
           <p className="mt-1 flex items-center gap-2 text-amber-700/70 dark:text-amber-200/70">
             <UploadCloud className="w-4 h-4" />
-            Use “
-            {isFinetune ? "Upload & start training" : "Upload & continue training"}
-            ” below to upload, then launch.
+            {/* Quotes the Start button's own label, so the two can't drift. */}
+            {t("training.cloudNotice.uploadHint", {
+              action: isFinetune
+                ? t("training.configurator.button.uploadAndStart")
+                : t("training.configurator.button.uploadAndContinue"),
+            })}
           </p>
         </div>
       </div>

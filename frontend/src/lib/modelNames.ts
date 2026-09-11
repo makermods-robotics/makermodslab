@@ -1,5 +1,5 @@
 /**
- * Presentation helpers for model/skill card titles.
+ * Presentation helpers for model/policy card titles.
  *
  * The derivation itself is the backend's — `derive_imported_title` in
  * makermodslab/utils/naming.py peels an imported model's repo id down to its

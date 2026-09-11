@@ -10,7 +10,7 @@ interface ConfigurationTabProps extends ConfigComponentProps {
   authenticated: boolean;
   flavors: RunnerFlavor[];
   hardwareLoading: boolean;
-  /** True when a base skill (fine-tune) or resume seed fixes the policy —
+  /** True when a base policy (fine-tune) or resume seed fixes the policy —
    * the run must train the source checkpoint's architecture. */
   policyLocked?: boolean;
 }

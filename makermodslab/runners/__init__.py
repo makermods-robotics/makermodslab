@@ -20,5 +20,6 @@ Protocol declared in app/jobs.py.
 """
 
 from .hf_cloud import HfCloudJobRunner
+from .lan_node import LanNodeJobRunner
 
-__all__ = ["HfCloudJobRunner"]
+__all__ = ["HfCloudJobRunner", "LanNodeJobRunner"]

@@ -1,0 +1,411 @@
+/**
+ * "robotConfig" 命名空间 — 机器人设置窗口
+ * (components/dialogs/RobotConfigDialog.tsx)。
+ *
+ * Key tree must match the other language exactly (see i18n/catalogs.test.ts).
+ *
+ * 机器人名称、串口路径、标定文件名、摄像头名称以及后端返回的
+ * message / error 文本都属于数据，一律原样呈现，不在此翻译。
+ */
+export default {
+  // ---- 窗口标题栏与底栏 ---------------------------------------------------
+  window: {
+    // `.eyebrow` 的大写在中文上是空操作，字距仍按原样。
+    eyebrow: "端口 · 标定 · 摄像头 · 电机力矩",
+    title: "机器人设置 — {{name}}",
+    srDescription: "为 {{name}} 配置端口、标定、摄像头和电机力矩。",
+    armUnavailable:
+      "该机器人的机械臂类型“{{armType}}”未安装。请安装提供它的扩展，或删除该机器人并用已安装的机械臂类型重新创建 — 在此之前，端口识别和标定不可用。",
+    armsNotLoaded:
+      "尚未从服务器加载机械臂类型 — 正在重试。在加载完成之前，端口识别和标定暂不可用。",
+    unsaved: "有未保存的更改",
+    savedWithGap: "已保存。设置未完成。",
+    allSaved: "已保存",
+    quit: "退出",
+    save: "保存",
+    saving: "正在保存…",
+    justSaved: "已保存 ✓",
+    toast: {
+      saved: "更改已保存",
+      saveFailedTitle: "无法保存更改",
+      saveFailedFallback: "保存配置失败。",
+    },
+    discard: {
+      title: "放弃未保存的更改？",
+      description:
+        "你还有未保存的配置更改（端口、摄像头或电机力矩）。现在关闭会丢弃这些更改 — 它们尚未写入机器人。若要保留，请先保存。",
+      cancel: "继续编辑",
+      confirm: "放弃并退出",
+    },
+    abort: {
+      title: "中止标定？",
+      description:
+        "手动标定正在进行中。关闭会中止它 — 不会保存任何数据，机械臂会被释放（处于失力状态，请扶稳）。",
+      cancel: "继续标定",
+      confirm: "中止并关闭",
+    },
+  },
+
+  // ---- 机械臂槽位名称 ----------------------------------------------------
+  // 仅用于显示；请求中始终发送 device_type + arm，与这些名称无关。
+  arm: {
+    leader: "主臂",
+    follower: "从臂",
+    leftLeader: "左主臂",
+    leftFollower: "左从臂",
+    rightLeader: "右主臂",
+    rightFollower: "右从臂",
+  },
+
+  // 后端 device_type 枚举在句子中的说法。提交的值仍是 "teleop" / "robot"。
+  deviceValue: {
+    teleop: "主臂",
+    robot: "从臂",
+  },
+
+  // ---- 机械臂布局 --------------------------------------------------------
+  layout: {
+    question: "这台机器接了什么？",
+    both: "主臂和从臂",
+    followerOnly: "仅从臂 — 机器人工作站",
+    leaderOnly: "仅主臂 — 远程机器人的控制器",
+  },
+
+  // ---- 01 · 设备 ---------------------------------------------------------
+  device: {
+    step: "设备",
+    label: "设备",
+    groupBimanual: "设备与机械臂",
+    groupSingle: "设备",
+    left: "左",
+    right: "右",
+  },
+
+  // ---- 主控臂类型 ----------------------------------------------------------
+  leaderKind: {
+    label: "主控臂",
+    unavailable: "未安装",
+    energizedHint:
+      "主控臂可支撑自身重量。使用“抖动”查找它的端口。",
+    optionFor: {
+      maker: {
+        star: "Star Arm 102 主控臂",
+        star_trigger: "Star Arm 102 主控臂（扳机式夹爪）",
+      },
+      metal: {
+        star: "Star Arm 102 主控臂",
+        metal: "Metal 机械臂主控臂（重力补偿）",
+      },
+    },
+    toast: {
+      savedTitle: "主控臂已保存",
+      saveFailedTitle: "无法更改主控臂",
+    },
+  },
+
+  slotCard: {
+    undetectedLabel: "端口未检测到",
+    undetectedTitle: "已保存的端口未检测到。请接上机械臂并重新扫描。",
+    noPort: "未分配端口",
+    readyLabel: "就绪",
+  },
+
+  // ---- 端口选择、识别、抖动 ----------------------------------------------
+  port: {
+    label: "端口",
+    select: "选择端口",
+    none: "未检测到机械臂。请接上并重新扫描。",
+    otherArm: "其他机械臂",
+    clear: "清除端口",
+    clearTitle: "清除端口 — 释放它且不分配新端口",
+    rescan: "刷新",
+    detect: "摆动识别",
+    detecting: "监测中…",
+    detectTitle: "手动识别：将机械臂底座大幅向左和向右摆动",
+    detectHelp:
+      "手动识别 — 将机械臂底座分别大幅摆向左侧和右侧（每个方向都要超过起始位置 10–15°）；检测到运动的端口会被分配。小幅晃动不会被识别。",
+    detectLive:
+      "把底座向左右大幅摆动，明显越过起始位置。小幅或单向的晃动会被忽略。",
+    detectHelpMaker:
+      "自动识别 —— Maker 机械臂的从臂和主臂使用不同协议，无需手动操作。双臂装置请将其中一条机械臂的底座向左和向右摆动，以指明是哪一侧。",
+    detectHelpMetal:
+      "自动识别 —— Metal 机械臂的从臂和主臂使用不同协议，无需手动操作。双臂装置请将其中一条机械臂的底座向左和向右摆动，以指明是哪一侧。",
+    detectLiveProbe:
+      "正在逐个探测端口。若有两条机械臂响应，请把要分配的那条底座向左右摆动。",
+    detectLiveFor: {
+      maker:
+        "正在逐个探测端口。若有两条机械臂响应，请把要分配的那条底座向左右摆动。",
+      metal:
+        "正在逐个探测端口。若有两条机械臂响应，请把要分配的那条底座向左右摆动。",
+    },
+    multipleHelp:
+      "左右摆动主臂底座来识别主臂。对于从臂，请选择端口并点击抖动，观察哪个夹爪移动。夹爪随后会回到起始位置。",
+    wiggle: "抖动",
+    wiggling: "抖动中…",
+    wiggleTitle: "驱动该端口上的夹爪，看看是哪条机械臂",
+    wiggleHelp:
+      "确认机械臂接在该端口上 — 会短暂驱动它的夹爪，你可以看到哪条机械臂有反应。",
+    detectTip: "把底座向左右大幅摆动。小幅晃动会被忽略。",
+    detectAuto: "自动识别",
+    detectTipAuto: "逐个探测端口，无需手动摆动。",
+    wiggleTip: "移动夹爪后回到起始位置。",
+    wiggleFallback:
+      "请改用某个端口上的“抖动”：它只会驱动那条机械臂的夹爪，你可以看到是哪条机械臂，然后手动分配端口。",
+    noneAssigned: "无端口",
+    forSlot: "{{slot}} 的端口",
+    toast: {
+      missingPortTitle: "缺少端口",
+      missingPortWiggle: "请先输入或识别端口，再用抖动确认是哪条机械臂。",
+      wiggleStartedTitle: "正在抖动夹爪",
+      wiggleFailedTitle: "抖动失败",
+      noArmTitle: "未检测到机械臂",
+      detectFailedTitle: "识别失败",
+      swappedDetectedTitle: "已识别机械臂 — 端口已互换",
+      swappedTitle: "端口已互换",
+      swappedDescription:
+        "{{port}} 现已分配给这条机械臂；{{released}}接管了 {{swapPort}}。",
+      movedDetectedTitle: "已识别机械臂 — 端口已迁移",
+      movedTitle: "端口已迁移",
+      movedDescription:
+        "{{port}} 原本分配给{{released}}，现已迁移到这里。{{released}}目前没有端口。",
+      identifiedTitle: "已识别机械臂",
+      assignedTitle: "端口已分配",
+      identifiedDescription: "端口已分配给这条机械臂。",
+      assignedDescription: "{{port}} 已分配给这条机械臂。",
+    },
+  },
+
+  // ---- 端口分配确认 ------------------------------------------------------
+  portAssign: {
+    swapTitle: "互换端口？",
+    detectTitle: "分配识别到的端口？",
+    assignTitle: "分配端口？",
+    leadDetect: "识别到 <0>{{port}}</0> — 要把它分配给<1>{{target}}</1>吗？",
+    leadAssign: "要把 <0>{{port}}</0> 分配给<1>{{target}}</1>吗？",
+    swapClause:
+      "它目前分配给<0>{{released}}</0>；确认后两者互换 — <1>{{released}}</1>将接管这条机械臂当前的端口 <2>{{swapPort}}</2>，这样两条机械臂都不会没有端口。",
+    takeClause:
+      "它目前分配给<0>{{released}}</0>；这条机械臂没有端口可供交换，确认后端口会迁移到这里，而<1>{{released}}</1>将没有端口。",
+    confirmSwap: "互换端口",
+    confirmMove: "迁移并分配",
+    confirmAssign: "分配端口",
+  },
+
+  // ---- 02 · 标定文件 -----------------------------------------------------
+  files: {
+    step: "标定",
+    calibrateAll: "全部标定",
+    calibrateAllTitle: "选中所有已检测到的机械臂进行自动标定",
+    calibrateAllZeroTitle: "依次设置每个已检测机械臂的零位姿态",
+    calibrateAllDisabledTitle: "未检测到机械臂 — 请接上机械臂并重新扫描",
+    openLeaderFolder: "打开主臂标定文件夹",
+    openFollowerFolder: "打开从臂标定文件夹",
+    leader: "主臂",
+    follower: "从臂",
+    calibrate: "标定",
+    newCalibration: "新建标定",
+    newCalibrationTitle: "为这条机械臂新建一份标定",
+    // 括号里是该槽位对应的 LeRobot 设备类别。
+    row: {
+      leader: "主臂（遥操作器）",
+      follower: "从臂（机器人）",
+      leftLeader: "左主臂（遥操作器）",
+      leftFollower: "左从臂（机器人）",
+      rightLeader: "右主臂（遥操作器）",
+      rightFollower: "右从臂（机器人）",
+    },
+    toast: {
+      openFolderFailedTitle: "无法打开文件夹",
+    },
+  },
+
+  // ---- “新建标定”面板 ----------------------------------------------------
+  calib: {
+    panelTitle: "新建标定 — {{row}}",
+    status: {
+      idle: "空闲",
+      connecting: "连接中",
+      recording: "正在记录行程",
+      awaitingZero: "等待零位姿态",
+      saving: "正在保存标定",
+      completed: "已完成",
+      error: "出错",
+      stopping: "停止中",
+      unknown: "未知",
+    },
+    zeroPose: {
+      sequence_other: "逐一设置机械臂零位。还剩 {{count}} 个机械臂。",
+      cancelAll: "取消全部",
+      poseCaption: "与上图姿势保持一致，夹爪完全闭合。",
+      instructionsFor: {
+        maker: {
+          leader:
+            "用手将 Star Arm 102 主控臂摆成上图的姿态：折叠贴近底座，夹爪闭合。关节未通电，可以自由移动。",
+          leader_star_trigger:
+            "用手将 Star Arm 102 主控臂摆成上图的姿态：折叠贴近底座，夹爪扳机处于闭合挡位。关节未通电，可以自由移动。",
+          follower:
+            "用手把机械臂摆成上图的姿态：折叠贴近底座，夹爪完全闭合。扭矩已关闭，可以自由移动。",
+        },
+        metal: {
+          leader:
+            "用手将 Star Arm 102 主控臂摆成上图的姿态：折叠贴近底座，夹爪闭合。关节未通电，可以自由移动。",
+          leader_metal:
+            "用手把主控 Metal 机械臂摆成上图的姿态：竖直站立，各关节归零，夹爪闭合。扭矩已关闭，可以自由移动。",
+          follower:
+            "用手把机械臂摆成上图的姿态：竖直站立，各关节归零，夹爪闭合。扭矩已关闭，可以自由移动。",
+        },
+      },
+      leaderPoseImageFor: {
+        metal: {
+          metal: "主控 Metal 机械臂零位姿态：竖直，夹爪闭合",
+        },
+      },
+      liveAngles: "实时关节角度",
+      start: "设置零位姿态",
+      confirm: "设为零位并保存",
+      saving: "正在设置零位并保存标定…",
+      poseImage: "零位姿态：折叠，夹爪完全闭合",
+      poseImageLeader: "Star Arm 102 主控臂零位姿态：折叠，夹爪闭合",
+      poseImageMetal: "零位姿态：竖直，夹爪闭合",
+    },
+    cancel: "取消标定",
+    auto: "自动标定",
+    autoTitle: "在 {{port}} 上自动标定{{arm}} — 机械臂会自行运动",
+    autoDisabledTitle: "这条机械臂没有已检测到的端口 — 请在上方分配或重新连接",
+    manual: "手动标定",
+    torqueOffWarning:
+      "电机力矩已关闭 — 标定期间机械臂无法保持姿态，取消或完成后也会保持失力状态。请让它保持低位并有支撑，避免掉落到桌沿。",
+    connecting: "正在连接设备，请确认设备已连接。",
+    liveData: "实时位置数据",
+    rangeComplete: "行程已记录完整",
+    save: "保存标定",
+    rangeHint:
+      "<0>重要：</0>请让每个关节走完整个行程 — <1>腕部旋转关节除外</1>：让它保持在中间附近。它可以连续旋转，行程会自动设定。某个关节的行程足够大时，它旁边会出现一个对勾。",
+    completed: "标定成功完成！",
+    discontinuityTitle: "检测到电机位置跳变",
+    discontinuityBody:
+      "开始标定时，请让机器人处于中间位置 — 所有关节都位于各自行程的中间。正确的起始姿态可参考旁边的标定演示视频。",
+    errorLabel: "错误：",
+    demoTitle: "标定演示",
+    start: "开始",
+    sweepNote:
+      "把每个关节向两个方向都移到行程尽头。扭矩已关闭，机械臂会发软，请托住它。",
+    autoNote: "机械臂会自行运动以找到各关节的行程极限。请保持周围空旷。",
+    zeroNote:
+      "把机械臂摆成上图的位置，然后设定零位。扭矩保持关闭，可以自由活动。",
+    panel: {
+      notice:
+        "这条机械臂通过其扩展自带的面板进行标定。扩展提供该面板后，它会显示在这里。",
+    },
+    videoAuto: "自动标定演示",
+    poseMiddle: "起始姿态：中间位置",
+    poseAutoStart: "自动标定起始姿态",
+    restingPoseCaption:
+      "这是 SO-101 的休息姿态，也是自动标定的起始姿态。按下「开始」之前，请先把机械臂摆成这个姿态。",
+    middlePoseCaption:
+      "按下「开始」之前，请先把机械臂摆成这个中间位置——每个关节都接近其行程的中点。",
+    videoUnsupported: "你的浏览器不支持 video 标签。",
+    videoLink: "点此查看标定视频",
+    toast: {
+      noRobotTitle: "未选择机器人",
+      noRobotDescription: "请从机器人菜单打开机器人设置（⚙ 机器人设置）。",
+      missingPortTitle: "缺少端口",
+      missingPortDescription: "开始之前请先设置设备的串口。",
+      startedTitle: "标定已开始",
+      startedDescription: "已开始为{{device}}标定",
+      startFailedTitle: "标定失败",
+      startFailedFallback: "启动标定失败",
+      errorTitle: "出错",
+      startError: "启动标定失败",
+      stoppedTitle: "标定已停止",
+      stoppedDescription: "标定已停止",
+      stopFailedFallback: "停止标定失败",
+      stepCompletedTitle: "步骤已完成",
+      stepFailedTitle: "步骤失败",
+      stepFailedFallback: "无法完成该步骤",
+      stepError: "无法完成标定步骤",
+      failedFallback: "标定失败，请重试。",
+      notResponding: "机械臂无响应，请检查电源和连接线。",
+      jointsNotResponding: "{{joints}} 无响应，请检查电源和接线。",
+      disconnected: "机械臂已断开，请重新连接后重试。",
+      portDenied: "端口访问被拒绝，请检查权限或关闭其他应用。",
+      motorFault: "电机报告故障，请检查机械臂后重试。",
+    },
+  },
+
+  // ---- 多臂并发自动标定 --------------------------------------------------
+  batch: {
+    titleSingle: "自动标定",
+    titleMulti: "多臂自动标定",
+    stopSingle: "停止自动标定",
+    stopAll: "停止全部自动标定",
+    pickerHint: "取消勾选不需要标定的机械臂。它们会同时进行。",
+    portUndetected: "未检测到端口",
+    portMissing: "无端口 — 请在上方分配",
+    // 中文只有一个复数形式，因此只提供 _other。
+    start_other: "自动标定 {{count}} 条机械臂",
+    progress_other:
+      "已完成 {{total}} 条中的 {{done}} 条 — 机械臂正在运动。请保持工作区无障碍物。",
+    armStatus: {
+      completed: "✓ 完成",
+      failed: "✗ 失败",
+      stopped: "已停止",
+      running: "运行中…",
+    },
+    summary: "{{completed}} 条完成，{{failed}} 条失败/已停止。",
+    dismiss: "关闭",
+    prompt: {
+      titleSingle: "自动标定{{arm}}",
+      titleFallbackArm: "这条机械臂",
+      titleMulti: "自动标定 {{count}} 条机械臂",
+      bodySingle: "机械臂会<0>自行运动</0>。请先把它摆到休息位，并清空工作区。",
+      bodyMulti:
+        "{{count}} 条机械臂会<0>自行运动</0>。请先把它们摆到休息位，并清空工作区。",
+      confirm: "开始自动标定",
+    },
+    toast: {
+      noArmsTitle: "未选择机械臂",
+      noArmsDescription: "请至少勾选一条要自动标定的机械臂。",
+      noPortTitle: "机械臂没有已检测到的端口",
+      noPortDescription:
+        "{{arm}}没有当前已接入的端口 — 开始之前请在上方分配或重新连接。",
+      duplicatePortTitle: "端口重复",
+      duplicatePortDescription: "每条机械臂都需要各自独立的串口。",
+      startedTitle_other: "已在 {{count}} 条机械臂上开始自动标定",
+      startedDescription: "机械臂正在运动 — 请保持工作区无障碍物。",
+      startFailedTitle: "无法启动自动标定",
+      finishedTitle_other: "已自动标定 {{count}} 条机械臂",
+      issuesTitle: "批量自动标定完成，但存在问题",
+    },
+  },
+
+  // ---- 高级参数（自动标定力矩） ------------------------------------------
+  advanced: {
+    holdingLabel: "保持力矩 (N·m)",
+    holdingDefault: "默认：0.5 N·m",
+    holdingHint: "调整夹住物体后的持续夹持力度。点击保存可在遥操作或录制中实时应用并记住该值。双臂机器人的两个从臂夹爪共用此设置。这不是瞬时力矩上限。",
+    holdingDisabled: "保持控制已禁用。请选择数值或使用默认值，然后在会话停止时点击保存以启用。",
+    holdingApplied: "保持力矩已应用并保存",
+    holdingSaved: "保持力矩已保存，将用于下一次会话",
+    title: "高级参数",
+    subtitle: "自动标定力矩",
+    torqueLabel: "自动标定力矩",
+    // "Torque_Limit" 是舵机寄存器名，不翻译。
+    torqueSliderLabel: "自动标定力矩（Torque_Limit 寄存器，0-1000 刻度）",
+    torqueHint:
+      "舵机原始 <0>Torque_Limit</0>（刻度标记为出厂值 {{ref}}）— 数值越低越柔和；低于 {{min}} 时机械臂无法抬起自身。",
+  },
+
+  // ---- 03 · 已连接的摄像头 -----------------------------------------------
+  cameras: {
+    step: "已连接的摄像头",
+    on: "开",
+    off: "关",
+    toggleLabel: "打开或关闭摄像头",
+    offTitle: "摄像头已关闭",
+    offDescription:
+      "打开摄像头后即可扫描已连接的设备并进行预览。浏览器可能会短暂开启摄像头以读取设备名称，已配置的摄像头在预览可见期间会保持开启；浏览器会请求摄像头权限。不会录制任何内容。",
+    saved_other: "已为该机器人保存 {{count}} 个摄像头。",
+    permissionHint: "系统会请求你授予摄像头访问权限。",
+  },
+} as const;

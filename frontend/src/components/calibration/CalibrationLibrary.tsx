@@ -1,6 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Pencil, Trash2 } from "lucide-react";
+import { useTranslation } from "react-i18next";
+import { MoreHorizontal, Pencil, Trash2, Upload, Wand2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -18,8 +26,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useApi } from "@/contexts/ApiContext";
+import { useLanguage } from "@/contexts/LanguageContext";
 import { useToast } from "@/hooks/use-toast";
+import type { ArmType } from "@/hooks/useRobots";
+import { isCaselessScript } from "@/i18n/config";
+import { cn } from "@/lib/utils";
 import ImportCalibrationButton from "./ImportCalibrationButton";
+import { libraryQuery } from "@/lib/calibrationLibraryQuery";
 
 interface ConfigEntry {
   name: string;
@@ -28,6 +41,20 @@ interface ConfigEntry {
 interface CalibrationLibraryProps {
   /** API device vocabulary: "teleop" (leader) or "robot" (follower). */
   device: "teleop" | "robot";
+  /**
+   * Which calibration library to list and act on. The SO-101 pair and the
+   * Maker pair keep entirely SEPARATE directories on disk, so a name that
+   * exists in one is a different file (or no file) in the other — listing,
+   * deleting and renaming all have to be told which one they mean.
+   */
+  armType: ArmType;
+  /**
+   * Which of the family's leader libraries a "teleop" row addresses, for a
+   * family with more than one leader (the Metal arm's own leader keeps a
+   * library apart from the Star leader's). Omitted for every other family
+   * and for follower rows, so their requests are unchanged.
+   */
+  leaderKind?: string;
   /** Config name currently assigned to the selected robot (marked "in use"). */
   assignedConfig?: string;
   /** Robot record to reassign when "Use for this robot" is clicked. */
@@ -51,7 +78,7 @@ interface CalibrationLibraryProps {
    */
   excludeConfigField?: string;
   /** Called after a successful reassignment so the parent can refetch the robot. */
-  onAssigned?: () => void | Promise<void>;
+  onAssigned?: () => void | Promise<unknown>;
   /**
    * Called after an operation that changes the FILE LIBRARY itself (rename /
    * delete / import). Each arm row renders its own CalibrationLibrary with a
@@ -66,6 +93,19 @@ interface CalibrationLibraryProps {
    * sibling instance renamed/deleted/imported one (see onLibraryChanged).
    */
   reloadToken?: number;
+  /**
+   * Opens the caller's new-calibration flow for this arm. Passing it adds a
+   * "Calibrate" segment to the control group; omitting it leaves the group as
+   * picker + overflow menu.
+   *
+   * The action lives INSIDE this component rather than beside it because the
+   * three controls share a single border — a sibling button could not join
+   * that group without the parent re-implementing its seams.
+   */
+  onCalibrate?: () => void;
+  /** The caller's calibration panel is open for this arm; presses the segment. */
+  calibrateOpen?: boolean;
+  calibrateDisabled?: boolean;
 }
 
 /**
@@ -78,6 +118,8 @@ interface CalibrationLibraryProps {
  */
 const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   device,
+  armType,
+  leaderKind,
   assignedConfig,
   robotName,
   configField,
@@ -86,9 +128,17 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   onAssigned,
   onLibraryChanged,
   reloadToken,
+  onCalibrate,
+  calibrateOpen,
+  calibrateDisabled,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
+  const { t } = useTranslation();
+  const { language } = useLanguage();
+  // `uppercase` is a no-op on caseless scripts but the tracking that rides
+  // along with it is not — both are dropped together on the chips below.
+  const isCJK = isCaselessScript(language);
 
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -102,7 +152,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   const refresh = useCallback(async () => {
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/calibration-configs/${device}`,
+        `${baseUrl}/api/v1/calibration-configs/${device}${libraryQuery(armType, leaderKind)}`,
       );
       const data = await res.json();
       if (data.success) {
@@ -113,7 +163,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     } catch {
       // Non-fatal; leave the list as-is.
     }
-  }, [baseUrl, fetchWithHeaders, device]);
+  }, [baseUrl, fetchWithHeaders, device, armType, leaderKind]);
 
   useEffect(() => {
     refresh();
@@ -152,7 +202,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     setPendingDelete(null);
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/calibration-configs/${device}/${encodeURIComponent(name)}`,
+        `${baseUrl}/api/v1/calibration-configs/${device}/${encodeURIComponent(name)}${libraryQuery(armType, leaderKind)}`,
         { method: "DELETE" },
       );
       const data = await res.json().catch(() => ({}));
@@ -161,12 +211,20 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         // server-side; those arms are back to "needs calibration".
         const unassigned = (data.unassigned ?? []) as { robot: string }[];
         toast({
-          title: "Config deleted",
+          title: t("calibration.library.toast.deletedTitle"),
+          // Two whole sentences, one per branch — never a shared stem with a
+          // clause bolted on. `count` drives the verb agreement (a real
+          // i18next plural); the config name and the joined robot-name list
+          // are data and interpolate verbatim.
           description: unassigned.length
-            ? `Removed "${name}". ${unassigned
-                .map((u) => u.robot)
-                .join(", ")} now needs calibration before use.`
-            : `Removed "${name}".`,
+            ? t("calibration.library.toast.deletedUnassigned", {
+                count: unassigned.length,
+                name,
+                robots: unassigned
+                  .map((u) => u.robot)
+                  .join(t("calibration.library.toast.robotJoin")),
+              })
+            : t("calibration.library.toast.deleted", { name }),
         });
         setConfigs((prev) => prev.filter((c) => c.name !== name));
         if (unassigned.length) {
@@ -177,19 +235,31 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         onLibraryChanged?.();
       } else {
         toast({
-          title: "Delete failed",
+          // `data.message` is backend prose — passed through untranslated.
+          title: t("calibration.library.toast.deleteFailedTitle"),
           description: data.message,
           variant: "destructive",
         });
       }
     } catch (e) {
       toast({
-        title: "Delete failed",
+        title: t("calibration.library.toast.deleteFailedTitle"),
         description: String(e),
         variant: "destructive",
       });
     }
-  }, [baseUrl, fetchWithHeaders, device, pendingDelete, toast, onAssigned, onLibraryChanged]);
+  }, [
+    baseUrl,
+    fetchWithHeaders,
+    device,
+    armType,
+    leaderKind,
+    pendingDelete,
+    toast,
+    t,
+    onAssigned,
+    onLibraryChanged,
+  ]);
 
   // Assign a config to this robot's slot. Called straight from the dropdown's
   // onValueChange — picking a config IS choosing it for this robot; there is
@@ -213,10 +283,13 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           name === excludeConfig &&
           excludeConfigField !== field;
         const body = isSwap
-          ? { [field]: name, [excludeConfigField as string]: assignedConfig ?? "" }
+          ? {
+              [field]: name,
+              [excludeConfigField as string]: assignedConfig ?? "",
+            }
           : { [field]: name };
         const res = await fetchWithHeaders(
-          `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
+          `${baseUrl}/api/v1/robots/${encodeURIComponent(robotName)}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -226,22 +299,32 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         const data = await res.json().catch(() => ({}));
         if (res.ok && data.status === "success") {
           toast({
-            title: isSwap ? "Configs swapped" : "Config assigned",
+            title: isSwap
+              ? t("calibration.library.toast.swappedTitle")
+              : t("calibration.library.toast.assignedTitle"),
+            // Config names are data. `noConfig` is a DISPLAY placeholder for
+            // the empty-string value the record actually holds — the stored
+            // value is unaffected by the language.
             description: isSwap
-              ? `"${name}" is now used for this arm; the other arm took "${assignedConfig || "(none)"}".`
-              : `"${name}" is now used for this robot.`,
+              ? t("calibration.library.toast.swapped", {
+                  name,
+                  previous:
+                    assignedConfig || t("calibration.library.toast.noConfig"),
+                })
+              : t("calibration.library.toast.assigned", { name }),
           });
           await onAssigned?.();
         } else {
           toast({
-            title: "Assign failed",
+            // `data.message` is backend prose — passed through untranslated.
+            title: t("calibration.library.toast.assignFailedTitle"),
             description: data.message,
             variant: "destructive",
           });
         }
       } catch (e) {
         toast({
-          title: "Assign failed",
+          title: t("calibration.library.toast.assignFailedTitle"),
           description: String(e),
           variant: "destructive",
         });
@@ -252,6 +335,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     [
       robotName,
       device,
+      t,
       configField,
       assignedConfig,
       excludeConfig,
@@ -274,7 +358,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     if (!selected) return;
     const next = renameValue.trim();
     if (!next) {
-      setRenameError("Name cannot be empty.");
+      setRenameError(t("calibration.library.rename.emptyName"));
       return;
     }
     if (next === selected) {
@@ -285,7 +369,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     setRenameError(null);
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/calibration-configs/${device}/${encodeURIComponent(selected)}/rename`,
+        `${baseUrl}/api/v1/calibration-configs/${device}/${encodeURIComponent(selected)}/rename${libraryQuery(armType, leaderKind)}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -295,8 +379,12 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.success) {
         toast({
-          title: "Config renamed",
-          description: `"${selected}" → "${data.name}".`,
+          title: t("calibration.library.toast.renamedTitle"),
+          // Both are calibration file names — data, rendered verbatim.
+          description: t("calibration.library.toast.renamed", {
+            from: selected,
+            to: data.name,
+          }),
         });
         setRenameOpen(false);
         await refresh();
@@ -307,8 +395,10 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         // parent so it bumps reloadToken and every instance re-fetches.
         onLibraryChanged?.();
       } else {
-        // 409/400 keep the dialog open with the message for a retry.
-        setRenameError(data.message || "Rename failed.");
+        // 409/400 keep the dialog open with the message for a retry. The
+        // backend's message is English prose we pass through; only the
+        // client-side fallback beside it is translated.
+        setRenameError(data.message || t("calibration.library.rename.failed"));
       }
     } catch (e) {
       setRenameError(String(e));
@@ -316,9 +406,12 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
       setRenaming(false);
     }
   }, [
+    armType,
+    leaderKind,
     selected,
     renameValue,
     device,
+    t,
     baseUrl,
     fetchWithHeaders,
     toast,
@@ -329,9 +422,21 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
 
   const empty = configs.length === 0;
 
+  // Opens the import file picker from the overflow menu; the input and the
+  // naming dialog stay mounted inside ImportCalibrationButton at the row root.
+  const importPick = React.useRef<(() => void) | null>(null);
+
   return (
     <div className="mt-1 ml-6 space-y-1">
-      <div className="flex items-center gap-1">
+      {/* One control, not three. The picker, Calibrate and the overflow menu
+          share a single border with hairline seams, so the row reads as one
+          object instead of a bordered select flanked by two buttons at two
+          other visual weights. Every segment is h-10, matching SelectTrigger.
+
+          Focus rings are moved INSIDE (ring-inset, no offset): the default
+          shadcn ring draws 2px outside the element, which here would overlap
+          the neighbouring segment and spill past the group's own border. */}
+      <div className="flex items-stretch overflow-hidden rounded-md border border-input bg-background">
         <Select
           value={selected ?? ""}
           onValueChange={(name) => {
@@ -344,9 +449,13 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           }}
           disabled={empty || assigning}
         >
-          <SelectTrigger className="flex-1">
+          <SelectTrigger className="min-w-0 flex-1 rounded-none border-0 bg-transparent focus:ring-1 focus:ring-inset focus:ring-offset-0">
             <SelectValue
-              placeholder={empty ? "No saved configs" : "Select a config"}
+              placeholder={
+                empty
+                  ? t("calibration.library.placeholderEmpty")
+                  : t("calibration.library.placeholder")
+              }
             />
           </SelectTrigger>
           <SelectContent>
@@ -357,16 +466,29 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
                 !!excludeConfig && c.name === excludeConfig;
               return (
                 <SelectItem key={c.name} value={c.name}>
+                  {/* The item VALUE stays the config's file name — it is what
+                      gets submitted and stored. Only the chips beside it are
+                      display text. */}
                   <span className="flex items-center gap-2">
                     {c.name}
                     {c.name === assignedConfig && (
-                      <span className="text-[10px] uppercase tracking-wide text-ok border border-ok/40 rounded px-1">
-                        in use
+                      <span
+                        className={cn(
+                          "text-[10px] text-ok border border-ok/40 rounded px-1",
+                          isCJK ? "" : "uppercase tracking-wide",
+                        )}
+                      >
+                        {t("calibration.library.inUse")}
                       </span>
                     )}
                     {usedByOtherArm && (
-                      <span className="rounded border border-warn/40 px-1 text-[10px] uppercase tracking-wide text-warn">
-                        other arm
+                      <span
+                        className={cn(
+                          "rounded border border-warn/40 px-1 text-[10px] text-warn",
+                          isCJK ? "" : "uppercase tracking-wide",
+                        )}
+                      >
+                        {t("calibration.library.otherArm")}
                       </span>
                     )}
                   </span>
@@ -376,46 +498,89 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           </SelectContent>
         </Select>
 
-        <Button
-          size="icon"
-          variant="ghost"
-          className="shrink-0 text-muted-foreground hover:text-foreground"
-          disabled={!selected}
-          onClick={openRename}
-          aria-label="Rename selected config"
-          title="Rename"
-        >
-          <Pencil className="h-4 w-4" />
-        </Button>
-        <Button
-          size="icon"
-          variant="ghost"
-          className="shrink-0 text-muted-foreground hover:text-destructive"
-          disabled={!selected}
-          onClick={() => selected && setPendingDelete(selected)}
-          aria-label="Delete selected config"
-          title="Delete"
-        >
-          <Trash2 className="h-4 w-4" />
-        </Button>
-        <ImportCalibrationButton
-          device={device}
-          onImported={async (name) => {
-            await refresh();
-            setSelected(name);
-            // Refresh sibling arm rows' config lists (see onLibraryChanged doc).
-            onLibraryChanged?.();
-          }}
-        />
+        {/* The row's main action, and the reason anyone opens this section.
+            It stays a labelled segment rather than folding into the menu
+            below: a bare "+" beside a file picker reads as "add a file" when
+            it actually starts a calibration run. */}
+        {onCalibrate && (
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={onCalibrate}
+            disabled={calibrateDisabled}
+            aria-expanded={calibrateOpen}
+            title={t("robotConfig.files.newCalibrationTitle")}
+            className={cn(
+              "h-10 shrink-0 gap-1.5 rounded-none border-l border-input px-3 font-normal focus-visible:ring-inset focus-visible:ring-offset-0",
+              calibrateOpen && "bg-accent text-accent-foreground",
+            )}
+          >
+            <Wand2 className="h-4 w-4" />
+            {t("robotConfig.files.calibrate")}
+          </Button>
+        )}
+
+        {/* Rename, import and delete are rare next to picking a config, so
+            they fold into one overflow menu and the row reads select,
+            calibrate, more — instead of a strip of loose icons. */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-10 w-10 shrink-0 rounded-none border-l border-input text-muted-foreground hover:text-foreground focus-visible:ring-inset focus-visible:ring-offset-0"
+              aria-label={t("calibration.library.moreAria")}
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              disabled={!selected}
+              onSelect={() => openRename()}
+            >
+              <Pencil className="mr-2 h-4 w-4" />
+              {t("calibration.library.renameTooltip")}
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => importPick.current?.()}>
+              <Upload className="mr-2 h-4 w-4" />
+              {t("calibration.library.importShort")}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              disabled={!selected}
+              className="text-destructive focus:text-destructive"
+              onSelect={() => selected && setPendingDelete(selected)}
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              {t("calibration.library.deleteTooltip")}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
+
+      {/* Renders nothing: the trigger lives in the menu above. Mounted OUTSIDE
+          the control group so its hidden file input is never a flex child of
+          a border-seamed row. */}
+      <ImportCalibrationButton
+        armType={armType}
+        leaderKind={leaderKind}
+        device={device}
+        pickRef={importPick}
+        onImported={async (name) => {
+          await refresh();
+          setSelected(name);
+          // Refresh sibling arm rows' config lists (see onLibraryChanged doc).
+          onLibraryChanged?.();
+        }}
+      />
 
       <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Rename config</DialogTitle>
+            <DialogTitle>{t("calibration.library.rename.title")}</DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              Renames the calibration file. Robots using it are updated
-              automatically. Won't overwrite an existing name.
+              {t("calibration.library.rename.description")}
             </DialogDescription>
           </DialogHeader>
           <Input
@@ -431,15 +596,14 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
               }
             }}
             autoFocus
-            placeholder="New name"
+            placeholder={t("calibration.library.rename.placeholder")}
           />
-          {renameError && <p className="text-sm text-destructive">{renameError}</p>}
+          {renameError && (
+            <p className="text-sm text-destructive">{renameError}</p>
+          )}
           <DialogFooter className="flex gap-2 justify-end">
-            <Button
-              variant="outline"
-              onClick={() => setRenameOpen(false)}
-            >
-              Cancel
+            <Button variant="outline" onClick={() => setRenameOpen(false)}>
+              {t("common.cancel")}
             </Button>
             <Button
               disabled={
@@ -449,7 +613,9 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
               }
               onClick={renameConfig}
             >
-              {renaming ? "Renaming…" : "Rename"}
+              {renaming
+                ? t("calibration.library.rename.submitting")
+                : t("calibration.library.rename.submit")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -461,25 +627,25 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete config "{pendingDelete}"?</DialogTitle>
+            <DialogTitle>
+              {/* The quoted name is the config's file name — data. */}
+              {t("calibration.library.delete.title", {
+                name: pendingDelete ?? "",
+              })}
+            </DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              This permanently deletes the calibration file — you'd have to
-              recalibrate the arm to recreate it. Any robot using it will need
-              calibration before its next use.
+              {t("calibration.library.delete.description")}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="flex gap-2 justify-end">
-            <Button
-              variant="outline"
-              onClick={() => setPendingDelete(null)}
-            >
-              Cancel
+            <Button variant="outline" onClick={() => setPendingDelete(null)}>
+              {t("common.cancel")}
             </Button>
             <Button
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={confirmDelete}
             >
-              Delete
+              {t("calibration.library.delete.confirm")}
             </Button>
           </DialogFooter>
         </DialogContent>

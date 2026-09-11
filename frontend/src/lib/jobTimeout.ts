@@ -168,6 +168,13 @@ export function estimateJobTimeoutSeconds(input: TimeoutEstimateInput): number {
  * exact value applied to the input on click — the output always re-parses via
  * parseTimeoutSeconds. Inputs here are estimator results (multiples of 15m,
  * capped at 24h), so hours+minutes covers every case (no days needed).
+ *
+ * NEVER LOCALIZE THIS. The `h`/`m`/`s` suffixes are wire format, not copy: the
+ * string is written straight into the timeout input, re-parsed by
+ * parseTimeoutSeconds against DURATION_FULL_RE, and validated again by
+ * _DURATION_FULL_RE in makermodslab/train.py. Translating a unit letter would
+ * make the field reject its own suggestion. Words AROUND the value ("Suggested:
+ * ~", "(default)") are ordinary copy and live in the i18n catalogs.
  */
 export function formatDurationShort(seconds: number): string {
   const total = Math.max(0, Math.round(seconds));

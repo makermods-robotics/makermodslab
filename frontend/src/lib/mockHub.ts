@@ -102,7 +102,9 @@ const metrics = (current: number, total: number, loss = 0.042) => ({
 // Overridable per entry via the spread below.
 let mockJobNumber = 0;
 
-const job = (j: Partial<JobRecord> & Pick<JobRecord, "id" | "name">): JobRecord => ({
+const job = (
+  j: Partial<JobRecord> & Pick<JobRecord, "id" | "name">,
+): JobRecord => ({
   job_number: ++mockJobNumber,
   display_name: null,
   state: "done",
@@ -255,9 +257,10 @@ const checkpointsByJob: Record<string, JobCheckpoint[]> = {
     `${USER}/pi05_metal_pick_place_lora_mock`,
     [0],
   ),
-  "act_imported_2026-07-11_16-39-00": hubCkpts(`${USER}/act_so101_merged_mock`, [
-    5000, 10000,
-  ]),
+  "act_imported_2026-07-11_16-39-00": hubCkpts(
+    `${USER}/act_so101_merged_mock`,
+    [5000, 10000],
+  ),
   "smolvla_imported_2026-07-10_09-30-00": hubCkpts(
     `${USER}/smolvla_sock_purple_green_mock`,
     [0],
@@ -266,10 +269,16 @@ const checkpointsByJob: Record<string, JobCheckpoint[]> = {
 
 const iso = (secAgo: number) => new Date((NOW - secAgo) * 1000).toISOString();
 
-/** Untracked Hub jobs (no local record): one live, two dead leftovers. */
+/** Untracked Hub jobs (no local record): one live, two dead leftovers.
+ * `name` covers the three cases the card titles by: a labelled job, one named
+ * from its argv, and one the Hub gives us nothing for (image-name fallback).
+ * The identity fields track that split — the two named runs carry the policy /
+ * dataset / steps read off their argv, the anonymous one answers none of them,
+ * so the mock exercises both the populated row and the blank-column row. */
 const hubJobs: HubJob[] = [
   {
     id: "mock-untracked-live",
+    name: "act_cube_grab_2026-08-10_14-02-11",
     created_at: iso(20 * 60),
     docker_image: "huggingface/lerobot-gpu:latest",
     space_id: null,
@@ -277,9 +286,14 @@ const hubJobs: HubJob[] = [
     status: { stage: "RUNNING", message: null },
     owner: USER,
     url: "https://huggingface.co/jobs/makermods/mock-untracked-live",
+    policy_type: "act",
+    dataset: "makermods/cube_grab",
+    total_steps: 10000,
+    hf_repo_id: "makermods/act_cube_grab_2026-08-10_14-02-11",
   },
   {
     id: "mock-untracked-done",
+    name: "smolvla_fold_towel_2026-08-08_09-31-40",
     created_at: iso(4 * D),
     docker_image: "huggingface/lerobot-gpu:latest",
     space_id: null,
@@ -287,9 +301,14 @@ const hubJobs: HubJob[] = [
     status: { stage: "COMPLETED", message: null },
     owner: USER,
     url: "https://huggingface.co/jobs/makermods/mock-untracked-done",
+    policy_type: "smolvla",
+    dataset: "makermods/fold_towel",
+    total_steps: 25000,
+    hf_repo_id: "makermods/smolvla_fold_towel_2026-08-08_09-31-40",
   },
   {
     id: "mock-untracked-error",
+    name: null,
     created_at: iso(6 * D),
     docker_image: "huggingface/lerobot-gpu:latest",
     space_id: null,
@@ -297,6 +316,13 @@ const hubJobs: HubJob[] = [
     status: { stage: "ERROR", message: "exit code 1" },
     owner: USER,
     url: "https://huggingface.co/jobs/makermods/mock-untracked-error",
+    // The job the Hub tells us nothing about: no name, and an argv the
+    // parser can't read either. Keeps the image-name fallback and the
+    // empty policy column in the mock.
+    policy_type: null,
+    dataset: null,
+    total_steps: null,
+    hf_repo_id: null,
   },
 ];
 
@@ -331,8 +357,25 @@ const policyConfig = (policy: string): PolicyConfigSummary => ({
     wrist: { height: 480, width: 640 },
   },
   requires_task: policy === "smolvla" || policy === "pi05",
+  // Mirrors the server's table (jobs.policy_type_supports_rtc): the VLAs run
+  // Real-Time Chunking, ACT and the other regression policies don't.
+  supports_rtc: policy === "smolvla" || policy === "pi05",
+  // The two GPU-launch knobs, as the real route reports them. Only MolmoAct2
+  // carries `model_dtype`, so mock mode always exercises the DISABLED
+  // precision select — which is the state the bench failure came from. The
+  // flow families sample in steps; ACT does not.
+  supports_model_dtype: false,
+  supports_flow_steps: policy === "smolvla" || policy === "pi05",
+  supports_extra_image_roles: policy === "molmoact2",
+  flow_steps_default: policy === "smolvla" ? 10 : policy === "pi05" ? 10 : null,
   state_dim: 6,
   action_dim: 6,
+  // Chunk geometry, as the real route reports it. ACT's config defaults are
+  // 100/100; the flow families ship 50/50. Both are >= the panel's engine
+  // defaults, so mock mode exercises the "ceiling doesn't move the seed" side
+  // of horizonForEngine (a checkpoint like MolmoAct2's 30 is the other).
+  n_action_steps: policy === "act" ? 100 : 50,
+  chunk_size: policy === "act" ? 100 : 50,
 });
 
 /** /models rows derived live from the registry so mutations stay coherent. */
@@ -423,7 +466,7 @@ export function mockHubResponse(
     return null;
   }
 
-  if (method === "GET" && path === "/hf-auth-status") {
+  if (method === "GET" && path === "/api/v1/hf-auth-status") {
     return json({
       authenticated: true,
       username: USER,
@@ -432,7 +475,7 @@ export function mockHubResponse(
     });
   }
 
-  if (method === "GET" && path === "/jobs/hub") {
+  if (method === "GET" && path === "/api/v1/jobs/hub") {
     return json({
       authenticated: true,
       jobs_permission: true,
@@ -441,7 +484,7 @@ export function mockHubResponse(
     });
   }
 
-  const dismiss = path.match(/^\/jobs\/hub\/jobs\/([^/]+)\/dismiss$/);
+  const dismiss = path.match(/^\/api\/v1\/jobs\/hub\/jobs\/([^/]+)\/dismiss$/);
   if (method === "POST" && dismiss) {
     const idx = hubJobs.findIndex(
       (h) => h.id === decodeURIComponent(dismiss[1]),
@@ -450,7 +493,7 @@ export function mockHubResponse(
     return json({ status: "dismissed" });
   }
 
-  const hubModelDelete = path.match(/^\/jobs\/hub\/models\/(.+)$/);
+  const hubModelDelete = path.match(/^\/api\/v1\/jobs\/hub\/models\/(.+)$/);
   if (method === "DELETE" && hubModelDelete) {
     const repo = decodeURIComponent(hubModelDelete[1]);
     const idx = hubModels.findIndex((m) => m.repo_id === repo);
@@ -458,11 +501,11 @@ export function mockHubResponse(
     return json(undefined, 204);
   }
 
-  if (method === "GET" && path === "/models") {
+  if (method === "GET" && path === "/api/v1/models") {
     return json(modelItems());
   }
 
-  if (method === "POST" && path === "/jobs/import") {
+  if (method === "POST" && path === "/api/v1/jobs/import") {
     let source = "";
     try {
       source = JSON.parse(String(init.body ?? "{}")).source ?? "";
@@ -476,11 +519,11 @@ export function mockHubResponse(
     return json({ ...importRepo(source), already_imported: existing });
   }
 
-  if (method === "GET" && path === "/jobs") {
+  if (method === "GET" && path === "/api/v1/jobs") {
     return json({ jobs });
   }
 
-  const jobRoute = path.match(/^\/jobs\/([^/]+)(?:\/(.*))?$/);
+  const jobRoute = path.match(/^\/api\/v1\/jobs\/([^/]+)(?:\/(.*))?$/);
   if (jobRoute) {
     const id = decodeURIComponent(jobRoute[1]);
     const rest = jobRoute[2] ?? "";

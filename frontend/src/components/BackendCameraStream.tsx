@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { VideoOff, RefreshCw } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import { cn } from "@/lib/utils";
@@ -33,8 +34,8 @@ const RETRY_MAX_MS = 12000;
  * endpoint WHY (the 409/503 detail — "recording is using the cameras" etc.),
  * shows that on the tile, and retries with capped backoff; clicking the tile
  * retries immediately. Parents should render it whenever a cameraIndex is
- * known and unmount it to pause/release (unmount cleanup clears the img src
- * so the browser drops the HTTP connection and the server releases the
+ * known and unmount it to pause/release (the img's detach handler clears its
+ * src so the browser drops the HTTP connection and the server releases the
  * shared capture).
  */
 const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
@@ -42,8 +43,9 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
   uniqueId,
   className,
 }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
-  const imgRef = useRef<HTMLImageElement>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptRef = useRef(0);
   // Bumping remounts the <img> with a cache-busted URL — a clean retry.
@@ -64,13 +66,22 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
   }, [cameraIndex, uniqueId]);
 
   useEffect(() => {
-    const img = imgRef.current;
     return () => {
       if (retryTimer.current) clearTimeout(retryTimer.current);
-      // Detaching an <img> doesn't reliably abort its in-flight request;
-      // clearing src does, which is what lets the backend release the camera.
-      if (img) img.src = "";
     };
+  }, []);
+
+  // Detaching an <img> doesn't reliably abort its in-flight request; clearing
+  // src does, which is what lets the backend release the camera. A callback
+  // ref (not a mount-effect cleanup) because `key={attempt}` remounts the
+  // <img> on every retry: a cleanup captured at mount clears the first,
+  // long-dead element and leaves the live stream's connection open after the
+  // tile is removed.
+  const attachImg = useCallback((node: HTMLImageElement | null) => {
+    if (node === null && imgRef.current) {
+      imgRef.current.src = "";
+    }
+    imgRef.current = node;
   }, []);
 
   const scheduleRetry = useCallback(() => {
@@ -92,10 +103,13 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
     // the status detail so the tile can say "recording is using the cameras"
     // instead of a generic failure. Best-effort: any probe error is itself
     // a reason ("server unreachable").
-    fetchWithHeaders(`${baseUrl}/camera-preview/${cameraIndex}${uniqueIdQuery}`, {
-      method: "GET",
-      headers: { Range: "bytes=0-0" },
-    })
+    fetchWithHeaders(
+      `${baseUrl}/api/v1/camera-preview/${cameraIndex}${uniqueIdQuery}`,
+      {
+        method: "GET",
+        headers: { Range: "bytes=0-0" },
+      }
+    )
       .then(async (r) => {
         if (r.ok) {
           // Endpoint is fine again — the stream just dropped; retry sooner.
@@ -130,11 +144,11 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
           className,
           "flex cursor-pointer flex-col items-center justify-center gap-1 bg-muted text-muted-foreground"
         )}
-        title="Click to retry now"
+        title={t("shared.camera.clickToRetry")}
       >
         <VideoOff className="h-5 w-5" />
         <span className="px-1 text-center text-[10px] leading-tight">
-          {reason ?? "Preview failed"}
+          {reason ?? t("shared.camera.previewFailed")}
         </span>
         <span className="flex items-center gap-1 text-[10px] text-muted-foreground/70">
           <RefreshCw className="h-3 w-3" /> retrying...
@@ -146,13 +160,13 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
   return (
     <img
       key={attempt}
-      ref={imgRef}
-      src={`${baseUrl}/camera-preview/${cameraIndex}?r=${attempt}${
+      ref={attachImg}
+      src={`${baseUrl}/api/v1/camera-preview/${cameraIndex}?r=${attempt}${
         uniqueId ? `&unique_id=${encodeURIComponent(uniqueId)}` : ""
       }`}
       onError={handleError}
       className={className}
-      alt="Server camera preview"
+      alt={t("shared.camera.previewAlt")}
     />
   );
 };

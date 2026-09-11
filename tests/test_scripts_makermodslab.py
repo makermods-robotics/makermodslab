@@ -11,11 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for makermodslab.scripts.makermodslab — covers `_wait_for_port` and
-`_ensure_path_symlinks`. The launcher's `_run_prod` / `_run_dev` / `main`
-functions are CLI/process glue (they call uvicorn.run, spawn npm, install
-SIGINT handlers) and have no unit-testable seam without rewriting them; they
-are left to manual smoke testing."""
+"""Tests for makermodslab.scripts.makermodslab — covers `_wait_for_port`,
+`_ensure_path_symlinks`, `_resolve_bind_host`, and `main`'s arg handling (with
+`_run_prod` stubbed out). The launcher's `_run_prod` / `_run_dev` bodies are
+CLI/process glue (they call uvicorn.run, spawn npm, install SIGINT handlers)
+and have no unit-testable seam without rewriting them; they are left to manual
+smoke testing."""
 
 from __future__ import annotations
 
@@ -83,6 +84,44 @@ def test_wait_for_port_returns_true_immediately_for_already_open_port(
         assert sleep_calls == []
     finally:
         server.close()
+
+
+def test_wait_for_port_probes_the_host_it_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: `--bind <iface>` pins livekit's `bind_addresses` to that one
+    interface, so probing loopback timed out on a healthy SFU and the launcher
+    killed it. The probe must go to the address the child actually bound."""
+    from makermodslab.scripts.makermodslab import _wait_for_port
+
+    probed: list[tuple[str, int]] = []
+
+    class _RecordingSocket:
+        def settimeout(self, _t): ...
+
+        def connect_ex(self, address):
+            probed.append(address)
+            return 0
+
+        def close(self): ...
+
+    monkeypatch.setattr(
+        "makermodslab.scripts.makermodslab.socket.socket",
+        lambda *_a, **_k: _RecordingSocket(),
+    )
+
+    assert _wait_for_port(7880, timeout=1, host="100.64.0.1") is True
+    assert probed == [("100.64.0.1", 7880)]
+
+
+def test_wait_for_port_defaults_to_loopback() -> None:
+    """The default host keeps the loopback behaviour every other call site
+    (dev-mode Vite and backend, both hardcoded to 127.0.0.1) relies on."""
+    import inspect
+
+    from makermodslab.scripts.makermodslab import _wait_for_port
+
+    assert inspect.signature(_wait_for_port).parameters["host"].default == "localhost"
 
 
 def _fake_entry_points(tmp_path):
@@ -261,6 +300,33 @@ def test_station_passes_extra_args_through(monkeypatch: pytest.MonkeyPatch) -> N
     assert captured["argv"] == ["makermodslab-station", "--lan", "--offline", "--dev"]
 
 
+def test_discover_tailscale_flag_sets_env_before_server_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--discover-tailscale` follows the MAKERMODSLAB_NO_UI precedent: the env
+    var must be in place before uvicorn imports makermodslab.server (where
+    nodes.register_sources_from_env reads it). OFF unless the flag is given."""
+    import os
+
+    from makermodslab.scripts import makermodslab as launcher
+
+    monkeypatch.setenv("MAKERMODSLAB_DISCOVER_TAILSCALE", "0")  # restored by monkeypatch
+    monkeypatch.delenv("MAKERMODSLAB_DISCOVER_TAILSCALE")
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
+    seen_at_run: dict[str, str | None] = {}
+
+    def fake_run_prod(**_kwargs) -> None:
+        seen_at_run["env"] = os.environ.get("MAKERMODSLAB_DISCOVER_TAILSCALE")
+
+    monkeypatch.setattr(launcher, "_run_prod", fake_run_prod)
+
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab"])
+    launcher.main()
+    assert seen_at_run["env"] is None  # off by default
+
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--discover-tailscale"])
+    launcher.main()
+    assert seen_at_run["env"] == "1"
+
+
 def test_entry_points_target_correct_functions() -> None:
     """`makermodslab` -> `main` (friendly default), `makermodslab-station` ->
     `station` (headless posture). The old `lelab*` / `makerlabs` / `makerlab*`
@@ -300,6 +366,153 @@ def test_ensure_path_symlinks_leaves_uv_tool_entry_untouched(tmp_path) -> None:
     assert (bin_dir / "makermodslab").resolve() != (source_dir / "makermodslab").resolve()
     # The other name, not uv-owned, is linked to the venv as usual.
     assert (bin_dir / "makermodslab-station").resolve() == (source_dir / "makermodslab-station").resolve()
+
+
+# --- --bind: literal address or interface name -------------------------------
+
+
+def _fake_if_addrs(monkeypatch: pytest.MonkeyPatch, addrs: dict) -> None:
+    import makermodslab.scripts.makermodslab as launcher
+
+    monkeypatch.setattr(launcher.psutil, "net_if_addrs", lambda: addrs)
+
+
+def _snic(family: int, address: str):
+    """A psutil snicaddr stand-in (only family/address are read)."""
+    return types.SimpleNamespace(family=family, address=address)
+
+
+def test_resolve_bind_host_passes_literal_ip_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A literal IP never consults the interface table."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    monkeypatch.setattr(
+        launcher.psutil, "net_if_addrs", lambda: pytest.fail("literal IPs must not hit psutil")
+    )
+    assert launcher._resolve_bind_host("192.168.1.10") == "192.168.1.10"
+    assert launcher._resolve_bind_host("100.64.0.7") == "100.64.0.7"
+    assert launcher._resolve_bind_host("::1") == "::1"
+
+
+def test_resolve_bind_host_resolves_interface_to_first_ipv4(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.scripts.makermodslab as launcher
+
+    _fake_if_addrs(
+        monkeypatch,
+        {
+            "lo0": [_snic(socket.AF_INET, "127.0.0.1")],
+            "tailscale0": [
+                _snic(socket.AF_INET6, "fd7a:115c:a1e0::7"),  # v6 first, like real tables
+                _snic(socket.AF_INET, "100.64.0.7"),
+                _snic(socket.AF_INET, "100.64.0.8"),  # aliases: first IPv4 wins
+            ],
+        },
+    )
+    assert launcher._resolve_bind_host("tailscale0") == "100.64.0.7"
+
+
+def test_resolve_bind_host_unknown_interface_fails_with_the_available_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import makermodslab.scripts.makermodslab as launcher
+
+    _fake_if_addrs(monkeypatch, {"lo0": [_snic(socket.AF_INET, "127.0.0.1")]})
+    with pytest.raises(ValueError, match="lo0"):
+        launcher._resolve_bind_host("tailscale0")
+
+
+def test_resolve_bind_host_interface_without_ipv4_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.scripts.makermodslab as launcher
+
+    _fake_if_addrs(monkeypatch, {"utun3": [_snic(socket.AF_INET6, "fd7a:115c:a1e0::7")]})
+    with pytest.raises(ValueError, match="no IPv4"):
+        launcher._resolve_bind_host("utun3")
+
+
+def _run_main(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> dict:
+    """Drive main() with `argv`, capturing the _run_prod call instead of
+    starting a server."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    captured: dict = {}
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
+    monkeypatch.setattr(launcher, "_run_prod", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", *argv])
+    launcher.main()
+    return captured
+
+
+def test_main_passes_resolved_bind_host_to_run_prod(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _run_main(monkeypatch, ["--bind", "100.64.0.7"])["host"] == "100.64.0.7"
+
+
+def test_main_without_bind_leaves_host_to_lan_or_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _run_main(monkeypatch, ["--lan"])
+    assert captured["host"] is None
+    assert captured["lan"] is True
+
+
+def test_bind_wins_over_lan_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.INFO):
+        captured = _run_main(monkeypatch, ["--lan", "--bind", "100.64.0.7"])
+    assert captured["host"] == "100.64.0.7"
+    assert "--bind" in caplog.text
+    assert "--lan" in caplog.text
+
+
+def test_bad_bind_fails_fast_before_anything_starts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import makermodslab.scripts.makermodslab as launcher
+
+    _fake_if_addrs(monkeypatch, {"lo0": [_snic(socket.AF_INET, "127.0.0.1")]})
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: pytest.fail("must fail before this"))
+    monkeypatch.setattr(launcher, "_run_prod", lambda **_kw: pytest.fail("must not start"))
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--bind", "no-such-if0"])
+
+    with pytest.raises(SystemExit), caplog.at_level(logging.ERROR):
+        launcher.main()
+    assert "no-such-if0" in caplog.text
+
+
+def test_bind_in_dev_mode_reaches_the_sfu_and_nothing_else(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`--bind` is not ignored in dev — it is NARROWED to the SFU.
+
+    Vite serves localhost only and uvicorn follows it, so the web halves stay
+    on loopback. The SFU is not a web server for this browser: a remote peer (a
+    Modal container) has to reach its SIGNALLING port, and a loopback bind is
+    what made a dev session LiveKit-Cloud-only.
+    """
+    import makermodslab.scripts.makermodslab as launcher
+
+    captured: dict = {}
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
+    monkeypatch.setattr(launcher, "_run_dev", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(launcher, "_resolve_bind_host", lambda value: value)
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--dev", "--bind", "100.64.0.7"])
+
+    with caplog.at_level(logging.WARNING):
+        launcher.main()
+    assert captured["sfu_host"] == "100.64.0.7"
+    assert "--bind applies to the SFU only in --dev mode" in caplog.text
+
+
+def test_dev_mode_without_bind_leaves_the_sfu_on_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default is unchanged: a dev session that never asked for a remote
+    peer must not start advertising itself on an interface."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    captured: dict = {}
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
+    monkeypatch.setattr(launcher, "_run_dev", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--dev"])
+
+    launcher.main()
+    assert captured["sfu_host"] == "127.0.0.1"
 
 
 # --- Shutdown reliability: --stop, port preflight, process-tree teardown -----
@@ -402,6 +615,63 @@ def test_stop_kills_orphaned_reload_worker_in_this_checkout(
     assert terminated == [300]
 
 
+def test_stop_kills_the_prod_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the long-standing sharp edge: prod mode runs uvicorn
+    IN-PROCESS, so its argv is `.../python3 .../bin/makermodslab --lan ...`
+    with no `makermodslab.server` substring anywhere — and `--stop` reported
+    its own server as a port stranger and refused to touch it (observed on two
+    real stations). The executed launcher script is now identity signal 3."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    shebang_form = _FakeProc(
+        500,
+        ["/Users/x/MakerLab/.venv/bin/python3", "./.venv/bin/makermodslab", "--lan", "--portal"],
+        listening=(8000,),
+    )
+    direct_form = _FakeProc(501, ["/Users/x/.local/bin/makermodslab-station", "--offline"])
+
+    monkeypatch.setattr(launcher.psutil, "process_iter", lambda attrs=None: [shebang_form, direct_form])
+    monkeypatch.setattr(launcher.os, "getpid", lambda: 999)
+    terminated: list[int] = []
+    monkeypatch.setattr(launcher, "_terminate_tree", lambda pid, timeout=5: terminated.append(pid))
+
+    launcher._run_stop()
+
+    assert sorted(terminated) == [500, 501]
+
+
+def test_prod_launcher_signal_never_matches_a_mere_mention(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The signal matches the EXECUTED script only. A process that just names
+    the launcher in an argument (an editor, a log tail) or in a longer
+    basename must stay a stranger — `--stop` kills identity matches whether or
+    not they hold a port, so a loose match here is a loose SIGTERM."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    editor = _FakeProc(600, ["vim", "makermodslab"], name="vim")
+    log_tail = _FakeProc(601, ["tail", "-f", "/Users/x/makermodslab.log"], name="tail")
+    lookalike = _FakeProc(602, ["python3", "makermodslab_helper.py"], name="python")
+    stranger_on_port = _FakeProc(603, ["node", "server.js"], name="node", listening=(8000,))
+
+    monkeypatch.setattr(
+        launcher.psutil,
+        "process_iter",
+        lambda attrs=None: [editor, log_tail, lookalike, stranger_on_port],
+    )
+    monkeypatch.setattr(launcher.os, "getpid", lambda: 999)
+    terminated: list[int] = []
+    monkeypatch.setattr(launcher, "_terminate_tree", lambda pid, timeout=5: terminated.append(pid))
+
+    with caplog.at_level(logging.INFO):
+        launcher._run_stop()
+
+    assert terminated == []
+
+
 def test_stop_reports_nothing_when_no_candidates(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -442,35 +712,263 @@ def test_ensure_port_available_passes_when_free(monkeypatch: pytest.MonkeyPatch)
     launcher._ensure_port_available("Backend", 8000)
 
 
-def test_terminate_tree_terminates_parent_and_children(
+class _TreeProc:
+    """A process tree stand-in that records what it was sent."""
+
+    def __init__(self, pid: int, log: list[tuple[str, int]], kids: list[int] | None = None) -> None:
+        self.pid = pid
+        self._log = log
+        self._kids = kids or []
+
+    def children(self, recursive: bool = False) -> list:
+        return [_TreeProc(k, self._log) for k in self._kids]
+
+    def terminate(self) -> None:
+        self._log.append(("terminate", self.pid))
+
+    def kill(self) -> None:
+        self._log.append(("kill", self.pid))
+
+
+def test_terminate_tree_gives_the_leader_its_grace_before_walking_the_tree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Tree teardown terminates the parent AND every descendant (so npm/vite
-    and uvicorn reload workers can't outlive the parent and hold the ports)."""
+    """The leader is signalled ALONE first, and a tree that goes quiet within
+    the grace is never walked.
+
+    That step exists for one grandchild: the `modal run` client under the
+    backend. It stops its Modal app only when its own parent's shutdown handler
+    SIGINTs it — a SIGTERM straight from here kills it first and leaves an A100
+    billing for minutes. A well-behaved leader takes its children with it, so
+    this also costs nothing when there is no GPU to stop.
+    """
     import makermodslab.scripts.makermodslab as launcher
 
-    terminated: list[int] = []
-    killed: list[int] = []
+    sent: list[tuple[str, int]] = []
+    waits: list[float] = []
 
-    class _TreeProc:
-        def __init__(self, pid: int, kids: list[int] | None = None) -> None:
-            self.pid = pid
-            self._kids = kids or []
+    def _wait(procs, timeout=None):
+        waits.append(timeout)
+        return (procs, [])  # everything exited within the grace
 
-        def children(self, recursive: bool = False) -> list:
-            return [_TreeProc(k) for k in self._kids]
-
-        def terminate(self) -> None:
-            terminated.append(self.pid)
-
-        def kill(self) -> None:  # pragma: no cover - alive list is empty here
-            killed.append(self.pid)
-
-    monkeypatch.setattr(launcher.psutil, "Process", lambda pid: _TreeProc(pid, kids=[2, 3]))
-    monkeypatch.setattr(launcher.psutil, "wait_procs", lambda procs, timeout=None: (procs, []))
+    monkeypatch.setattr(launcher.psutil, "Process", lambda pid: _TreeProc(pid, sent, kids=[2, 3]))
+    monkeypatch.setattr(launcher.psutil, "wait_procs", _wait)
 
     launcher._terminate_tree(1)
 
-    # Parent (1) plus both children (2, 3) all get terminate(); nothing killed.
-    assert sorted(terminated) == [1, 2, 3]
-    assert killed == []
+    assert sent == [("terminate", 1)]
+    assert waits == [launcher._LEADER_GRACE_S]
+
+
+def test_terminate_tree_still_walks_the_tree_when_the_grace_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The grace is a courtesy, never a licence to leak: a descendant that
+    outlived its parent still gets terminate → wait → kill, so nothing keeps
+    holding :8000/:8080."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    sent: list[tuple[str, int]] = []
+    survivors: list[_TreeProc] = []
+
+    def _wait(procs, timeout=None):
+        if timeout == launcher._LEADER_GRACE_S:
+            return ([], procs)  # nothing exited on the leader's signal alone
+        return ([], survivors)
+
+    monkeypatch.setattr(launcher.psutil, "Process", lambda pid: _TreeProc(pid, sent, kids=[2, 3]))
+    monkeypatch.setattr(launcher.psutil, "wait_procs", _wait)
+    launcher._terminate_tree(1)
+
+    # The leader once for its grace, then the whole snapshot — parent included.
+    assert sent == [("terminate", 1), ("terminate", 2), ("terminate", 3), ("terminate", 1)]
+
+    sent.clear()
+    survivors.append(_TreeProc(3, sent))
+    launcher._terminate_tree(1)
+    assert ("kill", 3) in sent
+
+
+def test_terminate_tree_with_no_grace_signals_everything_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`grace=0` is the old behaviour, kept for `npm run dev`: npm routinely
+    leaves vite behind rather than taking it down, so waiting on that tree
+    would add the whole grace to every Ctrl-C and change nothing."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    sent: list[tuple[str, int]] = []
+    monkeypatch.setattr(launcher.psutil, "Process", lambda pid: _TreeProc(pid, sent, kids=[2, 3]))
+    monkeypatch.setattr(launcher.psutil, "wait_procs", lambda procs, timeout=None: (procs, []))
+
+    launcher._terminate_tree(1, grace=0.0)
+
+    # The leader's own signal and the tree walk are back to back, with no wait
+    # between them (the leader is signalled twice; SIGTERM is idempotent).
+    assert {pid for _op, pid in sent} == {1, 2, 3}
+    assert all(op == "terminate" for op, _pid in sent)
+
+
+# --- --sfu: fail-fast binary check, handoff to the run functions, --stop identity
+
+
+def test_sfu_flag_without_binary_exits_before_anything_starts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No livekit-server on PATH: a one-line exit with the per-OS install hint,
+    BEFORE the PATH self-link or any server start — never a half-started
+    stack."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    calls: list[str] = []
+    monkeypatch.setattr(launcher.sfu, "find_livekit_server", lambda *a, **k: None)
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: calls.append("symlinks"))
+    monkeypatch.setattr(launcher, "_run_prod", lambda **kwargs: calls.append("run_prod"))
+    monkeypatch.setattr(launcher.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--sfu"])
+
+    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as exc:
+        launcher.main()
+
+    assert exc.value.code == 1
+    assert calls == []
+    assert "livekit-server" in caplog.text
+    assert "brew install livekit" in caplog.text
+
+
+def test_sfu_flag_hands_the_binary_to_run_prod_and_run_dev(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.scripts.makermodslab as launcher
+
+    monkeypatch.setattr(
+        launcher.sfu, "find_livekit_server", lambda *a, **k: "/opt/homebrew/bin/livekit-server"
+    )
+    assert _run_main(monkeypatch, ["--sfu"])["sfu_bin"] == "/opt/homebrew/bin/livekit-server"
+    assert _run_main(monkeypatch, [])["sfu_bin"] is None
+
+    captured: dict = {}
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
+    monkeypatch.setattr(launcher, "_run_dev", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--dev", "--sfu"])
+    launcher.main()
+    assert captured["sfu_bin"] == "/opt/homebrew/bin/livekit-server"
+
+
+def test_identity_reason_recognises_our_sfu_child_but_not_a_foreign_livekit() -> None:
+    """`--stop` must reap the livekit-server WE spawned (pointed at our
+    generated config) and leave a user's own livekit-server alone."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    ours = _FakeProc(300, ["/opt/homebrew/bin/livekit-server", "--config", launcher.LIVEKIT_CONFIG_FILE])
+    foreign = _FakeProc(301, ["livekit-server", "--config", "/etc/livekit/livekit.yaml"])
+    assert launcher._identity_reason(" ".join(ours.info["cmdline"]), ours) == "livekit-server (--sfu)"
+    assert launcher._identity_reason(" ".join(foreign.info["cmdline"]), foreign) is None
+
+
+def test_host_flag_requires_the_sfu_and_exports_the_robot(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    """`--host ROBOT` is station mode: it needs the SFU (--sfu or an external
+    MAKERMODSLAB_SFU_URL) and hands the robot name to the app through the
+    environment before the server import."""
+    import os
+
+    import makermodslab.scripts.makermodslab as launcher
+
+    monkeypatch.delenv("MAKERMODSLAB_HOST_ROBOT", raising=False)
+    monkeypatch.delenv(launcher.sfu.ENV_URL, raising=False)
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
+    monkeypatch.setattr(
+        launcher.sfu, "find_livekit_server", lambda *a, **k: "/opt/homebrew/bin/livekit-server"
+    )
+    seen: dict = {}
+    monkeypatch.setattr(
+        launcher,
+        "_run_prod",
+        lambda **kwargs: seen.update(kwargs, robot=os.environ.get("MAKERMODSLAB_HOST_ROBOT")),
+    )
+
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--host", "arm1"])
+    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit):
+        launcher.main()
+    assert "--sfu" in caplog.text
+
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--sfu", "--host", "arm1"])
+    launcher.main()
+    assert seen["robot"] == "arm1"
+    assert seen["sfu_bin"] == "/opt/homebrew/bin/livekit-server"
+    assert os.environ.get("MAKERMODSLAB_STATION") == "1"
+
+    # A bare --host is station mode with the robot chosen later (remembered,
+    # auto-picked, or from the station's UI): the posture is set, the name empty.
+    monkeypatch.delenv("MAKERMODSLAB_STATION", raising=False)
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--sfu", "--host"])
+    launcher.main()
+    assert seen["robot"] == ""
+    assert os.environ.get("MAKERMODSLAB_STATION") == "1"
+
+
+# --- _frontend_deps_current ---------------------------------------------------
+#
+# `--dev` used to run a bare `npm install` on every start. With a complete
+# node_modules that is two registry round trips (audit + fund) that install
+# nothing — and the audit POST hung a start for minutes on 2026-09-03. The
+# skip is keyed on npm's own end-of-install marker.
+
+
+def _frontend_tree(tmp_path, *, marker: bool = True):
+    import os
+
+    frontend = tmp_path / "frontend"
+    (frontend / "node_modules").mkdir(parents=True)
+    (frontend / "package.json").write_text("{}")
+    (frontend / "package-lock.json").write_text("{}")
+    if marker:
+        (frontend / "node_modules" / ".package-lock.json").write_text("{}")
+    # Pin every mtime explicitly so the assertions do not depend on how fast
+    # the filesystem wrote the three files.
+    base = 1_700_000_000
+    for name, t in (
+        ("package.json", base),
+        ("package-lock.json", base),
+        ("node_modules/.package-lock.json", base + 10),
+    ):
+        p = frontend / name
+        if p.exists():
+            os.utime(p, (t, t))
+    return frontend
+
+
+def test_frontend_deps_current_when_marker_is_newer_than_both_manifests(tmp_path) -> None:
+    from makermodslab.scripts.makermodslab import _frontend_deps_current
+
+    assert _frontend_deps_current(_frontend_tree(tmp_path)) is True
+
+
+def test_frontend_deps_stale_without_npm_marker(tmp_path) -> None:
+    # Fresh clone, deleted node_modules, or an install that died midway.
+    from makermodslab.scripts.makermodslab import _frontend_deps_current
+
+    assert _frontend_deps_current(_frontend_tree(tmp_path, marker=False)) is False
+
+
+@pytest.mark.parametrize("touched", ["package.json", "package-lock.json"])
+def test_frontend_deps_stale_when_a_manifest_is_touched_after_install(tmp_path, touched) -> None:
+    import os
+
+    from makermodslab.scripts.makermodslab import _frontend_deps_current
+
+    frontend = _frontend_tree(tmp_path)
+    later = 1_700_000_000 + 20
+    os.utime(frontend / touched, (later, later))
+    assert _frontend_deps_current(frontend) is False
+
+
+def test_frontend_deps_stale_when_frontend_dir_is_missing(tmp_path) -> None:
+    from makermodslab.scripts.makermodslab import _frontend_deps_current
+
+    assert _frontend_deps_current(tmp_path / "nowhere") is False
+
+
+def test_npm_install_skips_audit_and_fund() -> None:
+    from makermodslab.scripts.makermodslab import NPM_INSTALL_ARGS
+
+    assert NPM_INSTALL_ARGS[:2] == ("npm", "install")
+    assert {"--no-audit", "--no-fund", "--prefer-offline"} <= set(NPM_INSTALL_ARGS)

@@ -1,4 +1,5 @@
 import React from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -7,9 +8,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { cn } from "@/lib/utils";
-import { ConfigComponentProps, RESUME_INHERITED_SHORT } from "../types";
+import { useNodes } from "@/hooks/useNodes";
+import { listableNodes, nodeDisplayName } from "@/lib/nodesApi";
+import { ConfigComponentProps, RESUME_INHERITED_SHORT_KEY } from "../types";
 import { RunnerFlavor } from "@/lib/jobsApi";
+import ComputeSelector from "./ComputeSelector";
+import NodeDetailPanel from "./NodeDetailPanel";
 
 interface TargetCardProps extends ConfigComponentProps {
   authenticated: boolean;
@@ -17,6 +21,8 @@ interface TargetCardProps extends ConfigComponentProps {
   loading: boolean;
 }
 
+// Currency and number formatting are deliberately NOT locale-aware: HF Jobs
+// prices are quoted in USD, and the figure is the vendor's, not ours.
 const formatHourly = (unitCostUsd: number, unitLabel: string): string => {
   const hourly = unitLabel === "minute" ? unitCostUsd * 60 : unitCostUsd;
   return `$${hourly.toFixed(2)}/hr`;
@@ -35,15 +41,15 @@ const formatFlavorLine = (f: RunnerFlavor): string => {
   return `${f.pretty_name} · ${accel} · ${formatHourly(f.unit_cost_usd, f.unit_label)}`;
 };
 
-/** Where the run executes — the runner toggle plus whichever hardware control
- * that runner needs. Flat: the controls carry their own <Label>s and there is
- * no "Compute target" eyebrow above them, which used to restate the "Run
- * training on" label directly beneath it.
+/** Where the run executes — the Compute radio-row list (ComputeSelector: this
+ * machine / HF Cloud / registered LAN nodes) plus whichever contextual control
+ * the chosen runner needs: the Device picker for local, the Hardware picker
+ * for the cloud, the node detail panel (identity + live workload) for a node.
  *
  * Both the runner and the hardware are genuinely chosen per launch, including
  * on a resume: a continuation may cross runners in either direction (F7 — the
  * parent's checkpoint is fetched from the Hub for a cloud→local one, and
- * uploaded to it for a local→cloud one), so the toggle stays live and merely
+ * uploaded to it for a local→cloud one), so the selector stays live and merely
  * DEFAULTS to the parent's runner. `policy_device` is still locked on a resume,
  * for an unrelated reason: the resume branch emits no --policy.device, so
  * lerobot uses whatever the checkpoint's train_config.json recorded. */
@@ -55,50 +61,76 @@ const TargetCard: React.FC<TargetCardProps> = ({
   loading,
   resumeLocked,
 }) => {
+  const { t } = useTranslation();
   const target = config.target;
+  const {
+    nodes,
+    sources: nodeSources,
+    loading: nodesLoading,
+    refresh: refreshNodes,
+    forceRefresh: forceRefreshNodes,
+  } = useNodes();
+  // Manual refresh: a FORCED registry pass (the server probes everything now,
+  // TTL notwithstanding) plus a token bump so NodeDetailPanel refetches the
+  // workload in the same gesture.
+  const [nodesRefreshToken, setNodesRefreshToken] = React.useState(0);
+  const refreshNodesAndWorkload = React.useCallback(() => {
+    forceRefreshNodes();
+    setNodesRefreshToken((v) => v + 1);
+  }, [forceRefreshNodes]);
 
-  const setRunner = (runner: "local" | "hf_cloud") => {
-    if (runner === target.runner) return;
-    if (runner === "local") {
-      updateConfig("target", { runner: "local" });
-    } else {
-      // Preserve any previously-chosen flavor (may be undefined until picked).
-      updateConfig("target", { runner: "hf_cloud", flavor: target.flavor });
-    }
-  };
+  const selectedNode =
+    target.runner === "lan_node" && target.node_instance_id
+      ? (listableNodes(nodes).find(
+          (n) => n.instance_id === target.node_instance_id,
+        ) ?? null)
+      : null;
+
+  // The live "Run on: X" summary in the section header. The node's name is
+  // data; a vanished node degrades to its short instance id.
+  const runOnName =
+    target.runner === "local"
+      ? t("training.target.thisMachine")
+      : target.runner === "hf_cloud"
+        ? t("training.target.runnerCloud")
+        : selectedNode
+          ? nodeDisplayName(selectedNode)
+          : (target.node_instance_id?.slice(0, 8) ?? "?");
 
   return (
     <section className="space-y-4">
       <div className="space-y-2">
-        <Label>Compute</Label>
-        <div className="grid grid-cols-2 overflow-hidden rounded-md border border-border text-sm">
-          {(["local", "hf_cloud"] as const).map((r) => (
-            <button
-              key={r}
-              type="button"
-              onClick={() => setRunner(r)}
-              className={cn(
-                "px-3 py-1.5 transition-colors",
-                target.runner === r
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-background text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {r === "local" ? "Local — your machine" : "Hugging Face Cloud"}
-            </button>
-          ))}
+        <div className="flex items-baseline justify-between gap-2">
+          <Label>{t("training.target.computeLabel")}</Label>
+          <span className="text-xs text-muted-foreground">
+            <Trans
+              i18nKey="training.target.runOn"
+              values={{ name: runOnName }}
+              components={[
+                <strong key="0" className="font-semibold text-foreground" />,
+              ]}
+            />
+          </span>
         </div>
-        {resumeLocked ? (
-          <p className="text-xs text-muted-foreground">
-            Defaults to the runner this run started on — switch it to continue
-            somewhere else.
-          </p>
-        ) : null}
+        <ComputeSelector
+          target={target}
+          nodes={nodes}
+          sources={nodeSources}
+          nodesLoading={nodesLoading}
+          onSelect={(next) => updateConfig("target", next)}
+          onNodeAdded={() => void refreshNodes()}
+          onRefresh={refreshNodesAndWorkload}
+        />
+        <p className="text-xs text-muted-foreground">
+          {resumeLocked
+            ? t("training.target.resumeRunnerHint")
+            : t("training.target.selectorHint")}
+        </p>
       </div>
 
       {target.runner === "local" ? (
         <div className="space-y-2">
-          <Label htmlFor="policy_device">Device</Label>
+          <Label htmlFor="policy_device">{t("training.target.deviceLabel")}</Label>
           <Select
             value={config.policy_device === "cpu" ? "cpu" : "auto"}
             onValueChange={(value) => updateConfig("policy_device", value)}
@@ -108,21 +140,22 @@ const TargetCard: React.FC<TargetCardProps> = ({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              {/* Values are wire settings; only the labels are copy. */}
               <SelectItem value="auto">
-                Automatic (use GPU if available)
+                {t("training.target.deviceAuto")}
               </SelectItem>
-              <SelectItem value="cpu">CPU</SelectItem>
+              <SelectItem value="cpu">{t("training.target.deviceCpu")}</SelectItem>
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground">
             {resumeLocked
-              ? RESUME_INHERITED_SHORT
-              : "lerobot auto-detects your GPU (CUDA/MPS); only CPU is forced."}
+              ? t(RESUME_INHERITED_SHORT_KEY)
+              : t("training.target.deviceHint")}
           </p>
         </div>
-      ) : (
+      ) : target.runner === "hf_cloud" ? (
         <div className="space-y-2">
-          <Label>Hardware</Label>
+          <Label>{t("training.target.hardwareLabel")}</Label>
           <Select
             value={target.flavor ?? ""}
             onValueChange={(flavor) =>
@@ -131,7 +164,11 @@ const TargetCard: React.FC<TargetCardProps> = ({
           >
             <SelectTrigger>
               <SelectValue
-                placeholder={loading ? "Loading…" : "Select hardware"}
+                placeholder={
+                  loading
+                    ? t("training.target.hardwareLoading")
+                    : t("training.target.hardwarePlaceholder")
+                }
               />
             </SelectTrigger>
             <SelectContent>
@@ -144,7 +181,7 @@ const TargetCard: React.FC<TargetCardProps> = ({
                   {formatFlavorLine(f)}
                   {!authenticated && (
                     <span className="text-warn ml-2 text-xs">
-                      log in to HF
+                      {t("training.target.loginToHf")}
                     </span>
                   )}
                 </SelectItem>
@@ -152,11 +189,16 @@ const TargetCard: React.FC<TargetCardProps> = ({
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground">
-            Cost shown is per running hour. Final policy uploads to your HF
-            account when training completes.
+            {t("training.target.costHint")}
           </p>
         </div>
-      )}
+      ) : target.node_instance_id ? (
+        <NodeDetailPanel
+          node={selectedNode}
+          instanceId={target.node_instance_id}
+          refreshToken={nodesRefreshToken}
+        />
+      ) : null}
     </section>
   );
 };
