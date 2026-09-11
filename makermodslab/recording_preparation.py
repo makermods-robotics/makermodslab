@@ -35,7 +35,6 @@ from pathlib import Path
 
 import av
 import numpy as np
-from PIL import Image
 
 from lerobot.datasets.video_utils import StreamingVideoEncoder, _CameraEncoderThread, quantize_depth
 
@@ -96,7 +95,7 @@ class _PreparedCameraEncoder(_CameraEncoderThread):
                 if image_dimensions(frame_data) != self.dimensions:
                     raise ValueError("Camera dimensions changed after episode preparation")
                 if not self.is_depth:
-                    video_frame = av.VideoFrame.from_image(Image.fromarray(frame_data))
+                    video_frame = av.VideoFrame.from_ndarray(frame_data, format="rgb24")
                 else:
                     video_frame = quantize_depth(
                         frame_data,

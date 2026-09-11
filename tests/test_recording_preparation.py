@@ -15,10 +15,12 @@
 
 import queue
 import threading
+from fractions import Fraction
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from makermodslab import recording_preparation as prep
 
@@ -111,16 +113,17 @@ def test_invalid_shape_creates_no_artifact(encoder, tmp_path):
     assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize("depth", [False, True])
-def test_worker_opens_actual_context_before_dequeue_without_dummy_frames(monkeypatch, tmp_path, depth):
-    # Run the worker body synchronously with fake PyAV; no service or thread.
+@pytest.mark.parametrize("layout", ["hwc", "chw", "strided", "float_hwc", "float_chw", "depth"])
+def test_worker_opens_actual_context_before_dequeue_without_dummy_frames(monkeypatch, tmp_path, layout):
+    # Real RGB PyAV conversion with a fake output stream; no encoding or thread.
+    depth = layout == "depth"
     events = []
     encoded = []
     stream = SimpleNamespace(codec_context=SimpleNamespace(open=lambda: events.append("codec_open")))
 
     def encode(frame=None):
         if frame is not None:
-            encoded.append((frame.pts, frame.time_base))
+            encoded.append(frame)
         return []
 
     stream.encode = encode
@@ -131,7 +134,11 @@ def test_worker_opens_actual_context_before_dequeue_without_dummy_frames(monkeyp
         mux=lambda _: None,
     )
     monkeypatch.setattr(prep.av, "open", lambda *a, **k: container)
-    monkeypatch.setattr(prep.av, "VideoFrame", SimpleNamespace(from_image=lambda _: SimpleNamespace()))
+
+    def reject_pil(*args, **kwargs):
+        raise AssertionError("RGB encoding must not round-trip through PIL")
+
+    monkeypatch.setattr(Image, "fromarray", reject_pil)
     monkeypatch.setattr(prep, "quantize_depth", lambda *a, **k: SimpleNamespace())
     config = SimpleNamespace(vcodec="fake", pix_fmt="fake", get_codec_options=lambda *a, **k: {})
     if depth:
@@ -142,9 +149,23 @@ def test_worker_opens_actual_context_before_dequeue_without_dummy_frames(monkeyp
         config.pix_fmt = "fake"
         config.get_codec_options = lambda *a, **k: {}
     q = queue.Queue()
-    shape = (8, 10) if depth else (8, 10, 3)
-    q.put(np.zeros(shape, np.uint16 if depth else np.uint8))
-    q.put(np.ones(shape, np.uint16 if depth else np.uint8))
+    expected = []
+    for offset in (0, 19):
+        rgb = (np.arange(8 * 10 * 3).reshape(8, 10, 3) + offset).astype(np.uint8)
+        expected.append(rgb)
+        frame = rgb
+        if layout.startswith("float"):
+            frame = rgb.astype(np.float32) / 255
+        if layout.endswith("chw"):
+            frame = frame.transpose(2, 0, 1)
+        elif layout == "strided":
+            backing = np.zeros((8, 20, 3), dtype=np.uint8)
+            backing[:, ::2] = rgb
+            frame = backing[:, ::2]
+            assert not frame.flags.c_contiguous
+        elif depth:
+            frame = np.full((8, 10), offset, np.uint16)
+        q.put(frame)
     q.put(None)
     original_get = q.get
 
@@ -166,8 +187,12 @@ def test_worker_opens_actual_context_before_dequeue_without_dummy_frames(monkeyp
     worker.run()
     assert worker.preparation_error is None
     assert events[:3] == ["codec_open", "header", "dequeue"]
-    assert [pts for pts, _ in encoded] == [0, 1]
-    assert all(float(tb) == 1 / 30 for _, tb in encoded)
+    assert [frame.pts for frame in encoded] == [0, 1]
+    assert all(frame.time_base == Fraction(1, 30) for frame in encoded)
+    if not depth:
+        for frame, rgb in zip(encoded, expected, strict=True):
+            assert frame.format.name == "rgb24"
+            np.testing.assert_array_equal(frame.to_ndarray(format="rgb24"), rgb)
     status, stats = result.get_nowait()
     assert status == "ok"
     assert stats["count"].item() == 160  # Exactly two real 8x10 frames.

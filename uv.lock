@@ -1131,7 +1131,7 @@ wheels = [
 [[package]]
 name = "lerobot"
 version = "0.6.2"
-source = { git = "https://github.com/makermods-robotics/lerobot.git?rev=5ce2fe41a63647c20b2ab6e84bcb4cc7295a9b21#5ce2fe41a63647c20b2ab6e84bcb4cc7295a9b21" }
+source = { git = "https://github.com/Mokuroh54/lerobot.git?rev=f33ec84bc075eae153f9b1dff0ee74076e752dbd#f33ec84bc075eae153f9b1dff0ee74076e752dbd" }
 dependencies = [
     { name = "cmake" },
     { name = "draccus" },
@@ -1313,8 +1313,8 @@ test = [
 requires-dist = [
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.12" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27" },
-    { name = "lerobot", extras = ["core-scripts", "feetech", "training", "maker", "damiao", "rebot"], git = "https://github.com/makermods-robotics/lerobot.git?rev=5ce2fe41a63647c20b2ab6e84bcb4cc7295a9b21" },
-    { name = "lerobot", extras = ["pin-dep"], marker = "extra == 'metal-leader'", git = "https://github.com/makermods-robotics/lerobot.git?rev=5ce2fe41a63647c20b2ab6e84bcb4cc7295a9b21" },
+    { name = "lerobot", extras = ["core-scripts", "feetech", "training", "maker", "damiao", "rebot"], git = "https://github.com/Mokuroh54/lerobot.git?rev=f33ec84bc075eae153f9b1dff0ee74076e752dbd" },
+    { name = "lerobot", extras = ["pin-dep"], marker = "extra == 'metal-leader'", git = "https://github.com/Mokuroh54/lerobot.git?rev=f33ec84bc075eae153f9b1dff0ee74076e752dbd" },
     { name = "lerobot-robot-livekit", marker = "extra == 'remote'", specifier = "==0.2.4" },
     { name = "lerobot-teleoperator-livekit", marker = "extra == 'remote'", specifier = "==0.2.4" },
     { name = "livekit-api", specifier = ">=1.0" },
