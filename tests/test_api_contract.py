@@ -324,6 +324,10 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # run is launched with. Read/replace only — never deletes an episode.
         "GET /api/v1/datasets/excluded-episodes",
         "PUT /api/v1/datasets/excluded-episodes",
+        # Episode/whole-dataset deletion from the dataset viewer and the
+        # post-recording Finalize review. No trash/undo; no flat mirror — born
+        # after the flat surface was frozen.
+        "POST /api/v1/datasets/episode-delete",
         # Remote inference (DRTC): read-only status + transport, plus the one
         # mutation that clears the local-SFU override. Start/stop ride
         # POST /api/v1/sessions and /sessions/{id}/stop — no new verbs. No flat

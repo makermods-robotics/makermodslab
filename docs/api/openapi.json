@@ -1462,6 +1462,46 @@
         "title": "EndedSessionInfo",
         "type": "object"
       },
+      "EpisodeDeleteBody": {
+        "properties": {
+          "dataset_repo_id": {
+            "title": "Dataset Repo Id",
+            "type": "string"
+          },
+          "episode_indices": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Episode Indices",
+            "type": "array"
+          }
+        },
+        "required": [
+          "dataset_repo_id",
+          "episode_indices"
+        ],
+        "title": "EpisodeDeleteBody",
+        "type": "object"
+      },
+      "EpisodeDeleteResponse": {
+        "description": "server.py datasets_episode_delete: {\"success\": True,\n**delete_local_episodes()}. `whole_dataset_deleted` is True when every\nremaining episode was selected — there's nothing left to keep, so the\nwhole directory was removed instead of rewritten (see\ndelete_local_episodes).",
+        "properties": {
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          },
+          "whole_dataset_deleted": {
+            "title": "Whole Dataset Deleted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "whole_dataset_deleted"
+        ],
+        "title": "EpisodeDeleteResponse",
+        "type": "object"
+      },
       "EpisodeJointSeriesResponse": {
         "description": "datasets.py get_episode_joint_series — per-frame timestamps + one\nobservation.state vector per frame.",
         "properties": {
@@ -9105,6 +9145,48 @@
           }
         },
         "summary": "Datasets Download Status",
+        "tags": [
+          "datasets"
+        ]
+      }
+    },
+    "/api/v1/datasets/episode-delete": {
+      "post": {
+        "description": "Permanently delete one or more episodes from a local dataset (no\ntrash/undo — see delete_local_episodes). Deleting every remaining episode\nremoves the whole dataset instead (`whole_dataset_deleted: true`), since\nlerobot refuses to produce a zero-episode dataset. Refuses (409) if the\ndataset is being recorded, merged, uploaded, or trained on locally.",
+        "operationId": "datasets_episode_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EpisodeDeleteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EpisodeDeleteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Episode Delete",
         "tags": [
           "datasets"
         ]

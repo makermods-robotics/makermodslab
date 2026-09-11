@@ -51,6 +51,7 @@ __all__ = [
     "DeleteDatasetResponse",
     "DownloadStartResponse",
     "DownloadStatusResponse",
+    "EpisodeDeleteResponse",
     "EpisodeJointSeriesResponse",
     "EpisodeSummary",
     "ExcludedEpisodesResponse",
@@ -305,3 +306,14 @@ class DeleteDatasetResponse(BaseModel):
 
     success: bool
     message: str
+
+
+class EpisodeDeleteResponse(BaseModel):
+    """server.py datasets_episode_delete: {"success": True,
+    **delete_local_episodes()}. `whole_dataset_deleted` is True when every
+    remaining episode was selected — there's nothing left to keep, so the
+    whole directory was removed instead of rewritten (see
+    delete_local_episodes)."""
+
+    success: bool
+    whole_dataset_deleted: bool
