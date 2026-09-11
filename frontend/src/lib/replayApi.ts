@@ -455,6 +455,27 @@ export async function deleteDataset(
   });
 }
 
+/**
+ * Permanently delete one or more episodes from a local dataset (no
+ * trash/undo). Deleting every remaining episode removes the whole dataset
+ * instead — `whole_dataset_deleted` tells the caller which happened, since
+ * lerobot refuses to produce a zero-episode dataset. Throws ApiError on a
+ * rejected delete (busy, out-of-range index), with the backend's message in
+ * `.detail`.
+ */
+export async function deleteEpisodes(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  episodeIndices: number[],
+): Promise<{ success: boolean; whole_dataset_deleted: boolean }> {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/episode-delete", {
+    method: "POST",
+    body: { dataset_repo_id: repoId, episode_indices: episodeIndices },
+    action: "Delete episodes",
+  });
+}
+
 /** What happened to the dataset's Hub copy during a rename: "renamed" — the
  * Hub copy was moved to match; "none" — the Hub was reachable and confirmed
  * it has no copy; "skipped" — the Hub step didn't run (offline, logged out,

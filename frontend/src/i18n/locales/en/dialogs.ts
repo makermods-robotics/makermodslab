@@ -65,6 +65,27 @@ export default {
     curateSaveFailedBody: "Your changes weren't saved — try again.",
     // title on the disabled Train button while curation is still open.
     finishCuratingFirst: "Finish selecting episodes first",
+    // Per-episode delete (permanent — no trash/undo). Icon-only row action,
+    // hidden while curating or finalizing (see finalize.* below).
+    deleteEpisodeAria: "Delete episode {{index}}",
+    deleteEpisodeTitle: "Delete episode {{index}}?",
+    deleteEpisodeDescription:
+      "This permanently removes this episode from the dataset. You can't undo this.",
+    deleteEpisodeConfirm: "Delete episode",
+    deleteEpisodeFailedTitle: "Couldn't delete episode",
+    deleteEpisodeFailedBody: "Nothing was changed — try again.",
+    deleteDatasetFailedTitle: "Couldn't delete dataset",
+    deleteDatasetFailedBody: "Nothing was changed — try again.",
+    // Post-recording Finalize review (CollectPanel opens the viewer in this
+    // mode right after a session ends, clean finish or error alike). Every
+    // episode starts checked (kept); unchecking one marks it for deletion
+    // when Finalize is clicked — nothing is deleted until then.
+    finalizeDescription:
+      "Review your recording — uncheck any episodes you don't want to keep, then finalize.",
+    finalize: "Finalize",
+    keepEpisodeAria: "Keep episode {{index}}",
+    finalizeFailedTitle: "Couldn't finalize the recording",
+    finalizeFailedBody: "Nothing was uploaded — try again.",
   },
 
   jointChart: {

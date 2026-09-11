@@ -14,6 +14,7 @@ import {
   Play,
   SkipBack,
   SkipForward,
+  Trash2,
   VideoOff,
 } from "lucide-react";
 import {
@@ -22,6 +23,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useStudio } from "@/contexts/StudioContext";
@@ -32,12 +43,16 @@ import { useLanguage } from "@/contexts/LanguageContext";
 import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
 import { lastFramePosition, previewPosition } from "@/lib/episodePreview";
+import { resolveDeleteAction } from "@/lib/deleteSemantics";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import JointPositionChart from "@/components/dialogs/JointPositionChart";
 import EpisodeReplayPanel from "@/components/dialogs/EpisodeReplayPanel";
 import {
+  DatasetItem,
   EpisodeJointSeries,
   EpisodeSummary,
+  deleteDataset,
+  deleteEpisodes,
   episodeVideoUrl,
   getDatasetInfo,
   getEpisodeJoints,
@@ -53,6 +68,30 @@ export interface DatasetDetailDialogProps {
   /** Called when an action navigates to the studio, so a parent surface that
    * would otherwise cover the studio (e.g. the library sheet) can close too. */
   onStudioAction?: () => void;
+  /** Called when the whole dataset is removed from local disk (the info
+   * card's delete action, or a Finalize review that deletes every remaining
+   * episode) so a parent list (LibrarySheet, CollectPanel) can refresh. */
+  onDeleted?: () => void;
+  /** The listing row for this dataset, when the caller already has one
+   * (LibrarySheet, DatasetPicker). Enables the whole-dataset delete
+   * affordance on the info card (resolveDeleteAction needs `source` to know
+   * whether that's a destructive local delete or just removing a local
+   * copy) — omitted, the affordance stays hidden, same as before. */
+  item?: DatasetItem;
+  /** Post-recording review mode (set by CollectPanel right after a session
+   * ends, clean finish or error alike). While set: the dialog can't be
+   * dismissed by ESC / outside-click / close button, every episode tile shows
+   * a keep/discard checkbox (all checked by default), and the footer shows
+   * Finalize instead of Train. Clicking Finalize permanently deletes every
+   * UNCHECKED episode, then calls `onFinalize` — or, if every episode was
+   * unchecked, deletes the whole dataset and calls `onDiscarded` instead
+   * (there is nothing left to finalize). The training-curation toggle and the
+   * info card's own delete affordance are hidden while this is set — both
+   * would be redundant with (or conflict with) the checkboxes here. */
+  finalize?: {
+    onFinalize: () => void;
+    onDiscarded: () => void;
+  };
 }
 
 // Best (cols, tileW, tileH) for `n` tiles inside a box of `boxW` x `boxH`:
@@ -572,6 +611,9 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   open,
   onOpenChange,
   onStudioAction,
+  onDeleted,
+  item,
+  finalize,
 }) => {
   const { t } = useTranslation();
   const { language } = useLanguage();
@@ -630,6 +672,25 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   const [draftExcluded, setDraftExcluded] = useState<Set<number>>(new Set());
   const [savingSelection, setSavingSelection] = useState(false);
 
+  // Finalize review (see the `finalize` prop doc): which episodes to KEEP,
+  // separate from `excludedEpisodes`/`draftExcluded` above — those persist a
+  // training-time exclusion list and never delete anything, while this drives
+  // an actual permanent delete when Finalize is clicked. The two modes are
+  // mutually exclusive (the curation toggle is hidden while `finalize` is
+  // set), so they never observe or edit each other's state.
+  const [finalizeKeep, setFinalizeKeep] = useState<Set<number>>(new Set());
+  const [finalizing, setFinalizing] = useState(false);
+
+  // Per-episode delete (permanent, no trash) — the pending index awaiting
+  // confirmation, and whether the confirmed delete request is in flight.
+  const [episodeDeleteTarget, setEpisodeDeleteTarget] = useState<number | null>(null);
+  const [deletingEpisode, setDeletingEpisode] = useState(false);
+
+  // Whole-dataset delete via the info card (permanent, local-only — see
+  // deleteDataset). Only offered when the caller passed `item`.
+  const [datasetDeleteConfirm, setDatasetDeleteConfirm] = useState(false);
+  const [deletingDataset, setDeletingDataset] = useState(false);
+
   useEffect(() => {
     if (!repoId || !open) return;
     const controller = new AbortController();
@@ -647,6 +708,9 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
       setEpisodes(eps);
       setCameras(info?.cameras ?? []);
       setExcludedEpisodesState(new Set(excluded));
+      // Finalize starts every episode checked (kept) — only unchecking marks
+      // one for deletion.
+      setFinalizeKeep(new Set((eps ?? []).map((e) => e.episode_index)));
       setSelectedEpisode(eps && eps.length > 0 ? eps[0].episode_index : null);
       setEpisodesLoading(false);
     });
@@ -695,6 +759,108 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
       .finally(() => setSavingSelection(false));
   };
 
+  const toggleFinalizeKeep = (episodeIndex: number) => {
+    setFinalizeKeep((prev) => {
+      const next = new Set(prev);
+      if (next.has(episodeIndex)) {
+        next.delete(episodeIndex);
+      } else {
+        next.add(episodeIndex);
+      }
+      return next;
+    });
+  };
+
+  // Finalize: permanently delete every UNCHECKED episode (nothing to delete —
+  // and no request at all — if everything stayed checked), then hand off to
+  // the caller. Deleting every remaining episode removes the whole dataset
+  // instead (the backend refuses to produce a zero-episode dataset), so that
+  // outcome reports through `onDiscarded` rather than `onFinalize` — same
+  // signal the manual per-episode delete-to-zero path below already sends.
+  const handleFinalizeClick = async () => {
+    if (!repoId || !episodes || !finalize) return;
+    const toDelete = episodes
+      .map((e) => e.episode_index)
+      .filter((i) => !finalizeKeep.has(i));
+    if (toDelete.length === 0) {
+      finalize.onFinalize();
+      return;
+    }
+    setFinalizing(true);
+    try {
+      const result = await deleteEpisodes(baseUrl, fetchWithHeaders, repoId, toDelete);
+      if (result.whole_dataset_deleted) {
+        onOpenChange(false);
+        onDeleted?.();
+        finalize.onDiscarded();
+      } else {
+        finalize.onFinalize();
+      }
+    } catch {
+      toast({
+        title: t("dialogs.datasetDetail.finalizeFailedTitle"),
+        description: t("dialogs.datasetDetail.finalizeFailedBody"),
+        variant: "destructive",
+      });
+    } finally {
+      setFinalizing(false);
+    }
+  };
+
+  // Per-episode delete (permanent, no trash/undo). Re-fetches the episode
+  // list afterward rather than relabeling client-side: lerobot's delete
+  // renumbers surviving episodes to stay contiguous from 0, so anything but
+  // the last episode in the list would otherwise show the wrong episode's
+  // data under a stale label.
+  const confirmDeleteEpisode = async () => {
+    const target = episodeDeleteTarget;
+    if (!repoId || target == null) return;
+    setDeletingEpisode(true);
+    try {
+      const result = await deleteEpisodes(baseUrl, fetchWithHeaders, repoId, [target]);
+      setEpisodeDeleteTarget(null);
+      if (result.whole_dataset_deleted) {
+        onOpenChange(false);
+        onDeleted?.();
+      } else {
+        setReloadKey((k) => k + 1);
+      }
+    } catch {
+      toast({
+        title: t("dialogs.datasetDetail.deleteEpisodeFailedTitle"),
+        description: t("dialogs.datasetDetail.deleteEpisodeFailedBody"),
+        variant: "destructive",
+      });
+    } finally {
+      setDeletingEpisode(false);
+    }
+  };
+
+  // Whole-dataset delete via the info card (permanent, local-only —
+  // deleteDataset never touches a Hub copy). `item` decides the confirm
+  // dialog's wording (resolveDeleteAction) but not the API call: a "both"
+  // row's first press and a local-only row's delete both just remove the
+  // local directory.
+  const datasetDeleteResolution = item ? resolveDeleteAction("dataset", item) : null;
+  const confirmDeleteDataset = async () => {
+    if (!repoId) return;
+    setDeletingDataset(true);
+    try {
+      await deleteDataset(baseUrl, fetchWithHeaders, repoId);
+      setDatasetDeleteConfirm(false);
+      onOpenChange(false);
+      onDeleted?.();
+    } catch {
+      toast({
+        title: t("dialogs.datasetDetail.deleteDatasetFailedTitle"),
+        description: t("dialogs.datasetDetail.deleteDatasetFailedBody"),
+        variant: "destructive",
+      });
+    } finally {
+      setDeletingDataset(false);
+    }
+  };
+
   if (!repoId) return null;
 
   const handleTrain = () => {
@@ -711,13 +877,25 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   };
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[85vh] max-w-6xl flex-col gap-0 overflow-hidden p-0">
+      <DialogContent
+        hideClose={!!finalize}
+        onEscapeKeyDown={finalize ? (e) => e.preventDefault() : undefined}
+        onPointerDownOutside={finalize ? (e) => e.preventDefault() : undefined}
+        onInteractOutside={finalize ? (e) => e.preventDefault() : undefined}
+        className="flex h-[85vh] max-w-6xl flex-col gap-0 overflow-hidden p-0"
+      >
         <DialogHeader className="shrink-0 space-y-0 border-b border-border px-6 py-4 text-left">
           <p className={eyebrow}>{t("dialogs.datasetDetail.eyebrow")}</p>
           <DialogTitle className="break-all pt-1 font-mono text-base font-semibold">
             {repoId}
           </DialogTitle>
+          {finalize && (
+            <p className="pt-1 text-sm text-muted-foreground">
+              {t("dialogs.datasetDetail.finalizeDescription")}
+            </p>
+          )}
         </DialogHeader>
 
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_300px]">
@@ -762,7 +940,12 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                         })
                       : t("dialogs.datasetDetail.episodesHeading")}
                   </p>
-                  {episodes && episodes.length > 0 && (
+                  {/* Hidden during Finalize: it edits a training-time
+                      exclusion list that's a different, longer-lived concern
+                      than the keep/delete checkboxes Finalize shows below,
+                      and reviewing a not-yet-finalized dataset for training
+                      makes no sense yet. */}
+                  {!finalize && episodes && episodes.length > 0 && (
                     <Button
                       size="sm"
                       variant={selecting ? "default" : "outline"}
@@ -781,7 +964,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                     </Button>
                   )}
                 </div>
-                {activeExcluded.size > 0 && (
+                {!finalize && activeExcluded.size > 0 && (
                   <p className="mt-0.5 text-[10px] text-muted-foreground">
                     {t("dialogs.datasetDetail.includedCount", {
                       included: includedEpisodes.length,
@@ -837,7 +1020,16 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                             : "border border-transparent"
                         }`}
                       >
-                        {selecting && (
+                        {finalize ? (
+                          <Checkbox
+                            checked={finalizeKeep.has(ep.episode_index)}
+                            onCheckedChange={() => toggleFinalizeKeep(ep.episode_index)}
+                            aria-label={t("dialogs.datasetDetail.keepEpisodeAria", {
+                              index: ep.episode_index,
+                            })}
+                            className="h-3.5 w-3.5 shrink-0 border-muted-foreground/40 data-[state=checked]:border-primary"
+                          />
+                        ) : selecting ? (
                           <Checkbox
                             checked={!draftExcluded.has(ep.episode_index)}
                             onCheckedChange={() => toggleDraftEpisode(ep.episode_index)}
@@ -846,7 +1038,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                             })}
                             className="h-3.5 w-3.5 shrink-0 border-muted-foreground/40 data-[state=checked]:border-primary"
                           />
-                        )}
+                        ) : null}
                         <button
                           type="button"
                           onClick={() => setSelectedEpisode(ep.episode_index)}
@@ -880,6 +1072,23 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                             {ep.duration.toFixed(1)}s
                           </span>
                         </button>
+                        {/* Per-episode delete (permanent, no trash) — a
+                            separate action from Finalize's keep/delete
+                            checkboxes and from training curation, so it's
+                            offered only outside both of those modes. */}
+                        {!finalize && !selecting && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 shrink-0 text-muted-foreground hover:text-destructive"
+                            onClick={() => setEpisodeDeleteTarget(ep.episode_index)}
+                            aria-label={t("dialogs.datasetDetail.deleteEpisodeAria", {
+                              index: ep.episode_index,
+                            })}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -891,40 +1100,125 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
               </div>
             </div>
 
-            {/* Non-related while picking episodes to train on — rename, tags,
-                visibility, upload/download, delete-whole-dataset all live
-                here, none of it relevant to "which episodes." A dimmed
-                pointer-events-none wrapper keeps this from needing a
-                `disabled` prop threaded through DatasetInfoCard's internals. */}
+            {/* Non-related while picking episodes to train on, or while
+                reviewing a Finalize checklist — rename, tags, visibility,
+                upload/download, delete-whole-dataset all live here, none of
+                it relevant to either. A dimmed pointer-events-none wrapper
+                keeps this from needing a `disabled` prop threaded through
+                DatasetInfoCard's internals. Finalize also hides its own
+                delete affordance — that would be redundant with (or conflict
+                with) the keep/delete checkboxes on the left. */}
             <div
-              className={selecting ? "pointer-events-none p-3 opacity-40" : "p-3"}
-              aria-disabled={selecting}
+              className={selecting || finalize ? "pointer-events-none p-3 opacity-40" : "p-3"}
+              aria-disabled={selecting || !!finalize}
             >
               <DatasetInfoCard
                 repoId={repoId}
                 onDownloaded={() => setReloadKey((k) => k + 1)}
+                canDelete={!finalize && !!item}
+                onDelete={() => setDatasetDeleteConfirm(true)}
               />
             </div>
 
             <div className="p-3">
-              <Button
-                onClick={handleTrain}
-                disabled={selecting || includedEpisodes.length === 0}
-                title={
-                  selecting
-                    ? t("dialogs.datasetDetail.finishCuratingFirst")
-                    : undefined
-                }
-                className="w-full gap-2"
-              >
-                <Boxes className="h-4 w-4" />
-                {t("dialogs.datasetDetail.trainPolicy")}
-              </Button>
+              {finalize ? (
+                <Button
+                  onClick={handleFinalizeClick}
+                  disabled={finalizing}
+                  className="w-full gap-2"
+                >
+                  {finalizing ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Check className="h-4 w-4" />
+                  )}
+                  {t("dialogs.datasetDetail.finalize")}
+                </Button>
+              ) : (
+                <Button
+                  onClick={handleTrain}
+                  disabled={selecting || includedEpisodes.length === 0}
+                  title={
+                    selecting
+                      ? t("dialogs.datasetDetail.finishCuratingFirst")
+                      : undefined
+                  }
+                  className="w-full gap-2"
+                >
+                  <Boxes className="h-4 w-4" />
+                  {t("dialogs.datasetDetail.trainPolicy")}
+                </Button>
+              )}
             </div>
           </div>
         </div>
       </DialogContent>
     </Dialog>
+
+      <AlertDialog
+        open={episodeDeleteTarget !== null}
+        onOpenChange={(o) => !o && setEpisodeDeleteTarget(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("dialogs.datasetDetail.deleteEpisodeTitle", {
+                index: episodeDeleteTarget ?? 0,
+              })}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("dialogs.datasetDetail.deleteEpisodeDescription")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deletingEpisode}>
+              {t("common.cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmDeleteEpisode}
+              disabled={deletingEpisode}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {t("dialogs.datasetDetail.deleteEpisodeConfirm")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={datasetDeleteConfirm}
+        onOpenChange={(o) => !o && setDatasetDeleteConfirm(false)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="break-words">
+              {datasetDeleteResolution
+                ? t(datasetDeleteResolution.titleKey as never, { label: repoId })
+                : null}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {datasetDeleteResolution
+                ? t(datasetDeleteResolution.descriptionKey as never)
+                : null}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deletingDataset}>
+              {t("common.cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmDeleteDataset}
+              disabled={deletingDataset}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {datasetDeleteResolution
+                ? t(datasetDeleteResolution.confirmKey as never)
+                : null}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 };
 
