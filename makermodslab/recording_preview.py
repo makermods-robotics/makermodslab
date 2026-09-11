@@ -1,6 +1,6 @@
 """Read-only previews tapped from recording observations; never opens hardware.
 
-Keep only the latest sampled RGB images. JPEG encoding runs in HTTP workers,
+Sample only cameras requested in the last two seconds. JPEG encoding runs in HTTP workers,
 not in the control loop. Short snapshot requests avoid exhausting a browser's
 per-host connection pool when a robot has many cameras.
 """
@@ -17,43 +17,83 @@ logger = logging.getLogger(__name__)
 
 
 class RecordingPreview:
+    # Requests renew demand; browser polling can pause briefly without churn.
+    _VIEWER_TIMEOUT = 2.0
+    _SAMPLE_INTERVAL = 0.1
+
     def __init__(self):
         self._lock = threading.Lock()
         self._active = False
-        self._frames = {}
+        self._cameras = {}
         self._last_sample = float("-inf")
         self.joint_notifier: Callable[[dict], None] | None = None
 
     def start(self):
         with self._lock:
-            self._frames = {}
+            self._cameras = {}
             self._last_sample = float("-inf")
             self._active = True
 
     def stop(self):
         with self._lock:
             self._active = False
-            self._frames = {}
+            self._cameras = {}
+
+    def _expire(self, now):
+        for name in list(self._cameras):
+            if now - self._cameras[name]["requested"] >= self._VIEWER_TIMEOUT:
+                del self._cameras[name]
 
     def publish(self, observation: dict) -> bool:
-        """Copy at most 10 Hz; camera backends may reuse their RGB buffers."""
+        """Sample demanded cameras; return independent 10 Hz joint tick readiness."""
         with self._lock:
             now = time.monotonic()
-            if not self._active or now - self._last_sample < 0.1:
+            self._expire(now)
+            if not self._active or now - self._last_sample < self._SAMPLE_INTERVAL:
                 return False
             self._last_sample = now
-            self._frames = {
-                name: frame.copy()
-                for name, frame in observation.items()
-                if isinstance(frame, np.ndarray) and frame.ndim == 3 and frame.shape[2] == 3
-            }
+            for name, camera in self._cameras.items():
+                frame = observation.get(name)
+                camera["frame"] = (
+                    frame.copy()
+                    if isinstance(frame, np.ndarray) and frame.ndim == 3 and frame.shape[2] == 3
+                    else None
+                )
+                camera["jpeg"] = None
             return True
 
     def jpeg(self, camera_name: str) -> bytes | None:
         with self._lock:
-            frame = self._frames.get(camera_name)
-        if frame is None:
-            return None
+            if not self._active:
+                return None
+            now = time.monotonic()
+            self._expire(now)
+            camera = self._cameras.get(camera_name)
+            if camera is None:
+                camera = {"requested": now, "frame": None, "jpeg": None, "encoding": threading.Lock()}
+                self._cameras[camera_name] = camera
+            camera["requested"] = now
+        # Serialize only this camera's HTTP consumers. The control loop never
+        # waits for a JPEG encode, and all viewers reuse the same cached bytes.
+        with camera["encoding"]:
+            with self._lock:
+                if self._cameras.get(camera_name) is not camera:
+                    return None
+                if camera["jpeg"] is not None:
+                    return camera["jpeg"]
+                frame = camera["frame"]
+            if frame is None:
+                return None
+            encoded = self._encode(frame)
+            with self._lock:
+                if self._cameras.get(camera_name) is not camera:
+                    return None
+                if camera["frame"] is frame:
+                    camera["jpeg"] = encoded
+            return encoded
+
+    @staticmethod
+    def _encode(frame):
         # Preserve the whole image and aspect ratio; never crop task footage.
         height, width = frame.shape[:2]
         scale = min(1.0, 640 / width, 480 / height)
