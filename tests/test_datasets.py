@@ -293,6 +293,52 @@ def test_count_task_episodes_is_none_when_there_is_no_episode_metadata(
     assert _count_task_episodes(meta) is None
 
 
+def test_count_task_episodes_abandons_a_non_object_jsonl_line(
+    tmp_lerobot_home: Path,
+) -> None:
+    """A line that is valid JSON but not an object (a truncated write leaving a
+    bare `null` or number) must abandon the count like any other bad line —
+    return None, not raise AttributeError up through /datasets/info as a 500."""
+    from makermodslab.datasets import _count_task_episodes
+
+    meta = tmp_lerobot_home / "odd_line" / "meta"
+    meta.mkdir(parents=True)
+    (meta / "episodes.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"episode_index": 0, "tasks": ["alpha"]}),
+                "null",
+                json.dumps({"episode_index": 2, "tasks": ["alpha"]}),
+            ]
+        )
+    )
+
+    assert _count_task_episodes(meta) is None
+
+
+def test_get_local_dataset_info_survives_a_corrupt_episodes_jsonl(
+    tmp_lerobot_home: Path,
+) -> None:
+    """The endpoint stays up on a corrupt episodes.jsonl: the task strings still
+    render, their counts degrade to None ("unknown")."""
+    from makermodslab.datasets import get_local_dataset_info
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/corrupt_meta",
+        {"total_episodes": 3, "total_frames": 90, "fps": 30, "robot_type": "so101"},
+    )
+    pq.write_table(
+        pa.table({"task_index": [0], "task": ["only task"]}),
+        d / "meta" / "tasks.parquet",
+    )
+    (d / "meta" / "episodes.jsonl").write_text("null\n")
+
+    result = get_local_dataset_info("alice/corrupt_meta")
+    assert result is not None
+    assert result["tasks"] == [{"task": "only task", "num_episodes": None}]
+
+
 def test_get_local_dataset_info_single_task_missing_episode_metadata(
     tmp_lerobot_home: Path,
 ) -> None:

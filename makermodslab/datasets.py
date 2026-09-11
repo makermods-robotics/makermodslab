@@ -1063,9 +1063,15 @@ def _count_task_episodes(meta_dir: Path) -> dict[str, int] | None:
                 if not line:
                     continue
                 obj = json.loads(line)
+                if not isinstance(obj, dict):
+                    # Valid JSON, wrong shape — a truncated write leaving a bare
+                    # `null`/number. Treated like any other bad line (below):
+                    # abandon the whole count rather than skip the row or, worse,
+                    # let obj.get raise AttributeError out through /datasets/info.
+                    raise ValueError(f"episode row is not an object: {line[:80]!r}")
                 for task in set(obj.get("tasks") or []):
                     counts[str(task)] = counts.get(str(task), 0) + 1
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, TypeError) as e:
             logger.warning(f"Could not read {jsonl_path}: {e}")
             return None
         return counts
