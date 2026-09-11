@@ -759,7 +759,9 @@ def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp
     monkeypatch.setattr(so101, "_preflight_arm_identity", lambda *a, **k: [])
     monkeypatch.setattr(so101, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(
-        rollout, "_resolve_policy_path", lambda ref, report=None: str(tmp_path / "pretrained_model")
+        rollout,
+        "_resolve_policy_path",
+        lambda ref, report=None, should_cancel=None: str(tmp_path / "pretrained_model"),
     )
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
 
@@ -1370,7 +1372,9 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
     monkeypatch.setattr(so101, "_preflight_arm_identity", lambda *a, **k: [])
     monkeypatch.setattr(so101, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(
-        rollout, "_resolve_policy_path", lambda ref, report=None: str(tmp_path / "pretrained_model")
+        rollout,
+        "_resolve_policy_path",
+        lambda ref, report=None, should_cancel=None: str(tmp_path / "pretrained_model"),
     )
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
 
@@ -1702,7 +1706,7 @@ def test_stopped_startup_worker_blocks_a_new_session_from_starting(monkeypatch) 
         return [], []
 
     monkeypatch.setattr(rollout, "_prepare_robot", _blocking_prepare_robot)
-    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: ref)
+    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None, should_cancel=None: ref)
 
     created_threads: list[threading.Thread] = []
     real_thread = threading.Thread
@@ -2120,7 +2124,7 @@ def test_startup_download_failure_reports_failed_and_hint_without_spawn(monkeypa
         {"phase": rollout.PHASE_STARTING, "policy_ref": "user/repo@checkpoints/000050"},
     )
 
-    def _raise(ref, report=None):
+    def _raise(ref, report=None, should_cancel=None):
         raise RuntimeError("Repository Not Found for url: https://huggingface.co/api/models/x")
 
     monkeypatch.setattr(rollout, "_resolve_policy_path", _raise)
@@ -2164,7 +2168,7 @@ def test_stop_during_download_leaves_clean_idle_without_spawn(monkeypatch) -> No
         {"phase": rollout.PHASE_DOWNLOADING_MODEL, "policy_ref": "user/repo@checkpoints/000050"},
     )
 
-    def _resolve_then_stop(ref, report=None):
+    def _resolve_then_stop(ref, report=None, should_cancel=None):
         rollout.handle_stop_inference()
         return "/tmp/snap/pretrained_model"
 
@@ -2184,6 +2188,70 @@ def test_stop_during_download_leaves_clean_idle_without_spawn(monkeypatch) -> No
     assert rollout._inference_proc is None
     assert rollout._inference_meta == {}
     assert rollout.handle_inference_status()["inference_active"] is False
+
+
+def test_download_cancelled_mid_flight_leaves_a_clean_idle_not_a_failure(monkeypatch) -> None:
+    """A stop DURING the transfer aborts snapshot_download from its progress
+    hook (DownloadCancelled). The worker treats that as the stop it is — clean
+    idle, no _fail_startup payload — never opening the bus or spawning."""
+    from makermodslab import rollout
+    from makermodslab.jobs import DownloadCancelled
+
+    cancel = threading.Event()
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_cancel", cancel)
+    monkeypatch.setattr(rollout, "_inference_proc", None)
+    monkeypatch.setattr(
+        rollout,
+        "_inference_meta",
+        {"phase": rollout.PHASE_DOWNLOADING_MODEL, "policy_ref": "user/repo@checkpoints/000050"},
+    )
+
+    def _abort_like_a_cancelled_download(ref, report=None, should_cancel=None):
+        # stop() ran first (proc is None -> _go_idle_locked), and the progress
+        # hook then raised as the next chunk arrived.
+        rollout.handle_stop_inference()
+        raise DownloadCancelled
+
+    monkeypatch.setattr(rollout, "_resolve_policy_path", _abort_like_a_cancelled_download)
+    monkeypatch.setattr(
+        rollout, "_prepare_robot", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no bus"))
+    )
+    monkeypatch.setattr(
+        rollout.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no spawn"))
+    )
+
+    rollout._run_inference_startup(_stub_request(), cancel)
+
+    assert rollout.inference_active is False
+    assert rollout._inference_proc is None
+    assert rollout._last_result is None  # NOT a startup failure
+    assert rollout.handle_inference_status()["inference_active"] is False
+
+
+def test_resolve_policy_path_threads_should_cancel_into_the_download(monkeypatch, tmp_path) -> None:
+    """`should_cancel` reaches snapshot_download's tqdm_class, so a real
+    transfer would abort on the next chunk once the predicate goes true."""
+    from makermodslab import rollout
+    from makermodslab.jobs import DownloadCancelled
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: True)
+
+    def _fake_snapshot_download(**kwargs):
+        cls = kwargs["tqdm_class"]
+        bar = cls(unit="B", total=1_000)
+        bar.update(10)  # the caller wants to abort now
+        return str(tmp_path)  # unreachable when should_cancel fires
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_snapshot_download)
+
+    with pytest.raises(DownloadCancelled):
+        rollout._resolve_policy_path(
+            "user/repo@root",
+            report=rollout._report_download_progress,
+            should_cancel=lambda: True,
+        )
 
 
 def test_run_inference_startup_local_ref_skips_download_phase(monkeypatch, tmp_path) -> None:
@@ -3017,7 +3085,9 @@ def test_eval_start_spawns_the_runner_with_stdin_left_open(monkeypatch, tmp_path
     monkeypatch.setattr(so101, "_preflight_arm_identity", lambda *a, **k: [])
     monkeypatch.setattr(so101, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda name, arm_type="so101": name)
-    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/local/model")
+    monkeypatch.setattr(
+        rollout, "_resolve_policy_path", lambda ref, report=None, should_cancel=None: "/local/model"
+    )
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
     monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: True)
     monkeypatch.setattr(rollout.camera_preview_manager, "stop_all", lambda: None)
@@ -3078,7 +3148,9 @@ def test_single_episode_start_still_spawns_lerobot_rollout(monkeypatch, tmp_path
     monkeypatch.setattr(so101, "_preflight_arm_identity", lambda *a, **k: [])
     monkeypatch.setattr(so101, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda name, arm_type="so101": name)
-    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/local/model")
+    monkeypatch.setattr(
+        rollout, "_resolve_policy_path", lambda ref, report=None, should_cancel=None: "/local/model"
+    )
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
     monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: True)
     monkeypatch.setattr(rollout.camera_preview_manager, "stop_all", lambda: None)
