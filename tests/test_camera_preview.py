@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -473,3 +473,11 @@ def test_teleoperation_does_not_touch_camera_previews(monkeypatch: pytest.Monkey
     blank the user's tiles for no reason. Guards the /camera-preview endpoint's
     "allowed while teleoperating" contract from the other side."""
     assert not hasattr(teleoperate, "camera_preview_manager")
+
+
+@pytest.mark.parametrize("state", ["hosting_active", "releasing"])
+def test_camera_preview_refused_while_hosting_owns_camera(client, monkeypatch, state):
+    monkeypatch.setattr(server_mod.remote_host, state, True)
+    response = client.get("/camera-preview/0")
+    assert response.status_code == 409
+    assert "Stop hosting" in response.json()["detail"]

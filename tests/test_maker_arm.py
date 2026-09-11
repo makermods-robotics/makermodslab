@@ -6,6 +6,7 @@ zero-calibration worker, the port probe's bus I/O) are deliberately NOT
 exercised here; they are verified against real hardware instead.
 """
 
+import math
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,7 @@ from makermodslab.utils import config as cfg
 
 def test_records_written_before_the_maker_arm_read_back_as_so101(tmp_lerobot_home: Path) -> None:
     """A record with no arm_type on disk is an SO-101 by definition."""
-    robots = tmp_lerobot_home / "robots"
+    robots = Path(cfg.ROBOTS_PATH)
     robots.mkdir(exist_ok=True)
     (robots / "legacy.json").write_text('{"name": "legacy", "mode": "single", "leader_port": "/dev/a"}')
 
@@ -30,13 +31,18 @@ def test_records_written_before_the_maker_arm_read_back_as_so101(tmp_lerobot_hom
 
 
 def test_a_corrupted_arm_type_on_disk_falls_back_rather_than_raising(tmp_lerobot_home: Path) -> None:
-    """Same contract as motor_power's clamp: a bad value must never make a
-    robot unopenable."""
-    robots = tmp_lerobot_home / "robots"
+    """A NON-STRING arm_type is a corrupted field, not a family: it reads as
+    the SO-101 default rather than raising, the same contract as
+    motor_power's clamp. An unknown STRING is a different thing — TB5 keeps
+    it verbatim so the record lists as unavailable and refuses to start
+    (tests/test_arms_manifest.py) instead of silently becoming an SO-101."""
+    robots = Path(cfg.ROBOTS_PATH)
     robots.mkdir(exist_ok=True)
-    (robots / "weird.json").write_text('{"name": "weird", "arm_type": "definitely-not-an-arm"}')
+    (robots / "weird.json").write_text('{"name": "weird", "arm_type": 7}')
+    (robots / "nulled.json").write_text('{"name": "nulled", "arm_type": null}')
 
     assert cfg.get_robot_record("weird")["arm_type"] == "so101"
+    assert cfg.get_robot_record("nulled")["arm_type"] == "so101"
 
 
 def test_creating_a_maker_robot_persists_its_arm_type(tmp_lerobot_home: Path) -> None:
@@ -128,7 +134,7 @@ def test_deleting_a_maker_calibration_leaves_same_named_so101_records_alone(
     """The two libraries are separate namespaces: an SO-101 record naming
     "armA" points at a different file from a Maker record naming "armA", so a
     Maker delete must not unassign the SO-101 robot."""
-    robots = tmp_lerobot_home / "robots"
+    robots = Path(cfg.ROBOTS_PATH)
     robots.mkdir(exist_ok=True)
     cfg.save_robot_record("so_bot", {"arm_type": "so101", "follower_config": "armA"}, allow_create=True)
     cfg.save_robot_record("maker_bot", {"arm_type": "maker", "follower_config": "armA"}, allow_create=True)
@@ -228,7 +234,8 @@ def _no_staging(monkeypatch: pytest.MonkeyPatch):
     """Skip the on-disk calibration staging — this is a config-shape test."""
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower, arm_type="so101": (leader, follower),
+        # The Maker arm offers two leader kinds, so it now hears leader_kind.
+        lambda leader, follower, arm_type="so101", **kw: (leader, follower),
     )
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.stage_bimanual_calibrations",
@@ -596,6 +603,179 @@ def test_maker_return_leaves_joints_absent_from_the_pose_alone() -> None:
     assert arm.pos["gripper"] == -50.0
 
 
+# ---------------------------------------------------------------------------
+# A destination that moves: the mid-session re-alignment chases the leader
+#
+# The teardown return goes to a pose captured once, which cannot move. The
+# re-alignment goes to the LEADER, and the UI says "resumed" the instant Resume
+# is pressed — so the operator's hand is back on it while the follower is still
+# walking. Sampling the destination once would deliver everything the leader
+# moved during the walk in one unramped step at the end.
+# ---------------------------------------------------------------------------
+
+
+def test_a_move_without_a_target_fn_keeps_the_old_fixed_plan() -> None:
+    """Every teardown caller passes no target_fn and must keep byte-for-byte
+    its old motion: one interpolation planned up front, all joints on one
+    timeline. The chase is strictly opt-in."""
+    from makermodslab.maker_rest_pose import MAKER_RETURN_FPS, return_maker_to_pose
+
+    arm = _MakerArmDouble({"shoulder_pan": 30.0})
+    return_maker_to_pose(arm, {"shoulder_pan": 0.0})
+
+    # 30 deg at 30 deg/s is 1.0s, and the ramp runs at MAKER_RETURN_FPS.
+    steps = int(1.0 * MAKER_RETURN_FPS)
+    ramp = [sent["shoulder_pan.pos"] for sent in arm.sent[:steps]]
+    assert ramp == [pytest.approx(30.0 * (1 - step / steps)) for step in range(1, steps + 1)]
+
+
+def test_chase_follows_a_target_that_moves_during_the_slew() -> None:
+    """The point of target_fn: a leader the operator keeps moving is followed,
+    and the arm lands where the leader ENDED UP, not where it was when Resume
+    was pressed."""
+    from makermodslab.maker_rest_pose import return_maker_to_pose
+
+    arm = _MakerArmDouble({"shoulder_pan": 30.0})
+    target = {"shoulder_pan": 0.0}
+    calls = {"n": 0}
+
+    def _moving_target() -> dict[str, float]:
+        calls["n"] += 1
+        if calls["n"] == 5:
+            # The operator carries on past the original destination.
+            target["shoulder_pan"] = -10.0
+        return dict(target)
+
+    arrived, reason = return_maker_to_pose(arm, {"shoulder_pan": 0.0}, target_fn=_moving_target)
+
+    assert arrived is True
+    assert reason in ("", "settled")
+    # Landed on the LAST target, not the first — a fixed plan would have
+    # stopped at 0 and left 10 deg to be snapped by the next passthrough tick.
+    assert arm.pos["shoulder_pan"] == pytest.approx(-10.0, abs=2.0)
+    assert arm.sent[-1]["shoulder_pan.pos"] == pytest.approx(-10.0, abs=2.0)
+
+
+def test_chase_never_steps_faster_than_the_rate_cap() -> None:
+    """A moving target must not become an excuse to jump: each tick steps
+    toward wherever the target is now by at most speed_deg_s * dt, which is
+    what keeps the arm from snapping when the leader moves a long way."""
+    from makermodslab.maker_rest_pose import (
+        MAKER_RETURN_FPS,
+        MAKER_RETURN_SPEED_DEG_S,
+        return_maker_to_pose,
+    )
+
+    arm = _MakerArmDouble({"shoulder_pan": 20.0})
+    target = {"shoulder_pan": 0.0}
+    calls = {"n": 0}
+
+    def _jumping_target() -> dict[str, float]:
+        calls["n"] += 1
+        if calls["n"] == 3:
+            target["shoulder_pan"] = -60.0  # a whole arm-length in one tick
+        return dict(target)
+
+    return_maker_to_pose(arm, {"shoulder_pan": 0.0}, target_fn=_jumping_target)
+
+    cap = MAKER_RETURN_SPEED_DEG_S / MAKER_RETURN_FPS
+    setpoints = [20.0] + [sent["shoulder_pan.pos"] for sent in arm.sent]
+    biggest = max(abs(b - a) for a, b in zip(setpoints, setpoints[1:], strict=False))
+    assert biggest <= cap + 1e-9
+
+
+def test_chase_keeps_the_last_good_target_when_the_refresh_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A leader read that dies mid-chase must not raise out of a courtesy move
+    and must not abandon the arm part-way: it keeps walking to the last target
+    it knows. Logged ONCE — at 30 Hz for a whole ceiling, per-tick logging
+    would bury the session."""
+    import logging
+
+    from makermodslab.maker_rest_pose import return_maker_to_pose
+
+    arm = _MakerArmDouble({"shoulder_pan": 20.0})
+
+    def _broken_target() -> dict[str, float]:
+        raise RuntimeError("UART leader went away")
+
+    with caplog.at_level(logging.WARNING, logger="makermodslab.maker_rest_pose"):
+        arrived, _reason = return_maker_to_pose(arm, {"shoulder_pan": 0.0}, target_fn=_broken_target)
+
+    assert arrived is True
+    assert arm.pos["shoulder_pan"] == pytest.approx(0.0, abs=2.0)
+    warnings = [r for r in caplog.records if "refresh" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+def test_chase_aborts_as_promptly_as_the_fixed_plan() -> None:
+    """The abort event and the ceiling apply to the chase exactly as they do to
+    the plan — a stop mid-re-alignment must not wait for the leader to settle."""
+    import threading
+
+    from makermodslab.maker_rest_pose import return_maker_to_pose
+
+    abort = threading.Event()
+    abort.set()
+    arm = _MakerArmDouble({"shoulder_pan": 40.0})
+
+    arrived, reason = return_maker_to_pose(
+        arm, {"shoulder_pan": 0.0}, abort_event=abort, target_fn=lambda: {"shoulder_pan": 0.0}
+    )
+
+    assert (arrived, reason) == (False, "cut-short")
+    assert arm.sent == []
+
+
+def test_each_arm_of_a_bimanual_chase_gets_its_own_target_fn() -> None:
+    """Each side receives its own target through the coordinated chase."""
+    from makermodslab.maker_rest_pose import return_maker_arms_to_rest
+
+    left = _MakerArmDouble({"shoulder_pan": 15.0})
+    right = _MakerArmDouble({"shoulder_pan": -15.0})
+
+    verdicts = return_maker_arms_to_rest(
+        [(left, {"shoulder_pan": 0.0}), (right, {"shoulder_pan": 0.0})],
+        target_label="the leader's pose",
+        target_fns=[lambda: {"shoulder_pan": 5.0}, lambda: {"shoulder_pan": -5.0}],
+    )
+
+    assert all(ok for ok, _reason in verdicts)
+    assert left.pos["shoulder_pan"] == pytest.approx(5.0, abs=2.0)
+    assert right.pos["shoulder_pan"] == pytest.approx(-5.0, abs=2.0)
+
+
+@pytest.mark.parametrize("left_start", [0.0, 5.0])
+def test_bimanual_chase_keeps_early_arrival_tracking(left_start: float) -> None:
+    """An aligned or early-arriving side follows a leader moved during its
+    partner's longer catch-up, leaving no large jump for raw passthrough."""
+    from makermodslab.maker_rest_pose import (
+        MAKER_RETURN_FPS,
+        MAKER_RETURN_SPEED_DEG_S,
+        return_maker_arms_to_rest,
+    )
+
+    left = _MakerArmDouble({"shoulder_pan": left_start})
+    right = _MakerArmDouble({"shoulder_pan": 90.0})
+
+    def left_target():
+        return {"shoulder_pan": 30.0 if len(right.sent) >= 20 else 0.0}
+
+    verdicts = return_maker_arms_to_rest(
+        [(left, {"shoulder_pan": 0.0}), (right, {"shoulder_pan": 0.0})],
+        target_fns=[left_target, lambda: {"shoulder_pan": 0.0}],
+    )
+
+    assert all(ok for ok, _reason in verdicts)
+    assert left.pos["shoulder_pan"] == pytest.approx(30.0, abs=2.0)
+    assert right.pos["shoulder_pan"] == pytest.approx(0.0, abs=2.0)
+    cap = MAKER_RETURN_SPEED_DEG_S / MAKER_RETURN_FPS
+    for arm, start in [(left, left_start), (right, 90.0)]:
+        goals = [start] + [action["shoulder_pan.pos"] for action in arm.sent]
+        assert all(abs(b - a) <= cap + 1e-9 for a, b in zip(goals, goals[1:], strict=False))
+
+
 def test_bimanual_maker_arms_are_returned_concurrently() -> None:
     """Two arms on separate CAN buses: returning them in series would take
     twice as long and leave the second hanging under gravity meanwhile."""
@@ -608,6 +788,79 @@ def test_bimanual_maker_arms_are_returned_concurrently() -> None:
 
     assert abs(left.pos["shoulder_pan"]) <= 2.0
     assert abs(right.pos["shoulder_pan"]) <= 2.0
+
+
+def test_action_targets_strip_the_bimanual_side_prefixes() -> None:
+    """A robot-level action is keyed left_/right_ (BiMakerFollower.send_action
+    splits on exactly those); the sub-arms the return drives speak bare names.
+    Getting this wrong would hand each arm an empty pose and silently skip the
+    move the caller asked for."""
+    from makermodslab.maker_rest_pose import maker_targets_from_action
+
+    class _Bi:
+        left_arm = "L"
+        right_arm = "R"
+
+    targets = maker_targets_from_action(
+        _Bi(),
+        {
+            "left_shoulder_pan.pos": 10.0,
+            "left_gripper.pos": -40.0,
+            "right_shoulder_pan.pos": -10.0,
+            "right_elbow_flex.pos": 5.0,
+        },
+    )
+
+    assert targets == [
+        ("L", {"shoulder_pan": 10.0}),
+        ("R", {"shoulder_pan": -10.0, "elbow_flex": 5.0}),
+    ]
+
+
+def test_action_targets_of_a_single_arm_are_the_bare_action() -> None:
+    from makermodslab.maker_rest_pose import maker_targets_from_action
+
+    robot = object()
+    targets = maker_targets_from_action(
+        robot, {"shoulder_pan.pos": 3.0, "gripper.pos": 0.0, "not_a_joint": "x"}
+    )
+
+    assert targets == [(robot, {"shoulder_pan": 3.0})]
+
+
+def test_action_targets_pair_device_for_device_with_maker_follower_arms() -> None:
+    """The two helpers are used together — one names the arms, the other says
+    where to send them — so their ordering must not drift apart."""
+    from makermodslab.maker_rest_pose import maker_follower_arms, maker_targets_from_action
+
+    class _Bi:
+        left_arm = "L"
+        right_arm = "R"
+
+    robot = _Bi()
+    action = {"left_shoulder_pan.pos": 1.0, "right_shoulder_pan.pos": 2.0}
+
+    assert [d for d, _ in maker_follower_arms(robot)] == [
+        d for d, _ in maker_targets_from_action(robot, action)
+    ]
+
+
+def test_arms_to_rest_reports_each_arms_verdict() -> None:
+    """The mid-session re-alignment logs what happened; a thread whose join
+    timed out must not read back as a success."""
+    from makermodslab.maker_rest_pose import return_maker_arms_to_rest
+
+    left = _MakerArmDouble({"shoulder_pan": 3.0})
+    right = _MakerArmDouble({"shoulder_pan": -3.0})
+
+    verdicts = return_maker_arms_to_rest(
+        [(left, {"shoulder_pan": 0.0}), (right, {"shoulder_pan": 0.0})],
+        target_label="the leader's pose",
+    )
+
+    assert len(verdicts) == 2
+    assert all(ok for ok, _reason in verdicts)
+    assert return_maker_arms_to_rest([]) == []
 
 
 def test_maker_follower_arms_finds_both_sides_of_a_bimanual_robot() -> None:
@@ -648,16 +901,87 @@ def test_auto_calibration_refuses_a_maker_robot(tmp_lerobot_home: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# URDF joint mapping for the 3D teleop viewer
+# ---------------------------------------------------------------------------
+
+
+_MAKER_MOTORS_ZEROED = {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": 0.0,
+    "elbow_flex": 0.0,
+    "wrist_flex": 0.0,
+    "wrist_yaw": 0.0,
+    "wrist_roll": 0.0,
+    "gripper": -60.0,
+}
+
+
+def test_maker_urdf_mapping_converts_motor_degrees_to_urdf_radians() -> None:
+    """The Maker follower reports true joint angles in degrees about its
+    calibration zero, so the viewer mapping is a direct degrees->radians (the
+    SO-101's affine range->range remap is only needed because Feetech norm
+    values are not physical angles)."""
+    from makermodslab.arms.urdf import maker_joint_positions
+
+    arm = {**_MAKER_MOTORS_ZEROED, "shoulder_pan": 90.0, "elbow_flex": -45.0}
+    joints = maker_joint_positions(arm)
+
+    assert joints["link_002_joint"] == pytest.approx(math.pi / 2)
+    assert joints["link_004_joint"] == pytest.approx(-math.pi / 4)
+    assert joints["link_003_joint"] == pytest.approx(0.0)
+
+
+def test_maker_urdf_mapping_drives_the_gripper_joint() -> None:
+    """The shipped Maker URDF has a symmetric sliding gripper: the mapping
+    feeds `gripper_left_joint` (prismatic, metres) and the URDF's mimic moves
+    the other jaw. The value is clamped to the jaw's real 0..TRAVEL range."""
+    from makermodslab.arms.urdf import (
+        _MAKER_GRIPPER_JAW_TRAVEL_M,
+        _MAKER_URDF_GRIPPER_JOINT,
+        maker_joint_positions,
+    )
+
+    joints = maker_joint_positions(dict(_MAKER_MOTORS_ZEROED))
+
+    assert len(joints) == 7
+    assert _MAKER_URDF_GRIPPER_JOINT in joints
+    assert 0.0 <= joints[_MAKER_URDF_GRIPPER_JOINT] <= _MAKER_GRIPPER_JAW_TRAVEL_M
+
+    # Closed at the SDK's closed-encoder angle, fully open past the open one.
+    closed = maker_joint_positions({**_MAKER_MOTORS_ZEROED, "gripper": math.degrees(0.0067132066834521)})
+    wide = maker_joint_positions({**_MAKER_MOTORS_ZEROED, "gripper": math.degrees(-2.5)})
+    assert closed[_MAKER_URDF_GRIPPER_JOINT] == pytest.approx(0.0, abs=1e-6)
+    assert wide[_MAKER_URDF_GRIPPER_JOINT] == pytest.approx(_MAKER_GRIPPER_JAW_TRAVEL_M)
+
+
+def test_maker_urdf_mapping_applies_per_joint_sign_and_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`sign` (motor-increasing vs URDF-increasing) and `offset` (URDF zero vs
+    the arm's folded calibration zero) are the two per-joint facts that can
+    only be confirmed against real hardware, so the mapping must honour them."""
+    from makermodslab.arms import urdf
+
+    monkeypatch.setitem(urdf._MAKER_URDF_JOINTS, "wrist_roll", ("link_007_joint", -1, math.pi / 2))
+    arm = {**_MAKER_MOTORS_ZEROED, "wrist_roll": 90.0}
+
+    joints = urdf.maker_joint_positions(arm)
+
+    # -radians(90) + pi/2 == 0
+    assert joints["link_007_joint"] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
 # Calibration dispatch
 # ---------------------------------------------------------------------------
 
 
-def test_calibrating_a_maker_robot_builds_a_zero_calibration_request(tmp_lerobot_home: Path) -> None:
+def test_calibrating_a_maker_robot_builds_a_step_calibration_request(tmp_lerobot_home: Path) -> None:
     """One session kind, two procedures: _dispatch_start reads the request
-    CLASS to pick the manager."""
+    CLASS to pick the manager (the family's calibration_kind decides)."""
     from makermodslab.schemas.sessions import CalibrationOptions
     from makermodslab.sessions import _build_calibration_request
-    from makermodslab.zero_calibrate import ZeroCalibrationRequest
+    from makermodslab.step_calibrate import StepCalibrationRequest
 
     cfg.save_robot_record(
         "mk2", {"arm_type": "maker", "mode": "single", "follower_port": "/dev/can0"}, allow_create=True
@@ -666,7 +990,7 @@ def test_calibrating_a_maker_robot_builds_a_zero_calibration_request(tmp_lerobot
 
     request = _build_calibration_request(record, CalibrationOptions(device_type="robot", arm="left"))
 
-    assert isinstance(request, ZeroCalibrationRequest)
+    assert isinstance(request, StepCalibrationRequest)
     assert request.port == "/dev/can0"
 
 
@@ -685,74 +1009,217 @@ def test_calibrating_an_so101_robot_still_builds_the_sweep_request(tmp_lerobot_h
     assert isinstance(request, CalibrationRequest)
 
 
-def test_a_zero_calibration_is_visible_to_every_other_features_mutex() -> None:
+def test_a_step_calibration_is_visible_to_every_other_features_mutex() -> None:
     """The whole reason this flow reuses the `calibration` session kind: every
     existing reciprocal check calls calibrate.calibration_is_active(), so
-    widening that one function enrolls the Maker flow with no new
+    widening that one function enrolls the step wizard with no new
     robot.busy.* discriminant to register."""
-    from makermodslab import calibrate, zero_calibrate
+    from makermodslab import calibrate, step_calibrate
 
     assert calibrate.calibration_is_active() is False
     try:
-        zero_calibrate.zero_calibration_manager.status.calibration_active = True
-        assert zero_calibrate.zero_calibration_is_active() is True
+        step_calibrate.step_calibration_manager.status.calibration_active = True
+        assert step_calibrate.step_calibration_is_active() is True
         assert calibrate.calibration_is_active() is True
     finally:
-        zero_calibrate.zero_calibration_manager.status.calibration_active = False
+        step_calibrate.step_calibration_manager.status.calibration_active = False
     assert calibrate.calibration_is_active() is False
 
 
-def test_zero_calibration_refuses_while_another_feature_owns_the_bus(
+def test_step_calibration_refuses_while_another_feature_owns_the_bus(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Idle/mutex branch — no hardware touched."""
-    from makermodslab import teleoperate, zero_calibrate
+    from makermodslab import step_calibrate, teleoperate
 
     monkeypatch.setattr(teleoperate, "teleoperation_active", True)
 
-    result = zero_calibrate.zero_calibration_manager.start(
-        zero_calibrate.ZeroCalibrationRequest(device_type="robot", port="/dev/can0", config_file="cal")
+    result = step_calibrate.step_calibration_manager.start(
+        step_calibrate.StepCalibrationRequest(device_type="robot", port="/dev/can0", config_file="cal")
     )
 
     assert result["success"] is False
     assert "Teleoperation" in result["message"]
     # The refusal must not leave a claim behind.
-    assert zero_calibrate.zero_calibration_is_active() is False
+    assert step_calibrate.step_calibration_is_active() is False
 
 
-def test_zero_calibration_refuses_to_silently_overwrite_a_saved_calibration(
+def test_step_calibration_refuses_to_silently_overwrite_a_saved_calibration(
     tmp_lerobot_home: Path,
 ) -> None:
     """Same contract as the SO-101 flow: completing a calibration writes
     "<config_file>.json", so a taken name needs an explicit overwrite."""
-    from makermodslab import zero_calibrate
+    from makermodslab import step_calibrate
 
     library = Path(cfg.calibration_dir_for_device("robot", "maker"))
     library.mkdir(parents=True, exist_ok=True)
     (library / "taken.json").write_text("{}")
 
-    result = zero_calibrate.zero_calibration_manager.start(
-        zero_calibrate.ZeroCalibrationRequest(device_type="robot", port="/dev/can0", config_file="taken")
+    result = step_calibrate.step_calibration_manager.start(
+        step_calibrate.StepCalibrationRequest(device_type="robot", port="/dev/can0", config_file="taken")
     )
 
     assert result["success"] is False
     assert result["code"] == "name_taken"
-    assert zero_calibrate.zero_calibration_is_active() is False
+    assert step_calibrate.step_calibration_is_active() is False
 
 
 def test_completing_a_step_with_no_calibration_running_is_a_clean_refusal() -> None:
-    from makermodslab import zero_calibrate
+    from makermodslab import step_calibrate
 
-    result = zero_calibrate.zero_calibration_manager.complete_step()
+    result = step_calibrate.step_calibration_manager.complete_step()
     assert result["success"] is False
     assert "No calibration active" in result["message"]
 
 
 def test_stopping_with_no_calibration_running_is_a_clean_refusal() -> None:
-    from makermodslab import zero_calibrate
+    from makermodslab import step_calibrate
 
-    result = zero_calibrate.zero_calibration_manager.stop()
+    result = step_calibrate.step_calibration_manager.stop()
     assert result["success"] is False
+
+
+# ---------------------------------------------------------------------------
+# The Maker family's own calibration procedure (fake devices, no bus)
+# ---------------------------------------------------------------------------
+
+MAKER_FOLLOWER_ZERO_POSE = (
+    "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully closed — then confirm."
+)
+STAR_LEADER_ZERO_POSE = (
+    "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, "
+    "gripper fully closed — then confirm."
+)
+
+
+def test_maker_calibration_summary_is_the_zero_pose_text_per_side() -> None:
+    """What the config dialog shows BEFORE Start. The text is the family's
+    verbatim (the frontend overrides it per id from its catalog); no served
+    image — the bundled photos stay."""
+    from makermodslab.arms import registry
+
+    maker = registry.get("maker")
+    assert maker.calibration_summary("robot") == {"text": MAKER_FOLLOWER_ZERO_POSE, "image_url": None}
+    assert maker.calibration_summary("teleop") == {"text": STAR_LEADER_ZERO_POSE, "image_url": None}
+    assert registry.get("so101").calibration_summary("robot") is None
+    assert registry.get("so101").calibration_summary("teleop") is None
+
+
+def test_maker_follower_calibrate_sets_zero_once_after_the_pose_step() -> None:
+    """The procedure, on the manager's worker thread: ONE live-positions step
+    with the follower's zero-pose text, a transient "setting zero" message,
+    one whole-bus set_zero_position AFTER the user confirmed, the multi-turn
+    bookkeeping reset, and a calibration whose ranges are the config's fixed
+    joint_limits with homing_offset 0 (the zero lives inside the motor)."""
+    from lerobot.robots.maker_follower import MakerFollowerConfig
+    from makermodslab.arms import registry
+    from tests.mocks import FakeCalibrationUI, FakeCanFollower
+
+    log: list = []
+    config = MakerFollowerConfig(port="/dev/can0", id="unit")
+    device = FakeCanFollower(config, log)
+    ui = FakeCalibrationUI(log)
+
+    calibration = registry.get("maker").calibrate(device, "robot", ui)
+
+    assert ui.steps == [(MAKER_FOLLOWER_ZERO_POSE, None, True)]
+    assert ui.messages and "zero" in ui.messages[0].lower()
+    assert [e for e in log if e[0] == "bus"] == [("bus", "set_zero_position")]
+    assert log.index(("step", MAKER_FOLLOWER_ZERO_POSE)) < log.index(("bus", "set_zero_position"))
+    assert device._turn_offset == dict.fromkeys(config.motor_can_ids, 0.0)
+    assert device._stale_zero == {} and device._last_positions == {}
+
+    assert set(calibration) == set(config.motor_can_ids)
+    for motor, motor_id in config.motor_can_ids.items():
+        entry = calibration[motor]
+        low, high = config.joint_limits[motor]
+        assert (entry.id, entry.drive_mode, entry.homing_offset) == (motor_id, 0, 0)
+        assert (entry.range_min, entry.range_max) == (int(low), int(high))
+    # The family returns the dict; WRITING it is the manager's job.
+    assert device.calibration is None
+
+
+def test_maker_leader_calibrate_unlocks_and_sets_origin_per_servo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Star leader speaks FashionStar UART: no broadcast, so each servo is
+    unlocked, given the settle time, then origin'd — in joint_ids order —
+    after the leader's own zero-pose step; ranges come from the preset's
+    joint_ranges."""
+    from lerobot.teleoperators.rebot_102_leader.config_rebot_102_leader_maker import (
+        RebotArm102LeaderMakerTeleopConfig,
+    )
+    from makermodslab.arms import registry
+    from tests.mocks import FakeCalibrationUI, FakeStarLeader
+
+    log: list = []
+    monkeypatch.setattr("time.sleep", lambda seconds: log.append(("sleep", seconds)))
+    config = RebotArm102LeaderMakerTeleopConfig(port="/dev/star0", id="unit")
+    device = FakeStarLeader(config, log)
+    ui = FakeCalibrationUI(log)
+
+    calibration = registry.get("maker").calibrate(device, "teleop", ui)
+
+    assert ui.steps == [(STAR_LEADER_ZERO_POSE, None, True)]
+    expected: list = [("step", STAR_LEADER_ZERO_POSE)]
+    for motor_id in config.joint_ids.values():
+        expected += [("bus", "unlock", motor_id), ("sleep", 0.01), ("bus", "set_origin_point", motor_id)]
+    assert [e for e in log if e[0] in ("bus", "sleep", "step")] == expected
+    for motor, motor_id in config.joint_ids.items():
+        low, high = config.joint_ranges[motor]
+        assert calibration[motor].id == motor_id
+        assert (calibration[motor].range_min, calibration[motor].range_max) == (int(low), int(high))
+        assert calibration[motor].homing_offset == 0
+
+
+def test_maker_open_for_calibration_connects_the_follower_bus_then_disables_torque(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NOT device.connect() (its tail enables torque, locking the arm the
+    user must move by hand): open the bus directly, then disable — in that
+    order, the write that frees a Metal arm the Damiao handshake energized."""
+    from makermodslab.arms import registry
+    from tests.mocks import FakeCanFollower
+
+    built: list = []
+
+    def fake_make_robot(config):
+        built.append(config)
+        return FakeCanFollower(config)
+
+    monkeypatch.setattr("lerobot.robots.make_robot_from_config", fake_make_robot, raising=False)
+    monkeypatch.setattr("lerobot.robots.utils.make_robot_from_config", fake_make_robot, raising=False)
+
+    device = registry.get("maker").open_for_calibration("robot", "/dev/can0", "cal")
+
+    assert [c.type for c in built] == ["maker_follower"]
+    assert (built[0].port, built[0].id) == ("/dev/can0", "cal")
+    assert device.log == [("bus", "connect", False), ("bus", "disable_torque")]
+
+
+def test_maker_open_for_calibration_connects_the_leader_uncalibrated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The leader's bus is built inside connect(); connect(calibrate=False)
+    leaves it unlocked and back-drivable, and there is no torque to disable —
+    its joints hold encoders and no motors."""
+    from makermodslab.arms import registry
+    from tests.mocks import FakeStarLeader
+
+    built: list = []
+
+    def fake_make_teleop(config):
+        built.append(config)
+        return FakeStarLeader(config)
+
+    monkeypatch.setattr(
+        "lerobot.teleoperators.make_teleoperator_from_config", fake_make_teleop, raising=False
+    )
+    monkeypatch.setattr(
+        "lerobot.teleoperators.utils.make_teleoperator_from_config", fake_make_teleop, raising=False
+    )
+
+    device = registry.get("maker").open_for_calibration("teleop", "/dev/star0", "cal")
+
+    assert [c.type for c in built] == ["rebot_102_leader_maker"]
+    assert (built[0].port, built[0].id) == ("/dev/star0", "cal")
+    assert device.log == [("device", "connect", False)]
 
 
 # ---------------------------------------------------------------------------
@@ -805,3 +1272,91 @@ async def test_identify_rejects_an_unknown_device_type() -> None:
 
     assert result["success"] is False
     assert "device_type" in result["message"]
+
+
+def test_a_failed_torque_disable_after_connect_de_energizes_and_closes_the_bus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Damiao handshake inside bus.connect() energizes the arm; when the
+    disable that frees it raises, nothing holds a device object to release
+    it through. The family must run the recovery de-energize and close the
+    port before the failure propagates — otherwise the arm holds torque
+    with its port open until the process exits."""
+    from makermodslab import torque
+    from makermodslab.arms import registry as arm_registry
+
+    calls: list[str] = []
+
+    class _Bus:
+        def connect(self, handshake=True):
+            assert handshake is False
+            calls.append("connect")
+
+        def disable_torque(self):
+            calls.append("disable_torque")
+            raise RuntimeError("no reply from motor 3")
+
+        def disconnect(self, disable_torque=True):
+            calls.append(f"disconnect({disable_torque})")
+
+    class _Device:
+        bus = _Bus()
+
+    def fake_make_robot(config):
+        calls.append(f"make:{type(config).__name__}")
+        return _Device()
+
+    monkeypatch.setattr("lerobot.robots.make_robot_from_config", fake_make_robot)
+    monkeypatch.setattr(
+        torque,
+        "de_energize_can_device",
+        lambda device, label="device": calls.append(f"de_energize:{label}") or [],
+    )
+
+    with pytest.raises(RuntimeError, match="motor 3"):
+        arm_registry.get("metal").open_for_calibration("robot", "/dev/can0", "unit")
+
+    assert calls[1:] == ["connect", "disable_torque", "de_energize:Metal follower arm", "disconnect(False)"]
+
+
+def test_a_handshake_that_raises_partway_is_de_energized_before_the_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Damiao handshake is the per-motor enable, sent motor by motor: one
+    that raises on motor 4 has energized 1–3 while is_connected reads False.
+    The calibration connect must hand the bus to the recovery de-energize
+    (which reopens WITHOUT the handshake) rather than leave those motors
+    holding torque with no device object to release them through."""
+    from makermodslab import torque
+    from makermodslab.arms import registry as arm_registry
+
+    calls: list[str] = []
+
+    class _Bus:
+        is_connected = False
+
+        def connect(self, handshake=True):
+            assert handshake is False
+            calls.append("connect")
+            raise RuntimeError("motor 4 did not answer the handshake")
+
+        def disable_torque(self):  # pragma: no cover - must not be reached
+            calls.append("disable_torque")
+
+        def disconnect(self, disable_torque=True):
+            calls.append(f"disconnect({disable_torque})")
+
+    class _Device:
+        bus = _Bus()
+
+    monkeypatch.setattr("lerobot.robots.make_robot_from_config", lambda config: _Device())
+    monkeypatch.setattr(
+        torque,
+        "de_energize_can_device",
+        lambda device, label="device": calls.append(f"de_energize:{label}") or [],
+    )
+
+    with pytest.raises(RuntimeError, match="motor 4"):
+        arm_registry.get("metal").open_for_calibration("robot", "/dev/can0", "unit")
+
+    assert calls == ["connect", "de_energize:Metal follower arm", "disconnect(False)"]

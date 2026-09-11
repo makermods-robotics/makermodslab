@@ -44,6 +44,21 @@ if os.environ.setdefault("MAKERMODSLAB_OUTPUT_ROOT", _TEST_OUTPUT_ROOT) == _TEST
 else:  # pragma: no cover - only when the caller pinned a root themselves
     shutil.rmtree(_TEST_OUTPUT_ROOT, ignore_errors=True)
 
+# Same mechanism for the app's own state root. `makermodslab.utils.config`
+# resolves MAKERMODSLAB_HOME at import, so this too must precede any import
+# of the package. Two effects: every state constant (robot records, ports, the
+# node list, the instance id, the UI bookkeeping files) points into a tmp dir
+# even in a test that forgets the `tmp_lerobot_home` fixture — and, because
+# the override is set, the server's startup migration is skipped, so a test
+# run can never move a developer's real pre-split state anywhere (least of
+# all into a tmp dir that is deleted at exit). Set UNCONDITIONALLY, unlike the
+# output root: MAKERMODSLAB_HOME is a production override a station or a
+# container exports, and honouring an exported value here would point the
+# `client` fixture at that machine's real state.
+_TEST_STATE_HOME = tempfile.mkdtemp(prefix="makermodslab-home-")
+os.environ["MAKERMODSLAB_HOME"] = _TEST_STATE_HOME
+atexit.register(shutil.rmtree, _TEST_STATE_HOME, ignore_errors=True)
+
 
 @pytest.fixture
 def client() -> Iterator[TestClient]:
@@ -56,19 +71,25 @@ def client() -> Iterator[TestClient]:
 
 @pytest.fixture
 def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect every persisted-state path under `~/.cache/huggingface/lerobot/`
-    into a tmp directory.
+    """Redirect every persisted-state path — lerobot's cache AND the app's own
+    MAKERMODSLAB_HOME — into per-test tmp directories.
 
     Patches the module-level constants in `makermodslab.utils.config` so any code
     importing them through `from makermodslab.utils.config import LEADER_CONFIG_PATH`
     sees the redirected path. Also sets `HF_LEROBOT_HOME` env var for any
     consumer (e.g. `makermodslab.datasets._lerobot_cache_root`) reading it directly.
+    Returns the lerobot-cache half (calibration libraries live there); the app's
+    state half is `tmp_path / "makermodslab"`, reachable as `cfg.MAKERMODSLAB_HOME`.
     """
     cache = tmp_path / "lerobot"
     cache.mkdir()
     monkeypatch.setenv("HF_LEROBOT_HOME", str(cache))
+    home = tmp_path / "makermodslab"
+    home.mkdir()
 
     from makermodslab.utils import config as cfg
+
+    monkeypatch.setattr(cfg, "MAKERMODSLAB_HOME", str(home))
 
     teleop_dir = cache / "calibration" / "teleoperators" / "so101_leader"
     robot_dir = cache / "calibration" / "robots" / "so101_follower"
@@ -78,16 +99,24 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # SO-101 pair, so they need their own redirect — without it any test that
     # touches a Maker calibration writes into the developer's real ~/.cache.
     maker_leader_cfg_dir = cache / "configs" / "rebot_102_leader"
+    maker_trigger_leader_cfg_dir = cache / "configs" / "rebot_102_leader_trigger"
     maker_follower_cfg_dir = cache / "configs" / "maker_follower"
-    port_dir = cache / "ports"
-    robots_dir = cache / "robots"
+    # The Metal arm's: its follower library, and the library of its OWN
+    # (gravity-compensated) leader — the Star leader's is shared with Maker.
+    metal_follower_cfg_dir = cache / "configs" / "metal_follower"
+    metal_leader_cfg_dir = cache / "configs" / "metal_leader"
+    port_dir = home / "ports"
+    robots_dir = home / "robots"
     for d in (
         teleop_dir,
         robot_dir,
         leader_cfg_dir,
         follower_cfg_dir,
         maker_leader_cfg_dir,
+        maker_trigger_leader_cfg_dir,
         maker_follower_cfg_dir,
+        metal_follower_cfg_dir,
+        metal_leader_cfg_dir,
         port_dir,
         robots_dir,
     ):
@@ -101,11 +130,14 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(cfg, "LEADER_CONFIG_PATH", str(leader_cfg_dir))
     monkeypatch.setattr(cfg, "FOLLOWER_CONFIG_PATH", str(follower_cfg_dir))
     monkeypatch.setattr(cfg, "MAKER_LEADER_CONFIG_PATH", str(maker_leader_cfg_dir))
+    monkeypatch.setattr(cfg, "MAKER_TRIGGER_LEADER_CONFIG_PATH", str(maker_trigger_leader_cfg_dir))
     monkeypatch.setattr(cfg, "MAKER_FOLLOWER_CONFIG_PATH", str(maker_follower_cfg_dir))
+    monkeypatch.setattr(cfg, "METAL_FOLLOWER_CONFIG_PATH", str(metal_follower_cfg_dir))
+    monkeypatch.setattr(cfg, "METAL_LEADER_CONFIG_PATH", str(metal_leader_cfg_dir))
     monkeypatch.setattr(cfg, "PORT_CONFIG_PATH", str(port_dir))
     monkeypatch.setattr(cfg, "LEADER_PORT_FILE", str(port_dir / "leader_port.txt"))
     monkeypatch.setattr(cfg, "FOLLOWER_PORT_FILE", str(port_dir / "follower_port.txt"))
-    monkeypatch.setattr(cfg, "DISMISSED_HUB_JOBS_FILE", str(cache / "dismissed_hub_jobs.json"))
+    monkeypatch.setattr(cfg, "DISMISSED_HUB_JOBS_FILE", str(home / "dismissed_hub_jobs.json"))
     # The pinned ("saved custom") and hidden repo-id lists. These leak the
     # HARDEST of the lot: every merged /datasets and /models listing folds them
     # in, so on a developer machine whose real saved_custom_models.json has
@@ -115,16 +147,16 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # access precisely so a patched constant is honoured, and it holds no
     # in-memory copy, so redirecting the constant here is sufficient — there is
     # no cache to clear afterwards.
-    monkeypatch.setattr(cfg, "SAVED_CUSTOM_DATASETS_FILE", str(cache / "saved_custom_datasets.json"))
-    monkeypatch.setattr(cfg, "SAVED_CUSTOM_MODELS_FILE", str(cache / "saved_custom_models.json"))
-    monkeypatch.setattr(cfg, "SAVED_HIDDEN_DATASETS_FILE", str(cache / "hidden_datasets.json"))
-    monkeypatch.setattr(cfg, "SAVED_HIDDEN_MODELS_FILE", str(cache / "hidden_models.json"))
-    monkeypatch.setattr(cfg, "EXCLUDED_EPISODES_FILE", str(cache / "excluded_episodes.json"))
+    monkeypatch.setattr(cfg, "SAVED_CUSTOM_DATASETS_FILE", str(home / "saved_custom_datasets.json"))
+    monkeypatch.setattr(cfg, "SAVED_CUSTOM_MODELS_FILE", str(home / "saved_custom_models.json"))
+    monkeypatch.setattr(cfg, "SAVED_HIDDEN_DATASETS_FILE", str(home / "hidden_datasets.json"))
+    monkeypatch.setattr(cfg, "SAVED_HIDDEN_MODELS_FILE", str(home / "hidden_models.json"))
+    monkeypatch.setattr(cfg, "EXCLUDED_EPISODES_FILE", str(home / "excluded_episodes.json"))
     # BiSO staging root — without this, any bimanual staging test writes into the
-    # developer's real ~/.cache dir.
-    monkeypatch.setattr(cfg, "MAKERMODSLAB_BISO_STAGING_PATH", str(cache / "makermodslab_biso"))
+    # developer's real state dir.
+    monkeypatch.setattr(cfg, "MAKERMODSLAB_BISO_STAGING_PATH", str(home / "biso_staging"))
     # Persisted node-registry peer list.
-    monkeypatch.setattr(cfg, "NODES_FILE", str(cache / "nodes.json"))
+    monkeypatch.setattr(cfg, "NODES_FILE", str(home / "nodes.json"))
 
     return cache
 
@@ -191,6 +223,22 @@ def _reset_module_caches() -> None:
             _mgr.repo_id = None
             _mgr.message = None
             _mgr.error = None
+
+
+@pytest.fixture(autouse=True)
+def _no_real_gpu_app_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the GPU launcher's app-id record at tmp_path, for EVERY test.
+
+    That file is what the orphan reaper reads at server startup, and what it
+    finds decides whether it shells out to `modal app stop`. The `client`
+    fixture runs the real startup event, so without this redirect a suite run
+    on a machine that had just launched a GPU could stop the developer's actual
+    Modal app. Redirecting it makes the record permanently empty in tests,
+    which is the one state in which the reaper does nothing at all.
+    """
+    from makermodslab import modal_launcher
+
+    monkeypatch.setattr(modal_launcher, "_APP_RECORD_FILE", tmp_path / "drtc_gpu_app.json")
 
 
 @pytest.fixture(autouse=True)

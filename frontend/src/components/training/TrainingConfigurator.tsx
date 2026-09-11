@@ -20,7 +20,8 @@ import {
   getCheckpointPolicyConfig,
   listJobCheckpoints,
 } from "@/lib/checkpointsApi";
-import { ARM_TYPE_LABEL, armTypeFromRobotType } from "@/lib/armTypes";
+import { armLabel, armTypeFromRobotType } from "@/lib/armTypes";
+import { useArms } from "@/hooks/useArms";
 import { Label } from "@/components/ui/label";
 
 import { Button } from "@/components/ui/button";
@@ -264,6 +265,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const { auth } = useHfAuth();
   const { toast } = useToast();
   const { t } = useTranslation();
+  const { arms, byId } = useArms();
   const navigate = useNavigate();
   const location = useLocation();
   const { openJobMonitor } = useStudio();
@@ -653,16 +655,17 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   }, [finetuneJobId, effectiveFinetuneStep, baseUrl, fetchWithHeaders]);
 
   const crossArmWarning = useMemo(() => {
-    const baseArm = armTypeFromRobotType(baseTrainedOnRobotType);
+    const baseArm = armTypeFromRobotType(arms, baseTrainedOnRobotType);
     const datasetArm = armTypeFromRobotType(
+      arms,
       finetuneSeed ? (datasetInfo?.robot_type ?? null) : null,
     );
     if (!baseArm || !datasetArm || baseArm === datasetArm) return null;
     return t("training.configurator.finetune.armMismatch", {
-      base: ARM_TYPE_LABEL[baseArm],
-      dataset: ARM_TYPE_LABEL[datasetArm],
+      base: armLabel(byId(baseArm), baseArm, t),
+      dataset: armLabel(byId(datasetArm), datasetArm, t),
     });
-  }, [baseTrainedOnRobotType, datasetInfo, finetuneSeed, t]);
+  }, [arms, byId, baseTrainedOnRobotType, datasetInfo, finetuneSeed, t]);
 
   const [uploadError, setUploadError] = useState<string | null>(null);
 

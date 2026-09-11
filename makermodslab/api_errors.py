@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -49,6 +49,18 @@ class ErrorCode(StrEnum):
     # (arm still energized, driving back to rest) — retry shortly.
     ROBOT_NOT_FOUND = "robot.not_found"
     ROBOT_NOT_READY = "robot.not_ready"
+    # The record's arm_type names a family this install has not registered
+    # (an extension that is not installed, or a hand-edited record). Never
+    # normalized to the SO-101: a silent fallback would open a Feetech serial
+    # path at whatever the hardware really is. 400 wherever it is raised.
+    ROBOT_ARM_TYPE_UNAVAILABLE = "robot.arm_type.unavailable"
+    # The record's leader_kind names a leader its arm family does not offer
+    # (`unknown`: a hand-edited record, or a kind sent for the wrong family),
+    # or one the family offers but this install cannot drive (`unavailable`:
+    # the gravity-compensated Metal leader without the `metal-leader` extra
+    # installed). Both 400; the detail names the remedy.
+    ROBOT_LEADER_KIND_UNKNOWN = "robot.leader_kind.unknown"
+    ROBOT_LEADER_KIND_UNAVAILABLE = "robot.leader_kind.unavailable"
     ROBOT_BUSY_RECORDING = "robot.busy.recording"
     ROBOT_BUSY_TELEOPERATION = "robot.busy.teleoperation"
     ROBOT_BUSY_INFERENCE = "robot.busy.inference"
@@ -56,7 +68,21 @@ class ErrorCode(StrEnum):
     ROBOT_BUSY_CALIBRATION = "robot.busy.calibration"
     ROBOT_BUSY_AUTO_CALIBRATION = "robot.busy.auto_calibration"
     ROBOT_BUSY_WIGGLE = "robot.busy.wiggle"
+    # Remote inference (makermodslab/remote_inference.py): a policy on a remote
+    # GPU driving this machine's follower over LiveKit. Its own discriminant
+    # rather than `inference` because the two are different sessions with
+    # different stop machinery — a client refused by one and pointed at the
+    # other's Stop button would get an endpoint that reports idle.
+    ROBOT_BUSY_REMOTE_INFERENCE = "robot.busy.remote_inference"
     ROBOT_BUSY_RELEASING = "robot.busy.releasing"
+    # The remote pair (remote_host.py / remote_teleoperate.py): `hosting`
+    # holds the follower + cameras for a LiveKit room; `remote_teleoperation`
+    # holds the leader while driving a remote station's follower.
+    ROBOT_BUSY_HOSTING = "robot.busy.hosting"
+    ROBOT_BUSY_REMOTE_TELEOPERATION = "robot.busy.remote_teleoperation"
+    # The operator's leader and the station's follower disagree on the motor
+    # set (or arm family) — Portal would silently drop every packet.
+    ROBOT_SCHEMA_MISMATCH = "robot.schema_mismatch"
     # A live LOCAL training run holds the machine (GPU + the arms' USB bus).
     # The reverse direction never refuses: a submit made while a feature runs
     # QUEUES instead (jobs.JobRegistry._robot_busy).
@@ -101,6 +127,11 @@ class ErrorCode(StrEnum):
     # stop/cancel it where it lives (the jobs surface), not to retry the
     # delete.
     JOB_NOT_TERMINAL = "job.not_terminal"
+    # `publish_in_progress`: a delete was aimed at a run whose checkpoints the
+    # background Hub publish (models.model_upload_manager) is uploading RIGHT
+    # NOW — the rmtree would pull the files out from under upload_folder
+    # mid-read. The remedy is to wait for the publish to finish (or fail).
+    JOB_PUBLISH_IN_PROGRESS = "job.publish_in_progress"
 
     # Library resources.
     DATASET_NOT_FOUND = "dataset.not_found"
@@ -115,6 +146,9 @@ class ErrorCode(StrEnum):
     NODE_UNREACHABLE = "node.unreachable"
     NODE_DUPLICATE = "node.duplicate"
     NODE_SELF = "node.self"
+    # The station answered but has no hosting session up: the user there has
+    # to press "Available for remote teleop" first.
+    NODE_NOT_HOSTING = "node.not_hosting"
 
     # session.* — the /api/v1/sessions surface (sessions.py). `held`: another
     # session holds the hardware (details name the holder). `not_found`: a
@@ -129,6 +163,19 @@ class ErrorCode(StrEnum):
     SESSION_LEASE_EXPIRED = "session.lease_expired"
     SESSION_NOT_FOUND = "session.not_found"
 
+    # transport.* — the LiveKit path remote inference runs over (the SFU and
+    # the room), an external service this node depends on. Its own domain for
+    # the same reason `hub` has one: folding it into `hardware.connect_failed`
+    # would lie (that is the serial bus) and so would `system.*` (it is not
+    # this process). `no_policy` is the empty-room case — the room answers but
+    # no GPU-side operator is in it, caught BEFORE the arm is energized. A
+    # missing Portal extra is NOT a transport fact and lives under `system.*`
+    # (`SYSTEM_EXTRA_MISSING`), shared with hosting / remote teleoperation.
+    TRANSPORT_NOT_CONFIGURED = "transport.not_configured"
+    TRANSPORT_UNREACHABLE = "transport.unreachable"
+    TRANSPORT_UNAUTHORIZED = "transport.unauthorized"
+    TRANSPORT_NO_POLICY = "transport.no_policy"
+
     # system.* — the server process itself. `restart_unsupported`: this
     # process cannot safely re-exec (a dev reload worker, or a launch whose
     # argv isn't one of our entry points) — the remedy is restarting it the
@@ -136,6 +183,46 @@ class ErrorCode(StrEnum):
     # would orphan a live pip subprocess mid-write — retry once it finishes.
     SYSTEM_RESTART_UNSUPPORTED = "system.restart_unsupported"
     SYSTEM_INSTALL_IN_PROGRESS = "system.install_in_progress"
+    # An optional extra the flow needs is not importable (the `remote` extra:
+    # LiveKit Portal and its lerobot plugins, shared by hosting, remote
+    # teleoperation and remote inference) — install it, then retry.
+    SYSTEM_EXTRA_MISSING = "system.extra_missing"
+
+    # gpu.* — the remote GPU that runs the policy for a remote-inference run
+    # (modal_launcher.py), reached through the `modal` CLI. Its own level-1
+    # domain by the same argument `transport` earned one: a second external
+    # service this node depends on, with a different remedy set. `transport.*`
+    # would blunt four rungs that are carefully distinguished (the GPU is
+    # neither the SFU nor the room), and `system.*` would lie — `unauthenticated`
+    # and `launch_failed` are facts about Modal, not about this process.
+    # `cli_missing`: the binary isn't on PATH (remedy: `uv tool install modal`).
+    # `unauthenticated`: Modal rejected this machine (remedy: `modal token new`;
+    # the Lab never touches ~/.modal.toml). `already_running`/`not_running`: a
+    # start against a live launcher, a stop against a dead one — the GPU is a
+    # Lab-level resource, so these are its own, not `robot.busy.*`.
+    # `targets_unavailable`: the `modal profile list` / `modal environment
+    # list` listing behind the profile+environment pickers did not answer (a
+    # non-zero exit, a timeout, output that is not the JSON this build parses,
+    # or a profile query naming something this machine does not have). Its own
+    # rung rather than `launch_failed` because NOTHING WAS LAUNCHED: the
+    # remedy is the CLI's own state, and a failed listing must never block a
+    # launch — the CLI's own profile resolution still works.
+    GPU_CLI_MISSING = "gpu.cli_missing"
+    GPU_UNAUTHENTICATED = "gpu.unauthenticated"
+    GPU_ALREADY_RUNNING = "gpu.already_running"
+    GPU_NOT_RUNNING = "gpu.not_running"
+    GPU_LAUNCH_FAILED = "gpu.launch_failed"
+    GPU_TARGETS_UNAVAILABLE = "gpu.targets_unavailable"
+
+    # sfu.* — the bundled LiveKit server (sfu.py). `disabled`: this process
+    # was started without --sfu (or an external SFU configured), so there is
+    # no secret to sign room tokens with — the remedy is restarting the
+    # launcher with --sfu, not retrying.
+    SFU_DISABLED = "sfu.disabled"
+    # The station's single operator seat is held by someone else: the room
+    # admits one operator beside the robot, and the token route refuses a
+    # second operator token while the seat is occupied.
+    SFU_SEAT_TAKEN = "sfu.seat_taken"
 
     # The residual 500.
     INTERNAL_UNEXPECTED = "internal.unexpected"

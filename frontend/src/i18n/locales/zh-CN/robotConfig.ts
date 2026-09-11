@@ -14,9 +14,13 @@ export default {
     eyebrow: "端口 · 标定 · 摄像头 · 电机力矩",
     title: "机器人设置 — {{name}}",
     srDescription: "为 {{name}} 配置端口、标定、摄像头和电机力矩。",
+    armUnavailable:
+      "该机器人的机械臂类型“{{armType}}”未安装。请安装提供它的扩展，或删除该机器人并用已安装的机械臂类型重新创建 — 在此之前，端口识别和标定不可用。",
+    armsNotLoaded:
+      "尚未从服务器加载机械臂类型 — 正在重试。在加载完成之前，端口识别和标定暂不可用。",
     unsaved: "有未保存的更改",
-    savedWithGap: "已保存 — 但该机器人{{gap}}",
-    allSaved: "所有更改已保存",
+    savedWithGap: "已保存。设置未完成。",
+    allSaved: "已保存",
     quit: "退出",
     save: "保存",
     saving: "正在保存…",
@@ -59,6 +63,14 @@ export default {
     robot: "从臂",
   },
 
+  // ---- 机械臂布局 --------------------------------------------------------
+  layout: {
+    question: "这台机器接了什么？",
+    both: "主臂和从臂",
+    followerOnly: "仅从臂 — 机器人工作站",
+    leaderOnly: "仅主臂 — 远程机器人的控制器",
+  },
+
   // ---- 01 · 设备 ---------------------------------------------------------
   device: {
     step: "设备",
@@ -67,6 +79,28 @@ export default {
     groupSingle: "设备",
     left: "左",
     right: "右",
+  },
+
+  // ---- 主控臂类型 ----------------------------------------------------------
+  leaderKind: {
+    label: "主控臂",
+    unavailable: "未安装",
+    energizedHint:
+      "主控臂可支撑自身重量。使用“抖动”查找它的端口。",
+    optionFor: {
+      maker: {
+        star: "Star Arm 102 主控臂",
+        star_trigger: "Star Arm 102 主控臂（扳机式夹爪）",
+      },
+      metal: {
+        star: "Star Arm 102 主控臂",
+        metal: "Metal 机械臂主控臂（重力补偿）",
+      },
+    },
+    toast: {
+      savedTitle: "主控臂已保存",
+      saveFailedTitle: "无法更改主控臂",
+    },
   },
 
   slotCard: {
@@ -84,8 +118,8 @@ export default {
     otherArm: "其他机械臂",
     clear: "清除端口",
     clearTitle: "清除端口 — 释放它且不分配新端口",
-    rescan: "重新扫描",
-    detect: "识别",
+    rescan: "刷新",
+    detect: "摆动识别",
     detecting: "监测中…",
     detectTitle: "手动识别：将机械臂底座大幅向左和向右摆动",
     detectHelp:
@@ -94,12 +128,18 @@ export default {
       "把底座向左右大幅摆动，明显越过起始位置。小幅或单向的晃动会被忽略。",
     detectHelpMaker:
       "自动识别 —— Maker 机械臂的从臂和主臂使用不同协议，无需手动操作。双臂装置请将其中一条机械臂的底座向左和向右摆动，以指明是哪一侧。",
-    detectLiveMaker:
-      "正在逐个探测端口。若有两条机械臂响应，请把要分配的那条底座向左右摆动。",
     detectHelpMetal:
       "自动识别 —— Metal 机械臂的从臂和主臂使用不同协议，无需手动操作。双臂装置请将其中一条机械臂的底座向左和向右摆动，以指明是哪一侧。",
-    detectLiveMetal:
+    detectLiveProbe:
       "正在逐个探测端口。若有两条机械臂响应，请把要分配的那条底座向左右摆动。",
+    detectLiveFor: {
+      maker:
+        "正在逐个探测端口。若有两条机械臂响应，请把要分配的那条底座向左右摆动。",
+      metal:
+        "正在逐个探测端口。若有两条机械臂响应，请把要分配的那条底座向左右摆动。",
+    },
+    multipleHelp:
+      "左右摆动主臂底座来识别主臂。对于从臂，请选择端口并点击抖动，观察哪个夹爪移动。夹爪随后会回到起始位置。",
     wiggle: "抖动",
     wiggling: "抖动中…",
     wiggleTitle: "驱动该端口上的夹爪，看看是哪条机械臂",
@@ -108,7 +148,9 @@ export default {
     detectTip: "把底座向左右大幅摆动。小幅晃动会被忽略。",
     detectAuto: "自动识别",
     detectTipAuto: "逐个探测端口，无需手动摆动。",
-    wiggleTip: "驱动夹爪，你可以看到哪条机械臂有反应。",
+    wiggleTip: "移动夹爪后回到起始位置。",
+    wiggleFallback:
+      "请改用某个端口上的“抖动”：它只会驱动那条机械臂的夹爪，你可以看到是哪条机械臂，然后手动分配端口。",
     noneAssigned: "无端口",
     forSlot: "{{slot}} 的端口",
     toast: {
@@ -154,6 +196,7 @@ export default {
     step: "标定",
     calibrateAll: "全部标定",
     calibrateAllTitle: "选中所有已检测到的机械臂进行自动标定",
+    calibrateAllZeroTitle: "依次设置每个已检测机械臂的零位姿态",
     calibrateAllDisabledTitle: "未检测到机械臂 — 请接上机械臂并重新扫描",
     openLeaderFolder: "打开主臂标定文件夹",
     openFollowerFolder: "打开从臂标定文件夹",
@@ -191,17 +234,37 @@ export default {
       unknown: "未知",
     },
     zeroPose: {
-      instructions:
-        "用手把机械臂摆成上图的姿态：折叠贴近底座，夹爪完全张开。扭矩已关闭，可以自由移动。",
-      instructionsLeader:
-        "用手将 Star Arm 102 主控臂摆成上图的姿态：折叠贴近底座，夹爪闭合。关节未通电，可以自由移动。",
-      instructionsMetal:
-        "用手把机械臂摆成上图的姿态：竖直站立，各关节归零，夹爪闭合。扭矩已关闭，可以自由移动。",
+      sequence_other: "逐一设置机械臂零位。还剩 {{count}} 个机械臂。",
+      cancelAll: "取消全部",
+      poseCaption: "与上图姿势保持一致，夹爪完全闭合。",
+      instructionsFor: {
+        maker: {
+          leader:
+            "用手将 Star Arm 102 主控臂摆成上图的姿态：折叠贴近底座，夹爪闭合。关节未通电，可以自由移动。",
+          leader_star_trigger:
+            "用手将 Star Arm 102 主控臂摆成上图的姿态：折叠贴近底座，夹爪扳机处于闭合挡位。关节未通电，可以自由移动。",
+          follower:
+            "用手把机械臂摆成上图的姿态：折叠贴近底座，夹爪完全闭合。扭矩已关闭，可以自由移动。",
+        },
+        metal: {
+          leader:
+            "用手将 Star Arm 102 主控臂摆成上图的姿态：折叠贴近底座，夹爪闭合。关节未通电，可以自由移动。",
+          leader_metal:
+            "用手把主控 Metal 机械臂摆成上图的姿态：竖直站立，各关节归零，夹爪闭合。扭矩已关闭，可以自由移动。",
+          follower:
+            "用手把机械臂摆成上图的姿态：竖直站立，各关节归零，夹爪闭合。扭矩已关闭，可以自由移动。",
+        },
+      },
+      leaderPoseImageFor: {
+        metal: {
+          metal: "主控 Metal 机械臂零位姿态：竖直，夹爪闭合",
+        },
+      },
       liveAngles: "实时关节角度",
       start: "设置零位姿态",
       confirm: "设为零位并保存",
       saving: "正在设置零位并保存标定…",
-      poseImage: "零位姿态：折叠，夹爪张开",
+      poseImage: "零位姿态：折叠，夹爪完全闭合",
       poseImageLeader: "Star Arm 102 主控臂零位姿态：折叠，夹爪闭合",
       poseImageMetal: "零位姿态：竖直，夹爪闭合",
     },
@@ -225,9 +288,15 @@ export default {
     errorLabel: "错误：",
     demoTitle: "标定演示",
     start: "开始",
-    sweepNote: "把每个关节向两个方向都移到行程尽头。扭矩已关闭，机械臂会发软，请托住它。",
+    sweepNote:
+      "把每个关节向两个方向都移到行程尽头。扭矩已关闭，机械臂会发软，请托住它。",
     autoNote: "机械臂会自行运动以找到各关节的行程极限。请保持周围空旷。",
-    zeroNote: "把机械臂摆成上图的位置，然后设定零位。扭矩保持关闭，可以自由活动。",
+    zeroNote:
+      "把机械臂摆成上图的位置，然后设定零位。扭矩保持关闭，可以自由活动。",
+    panel: {
+      notice:
+        "这条机械臂通过其扩展自带的面板进行标定。扩展提供该面板后，它会显示在这里。",
+    },
     videoAuto: "自动标定演示",
     poseMiddle: "起始姿态：中间位置",
     poseAutoStart: "自动标定起始姿态",
@@ -255,6 +324,12 @@ export default {
       stepFailedTitle: "步骤失败",
       stepFailedFallback: "无法完成该步骤",
       stepError: "无法完成标定步骤",
+      failedFallback: "标定失败，请重试。",
+      notResponding: "机械臂无响应，请检查电源和连接线。",
+      jointsNotResponding: "{{joints}} 无响应，请检查电源和接线。",
+      disconnected: "机械臂已断开，请重新连接后重试。",
+      portDenied: "端口访问被拒绝，请检查权限或关闭其他应用。",
+      motorFault: "电机报告故障，请检查机械臂后重试。",
     },
   },
 
@@ -306,6 +381,12 @@ export default {
 
   // ---- 高级参数（自动标定力矩） ------------------------------------------
   advanced: {
+    holdingLabel: "保持力矩 (N·m)",
+    holdingDefault: "默认：0.5 N·m",
+    holdingHint: "调整夹住物体后的持续夹持力度。点击保存可在遥操作或录制中实时应用并记住该值。双臂机器人的两个从臂夹爪共用此设置。这不是瞬时力矩上限。",
+    holdingDisabled: "保持控制已禁用。请选择数值或使用默认值，然后在会话停止时点击保存以启用。",
+    holdingApplied: "保持力矩已应用并保存",
+    holdingSaved: "保持力矩已保存，将用于下一次会话",
     title: "高级参数",
     subtitle: "自动标定力矩",
     torqueLabel: "自动标定力矩",

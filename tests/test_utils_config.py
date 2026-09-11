@@ -1263,3 +1263,125 @@ def test_bind_robot_cameras_reanchors_for_inference_too(
     )
 
     assert cfg.bind_robot_cameras("lab1", {"front": "wrist"})["front"]["camera_index"] == 2
+
+
+# ---------------------------------------------------------------------------
+# TB6a: calibration libraries for a family the core did not ship
+# ---------------------------------------------------------------------------
+
+
+def test_lerobot_calibration_dir_is_the_dir_lerobot_derives_from_a_device_class_name(
+    tmp_lerobot_home: Path,
+) -> None:
+    """lerobot reads a device's calibration from ``<base>/<class name>/``;
+    the helper spells that rule once so an extension family returns it from
+    its dir methods instead of re-deriving the path (under the redirected
+    base here — resolved at call time, like the built-ins' constants)."""
+    import os
+
+    assert cfg.lerobot_calibration_dir("robots", "x_follower") == os.path.join(
+        cfg.CALIBRATION_BASE_PATH_ROBOTS, "x_follower"
+    )
+    assert cfg.lerobot_calibration_dir("teleoperators", "x_leader") == os.path.join(
+        cfg.CALIBRATION_BASE_PATH_TELEOP, "x_leader"
+    )
+    assert cfg.lerobot_calibration_dir("robots", "x_follower").startswith(str(tmp_lerobot_home))
+
+
+def test_an_extension_family_gets_its_own_library_dirs_through_the_config_seams(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fake family whose dir methods answer lerobot_calibration_dir(...)
+    is served its OWN directories by calibration_dir_for_device — never the
+    SO-101's or a CAN family's — and its default slot names carry its suffix
+    through default_slot_config_name, with no edit to the core."""
+    import os
+
+    from makermodslab.arms import registry
+    from tests.mocks import make_arm_family, scratch_registry
+
+    scratch_registry(monkeypatch)
+    registry.register(
+        make_arm_family(
+            "nine",
+            leader_dir=cfg.lerobot_calibration_dir("teleoperators", "nine_leader"),
+            follower_dir=cfg.lerobot_calibration_dir("robots", "nine_follower"),
+        )
+    )
+
+    follower_dir = cfg.calibration_dir_for_device("robot", "nine")
+    leader_dir = cfg.calibration_dir_for_device("teleop", "nine")
+    assert follower_dir == os.path.join(cfg.CALIBRATION_BASE_PATH_ROBOTS, "nine_follower")
+    assert leader_dir == os.path.join(cfg.CALIBRATION_BASE_PATH_TELEOP, "nine_leader")
+    for other in registry.ids()[:-1]:
+        assert follower_dir != cfg.calibration_dir_for_device("robot", other)
+        assert leader_dir != cfg.calibration_dir_for_device("teleop", other)
+    assert cfg.follower_config_path_for("nine") == follower_dir
+    assert cfg.leader_config_path_for("nine") == leader_dir
+
+    assert cfg.default_slot_config_name("bot", "single", "left", "nine") == "bot_nine"
+    assert cfg.default_slot_config_name("bot", "bimanual", "right", "nine") == "bot_nine_right"
+
+
+# --- record layout (`arms`) ----------------------------------------------------
+
+
+def test_record_arms_defaults_to_both_for_old_and_new_records(tmp_lerobot_home) -> None:
+    """A record written before the remote kinds existed carries no layout and
+    reads back as a local pair; a fresh record starts the same way."""
+    from makermodslab.utils import config as cfg
+
+    cfg.save_robot_record("fresh", {})
+    assert cfg.get_robot_record("fresh")["arms"] == "both"
+    # Simulate a pre-layout file on disk.
+    path = cfg._robot_record_path("old")
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps({"name": "old", "follower_port": "/dev/f"}))
+    assert cfg.get_robot_record("old")["arms"] == "both"
+
+
+@pytest.mark.parametrize("arms", ["follower", "leader", "both"])
+def test_record_arms_round_trips_and_ignores_unknown_values(tmp_lerobot_home, arms: str) -> None:
+    from makermodslab.utils import config as cfg
+
+    cfg.save_robot_record("station", {"arms": arms})
+    assert cfg.get_robot_record("station")["arms"] == arms
+    cfg.save_robot_record("station", {"arms": "wings"})  # unknown: keeps the existing layout
+    assert cfg.get_robot_record("station")["arms"] == arms
+    cfg.save_robot_record("station", {"follower_port": "/dev/f"})  # unrelated patch: preserved
+    assert cfg.get_robot_record("station")["arms"] == arms
+
+
+def test_robots_listing_reports_leader_ready(client, tmp_lerobot_home) -> None:
+    """The listing exposes all three readiness scopes; a leader-only record is
+    leader_ready and nothing else."""
+    from makermodslab.utils import config as cfg
+
+    (Path(cfg.LEADER_CONFIG_PATH) / "LC.json").write_text("{}")
+    cfg.save_robot_record("controller", {"arms": "leader", "leader_port": "/dev/l", "leader_config": "LC"})
+    robot = next(r for r in client.get("/api/v1/robots").json()["robots"] if r["name"] == "controller")
+    assert (robot["arms"], robot["leader_ready"], robot["follower_ready"], robot["is_clean"]) == (
+        "leader",
+        True,
+        False,
+        False,
+    )
+
+
+def test_bind_robot_cameras_ignores_disconnected_unbound_camera(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wrist = _camera_entry("wrist")
+    front = _camera_entry("front")
+    front["unique_id"] = "uid-front"
+    cfg.save_robot_record("lab1", {"cameras": [wrist, front]}, allow_create=True)
+    _enumeration(monkeypatch, [{"index": 3, "name": "Front", "unique_id": "uid-front"}])
+
+    bound = cfg.bind_robot_cameras("lab1", {"image": "front"})
+
+    assert set(bound) == {"image"}
+    assert bound["image"]["camera_index"] == 3
+    with pytest.raises(cfg.CameraResolutionError, match="wrist"):
+        cfg.bind_robot_cameras("lab1", {"image": "wrist"})
+    with pytest.raises(cfg.CameraResolutionError, match="wrist"):
+        cfg.load_robot_cameras("lab1")

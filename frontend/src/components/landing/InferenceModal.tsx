@@ -23,7 +23,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { AlertTriangle, CheckCircle, Loader2, Play, VideoOff } from "lucide-react";
-import { RobotRecord, jointsPerArm } from "@/hooks/useRobots";
+import { RobotRecord } from "@/hooks/useRobots";
+import { useArms } from "@/hooks/useArms";
+import { jointsPerArm } from "@/lib/armTypes";
 import { formatRobotSetupGap } from "@/lib/robotSetupGap";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
@@ -173,6 +175,7 @@ const InferenceModal: React.FC<Props> = ({
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { openInferenceSession } = useInferenceSession();
+  const { byId: armById } = useArms();
 
   const [checkpoints, setCheckpoints] = useState<JobCheckpoint[]>([]);
   const [selectedStep, setSelectedStep] = useState<number | null>(initialStep);
@@ -387,9 +390,10 @@ const InferenceModal: React.FC<Props> = ({
   // 6-DOF and a CAN arm (Maker, Metal) 7 (six joints plus its permanent
   // gripper). Measured against 6, a 7-dim CAN checkpoint is not a clean
   // multiple, so checkpointArms would resolve to null and this guard would
-  // silently go quiet on exactly the mismatch it exists to catch. Mirrors the
-  // server's `_ARM_STATE_DIMS` in rollout.py — change both together.
-  const armDof = jointsPerArm(robot?.arm_type);
+  // silently go quiet on exactly the mismatch it exists to catch. Read from
+  // the arms manifest (joints_per_arm), the same source the server's
+  // `_arm_count_mismatch` reads live.
+  const armDof = jointsPerArm(armById(robot?.arm_type));
   const checkpointDim = policyConfig?.state_dim ?? policyConfig?.action_dim ?? null;
   const checkpointArms =
     checkpointDim != null && checkpointDim % armDof === 0

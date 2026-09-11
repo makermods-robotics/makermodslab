@@ -68,6 +68,8 @@ export default {
       savedAs: "Will be saved as <0>{{repoId}}</0>",
       loginHint: "Log in to Hugging Face to set the repository owner.",
       task: "Task description *",
+      perEpisodeTaskLabel: "Describe each episode",
+      perEpisodeTaskHint: "Enter a task before each episode. Reset when needed, then press Space to record.",
       taskPlaceholder:
         "e.g., pick up the red block and place it on the blue square",
       numEpisodes: "Number of episodes",
@@ -89,7 +91,7 @@ export default {
       noRobotBody:
         "Select or create a robot first — use the robot menu in the top-right corner.",
       missingDetailsTitle: "Missing dataset details",
-      missingDetailsBody: "Please enter a dataset name and task description.",
+      missingDetailsBody: "Please enter a dataset name.",
       // The body is validateDatasetName's own message — client-side, but owned
       // by lib/datasetName.ts, so only this title is a key.
       invalidNameTitle: "Invalid dataset name",
@@ -167,6 +169,8 @@ export default {
         "Training on {{used}} of {{total}} episodes — adjust which ones from this dataset's viewer in My Library.",
       // aria-label and title on the same button.
       choose: "Choose dataset",
+      // Placeholder on the picker trigger before a dataset is chosen.
+      pick: "Pick a dataset",
       // <0> is the mono repo-id span; {{repoId}} is the typed Hub id.
       useHub: "Use <0>{{repoId}}</0> from the Hub",
       useHubHint: "Public dataset — training fetches it on demand.",
@@ -174,18 +178,8 @@ export default {
       noMatches:
         "No matching datasets. Type a full <0>org/name</0> id to use any public Hugging Face dataset.",
       hint: "Yours, or any public Hugging Face dataset.",
-      row: {
-        // Abbreviated episode count on a search result. {{episodes}} rather
-        // than {{count}}: this is a compact badge with no plural form.
-        episodes: "{{episodes}} ep",
-        // Source marker for a Hub-only row. Product name — same in every
-        // language, keyed so the two markers have one uniform shape.
-        hub: "Hub",
-        // Compact badge: this dataset carries per-episode sampling weights.
-        weighted: "weighted",
-        weightedTitle:
-          "Carries per-episode sampling weights — some episodes are sampled more often during training",
-      },
+      // The per-row markers (episode count / weighted / Hub) live with the
+      // picker that renders them now: `landing.datasetPicker.row.*`.
     },
     startingPoint: {
       label: "Starting point",
@@ -230,6 +224,12 @@ export default {
 
   deploy: {
     title: "Run",
+    // The panel's entry control — the opener that slides the run form open,
+    // matching collect.entry / train.entry.
+    entry: "Run a policy",
+    policy: {
+      label: "Policy *",
+    },
     picker: {
       placeholder: "Pick a policy",
       loading: "Loading policies…",
@@ -237,8 +237,8 @@ export default {
       // Shown INSTEAD of `empty` when the listing could not be fetched —
       // an outage must not read as "you have no policies".
       error: "Couldn’t load policies. Check the server and try again.",
-      // Badge on a run that exited non-zero but left usable weights.
-      failedBadge: "failed run",
+      // The "failed run" row badge lives with the picker that renders it now:
+      // `landing.modelPicker.failedBadge`.
       hubDegraded:
         "Hub unreachable — showing your local policies and the last Hub listing.",
       // aria-label and title on the same button.
@@ -250,7 +250,9 @@ export default {
       local: "local",
       both: "local · hub",
     },
-    intro: "Run this policy on your robot, then start inference.",
+    // The run form's one-line brief, in the slot and voice Train uses.
+    intro:
+      "Pick a policy and its checkpoint, set how long it runs, and check the cameras — then start.",
     noRobot:
       "Select a robot to run on — use the robot menu in the top-right corner of this window.",
     // <0> wraps the robot name; {{gap}} is the rendered follower-scoped setup
@@ -292,6 +294,17 @@ export default {
           "take control of the follower with the leader when it's failing, and gather data",
       },
     },
+    // WHERE the policy runs — the segmented control above the tab strip. The
+    // option VALUES ("local"/"remote") are identifiers the panel switches on;
+    // only these labels are translated.
+    runsOn: {
+      label: "Runs on",
+      local: "This machine",
+      remote: "Remote GPU",
+      localHint: "This machine loads the checkpoint and drives the arm.",
+      remoteHint:
+        "The GPU runs the policy. This machine controls the arm.",
+    },
     // Coaching-only parameters, shown when run mode is "coach".
     coaching: {
       correctionsLabel: "Corrections to collect",
@@ -318,6 +331,8 @@ export default {
     checkpoint: {
       label: "Checkpoint",
       none: "No checkpoints available for this policy yet.",
+      // Placeholder on the disabled dropdown shown before a policy is picked.
+      pickPolicyFirst: "Pick a policy first",
     },
     // Checkpoint/robot arm-count mismatch. Each branch is one complete
     // sentence pair so word order is the translator's to choose. <0> is the
@@ -333,19 +348,25 @@ export default {
       label: "Task description",
       placeholder: "e.g., pick up the red block",
       // {{policyType}} is the policy identifier (act, smolvla, …) — data.
-      hint: "This policy is language-conditioned ({{policyType}}).",
+      // The field is always shown, so the helper answers "is this even read?"
+      // in all three states: no policy picked yet, conditioned, not conditioned.
+      hint: "Task for {{policyType}}.",
+      hintUnknown:
+        "Select a policy to check task support.",
+      hintNotConditioned:
+        "{{policyType}} does not use a task.",
       // Appended to `hint` when the task was auto-filled from the checkpoint's
       // own training dataset. Leading space is added by the caller.
       prefilled: "Filled in from the dataset it was trained on.",
       // Placeholder when the lineage offered no task at all. Never an invented
       // example: a fake task greyed into the slot the REAL inherited one uses
       // is indistinguishable from one.
-      placeholderNone: "No task found on the training dataset — type one",
+      placeholderNone: "Describe the task",
       // Shown for a policy that does NOT read the task. Coaching still saves it.
       hintCoach:
         "Saved with every correction, so you can tell later what this session was teaching.",
       leaveEmpty:
-        "Leave it empty to use the greyed task from the dataset it was trained on.",
+        "Leave blank to use the suggested task.",
       multiTaskHint_one:
         "Its training dataset has {{count}} task — pick the one you're running:",
       multiTaskHint_other:
@@ -355,6 +376,12 @@ export default {
       label: "Max duration (s)",
       hint: "Per episode. An episode that runs this long without you calling it a success counts as a failure.",
       singleHint: "The run stops after this long.",
+      coachHint:
+        "Per attempt. An attempt that runs this long without a rescue or a finish ends on its own.",
+      // Remote only, where 0 is the backend's own unbounded contract rather
+      // than a run that ends the instant it starts.
+      remoteHint: "0 runs until you stop it.",
+      remoteUnbounded: "Runs until you stop it.",
     },
     episodes: {
       label: "Episodes",
@@ -369,14 +396,15 @@ export default {
       label: "Inference engine",
       // Option labels only — the submitted values ("sync" / "rtc") are
       // identifiers the backend parses and are never translated.
-      sync: "Sync (default)",
-      rtc: "RTC — experimental, smoother control",
-      syncHint:
-        "One policy forward per control step. The arm pauses briefly between action chunks.",
-      rtcHint:
-        "Real-Time Chunking overlaps inference with motion, removing the pause between action chunks. It also changes how actions are generated — compare against Sync before trusting a result.",
-      // Shown under the picker when the selected checkpoint's architecture
-      // can't run RTC (the server refuses it), which also disables the option.
+      sync: "Sync",
+      rtc: "Real-time chunking",
+      // The two hints live in `remoteInference.form.engine` — one field, one
+      // pair of explanations, whichever machine the policy runs on.
+      // Shown under the picker whenever the selected checkpoint's architecture
+      // isn't KNOWN to support RTC, which also disables the option — one rule
+      // for a local rollout and a remote run alike. "isn't available" covers
+      // both halves of that on purpose: a checkpoint the server ruled out and
+      // one nobody has classified are the same answer here.
       rtcUnavailable:
         "Real-Time Chunking isn't available for this checkpoint's policy.",
       // Shown INSTEAD of the picker in coaching mode, which is pinned to sync.
@@ -384,6 +412,8 @@ export default {
         "Coaching always uses the Sync engine. Real-Time Chunking makes the arm jump back toward its pre-correction pose when the policy resumes, which isn't safe with a hand nearby.",
     },
     cameras: {
+      automaticHint: "Inputs match automatically. Edit cameras in Robot settings.",
+      unused: "Not used by this policy",
       title: "Cameras",
       loading: "Reading policy config…",
       // {{error}} is the backend's own message and is shown as sent.
@@ -398,14 +428,32 @@ export default {
       disconnected: "Disconnected — reconnect it before starting",
       select: "Select a camera",
       robotHasNone: "This robot has no cameras — add them in Robot settings",
+      // Empty state of the read-only camera list when no robot is selected.
+      noRobot: "Select a robot to see its cameras.",
+      // A camera the checkpoint names that the robot has nothing matching.
+      // <0> emphasises the name; the name itself is DATA (the robot record's
+      // own key), interpolated, never translated.
+      unmatched:
+        "The policy expects camera <0>{{name}}</0> but this robot has no camera named “{{name}}” — rename one in Robot settings.",
+      // The same fact for a REMOTE run, which has a role picker and therefore a
+      // different remedy: a robot camera's name is its identity and is never
+      // renamed to suit a checkpoint.
+      unmatchedRemote:
+        "Add camera <0>{{name}}</0> in Robot settings.",
+      // Matched by name, but the robot captures at a different size than the
+      // checkpoint trained at. All four numbers are raw pixel dimensions.
+      resolutionMismatch:
+        "<0>{{name}}</0> is set to {{robotWidth}}×{{robotHeight}} in Robot settings, but the policy trained at {{policyWidth}}×{{policyHeight}} — the run captures at the policy's size.",
     },
     thumbnail: {
       // The preview tile's two placeholder states.
       released: "Released",
       noPreview: "No preview",
     },
+    // ACT's action-selection knob. No longer behind an Advanced disclosure —
+    // it takes the slot the engine select leaves empty for ACT, which is why
+    // the disclosure's own summary line is gone.
     advanced: {
-      summary: "Temporal ensembling for ACT",
       actionSelection: "Action selection",
       temporalEnsemble: "Temporal ensembling",
       temporalEnsembleHint:
@@ -417,13 +465,10 @@ export default {
       coeffHint:
         "Weights are exp(-coeff × age): higher favours the newest prediction, lower averages more evenly. The ACT paper uses {{value}}.",
     },
-    // The action row: each verb selects its mode and launches it in one press.
-    runVerbs: {
-      groupLabel: "Start a run",
-      single: "Run",
-      // {{count}} is the episode / correction target — a number, so no plural.
-      eval: "Score it · {{count}}",
-      coach: "Human in the loop · {{count}}",
+    // The run-type tab strip above the cameras. The tab labels are
+    // `runMode.<mode>.title`; this is the strip's accessible name.
+    tabs: {
+      groupLabel: "What you do",
     },
     // Why a verb can't run, keyed so deployGuards.ts stays pure prose-free.
     blocked: {
@@ -434,12 +479,23 @@ export default {
       camerasUnbound: "Bind every camera the checkpoint expects.",
       temporalEnsemble: "Fix the temporal-ensemble setting.",
       runInProgress: "A run is already in progress.",
+      // Local runs only: 0 is the remote run's "until you stop me" and a local
+      // run that ends the instant it starts.
+      durationRequired: "Set a max duration of at least 1 second.",
       taskRequired:
         "Describe the task first — this policy is language-conditioned.",
       leaderMissing:
         "Coaching needs a leader arm — add its port and calibration in Robot settings.",
       coachTaskRequired:
         "Describe the task first — it's saved with every correction.",
+      // Rarely seen: the panel answers this one with the probe's own sentence
+      // (remoteInference.transport.summary.*), which names WHICH step is the
+      // one to fix. This is the fallback wording if that is ever shown alone.
+      transportNotReady: "The remote transport isn't ready yet.",
+      remoteArmUnsupported:
+        "Remote runs need a single SO-101 arm. Bimanual rigs and the CAN arms aren't supported yet.",
+      remoteEngineUnsupported:
+        "Real-time chunking only works for flow policies. Switch the chunk engine back to Adaptive sync.",
     },
     actions: {
       start: "Start inference",

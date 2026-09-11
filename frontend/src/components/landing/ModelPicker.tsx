@@ -18,11 +18,19 @@ import { ModelItem } from "@/lib/modelsApi";
 import { sortByNamespaceFirst } from "@/lib/sortByNamespaceFirst";
 import { policyTypeShortLabel } from "@/components/training/types";
 import { useHfAuth } from "@/contexts/HfAuthContext";
+import { useLanguage } from "@/contexts/LanguageContext";
+import { isCaselessScript } from "@/i18n/config";
+import { cn } from "@/lib/utils";
+
+/** A picker row. `state` is the terminal state of the run behind the model,
+ * which /skills reports (SkillItem) and the wider /models listing does not —
+ * optional here so both listings can be passed. */
+type PickerModel = ModelItem & { state?: string | null };
 
 interface ModelPickerProps {
-  models: ModelItem[];
+  models: PickerModel[];
   loading: boolean;
-  onPickExisting: (item: ModelItem) => void;
+  onPickExisting: (item: PickerModel) => void;
   /** Per-row trash affordance. Invoked with the row's item; the parent routes
    * it through the shared delete confirm dialog (resolveDeleteAction decides
    * the semantics: local delete / local-copy removal / unpin / hide). The
@@ -38,7 +46,10 @@ const modelKey = (m: ModelItem): string => m.hf_repo_id ?? m.id ?? "";
 /** Namespace-first alphabetical ordering via the shared sortByNamespaceFirst
  * (the same helper sortDatasets wraps). Sorts on the display label so the
  * ordering matches what's shown. */
-const sortModels = (items: ModelItem[], username: string | null): ModelItem[] =>
+const sortModels = (
+  items: PickerModel[],
+  username: string | null,
+): PickerModel[] =>
   sortByNamespaceFirst(items, username, modelKey, (m) => m.name || modelKey(m));
 
 /**
@@ -56,6 +67,7 @@ const ModelPicker: React.FC<ModelPickerProps> = ({
   children,
 }) => {
   const { t } = useTranslation();
+  const { language } = useLanguage();
   const [open, setOpen] = useState(false);
 
   const { auth } = useHfAuth();
@@ -76,12 +88,12 @@ const ModelPicker: React.FC<ModelPickerProps> = ({
     [models, username],
   );
 
-  const handlePick = (item: ModelItem) => {
+  const handlePick = (item: PickerModel) => {
     onPickExisting(item);
     setOpen(false);
   };
 
-  const renderItem = (m: ModelItem) => (
+  const renderItem = (m: PickerModel) => (
     <CommandItem
       key={m.id || m.hf_repo_id || m.name}
       // cmdk filters/matches on `value`; include the name so a search over the
@@ -107,6 +119,22 @@ const ModelPicker: React.FC<ModelPickerProps> = ({
       {m.private && (
         <span className="shrink-0 text-xs text-amber-600 dark:text-amber-400">
           {t("landing.picker.private")}
+        </span>
+      )}
+      {/* A failed run that saved weights IS runnable, and the Train panel's
+          card has always run one. It is offered here rather than silently
+          withheld — but it says so, because a non-zero exit is a fact about
+          the run the user should weigh before deploying it.
+          `uppercase` is a no-op on Chinese but the tracking is not — drop both
+          together on a caseless script. */}
+      {m.state === "failed" && (
+        <span
+          className={cn(
+            "shrink-0 text-[10px] text-amber-600 dark:text-amber-500",
+            isCaselessScript(language) ? "" : "uppercase tracking-wide",
+          )}
+        >
+          {t("landing.modelPicker.failedBadge")}
         </span>
       )}
       {onDeleteItem && (

@@ -57,12 +57,13 @@ from typing import IO, Any, Literal
 
 from pydantic import BaseModel
 
-from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 
 from .api_errors import ErrorCode
-from .arm_capabilities import supports_dagger, uses_feetech_bus
+from .arm_capabilities import joints_per_arm, require_known_arm_type, supports_dagger
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
+from .arms import registry as _arm_registry
+from .arms.base import FollowerPreflight
 from .camera_preview import camera_preview_manager
 from .dagger_protocol import (
     CANCEL_REASON_OPERATOR,
@@ -117,10 +118,11 @@ from .models import (
     _hub_cache_has_repo,
     _resolve_pretrained_dir,
 )
-from .motor_power import FOLLOWER, LEADER, clear_goal_velocity, reset_torque_limit
+from .motor_power import LEADER, reset_torque_limit
 from .record import _DEFAULT_FOURCC
 from .session_events import notify_session_changed
 from .utils.config import (
+    DEFAULT_ARM_TYPE,
     LEADER_CONFIG_PATH,
     CameraResolutionError,
     _atomic_write_text,
@@ -147,9 +149,9 @@ logger = logging.getLogger(__name__)
 # 6, so this MUST be read per arm type: a 7-dim Maker checkpoint measured
 # against the SO-101's 6 is neither <= 6 nor a clean multiple of it, and the
 # guard would silently disable itself on exactly the mismatch it exists to
-# catch.
-_ARM_STATE_DIMS = {"so101": 6, "maker": 7, "metal": 7}
-_SINGLE_ARM_STATE_DIM = _ARM_STATE_DIMS["so101"]
+# catch. The width is read LIVE off the family (arm_capabilities.joints_per_arm)
+# rather than from a table captured at import, so a family registered later
+# (an extension's) is measured at its own width too.
 
 
 class PolicyCameraDims(BaseModel):
@@ -1756,7 +1758,9 @@ def _resolve_policy_path(policy_ref: str, report: Callable[[int, int | None], No
     return download_hub_checkpoint_ref(policy_ref, tqdm_class=tqdm_class)
 
 
-def _arm_count_mismatch(mode: str, checkpoint_state_dim: int | None, arm_type: str = "so101") -> str | None:
+def _arm_count_mismatch(
+    mode: str, checkpoint_state_dim: int | None, arm_type: str = DEFAULT_ARM_TYPE
+) -> str | None:
     """Explain a checkpoint/robot arm-count mismatch, or None when they agree.
 
     An SO-101 follower has 6 state dims and a Maker follower 7 (6 joints plus
@@ -1778,7 +1782,7 @@ def _arm_count_mismatch(mode: str, checkpoint_state_dim: int | None, arm_type: s
     """
     if checkpoint_state_dim is None:
         return None
-    arm_dim = _ARM_STATE_DIMS.get(arm_type, _SINGLE_ARM_STATE_DIM)
+    arm_dim = joints_per_arm(arm_type)
     robot_is_bimanual = mode == "bimanual"
     # The checkpoint is bimanual iff its state is (a multiple of) two arms wide.
     if checkpoint_state_dim <= arm_dim:
@@ -1811,7 +1815,9 @@ def _counterpart_leader_slots(follower_id: str) -> list[ArmSlot]:
     it up: any robot record whose follower slot is `follower_id` names the
     leader config that belongs on the OTHER port — if the connected arm's
     EEPROM fingerprint matches that config, the ports are swapped (hard block
-    instead of a generic warning)."""
+    instead of a generic warning). Called by the SO-101 family's follower
+    preflight (arms/so101.py) — it lives here because the lookup is this
+    flow's knowledge, not the family's."""
     slots: list[ArmSlot] = []
     seen: set[tuple[str, str]] = set()
     for record in list_robot_records():
@@ -1826,47 +1832,15 @@ def _counterpart_leader_slots(follower_id: str) -> list[ArmSlot]:
     return slots
 
 
-@contextmanager
-def _open_follower(port: str, follower_id: str):
-    """Open a bare follower bus on `port`, yield the connected robot, and
-    release the port read-only on exit.
-
-    Both rollout preflights connect one follower, do read-only work, then must
-    free the port for the subprocess to reopen. Torque is never enabled here,
-    so the release skips the torque-disable write (``disconnect(
-    disable_torque=False)``) — a plain port close. The disconnect runs on any
-    exit path (success or exception)."""
-    robot = SO101Follower(SO101FollowerConfig(port=port, id=follower_id))
-    robot.bus.connect()
-    try:
-        yield robot
-    finally:
-        robot.bus.disconnect(disable_torque=False)
-
-
-def _preflight_arm_identity(port: str, follower_id: str, config_name: str | None = None) -> list[str]:
-    """Read-only identity check of ONE follower arm before the rollout
-    subprocess starts.
-
-    The subprocess itself can't be guarded (its stdin is pre-seeded with a
-    newline, which auto-confirms lerobot's "use the calibration file" prompt
-    and stamps the file into EEPROM on mismatch), so the check happens here:
-    connect the bare bus, verify, and release the port for the subprocess to
-    reopen. Raises ArmIdentityError on a hard mismatch; returns the
-    warn-but-allow messages otherwise.
-
-    `follower_id` names the calibration the arm loads and is what identifies the
-    slot by default. For a bimanual staging alias id ("<base>_left"), pass the
-    real library stem as `config_name` so the guard compares against the library
-    entry rather than the alias (mirrors verify_devices' config_names in
-    record/teleop). Bimanual runs each follower bus through this separately —
-    each opens and releases its own port — so the two are never open at once."""
-    with _open_follower(port, follower_id) as robot:
-        return verify_devices(
-            ((robot, "follower"),),
-            extra_slots=_counterpart_leader_slots(config_name or follower_id),
-            config_names=[config_name] if config_name is not None else None,
-        )
+# --- the coaching LEADER preflights ------------------------------------------
+# The FOLLOWER preflights (identity fingerprint + register priming by port)
+# are the family's: `family.preflight_ports(...)` below, with the SO-101's
+# helpers in arms/so101.py and the CAN families answering "nothing to check".
+# The leader-side preflights here are SO-101-specific BY CONSTRUCTION (they
+# build an SO101Leader outright) and stay in this module: coaching is gated
+# by `supports_dagger`, which only the SO-101 has — its leader carries motors
+# that the handover drives. A family that wants coaching needs a later slice
+# that moves these behind the family contract too.
 
 
 @contextmanager
@@ -1874,9 +1848,10 @@ def _open_leader(port: str, leader_id: str):
     """Open a bare leader bus on `port`, yield the connected teleop, and release
     the port read-only on exit.
 
-    The leader-side twin of `_open_follower`, and used for the same reason: a
-    coaching session's subprocess opens this port, so the identity check has to
-    happen before it and hand the port back. Torque is never enabled here."""
+    The leader-side twin of arms/so101.py's `_open_follower`, and used for the
+    same reason: a coaching session's subprocess opens this port, so the
+    identity check has to happen before it and hand the port back. Torque is
+    never enabled here."""
     teleop = SO101Leader(SO101LeaderConfig(port=port, id=leader_id))
     teleop.bus.connect()
     try:
@@ -1890,8 +1865,9 @@ def _preflight_leader_identity(
 ) -> list[str]:
     """Read-only identity check of ONE leader arm before a coaching session.
 
-    The leader-side twin of `_preflight_arm_identity`, and needed only for
-    coaching — it is the one inference flow that connects a leader at all. Not
+    The leader-side twin of arms/so101.py's `_preflight_arm_identity`, and
+    needed only for coaching — it is the one inference flow that connects a
+    leader at all. Not
     an optional nicety: during a pause the runner ENABLES TORQUE on this arm and
     drives it to the follower's pose, so an unrecognised arm on this port is
     every bit as capable of moving unexpectedly as the follower is.
@@ -1900,42 +1876,14 @@ def _preflight_leader_identity(
     at once, matching the invariant the bimanual follower preflight already
     keeps. The counterpart slot is passed explicitly (we know the follower's
     config for this very session) instead of looked up from the robot records
-    the way `_counterpart_leader_slots` has to, so a port swap is caught against
-    the pair the operator actually selected."""
+    the way the follower preflight's `_counterpart_leader_slots` has to, so a
+    port swap is caught against the pair the operator actually selected."""
     with _open_leader(port, leader_id) as teleop:
         return verify_devices(
             ((teleop, "leader"),),
             extra_slots=[ArmSlot("follower", "follower", follower_id)],
             config_names=[config_name] if config_name is not None else None,
         )
-
-
-def _preflight_motor_registers(port: str, follower_id: str) -> list[str]:
-    """Prime the follower's RAM motor registers before the rollout subprocess
-    starts.
-
-    The subprocess itself can't be instrumented, but Torque_Limit and
-    Goal_Velocity are both RAM registers: they survive closing the serial port
-    (only a power cycle resets them), and the subprocess's connect()/configure()
-    never writes them — so setting them here and releasing the port is enough
-    for the whole rollout. Two priming steps:
-      - reset_torque_limit: restore stock torque (a previous auto-calibration's
-        working torque would otherwise cap the whole rollout).
-      - clear_goal_velocity: reset any leftover speed cap a previous
-        arm-driving feature stamped (auto-cal fold/unfold=1000, rest-pose
-        return=400), which would otherwise throttle the whole rollout.
-    Never raises: a failure degrades to the previous register value (logged)
-    and returns warning messages instead of aborting the start."""
-    try:
-        with _open_follower(port, follower_id) as robot:
-            return reset_torque_limit(robot, FOLLOWER) + clear_goal_velocity(robot, FOLLOWER)
-    except Exception as exc:
-        message = (
-            f"Could not reset the motor registers on {port}: {exc}. "
-            "The arm runs at its previous torque/speed limits for this rollout."
-        )
-        logger.warning(message)
-        return [message]
 
 
 def _preflight_leader_registers(port: str, leader_id: str) -> list[str]:
@@ -2319,25 +2267,17 @@ def _session_cameras(request: InferenceRequest) -> dict[str, dict[str, Any]]:
     )
 
 
-# lerobot `--robot.type` per arm type, single and bimanual. These are draccus
-# choice-registry keys (RobotConfig.register_subclass), not free text: a typo
-# fails inside the subprocess at CLI-parse time with a choices list, long after
-# the session has been claimed.
-_ROBOT_CLI_TYPES = {
-    ("so101", False): "so101_follower",
-    ("so101", True): "bi_so_follower",
-    ("maker", False): "maker_follower",
-    ("maker", True): "bi_maker_follower",
-    ("metal", False): "metal_follower",
-    ("metal", True): "bi_metal_follower",
-}
-
-
 def _robot_cli_type(request: InferenceRequest) -> str:
-    """The `--robot.type=` value for this request's arm type and layout."""
+    """The `--robot.type=` value for this request's arm type and layout.
+
+    The family's registered lerobot type — a draccus choice-registry key
+    (RobotConfig.register_subclass), not free text: a typo fails inside the
+    subprocess at CLI-parse time with a choices list, long after the session
+    has been claimed.
+    """
     from .utils.config import normalize_arm_type
 
-    return _ROBOT_CLI_TYPES[(normalize_arm_type(request.arm_type), request.mode == "bimanual")]
+    return _arm_registry.get(normalize_arm_type(request.arm_type)).robot_cli_type(request.mode == "bimanual")
 
 
 def _single_robot_args(request: InferenceRequest, follower_id: str) -> list[str]:
@@ -2446,26 +2386,19 @@ def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
         # the identity guard compares against the real library stems.
         left_id, right_id = f"{base}_left", f"{base}_right"
 
-        identity_warnings: list[str] = []
-        # Both preflights read/write Feetech registers by name and are skipped
-        # wholesale on a Maker arm's CAN bus — see arm_capabilities.
-        if not uses_feetech_bus(request.arm_type):
-            logger.info("CAN arm: skipping the Feetech identity + register preflights")
-        elif request.skip_identity_check:
-            logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
-        else:
-            # Each bus opens/verifies/releases sequentially — never both at
-            # once — mirroring the single-arm preflight.
-            identity_warnings += _preflight_arm_identity(
-                request.follower_port, left_id, config_name=request.follower_config
-            )
-            identity_warnings += _preflight_arm_identity(
-                request.right_follower_port, right_id, config_name=request.right_follower_config
-            )
-        if uses_feetech_bus(request.arm_type):
-            # Register reset on both buses, sequentially (each opens its own port).
-            identity_warnings += _preflight_motor_registers(request.follower_port, left_id)
-            identity_warnings += _preflight_motor_registers(request.right_follower_port, right_id)
+        # The family's preflight, always called: it opens each port in turn
+        # (never two at once), verifies then primes, and releases the port
+        # for the subprocess. The SO-101 fingerprints and resets registers;
+        # a CAN family answers "nothing to check".
+        identity_warnings = _arm_registry.get(request.arm_type).preflight_ports(
+            [
+                FollowerPreflight(request.follower_port, left_id, config_name=request.follower_config),
+                FollowerPreflight(
+                    request.right_follower_port, right_id, config_name=request.right_follower_config
+                ),
+            ],
+            skip_identity=request.skip_identity_check,
+        )
 
         return _bimanual_robot_args(request, base, follower_staging), identity_warnings
 
@@ -2475,24 +2408,14 @@ def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
     # `calibration_dir / f"{id}.json"`.
     follower_id = setup_follower_calibration_file(request.follower_config, request.arm_type)
 
-    # Arm-identity guard: refuse before the subprocess can move (or stamp
-    # the wrong calibration into) an arm that doesn't match its file.
-    identity_warnings = []
-    if not uses_feetech_bus(request.arm_type):
-        # A Maker follower stores its zero inside the RobStride motors and
-        # writes homing_offset=0 for every joint, so the EEPROM fingerprint has
-        # nothing to compare and the torque-limit register does not exist.
-        logger.info("CAN arm: skipping the Feetech identity + register preflights")
-        return _single_robot_args(request, follower_id), identity_warnings
-
-    if request.skip_identity_check:
-        logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
-    else:
-        identity_warnings = _preflight_arm_identity(request.follower_port, follower_id)
-
-    # Always reset so a previous auto-calibration's torque cap can't linger
-    # when the arm was never power-cycled.
-    identity_warnings += _preflight_motor_registers(request.follower_port, follower_id)
+    # Arm-identity guard and register priming, the family's: refuse before
+    # the subprocess can move (or stamp the wrong calibration into) an arm
+    # that doesn't match its file, and reset a lingering auto-calibration
+    # torque cap. A CAN family answers "nothing to check".
+    identity_warnings = _arm_registry.get(request.arm_type).preflight_ports(
+        [FollowerPreflight(request.follower_port, follower_id)],
+        skip_identity=request.skip_identity_check,
+    )
 
     return _single_robot_args(request, follower_id), identity_warnings
 
@@ -2529,16 +2452,20 @@ def _prepare_coaching_robot(request: InferenceRequest) -> tuple[list[str], list[
         )
         left_id, right_id = f"{base}_left", f"{base}_right"
 
+        # Followers first, through the family (identity then registers, per
+        # follower, one port at a time); the leaders below are this module's.
+        identity_warnings += _arm_registry.get(request.arm_type).preflight_ports(
+            [
+                FollowerPreflight(request.follower_port, left_id, config_name=request.follower_config),
+                FollowerPreflight(
+                    request.right_follower_port, right_id, config_name=request.right_follower_config
+                ),
+            ],
+            skip_identity=request.skip_identity_check,
+        )
         if request.skip_identity_check:
-            logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
+            logger.warning("Leader identity check SKIPPED by request (skip_identity_check=true)")
         else:
-            # Each bus opens/verifies/releases sequentially — never two at once.
-            identity_warnings += _preflight_arm_identity(
-                request.follower_port, left_id, config_name=request.follower_config
-            )
-            identity_warnings += _preflight_arm_identity(
-                request.right_follower_port, right_id, config_name=request.right_follower_config
-            )
             # The counterpart slot is the follower's LIBRARY stem, not the BiSO
             # staging alias — the identity library is keyed by library names
             # (same reason `config_name` is passed alongside the alias id).
@@ -2555,13 +2482,11 @@ def _prepare_coaching_robot(request: InferenceRequest) -> tuple[list[str], list[
                 config_name=request.right_leader_config,
             )
         # `reset_torque_limit` undoes an autocal's torque cap on an arm that will
-        # be driven under load. For the FOLLOWERS that is every flow; for the
-        # LEADERS it is coaching alone, which drives them under their own torque
-        # through the handover glide (the leaders are back-driven by hand
-        # everywhere else, where a cap is harmless). Goal_Velocity stays
-        # follower-only in both cases.
-        identity_warnings += _preflight_motor_registers(request.follower_port, left_id)
-        identity_warnings += _preflight_motor_registers(request.right_follower_port, right_id)
+        # be driven under load. For the FOLLOWERS that is every flow (done by
+        # the family's preflight above); for the LEADERS it is coaching alone,
+        # which drives them under their own torque through the handover glide
+        # (the leaders are back-driven by hand everywhere else, where a cap is
+        # harmless). Goal_Velocity stays follower-only in both cases.
         # Both leaders are driven under torque during a coaching handover.
         identity_warnings += _preflight_leader_registers(request.leader_port, left_id)
         identity_warnings += _preflight_leader_registers(request.right_leader_port, right_id)
@@ -2575,13 +2500,17 @@ def _prepare_coaching_robot(request: InferenceRequest) -> tuple[list[str], list[
     # want (lerobot appends the extension itself).
     leader_id, follower_id = setup_calibration_files(request.leader_config, request.follower_config)
 
+    # The follower through the family (identity, then registers); the leader
+    # below is this module's SO-101-specific twin.
+    identity_warnings += _arm_registry.get(request.arm_type).preflight_ports(
+        [FollowerPreflight(request.follower_port, follower_id)],
+        skip_identity=request.skip_identity_check,
+    )
     if request.skip_identity_check:
-        logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
+        logger.warning("Leader identity check SKIPPED by request (skip_identity_check=true)")
     else:
-        identity_warnings += _preflight_arm_identity(request.follower_port, follower_id)
         identity_warnings += _preflight_leader_identity(request.leader_port, leader_id, follower_id)
 
-    identity_warnings += _preflight_motor_registers(request.follower_port, follower_id)
     # Coaching drives the leader under torque; the other flows do not.
     identity_warnings += _preflight_leader_registers(request.leader_port, leader_id)
 
@@ -3121,10 +3050,18 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         auto_calibrate as _auto_calibrate,
         calibrate as _calibrate,
         record as _record,
+        remote_host as _remote_host,
+        remote_inference as _remote_inference,
+        remote_teleoperate as _remote_teleoperate,
         replay as _replay,
         teleoperate as _teleoperate,
         wiggle as _wiggle,
     )
+
+    # Argument validation first: an arm type nothing registered is refused
+    # (400 robot.arm_type.unavailable) before the slot is claimed — the
+    # arm-count guard and the CLI robot type both read the family off it.
+    require_known_arm_type(request.arm_type)
 
     with _state_lock:
         if _teleoperate.teleoperation_active:
@@ -3147,6 +3084,13 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "status_code": 409,
                 "message": "Inference is already active. Stop it first.",
                 "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+            }
+        if _remote_inference.remote_inference_is_active():
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Remote inference is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
             }
         if _inference_startup_thread is not None and _inference_startup_thread.is_alive():
             # A previous session was stopped while its startup worker was
@@ -3181,6 +3125,20 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
                 "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+            }
+        if _remote_host.hosting_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "This robot is hosted for remote teleoperation. Stop hosting first.",
+                "code": ErrorCode.ROBOT_BUSY_HOSTING,
+            }
+        if _remote_teleoperate.remote_teleoperation_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Remote teleoperation is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REMOTE_TELEOPERATION,
             }
         if _replay.replay_active:
             return {

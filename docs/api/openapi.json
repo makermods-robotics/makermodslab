@@ -25,6 +25,268 @@
         "title": "AddNodeBody",
         "type": "object"
       },
+      "ArmCalibrationInfo": {
+        "description": "How a family is calibrated: a range sweep (the SO-101's manual or\ndriven flows), a step wizard the family drives (the CAN arms' zero pose),\nor an extension's own panel at `panel_url`. `summary` and `panel_url` are\nnull — not absent — when they do not apply, so the route must NOT\nexclude None.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "range_sweep",
+              "steps",
+              "panel"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "panel_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Panel Url"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArmCalibrationSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "summary",
+          "panel_url"
+        ],
+        "title": "ArmCalibrationInfo",
+        "type": "object"
+      },
+      "ArmCalibrationSide": {
+        "description": "What the config dialog shows BEFORE Start for one device side (the\nfamily's own calibration_summary, verbatim — the backend is never\nlocalized): the text and an optional served image.",
+        "properties": {
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "image_url"
+        ],
+        "title": "ArmCalibrationSide",
+        "type": "object"
+      },
+      "ArmCalibrationSummary": {
+        "description": "The pre-start summary per side; a side is null when the family has\nnothing to show for it.",
+        "properties": {
+          "follower": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArmCalibrationSide"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "leader": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArmCalibrationSide"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "leader",
+          "follower"
+        ],
+        "title": "ArmCalibrationSummary",
+        "type": "object"
+      },
+      "ArmCapabilities": {
+        "description": "The family's capability flags (arms/base.py), plus two derived from\nits port-detection facts: `supports_port_probe` (a protocol probe exists,\nso no gesture is needed) and `motion_identify_energizes_follower` (the\nfollower side of the gesture is refused because opening its bus would\nenergize it).",
+        "properties": {
+          "motion_identify_energizes_follower": {
+            "title": "Motion Identify Energizes Follower",
+            "type": "boolean"
+          },
+          "supports_auto_calibration": {
+            "title": "Supports Auto Calibration",
+            "type": "boolean"
+          },
+          "supports_dagger": {
+            "title": "Supports Dagger",
+            "type": "boolean"
+          },
+          "supports_gripper_wiggle": {
+            "title": "Supports Gripper Wiggle",
+            "type": "boolean"
+          },
+          "supports_port_probe": {
+            "title": "Supports Port Probe",
+            "type": "boolean"
+          },
+          "supports_remote_inference": {
+            "title": "Supports Remote Inference",
+            "type": "boolean"
+          },
+          "uses_feetech_bus": {
+            "title": "Uses Feetech Bus",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "uses_feetech_bus",
+          "supports_auto_calibration",
+          "supports_dagger",
+          "supports_remote_inference",
+          "supports_port_probe",
+          "motion_identify_energizes_follower",
+          "supports_gripper_wiggle"
+        ],
+        "title": "ArmCapabilities",
+        "type": "object"
+      },
+      "ArmFamiliesResponse": {
+        "description": "GET /api/v1/arms (server.py list_arm_families) — registry order,\ndefault family first.",
+        "properties": {
+          "arms": {
+            "items": {
+              "$ref": "#/components/schemas/ArmFamilyInfo"
+            },
+            "title": "Arms",
+            "type": "array"
+          }
+        },
+        "required": [
+          "arms"
+        ],
+        "title": "ArmFamiliesResponse",
+        "type": "object"
+      },
+      "ArmFamilyInfo": {
+        "description": "One entry of the arms manifest (arms/manifest.py describe_family).\n\n`robot_types` are the lerobot RobotConfig type strings the family's\nfollowers register under (single, then bimanual); `robot_type_markers`\nthe substrings that identify it in a dataset's free-form robot_type;\n`calibration_name_suffix` what the server appends to a robot record's\nname when it mints a default calibration id (\"\" for the SO-101);\n`image_url` a served image for the create dialog (null for the built-ins,\nwhose photos the frontend bundles); `leader_options` the leader arms the\nfamily can be driven by, default first (`default_leader_kind` names it —\nwhat a record with no `leader_kind` reads as).",
+        "properties": {
+          "calibration": {
+            "$ref": "#/components/schemas/ArmCalibrationInfo"
+          },
+          "calibration_name_suffix": {
+            "title": "Calibration Name Suffix",
+            "type": "string"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/ArmCapabilities"
+          },
+          "default_leader_kind": {
+            "title": "Default Leader Kind",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
+          },
+          "joints_per_arm": {
+            "title": "Joints Per Arm",
+            "type": "integer"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "leader_options": {
+            "items": {
+              "$ref": "#/components/schemas/LeaderOptionInfo"
+            },
+            "title": "Leader Options",
+            "type": "array"
+          },
+          "provided_by": {
+            "title": "Provided By",
+            "type": "string"
+          },
+          "robot_type_markers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Robot Type Markers",
+            "type": "array"
+          },
+          "robot_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Robot Types",
+            "type": "array"
+          },
+          "short_label": {
+            "title": "Short Label",
+            "type": "string"
+          },
+          "supports_bimanual": {
+            "title": "Supports Bimanual",
+            "type": "boolean"
+          },
+          "telemetry_kind": {
+            "enum": [
+              "urdf",
+              "degrees"
+            ],
+            "title": "Telemetry Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "short_label",
+          "provided_by",
+          "joints_per_arm",
+          "supports_bimanual",
+          "image_url",
+          "calibration",
+          "telemetry_kind",
+          "capabilities",
+          "robot_types",
+          "robot_type_markers",
+          "calibration_name_suffix",
+          "default_leader_kind",
+          "leader_options"
+        ],
+        "title": "ArmFamilyInfo",
+        "type": "object"
+      },
       "AutoCalibrationBatchArm": {
         "description": "One arm in a concurrent auto-calibration batch. Same fields as the\nsingle-arm request minus robot_name (batch-level, shared by every arm).",
         "properties": {
@@ -307,6 +569,70 @@
         "title": "CameraInfo",
         "type": "object"
       },
+      "CanGripperWiggleRequest": {
+        "properties": {
+          "arm_type": {
+            "title": "Arm Type",
+            "type": "string"
+          },
+          "device_type": {
+            "title": "Device Type",
+            "type": "string"
+          },
+          "leader_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader Kind"
+          },
+          "port": {
+            "title": "Port",
+            "type": "string"
+          }
+        },
+        "required": [
+          "arm_type",
+          "device_type",
+          "port"
+        ],
+        "title": "CanGripperWiggleRequest",
+        "type": "object"
+      },
+      "CanGripperWiggleResponse": {
+        "description": "can_wiggle.wiggle_can_gripper — one port's gripper was jogged (or not).\n\n`code` is present only on a busy refusal (robot.busy.*), like every\nother hardware handler's refusal dict; the route excludes None.",
+        "properties": {
+          "code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Code"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "CanGripperWiggleResponse",
+        "type": "object"
+      },
       "CheckpointImageFeature": {
         "description": "One camera's expected input size in a checkpoint's policy config\n(jobs.py JobRegistry.get_policy_config_summary).",
         "properties": {
@@ -327,7 +653,7 @@
         "type": "object"
       },
       "CheckpointPolicyConfigResponse": {
-        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature. trained_on_robot_type is the\nraw lerobot robot_type of the checkpoint's training dataset (recovered via\ntrain_config.json), null when it can't be established — the fine-tune\npanel compares it against the selected dataset's arm.\n\nsupports_rtc says whether this architecture can run the Real-Time Chunking\ninference engine; null means the policy type isn't one the server knows\n(a fork newer than jobs.policy_type_supports_rtc's table), which the client\nmust read as \"offer it and let the server decide\", not as \"no\". The route\ndeclares no exclude_none/exclude_unset, so the key is always present.",
+        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature. trained_on_robot_type is the\nraw lerobot robot_type of the checkpoint's training dataset (recovered via\ntrain_config.json), null when it can't be established — the fine-tune\npanel compares it against the selected dataset's arm.\n\nsupports_rtc says whether this architecture can run the Real-Time Chunking\ninference engine; null means the policy type isn't one the server knows\n(a fork newer than jobs.policy_type_supports_rtc's table), which the client\nmust read as \"offer it and let the server decide\", not as \"no\". The route\ndeclares no exclude_none/exclude_unset, so the key is always present.\n\nn_action_steps / chunk_size are the checkpoint's chunk geometry, null when\nthe config omits them. n_action_steps is the CEILING on a remote-inference\nhorizon — a declared horizon above it makes the two Portal peers disagree\nabout the action-chunk shape, and every packet is then dropped in silence.",
         "properties": {
           "action_dim": {
             "anyOf": [
@@ -340,12 +666,45 @@
             ],
             "title": "Action Dim"
           },
+          "chunk_size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunk Size"
+          },
+          "flow_steps_default": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flow Steps Default"
+          },
           "image_features": {
             "additionalProperties": {
               "$ref": "#/components/schemas/CheckpointImageFeature"
             },
             "title": "Image Features",
             "type": "object"
+          },
+          "n_action_steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N Action Steps"
           },
           "policy_type": {
             "anyOf": [
@@ -372,6 +731,18 @@
               }
             ],
             "title": "State Dim"
+          },
+          "supports_extra_image_roles": {
+            "title": "Supports Extra Image Roles",
+            "type": "boolean"
+          },
+          "supports_flow_steps": {
+            "title": "Supports Flow Steps",
+            "type": "boolean"
+          },
+          "supports_model_dtype": {
+            "title": "Supports Model Dtype",
+            "type": "boolean"
           },
           "supports_rtc": {
             "anyOf": [
@@ -401,8 +772,14 @@
           "image_features",
           "requires_task",
           "supports_rtc",
+          "supports_model_dtype",
+          "supports_flow_steps",
+          "supports_extra_image_roles",
+          "flow_steps_default",
           "state_dim",
           "action_dim",
+          "n_action_steps",
+          "chunk_size",
           "trained_on_robot_type"
         ],
         "title": "CheckpointPolicyConfigResponse",
@@ -425,6 +802,23 @@
           "message"
         ],
         "title": "CoachingCommandResponse",
+        "type": "object"
+      },
+      "CompleteCalibrationStepRequest": {
+        "properties": {
+          "step": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step"
+          }
+        },
+        "title": "CompleteCalibrationStepRequest",
         "type": "object"
       },
       "CurrentSessionResponse": {
@@ -1121,6 +1515,19 @@
         "title": "EpisodeSummary",
         "type": "object"
       },
+      "EpisodeTaskBody": {
+        "properties": {
+          "task": {
+            "title": "Task",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "title": "EpisodeTaskBody",
+        "type": "object"
+      },
       "ExcludedEpisodesRequest": {
         "properties": {
           "episode_indices": {
@@ -1182,6 +1589,693 @@
         "title": "ExtraStatus",
         "type": "object"
       },
+      "GpuLaunchResponse": {
+        "description": "POST /api/v1/remote-inference/gpu/start — shape authority:\nmodal_launcher.start().\n\n`started` is always true here (every refusal is a coded ApiError raised\nbefore the spawn), and it is kept so the shape matches the install-manager\nsurface this one is modelled on. `gpu` is the status as of the spawn.",
+        "properties": {
+          "gpu": {
+            "$ref": "#/components/schemas/GpuStatusResponse"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "started": {
+            "title": "Started",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "started",
+          "message",
+          "gpu"
+        ],
+        "title": "GpuLaunchResponse",
+        "type": "object"
+      },
+      "GpuStartBody": {
+        "additionalProperties": false,
+        "description": "The GPU side of the remote-run form. Field-for-field the subset of\n`RemoteInferenceOptions` the container needs, with the same defaults: the\ntwo halves are launched from one object precisely so horizon / fps / codec\n/ s_min cannot disagree (Portal fingerprints the wire schema and drops a\nmismatched stream in silence).\n\n`extra=\"forbid\"` like every options model — a typo'd knob is a loud 422,\nnever a silently ignored one.",
+        "properties": {
+          "engine": {
+            "default": "sync",
+            "enum": [
+              "sync",
+              "rtc"
+            ],
+            "title": "Engine",
+            "type": "string"
+          },
+          "environment": {
+            "default": "",
+            "title": "Environment",
+            "type": "string"
+          },
+          "extra_image_roles": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 2,
+            "title": "Extra Image Roles",
+            "type": "array"
+          },
+          "flow_steps": {
+            "anyOf": [
+              {
+                "maximum": 20.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flow Steps"
+          },
+          "fps": {
+            "default": 30,
+            "title": "Fps",
+            "type": "integer"
+          },
+          "gpu": {
+            "default": "",
+            "enum": [
+              "",
+              "auto",
+              "A10G",
+              "L4",
+              "A100",
+              "A100-80GB",
+              "H100",
+              "H200"
+            ],
+            "title": "Gpu",
+            "type": "string"
+          },
+          "horizon": {
+            "default": 16,
+            "title": "Horizon",
+            "type": "integer"
+          },
+          "model_dtype": {
+            "default": "",
+            "enum": [
+              "",
+              "float32",
+              "bfloat16",
+              "float16"
+            ],
+            "title": "Model Dtype",
+            "type": "string"
+          },
+          "policy_hub_id": {
+            "default": "",
+            "title": "Policy Hub Id",
+            "type": "string"
+          },
+          "profile": {
+            "default": "",
+            "title": "Profile",
+            "type": "string"
+          },
+          "region": {
+            "default": "us-west",
+            "enum": [
+              "auto",
+              "us-west",
+              "us-east",
+              "us-central",
+              "eu",
+              "ap",
+              "uk",
+              "ca",
+              "me",
+              "sa",
+              "af",
+              "mx"
+            ],
+            "title": "Region",
+            "type": "string"
+          },
+          "s_min": {
+            "default": 4,
+            "title": "S Min",
+            "type": "integer"
+          },
+          "slack": {
+            "default": 5,
+            "description": "Policy-side synchronization buffering in ticks; applied on GPU launch.",
+            "maximum": 30.0,
+            "minimum": 2.0,
+            "title": "Slack",
+            "type": "integer"
+          },
+          "task": {
+            "default": "",
+            "title": "Task",
+            "type": "string"
+          },
+          "tolerance": {
+            "default": 1.5,
+            "maximum": 5.0,
+            "minimum": 0.1,
+            "title": "Tolerance",
+            "type": "number"
+          },
+          "video_codec": {
+            "default": "H264",
+            "enum": [
+              "H264",
+              "MJPEG"
+            ],
+            "title": "Video Codec",
+            "type": "string"
+          }
+        },
+        "title": "GpuStartBody",
+        "type": "object"
+      },
+      "GpuStatusResponse": {
+        "description": "GET /api/v1/remote-inference/gpu — shape authority:\nmodal_launcher.status().\n\nModelled EXACTLY, with no exclusion mode: the launcher funnels every branch\nthrough one builder (`_status_locked`) that emits every key, null where\nunknown, which is what lets a `response_model` sit on it without\nmaterializing absences as lies.\n\nThe GPU is a LAB-LEVEL RESOURCE, not a session — it holds no hardware, has\nno lease, and stopping it is not a safety action. That is why it has its\nown three routes rather than a field on `RemoteInferenceOptions`: a 1-3\nminute cold start inside `handle_start_remote_inference` would hold the\n`robot.busy.remote_inference` discriminant while the arm sat completely\nfree.",
+        "properties": {
+          "app_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "App Id"
+          },
+          "code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Code"
+          },
+          "device_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device Name"
+          },
+          "elapsed_s": {
+            "title": "Elapsed S",
+            "type": "number"
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine"
+          },
+          "environment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment"
+          },
+          "extra_image_roles": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra Image Roles"
+          },
+          "extra_image_roles_applied": {
+            "title": "Extra Image Roles Applied",
+            "type": "boolean"
+          },
+          "flow_steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flow Steps"
+          },
+          "flow_steps_applied": {
+            "title": "Flow Steps Applied",
+            "type": "boolean"
+          },
+          "fps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fps"
+          },
+          "gpu": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gpu"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "horizon": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Horizon"
+          },
+          "idle_stop_in_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idle Stop In S"
+          },
+          "last_line": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Line"
+          },
+          "log_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Path"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "model_dtype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Dtype"
+          },
+          "model_dtype_applied": {
+            "title": "Model Dtype Applied",
+            "type": "boolean"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "policy_hub_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Hub Id"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile"
+          },
+          "region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Region"
+          },
+          "room": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Room"
+          },
+          "s_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "S Min"
+          },
+          "slack": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slack"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "task": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task"
+          },
+          "tolerance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tolerance"
+          },
+          "video_codec": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Video Codec"
+          }
+        },
+        "required": [
+          "state",
+          "phase",
+          "engine",
+          "policy_hub_id",
+          "room",
+          "profile",
+          "environment",
+          "app_id",
+          "task",
+          "horizon",
+          "fps",
+          "video_codec",
+          "s_min",
+          "model_dtype",
+          "gpu",
+          "model_dtype_applied",
+          "flow_steps",
+          "flow_steps_applied",
+          "extra_image_roles",
+          "extra_image_roles_applied",
+          "device_name",
+          "log_path",
+          "started_at",
+          "elapsed_s",
+          "message",
+          "hint",
+          "code",
+          "last_line",
+          "idle_stop_in_s"
+        ],
+        "title": "GpuStatusResponse",
+        "type": "object"
+      },
+      "GpuTargetsError": {
+        "description": "Why the listing could not be made — in the BODY, never as a 500.\n\nA machine with no `modal`, an expired token or a slow API must still be\nable to launch: with no selection the CLI resolves the profile and\nenvironment itself. So a listing failure costs the two pickers and nothing\nelse, and the panel shows this message verbatim beside a Start button that\nstill works.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "GpuTargetsError",
+        "type": "object"
+      },
+      "GpuTargetsResponse": {
+        "description": "GET /api/v1/remote-inference/gpu/targets — shape authority:\nmodal_launcher.list_targets().\n\nWhat THIS MACHINE can bill, so a launch can be pointed at one workspace\nwithout `modal profile activate` rewriting the ~/.modal.toml every other\nterminal on this machine shares. Read-only: two `modal … list --json`\nsubprocesses, bounded, and no mutating subcommand anywhere near this path.\n`~/.modal.toml` itself — which holds token_id AND token_secret per profile\n— is never opened, so nothing here can carry a credential.",
+        "properties": {
+          "environments": {
+            "items": {
+              "$ref": "#/components/schemas/ModalEnvironmentEntry"
+            },
+            "title": "Environments",
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GpuTargetsError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile"
+          },
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/ModalProfileEntry"
+            },
+            "title": "Profiles",
+            "type": "array"
+          }
+        },
+        "required": [
+          "profiles",
+          "environments",
+          "profile",
+          "error"
+        ],
+        "title": "GpuTargetsResponse",
+        "type": "object"
+      },
+      "GripperStatus": {
+        "properties": {
+          "effective_current_a": {
+            "title": "Effective Current A",
+            "type": "number"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "fault": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fault"
+          },
+          "hold_torque_nm": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hold Torque Nm"
+          },
+          "holding": {
+            "title": "Holding",
+            "type": "boolean"
+          },
+          "limit_a": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit A"
+          },
+          "measured_torque_nm": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Measured Torque Nm"
+          },
+          "port": {
+            "title": "Port",
+            "type": "string"
+          },
+          "temperature_c": {
+            "title": "Temperature C",
+            "type": "number"
+          }
+        },
+        "required": [
+          "port",
+          "enabled",
+          "limit_a",
+          "effective_current_a",
+          "temperature_c",
+          "fault",
+          "hold_torque_nm",
+          "holding",
+          "measured_torque_nm"
+        ],
+        "title": "GripperStatus",
+        "type": "object"
+      },
+      "GripperStatusResponse": {
+        "properties": {
+          "grippers": {
+            "items": {
+              "$ref": "#/components/schemas/GripperStatus"
+            },
+            "title": "Grippers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "grippers"
+        ],
+        "title": "GripperStatusResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1197,7 +2291,7 @@
       },
       "HealthCapabilities": {
         "additionalProperties": true,
-        "description": "Capabilities block of /health (server.py health_check).\n\nThe health doc grows additively as the node registry needs more\n(gpu, hardware inventory, …) — extra=\"allow\" keeps keys the handler adds\nbefore this model learns about them, instead of silently filtering them\nout of the handshake.",
+        "description": "Capabilities block of /health (server.py health_check).\n\nThe health doc grows additively as the node registry needs more\n(gpu, hardware inventory, …) — extra=\"allow\" keeps keys the handler adds\nbefore this model learns about them, instead of silently filtering them\nout of the handshake. Absent-or-present keys (`gpu`, and `sfu` — the\nbundled LiveKit server's signalling URL, `{\"url\": \"ws://host:7880\"}`,\nonly when started with --sfu) are deliberately NOT declared here: a\ndeclared optional would materialize as null on nodes without one, and\nthe contract is \"absent means none/unknown\".",
         "properties": {
           "accepts_jobs": {
             "title": "Accepts Jobs",
@@ -1338,6 +2432,214 @@
           "login_command"
         ],
         "title": "HfLoginResponse",
+        "type": "object"
+      },
+      "HostingCamera": {
+        "properties": {
+          "height": {
+            "title": "Height",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "width": {
+            "title": "Width",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "width",
+          "height"
+        ],
+        "title": "HostingCamera",
+        "type": "object"
+      },
+      "HostingDescriptor": {
+        "description": "What an operator needs to join this station's room and agree on the\nwire contract (remote_host.build_descriptor). `motors` are the bare\nmotor names (bimanual: `left_`/`right_` prefixed) — Portal's state and\naction schema; both peers must declare the same set in the same order.\n`joint_ranges_deg` is the SO-101 follower's calibrated full travel per\nbody joint, so the OPERATOR can render the remote arm on the URDF viewer\nwithout holding the station's calibration file; absent for the CAN\narms, whose angles are already degrees.",
+        "properties": {
+          "active_operator": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Operator"
+          },
+          "arm_type": {
+            "title": "Arm Type",
+            "type": "string"
+          },
+          "cameras": {
+            "items": {
+              "$ref": "#/components/schemas/HostingCamera"
+            },
+            "title": "Cameras",
+            "type": "array"
+          },
+          "fps": {
+            "title": "Fps",
+            "type": "integer"
+          },
+          "joint_ranges_deg": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Joint Ranges Deg",
+            "type": "object"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "motors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Motors",
+            "type": "array"
+          },
+          "phase": {
+            "enum": [
+              "parked",
+              "engaging",
+              "engaged",
+              "parking"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "robot": {
+            "title": "Robot",
+            "type": "string"
+          },
+          "room": {
+            "title": "Room",
+            "type": "string"
+          },
+          "station_mode": {
+            "title": "Station Mode",
+            "type": "boolean"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          },
+          "video_codec": {
+            "enum": [
+              "H264",
+              "MJPEG",
+              "PNG",
+              "RAW"
+            ],
+            "title": "Video Codec",
+            "type": "string"
+          }
+        },
+        "required": [
+          "robot",
+          "arm_type",
+          "mode",
+          "room",
+          "url",
+          "fps",
+          "video_codec",
+          "motors",
+          "cameras",
+          "joint_ranges_deg",
+          "active_operator",
+          "phase",
+          "station_mode"
+        ],
+        "title": "HostingDescriptor",
+        "type": "object"
+      },
+      "HostingStatusResponse": {
+        "description": "remote_host.handle_hosting_status — the descriptor rides only while a\nhosting session is live (null otherwise); the rest mirrors the\nteleoperation status payload's post-session fields.",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "hosting": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostingDescriptor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hosting_active": {
+            "title": "Hosting Active",
+            "type": "boolean"
+          },
+          "last_cleanup_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Cleanup Error"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "releasing": {
+            "title": "Releasing",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "hosting_active",
+          "hosting",
+          "releasing",
+          "last_cleanup_error",
+          "outcome",
+          "error",
+          "hint",
+          "message"
+        ],
+        "title": "HostingStatusResponse",
         "type": "object"
       },
       "HubJobDismissResponse": {
@@ -2398,6 +3700,58 @@
         "title": "JobRecord",
         "type": "object"
       },
+      "LeaderOptionInfo": {
+        "description": "One leader arm a family can be driven by (arms/base.py LeaderOption).\n\n`id` is what a robot record stores as `leader_kind`; `available` is\nfalse when this install cannot drive it, with `unavailable_reason`\nnaming what to install (null when available); `energized` marks a leader\nthat holds torque while the human moves it (the Metal arm's\ngravity-compensated leader): it answers the follower's protocol, refuses\nthe gesture, and is returned and released on a stop like a follower.\n`calibration_summary` is the pre-start summary for THIS leader's side\n(null for a family with nothing to summarize).",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "calibration_summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArmCalibrationSide"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "energized": {
+            "title": "Energized",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "unavailable_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unavailable Reason"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "available",
+          "unavailable_reason",
+          "energized",
+          "calibration_summary"
+        ],
+        "title": "LeaderOptionInfo",
+        "type": "object"
+      },
       "LogLine": {
         "properties": {
           "message": {
@@ -2420,16 +3774,23 @@
         "properties": {
           "arm_type": {
             "default": "maker",
-            "enum": [
-              "maker",
-              "metal"
-            ],
             "title": "Arm Type",
             "type": "string"
           },
           "device_type": {
             "title": "Device Type",
             "type": "string"
+          },
+          "leader_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader Kind"
           },
           "ports": {
             "anyOf": [
@@ -2455,6 +3816,18 @@
       "MakerIdentifyArmResponse": {
         "description": "maker_ports.identify_maker_arm_by_motion — which port saw the gesture.\n\n`port` is absent on failure rather than null, so the route excludes None.\n`skipped` lists ports that could not be opened (usually the other half of\nthe rig, which speaks a different protocol).",
         "properties": {
+          "fallback": {
+            "anyOf": [
+              {
+                "const": "wiggle",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fallback"
+          },
           "message": {
             "title": "Message",
             "type": "string"
@@ -2494,12 +3867,19 @@
         "properties": {
           "arm_type": {
             "default": "maker",
-            "enum": [
-              "maker",
-              "metal"
-            ],
             "title": "Arm Type",
             "type": "string"
+          },
+          "leader_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader Kind"
           },
           "ports": {
             "anyOf": [
@@ -2767,6 +4147,49 @@
         "title": "MetricsHistoryPoint",
         "type": "object"
       },
+      "ModalEnvironmentEntry": {
+        "description": "One row of `modal environment list --json`, for one profile's workspace.\n\nThe CLI emits `active` there as the STRING \"True\" and carries a key with a\nspace in it; both are normalized in `modal_launcher.parse_environments`, so\nthis model sees a plain boolean.",
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "active"
+        ],
+        "title": "ModalEnvironmentEntry",
+        "type": "object"
+      },
+      "ModalProfileEntry": {
+        "description": "One row of `modal profile list --json`.\n\nAll three fields are DATA: a profile name and a workspace name are\nidentifiers the CLI matches on, never prose to translate.",
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "workspace": {
+            "title": "Workspace",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "workspace",
+          "active"
+        ],
+        "title": "ModalProfileEntry",
+        "type": "object"
+      },
       "ModelDeleteBody": {
         "properties": {
           "id": {
@@ -2889,6 +4312,21 @@
               }
             ],
             "title": "Last Modified"
+          },
+          "local_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run",
+                  "downloaded"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Kind"
           },
           "name": {
             "title": "Name",
@@ -3048,6 +4486,21 @@
             ],
             "title": "Last Modified"
           },
+          "local_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run",
+                  "downloaded"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Kind"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -3162,6 +4615,178 @@
           "source"
         ],
         "title": "ModelListItem",
+        "type": "object"
+      },
+      "ModelPublishBody": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Id"
+          },
+          "steps": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Steps"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ModelPublishBody",
+        "type": "object"
+      },
+      "ModelPublishStartResponse": {
+        "description": "POST /api/v1/models/publish (models.py ModelUploadManager.start) — the\nqueue was accepted and runs in the background; poll publish-status.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "model_id": {
+            "title": "Model Id",
+            "type": "string"
+          },
+          "started": {
+            "title": "Started",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "started",
+          "model_id",
+          "message"
+        ],
+        "title": "ModelPublishStartResponse",
+        "type": "object"
+      },
+      "ModelPublishStatusResponse": {
+        "description": "GET /api/v1/models/publish-status (models.py ModelUploadManager.get_status).\n`done_steps` stays meaningful on `error` — a queue that fails part-way keeps\neverything it published before it died.",
+        "properties": {
+          "current_step": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Step"
+          },
+          "done": {
+            "title": "Done",
+            "type": "integer"
+          },
+          "done_steps": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Done Steps",
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id"
+          },
+          "repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Id"
+          },
+          "state": {
+            "enum": [
+              "idle",
+              "running",
+              "done",
+              "error"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "state",
+          "model_id",
+          "repo_id",
+          "url",
+          "message",
+          "error",
+          "total",
+          "done",
+          "current_step",
+          "done_steps"
+        ],
+        "title": "ModelPublishStatusResponse",
         "type": "object"
       },
       "ModelUploadBody": {
@@ -3388,6 +5013,17 @@
           "device_type": {
             "title": "Device Type",
             "type": "string"
+          },
+          "leader_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader Kind"
           }
         },
         "required": [
@@ -3515,6 +5151,25 @@
         "title": "PolicyOptimizerPreset",
         "type": "object"
       },
+      "RecordingControlResponse": {
+        "description": "The 200 body of a recording control verb: `success` is False for a\nlegitimately refused request (wrong phase, empty task) that still returns\n200 — the frontend reads this flag, not just the status code.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "RecordingControlResponse",
+        "type": "object"
+      },
       "RecordingRequest": {
         "properties": {
           "arm_type": {
@@ -3548,6 +5203,17 @@
             "title": "Leader Config",
             "type": "string"
           },
+          "leader_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader Kind"
+          },
           "leader_port": {
             "title": "Leader Port",
             "type": "string"
@@ -3561,6 +5227,11 @@
             "default": 5,
             "title": "Num Episodes",
             "type": "integer"
+          },
+          "per_episode_task": {
+            "default": false,
+            "title": "Per Episode Task",
+            "type": "boolean"
           },
           "private": {
             "default": false,
@@ -3654,10 +5325,6 @@
       "ReleaseCanTorqueRequest": {
         "properties": {
           "arm_type": {
-            "enum": [
-              "maker",
-              "metal"
-            ],
             "title": "Arm Type",
             "type": "string"
           },
@@ -3698,6 +5365,742 @@
           "problems"
         ],
         "title": "ReleaseCanTorqueResponse",
+        "type": "object"
+      },
+      "RemoteCommandResponse": {
+        "description": "Home / engage from the operator side (remote_teleoperate): accepted or\nrefused with a reason. Refusals that are the station's verdict ride as a\ncoded 4xx instead.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "RemoteCommandResponse",
+        "type": "object"
+      },
+      "RemoteInferenceStats": {
+        "description": "One 1 Hz STATS sample from the child, decoded by drtc_protocol.parse_stats.\n\nField-for-field :data:`makermodslab.drtc_protocol.STATS_KEYS`, in its order,\nwith that module's own nullability. Every key is ALWAYS present —\n`format_stats` fills missing ones with null and raises on an unknown one,\nand `parse_stats` refills the full set on the way back — which is what\nmakes this model exact instead of `exclude_none`. Adding a field here\nwithout adding it to STATS_KEYS is a lie; change STATS_KEYS and nowhere\nelse.",
+        "properties": {
+          "active": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active"
+          },
+          "chunk_age_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunk Age Ms"
+          },
+          "chunks": {
+            "title": "Chunks",
+            "type": "integer"
+          },
+          "degrade": {
+            "title": "Degrade",
+            "type": "boolean"
+          },
+          "e2e_p50_us": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "E2E P50 Us"
+          },
+          "e2e_p95_us": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "E2E P95 Us"
+          },
+          "holds": {
+            "title": "Holds",
+            "type": "integer"
+          },
+          "horizon": {
+            "title": "Horizon",
+            "type": "integer"
+          },
+          "lat_ms": {
+            "title": "Lat Ms",
+            "type": "number"
+          },
+          "lat_steps": {
+            "title": "Lat Steps",
+            "type": "integer"
+          },
+          "lead": {
+            "title": "Lead",
+            "type": "integer"
+          },
+          "reqs": {
+            "title": "Reqs",
+            "type": "integer"
+          },
+          "rtt_us": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtt Us"
+          },
+          "s_min": {
+            "title": "S Min",
+            "type": "integer"
+          },
+          "sched": {
+            "title": "Sched",
+            "type": "integer"
+          },
+          "t": {
+            "title": "T",
+            "type": "integer"
+          },
+          "uncorr": {
+            "title": "Uncorr",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "t",
+          "chunks",
+          "reqs",
+          "sched",
+          "lead",
+          "s_min",
+          "horizon",
+          "lat_steps",
+          "lat_ms",
+          "holds",
+          "degrade",
+          "chunk_age_ms",
+          "active",
+          "e2e_p50_us",
+          "e2e_p95_us",
+          "rtt_us",
+          "uncorr"
+        ],
+        "title": "RemoteInferenceStats",
+        "type": "object"
+      },
+      "RemoteInferenceStatusResponse": {
+        "description": "GET /api/v1/remote-inference-status — shape authority:\nremote_inference.handle_remote_inference_status (pinned by that module's\ntests as an equality-asserted key set).\n\nModelled EXACTLY: the handler funnels every branch (live,\nidle-with-terminal-result, plain idle) through one payload builder\n(`_payload_locked`) so the key set never varies, which is what lets this\nroute carry no exclusion mode at all. Contrast /inference-status, whose\nlive and terminal branches carry different keys — the reason it is still in\nUNTYPED_V1_ROUTES.\n\n`response_model_exclude_none` would be actively WRONG here: pydantic's\nexclude_none recurses, so it would strip `chunk_age_ms` / `active` /\n`e2e_*` / `rtt_us` out of `stats` exactly while the run is warming up —\nthe moment the operator most needs \"no sample yet\" rendered as an explicit\nnull rather than as a missing key.",
+        "properties": {
+          "duration_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration S"
+          },
+          "elapsed_s": {
+            "title": "Elapsed S",
+            "type": "number"
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "exited": {
+            "title": "Exited",
+            "type": "boolean"
+          },
+          "fps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fps"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "log_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Path"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "policy_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Ref"
+          },
+          "remote_inference_active": {
+            "title": "Remote Inference Active",
+            "type": "boolean"
+          },
+          "returning_to_rest": {
+            "title": "Returning To Rest",
+            "type": "boolean"
+          },
+          "shutting_down": {
+            "title": "Shutting Down",
+            "type": "boolean"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "stats": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemoteInferenceStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemoteInferenceTransport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Warning"
+          }
+        },
+        "required": [
+          "remote_inference_active",
+          "phase",
+          "policy_ref",
+          "engine",
+          "started_at",
+          "elapsed_s",
+          "duration_s",
+          "log_path",
+          "exited",
+          "exit_code",
+          "outcome",
+          "error",
+          "hint",
+          "warning",
+          "returning_to_rest",
+          "shutting_down",
+          "stats",
+          "transport"
+        ],
+        "title": "RemoteInferenceStatusResponse",
+        "type": "object"
+      },
+      "RemoteInferenceTransport": {
+        "description": "The transport the session actually resolved (the READY echo, not what\nthe parent believed it passed — see drtc_protocol.format_ready).\n\n`source` is `remote_inference._transport_source`'s range, the SAME set the\ntransport ROUTE reports: `sfu` (this process runs the Lab's own LiveKit\nserver, so the url, room and every token were minted in-process) or\n`none`. The LiveKit Cloud values (`cloud`, `process_env`) retired with the\ncombine — the SFU is the one transport remote inference has.",
+        "properties": {
+          "operator_present": {
+            "title": "Operator Present",
+            "type": "boolean"
+          },
+          "room": {
+            "title": "Room",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "sfu",
+              "none"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "room",
+          "source",
+          "operator_present"
+        ],
+        "title": "RemoteInferenceTransport",
+        "type": "object"
+      },
+      "RemoteInferenceTransportStatusResponse": {
+        "description": "GET /api/v1/remote-inference/transport — shape authority:\nremote_inference.handle_remote_inference_transport.\n\nEvery key always present, so no exclusion mode: the four probe-shaped\nfields are null when the probe DID NOT RUN (no extra, or not configured),\nwhich is a third state distinct from false.",
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "endpoint_reachable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint Reachable"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "extra_installed": {
+            "title": "Extra Installed",
+            "type": "boolean"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "operator_present": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator Present"
+          },
+          "policy_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Token"
+          },
+          "room": {
+            "title": "Room",
+            "type": "string"
+          },
+          "sfu_enabled": {
+            "title": "Sfu Enabled",
+            "type": "boolean"
+          },
+          "sfu_external_ip": {
+            "title": "Sfu External Ip",
+            "type": "boolean"
+          },
+          "sfu_install_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sfu Install Hint"
+          },
+          "sfu_modal_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sfu Modal Url"
+          },
+          "sfu_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sfu Url"
+          },
+          "source": {
+            "enum": [
+              "sfu",
+              "none"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "extra_installed",
+          "configured",
+          "url",
+          "room",
+          "source",
+          "sfu_enabled",
+          "sfu_url",
+          "sfu_modal_url",
+          "sfu_external_ip",
+          "sfu_install_hint",
+          "policy_token",
+          "endpoint_reachable",
+          "operator_present",
+          "error_code",
+          "message"
+        ],
+        "title": "RemoteInferenceTransportStatusResponse",
+        "type": "object"
+      },
+      "RemoteStation": {
+        "properties": {
+          "instance_id": {
+            "title": "Instance Id",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "instance_id",
+          "name",
+          "url"
+        ],
+        "title": "RemoteStation",
+        "type": "object"
+      },
+      "RemoteTeleoperationMetrics": {
+        "description": "Portal transport metrics, in ms (None until the first sample).",
+        "properties": {
+          "observations": {
+            "title": "Observations",
+            "type": "integer"
+          },
+          "rtt_ms_last": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtt Ms Last"
+          },
+          "rtt_ms_mean": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtt Ms Mean"
+          },
+          "rtt_ms_p95": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtt Ms P95"
+          },
+          "states_dropped": {
+            "title": "States Dropped",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rtt_ms_last",
+          "rtt_ms_mean",
+          "rtt_ms_p95",
+          "observations",
+          "states_dropped"
+        ],
+        "title": "RemoteTeleoperationMetrics",
+        "type": "object"
+      },
+      "RemoteTeleoperationStatusResponse": {
+        "description": "remote_teleoperate.handle_remote_teleoperation_status. `station_phase`\nis the station's live phase (its hosting descriptor, re-read at most once\na second) — null when the station could not be read.",
+        "properties": {
+          "cameras": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Cameras",
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "last_cleanup_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Cleanup Error"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "metrics": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemoteTeleoperationMetrics"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "remote_teleoperation_active": {
+            "title": "Remote Teleoperation Active",
+            "type": "boolean"
+          },
+          "room": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Room"
+          },
+          "station": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemoteStation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "station_phase": {
+            "anyOf": [
+              {
+                "enum": [
+                  "parked",
+                  "engaging",
+                  "engaged",
+                  "parking"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Station Phase"
+          }
+        },
+        "required": [
+          "remote_teleoperation_active",
+          "station",
+          "station_phase",
+          "room",
+          "cameras",
+          "metrics",
+          "last_cleanup_error",
+          "outcome",
+          "error",
+          "hint",
+          "message"
+        ],
+        "title": "RemoteTeleoperationStatusResponse",
         "type": "object"
       },
       "RenameJobBody": {
@@ -3821,6 +6224,79 @@
           "default_port"
         ],
         "title": "RobotPortResponse",
+        "type": "object"
+      },
+      "RunCheckpointItem": {
+        "description": "One saved checkpoint of a local run (models.py list_run_checkpoints).",
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "published": {
+            "title": "Published",
+            "type": "boolean"
+          },
+          "step": {
+            "title": "Step",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "step",
+          "path",
+          "published"
+        ],
+        "title": "RunCheckpointItem",
+        "type": "object"
+      },
+      "RunCheckpointsResponse": {
+        "description": "GET /api/v1/models/checkpoints (models.py list_run_checkpoints) — what the\npublish picker needs for one run: its checkpoints, which are already on the\nHub, and the repo a publish would target. `hub_readable` is False when the\nHub could not be asked, in which case every `published` means \"unknown\".",
+        "properties": {
+          "checkpoints": {
+            "items": {
+              "$ref": "#/components/schemas/RunCheckpointItem"
+            },
+            "title": "Checkpoints",
+            "type": "array"
+          },
+          "default_repo_id": {
+            "title": "Default Repo Id",
+            "type": "string"
+          },
+          "hf_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hf Repo Id"
+          },
+          "hub_readable": {
+            "title": "Hub Readable",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "legacy_root_checkpoint": {
+            "title": "Legacy Root Checkpoint",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "default_repo_id",
+          "hf_repo_id",
+          "legacy_root_checkpoint",
+          "hub_readable",
+          "checkpoints"
+        ],
+        "title": "RunCheckpointsResponse",
         "type": "object"
       },
       "RunnerFlavor": {
@@ -4109,7 +6585,10 @@
               "inference",
               "replay",
               "calibration",
-              "auto_calibration"
+              "auto_calibration",
+              "hosting",
+              "remote_inference",
+              "remote_teleoperation"
             ],
             "title": "Kind",
             "type": "string"
@@ -4227,6 +6706,98 @@
         "title": "SetExcludedEpisodesResponse",
         "type": "object"
       },
+      "SfuTokenBody": {
+        "description": "Request for a LiveKit room token (sfu.py). Every field is optional:\nthe server picks a unique identity and the station's default room, and\n`operator` is the role a laptop or a policy worker wants. `robot` is for\nthe one participant that publishes cameras/state (normally this station\nitself, in a later phase); `viewer` subscribes only.",
+        "properties": {
+          "identity": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Identity"
+          },
+          "role": {
+            "default": "operator",
+            "enum": [
+              "robot",
+              "operator",
+              "viewer"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "room": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Room"
+          },
+          "ttl_seconds": {
+            "default": 3600,
+            "maximum": 43200.0,
+            "minimum": 60.0,
+            "title": "Ttl Seconds",
+            "type": "integer"
+          }
+        },
+        "title": "SfuTokenBody",
+        "type": "object"
+      },
+      "SfuTokenResponse": {
+        "description": "server.py issue_sfu_token — everything a Portal participant needs for\n`connect(url, token)`, plus the room/identity the token was scoped to\n(echoed back because the server fills in defaults the caller may have\nomitted) and the token's expiry as epoch seconds.",
+        "properties": {
+          "expires_at": {
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "identity": {
+            "title": "Identity",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "robot",
+              "operator",
+              "viewer"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "room": {
+            "title": "Room",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "token",
+          "room",
+          "identity",
+          "role",
+          "expires_at"
+        ],
+        "title": "SfuTokenResponse",
+        "type": "object"
+      },
       "SkillListItem": {
         "description": "One row of GET /skills (models.py list_skills).\n\nThe deployable projection of a listing row: the same producers, the same\nabsent-key heterogeneity (the route serializes with exclude_unset for the\nreason ModelListItem documents — a scanned checkpoint dir carries no\n``state``, for instance), plus the annotations list_skills stamps on every\nrow it emits.\n\n``origin`` is where the weights CAME FROM, as opposed to ``source``, which\nis where they live now. ``deployable`` is derived on read, never stored:\na checkpoint dir can be deleted and a resume can land at any moment, so a\npersisted flag would rot with no writer nearby.",
         "properties": {
@@ -4295,6 +6866,21 @@
               }
             ],
             "title": "Last Modified"
+          },
+          "local_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run",
+                  "downloaded"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Kind"
           },
           "name": {
             "title": "Name",
@@ -4509,6 +7095,81 @@
         "title": "SkillsResponse",
         "type": "object"
       },
+      "StationRobotBody": {
+        "description": "PUT /api/v1/station/robot — the robot this station hosts; null clears\nthe choice (hosting stops once idle and waits for a new pick).",
+        "properties": {
+          "robot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Robot"
+          }
+        },
+        "title": "StationRobotBody",
+        "type": "object"
+      },
+      "StationStatusResponse": {
+        "description": "remote_host.handle_station_status — the --host posture. `robot` is the\nremembered/auto-picked choice (null = nothing chosen yet), `hostable` the\nsaved robots whose follower side is set up, `phase` the live hosting\nphase (null when hosting is down).",
+        "properties": {
+          "hostable": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Hostable",
+            "type": "array"
+          },
+          "hosting_active": {
+            "title": "Hosting Active",
+            "type": "boolean"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "enum": [
+                  "parked",
+                  "engaging",
+                  "engaged",
+                  "parking"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "robot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Robot"
+          },
+          "station_mode": {
+            "title": "Station Mode",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "station_mode",
+          "robot",
+          "hostable",
+          "hosting_active",
+          "phase"
+        ],
+        "title": "StationStatusResponse",
+        "type": "object"
+      },
       "SuccessRepoIdResponse": {
         "description": "The pin/hide mutations' shared shape (server.py datasets_save_custom /\ndatasets_remove_custom / datasets_hide / datasets_unhide and their models\nmirrors) — success is False when a remove/unhide had nothing to remove.",
         "properties": {
@@ -4582,6 +7243,17 @@
           "leader_config": {
             "title": "Leader Config",
             "type": "string"
+          },
+          "leader_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader Kind"
           },
           "leader_port": {
             "title": "Leader Port",
@@ -5408,6 +8080,28 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/arms": {
+      "get": {
+        "description": "The arms manifest: every registered arm family and what it can do.\n\nThe one document the UI reads arm capabilities from, so a family an\nextension registers renders with no frontend change. Registry order,\ndefault family FIRST — a client scanning `robot_type_markers` checks the\ndefault family LAST (its markers are the loosest), exactly as\narm_capabilities.arm_type_from_robot_type does. See arms/manifest.py.",
+        "operationId": "list_arm_families",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArmFamiliesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Arm Families",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/api/v1/arms/release-torque": {
       "post": {
         "description": "De-energize a CAN follower after a crash left it holding torque.\n\nA SIGKILL or power loss leaves Damiao motors rigid at their last command\nwith no session and no device object to clean up through. This reopens\nthe named bus WITHOUT the energizing handshake, broadcasts the disable,\nand closes. Refused (409 session.held) while any live session holds the\nhardware; not a session itself — no lease, no session events (see\ncan_recovery.py).",
@@ -5551,6 +8245,22 @@
               "title": "Arm Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
+            }
           }
         ],
         "responses": {
@@ -5598,6 +8308,22 @@
               "default": "so101",
               "title": "Arm Type",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
             }
           }
         ],
@@ -5668,6 +8394,22 @@
               "title": "Arm Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
+            }
           }
         ],
         "responses": {
@@ -5724,6 +8466,22 @@
               "default": "so101",
               "title": "Arm Type",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
             }
           }
         ],
@@ -5782,6 +8540,22 @@
               "title": "Arm Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
+            }
           }
         ],
         "requestBody": {
@@ -5821,8 +8595,26 @@
     },
     "/api/v1/calibration-status": {
       "get": {
-        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `awaiting_pose` is present only on the zero-pose\nflow and defaults to False for the SO-101 sweep, which is what lets the\nfrontend switch panels on it.",
+        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `image_url` and `live_positions` are the step\nwizard's own fields and default (null / False) for the SO-101 sweep, so\nthe frontend reads one shape whichever manager answers.",
         "operationId": "calibration_status",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Arm Type"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -5831,6 +8623,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Calibration Status"
@@ -6070,6 +8872,23 @@
       "post": {
         "description": "Complete the current calibration step (either flow).",
         "operationId": "complete_calibration_step",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CompleteCalibrationStepRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {
@@ -6078,6 +8897,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Complete Calibration Step"
@@ -7064,6 +9893,28 @@
         ]
       }
     },
+    "/api/v1/hosting": {
+      "get": {
+        "description": "The station's hosting descriptor + status (remote_host.py). An\noperator node reads this (through its registry) to learn the room, the\ncodec/fps, and the motor/camera schema before joining; the URL is\nderived from the host the caller reached this API on.",
+        "operationId": "get_hosting_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostingStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Hosting Status",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
     "/api/v1/identify-arm": {
       "post": {
         "description": "The inverse of /wiggle: the user swings an arm's base (shoulder pan) by\nhand and we report which port saw the motion. Read-only — no motor writes.",
@@ -7645,7 +10496,7 @@
     },
     "/api/v1/jobs/{job_id}/checkpoints/{step}/policy-config": {
       "get": {
-        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, the\nflat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch, and trained_on_robot_type\n(the arm the checkpoint was trained on, for the fine-tune panel's cross-arm\nwarning; null when it can't be established).",
+        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, the\nflat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch, the n_action_steps /\nchunk_size geometry (n_action_steps is the ceiling on a remote-inference\nhorizon), and trained_on_robot_type (the arm the checkpoint was trained on,\nfor the fine-tune panel's cross-arm warning; null when it can't be\nestablished).",
         "operationId": "get_checkpoint_policy_config",
         "parameters": [
           {
@@ -7944,7 +10795,7 @@
     },
     "/api/v1/maker/identify-arm": {
       "post": {
-        "description": "Tell one Maker arm from its twin by watching for a hand gesture.\n\nOnly needed for a BIMANUAL Maker robot: both arms ship with identical CAN\nand servo ids, so probing alone cannot say which is left and which is\nright. The user swings one arm's base and we report the port that saw it.\nRead-only — no motor writes.",
+        "description": "Tell one Maker arm from its twin by watching for a hand gesture.\n\nOnly needed for a BIMANUAL Maker robot: both arms ship with identical CAN\nand servo ids, so probing alone cannot say which is left and which is\nright. The user swings one arm's base and we report the port that saw it.\nRead-only — no motor writes. Any registered family (each implements the\ngesture); an unknown id is a 400.",
         "operationId": "identify_maker_arm",
         "requestBody": {
           "content": {
@@ -7986,7 +10837,7 @@
     },
     "/api/v1/maker/probe-ports": {
       "post": {
-        "description": "Find which ports carry a Maker follower and which carry its Star 102 leader.\n\nA CAN rig's two halves speak different protocols on different adapters\n(RobStride/Damiao over CAN vs FashionStar over UART), so unlike the SO-101\nthis needs NO gesture from the user — asking each port which protocol\nanswers is enough. The maker probe is strictly read-only; the METAL\nfollower probe briefly enables the gravity-neutral base joint and disables\nit again (the Damiao handshake is the enable command — see\nmaker_ports._open_metal_follower_bus).",
+        "description": "Find which ports carry a Maker follower and which carry its Star 102 leader.\n\nA CAN rig's two halves speak different protocols on different adapters\n(RobStride/Damiao over CAN vs FashionStar over UART), so unlike the SO-101\nthis needs NO gesture from the user — asking each port which protocol\nanswers is enough. The maker probe is strictly read-only; the METAL\nfollower probe briefly enables the gravity-neutral base joint and disables\nit again (the Damiao handshake is the enable command — see\nmaker_ports._open_metal_follower_bus).\n\nRefused by the family's flag, never by id: a family whose two halves\nshare one protocol (the SO-101) has nothing to ask a port and is told to\nidentify by the gesture instead.",
         "operationId": "probe_maker_arm_ports",
         "requestBody": {
           "content": {
@@ -8026,6 +10877,48 @@
         ]
       }
     },
+    "/api/v1/maker/wiggle-gripper": {
+      "post": {
+        "description": "Jog ONE port's gripper so the user can see which CAN arm is on it.\n\nThe identification of last resort (can_wiggle.py): a Metal rig driven by\na second Metal arm answers Damiao on every port, so the probe cannot say\nwhich is the leader and the gesture is refused on both sides (opening a\nDamiao bus energizes it). This opens the port with ONLY the gripper\nmotor on the bus, jogs the jaws a few degrees inside their soft limits,\nand disables the motor again. Claims the wiggle mutex (robot.busy.wiggle)\nand is refused while any session holds the hardware. A family without a\ngripper wiggle answers a plain refusal.",
+        "operationId": "wiggle_can_gripper_port",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CanGripperWiggleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CanGripperWiggleResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Wiggle Can Gripper Port",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/api/v1/models": {
       "get": {
         "description": "List trained models available to the user — local runs + Hub repos.\n\nEach entry carries a `source` field: \"local\", \"hub\", or \"both\" (a local run\nthat was also pushed to the Hub). Mirrors GET /datasets.",
@@ -8047,6 +10940,49 @@
           }
         },
         "summary": "Models List",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/checkpoints": {
+      "get": {
+        "description": "The publish picker's source of truth for one local run: every checkpoint\nit saved, which steps are already on the Hub, and the repo a publish would\ntarget. `id` is a run id (query param for symmetry with /models/info).\n404 when the run has no uploadable checkpoint.",
+        "operationId": "models_checkpoints",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunCheckpointsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Checkpoints",
         "tags": [
           "models"
         ]
@@ -8407,9 +11343,73 @@
         ]
       }
     },
+    "/api/v1/models/publish": {
+      "post": {
+        "description": "START publishing a local run's checkpoints to the Hub as ONE PUBLIC,\nMakerModsLab-tagged model repo. MUTATES the Hub (creates/updates the repo).\n\nReturns immediately with {started, model_id, message} — the queue runs\nsequentially in a background thread (a run's worth of checkpoints is\ngigabytes, far past what an inline request should hold open) and\nGET /api/v1/models/publish-status reports progress. 409 when a publish is\nalready running; the per-step failures (400 offline, 403 permission, 404\nunknown step, 502 Hub) surface through that status, not this call.",
+        "operationId": "models_publish",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelPublishBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelPublishStartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Publish",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/publish-status": {
+      "get": {
+        "description": "Poll the single background publish: state (idle/running/done/error),\ntarget repo + url, `done`/`total`/`current_step` for the queue position, and\n`done_steps` — the steps already on the Hub, which stay meaningful after an\nerror because a failed queue keeps everything it published before it died.",
+        "operationId": "models_publish_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelPublishStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Models Publish Status",
+        "tags": [
+          "models"
+        ]
+      }
+    },
     "/api/v1/models/upload": {
       "post": {
-        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.",
+        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.\n\nThe single-checkpoint synchronous push, frozen for SDK clients — including\nits ON-HUB SHAPE: files land at the repo root, loadable by a plain\nfrom_pretrained(repo_id) (root_layout=True). The training view's\nmulti-checkpoint picker uses POST /api/v1/models/publish instead, which\nstep-addresses under checkpoints/<step>/.",
         "operationId": "models_upload",
         "requestBody": {
           "content": {
@@ -9122,7 +12122,7 @@
     },
     "/api/v1/open-calibration-folder": {
       "post": {
-        "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type is rejected with 400.",
+        "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type or arm_type is rejected with 400.",
         "operationId": "open_calibration_folder",
         "requestBody": {
           "content": {
@@ -9179,6 +12179,48 @@
         ]
       }
     },
+    "/api/v1/recording-episode-task": {
+      "post": {
+        "description": "Set the upcoming episode's task and start recording after environment\nreset. An empty description or a submission outside the naming phase\ncomes back 200 + {success: false}.",
+        "operationId": "recording_episode_task",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EpisodeTaskBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordingControlResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recording Episode Task",
+        "tags": [
+          "recording"
+        ]
+      }
+    },
     "/api/v1/recording-exit-early": {
       "post": {
         "description": "Skip to next episode (replaces right arrow key)",
@@ -9230,6 +12272,48 @@
         "summary": "Recording Pause"
       }
     },
+    "/api/v1/recording-preview/{camera_name}": {
+      "get": {
+        "description": "Latest recorder RGB frame by observation key; no device access.",
+        "operationId": "recording_camera_preview",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "camera_name",
+            "required": true,
+            "schema": {
+              "title": "Camera Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/jpeg": {}
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "No recording frame available"
+          }
+        },
+        "summary": "Recording Camera Preview",
+        "tags": [
+          "recording"
+        ]
+      }
+    },
     "/api/v1/recording-rerecord-episode": {
       "post": {
         "description": "Re-record current episode (replaces left arrow key)",
@@ -9279,6 +12363,287 @@
           }
         },
         "summary": "Recording Status"
+      }
+    },
+    "/api/v1/remote-inference-status": {
+      "get": {
+        "description": "Live telemetry of the remote-inference session: phase, elapsed/duration,\nthe child's 1 Hz STATS sample, and the transport it actually resolved.\n\nPoll at 1 Hz — the rate the child emits at. Metrics are deliberately NOT\npushed on the websocket: `holds` climbing and `degrade` mean the run is\nlosing quality and the operator's response is \"stop it\", which is not a\nmillisecond decision; and a droppable hint channel drops under queue\npressure, which is exactly when a run is in trouble. Only real transitions\nride `session_changed`.\n\n`stats` is null until the first sample lands (and stays null for a run that\nnever connected); every key WITHIN a sample is always present, null where\nunknown — a dropped or malformed line degrades to \"no sample this second\",\nnever to a half-populated one the UI would render as real. No exclusion\nmode: those nulls are meaningful (see RemoteInferenceStats).\n\nPollable unconditionally: when idle it answers\n`remote_inference_active=false` with null stats/transport, mirroring\n/inference-status.",
+        "operationId": "get_remote_inference_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteInferenceStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Remote Inference Status",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/remote-inference/gpu": {
+      "get": {
+        "description": "The GPU launcher's state: idle | starting | ready | failed | stopping,\nplus the container's own phase, the room it was pinned to, the log path and\nthe idle auto-stop countdown.\n\nPollable unconditionally, and a poll is also one of the two things (with\nthe log pump) that can notice a cold start that overran or a ready GPU\nnobody is using — neither deadline needs a thread of its own.\n\n`state == \"ready\"` is a HINT derived from the container's stdout, never the\nauthority: the gate on energizing the arm stays the session's own room\nprobe.",
+        "operationId": "get_remote_inference_gpu",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GpuStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Remote Inference Gpu",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/remote-inference/gpu/start": {
+      "post": {
+        "description": "Launch the policy server on Modal, attached, from this machine.\n\nAttached on purpose (no `--detach`): the local `modal run` process is the\napp's lifeline, so stopping it stops the app — which is the cost-safety\nproperty, and it means the GPU dies with the Lab. Detached would buy\n\"survives a restart\" in exchange for orphaned A100s nobody knows about.\n\nThe API secret is NEVER in the command line: both wrappers' `main()` falls\nback to LIVEKIT_API_KEY / LIVEKIT_API_SECRET from the environment, and the\nlauncher passes them there instead of in argv, which is world-readable in\n`ps` on this machine.\n\nDeliberately NOT refused while a local training run holds this machine: a\nModal A100 is not this machine's GPU.",
+        "operationId": "start_remote_inference_gpu",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GpuStartBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GpuLaunchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Remote Inference Gpu",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/remote-inference/gpu/stop": {
+      "post": {
+        "description": "Stop the GPU policy server (SIGTERM→SIGKILL over its process group).\n\nReturns while the group is still going down, in state `stopping`; the\nlauncher's own stdout pump lands it in `idle`. 409 `gpu.not_running` when\nthere is nothing to stop. Never touches the arm — a live remote-inference\nsession keeps running and its watchdogs report the empty room, which is a\nbetter diagnosis than a stop the user did not ask for.",
+        "operationId": "stop_remote_inference_gpu",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GpuStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stop Remote Inference Gpu",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/remote-inference/gpu/targets": {
+      "get": {
+        "description": "This machine's Modal profiles, and one profile's environments.\n\nWhat the two pickers above Start GPU are built from, so a launch can be\nbilled to a chosen workspace WITHOUT `modal profile activate` — that\nrewrites ~/.modal.toml, which every other terminal on this machine shares,\nand a web request has no business doing that. The profile rides the child's\nMODAL_PROFILE instead, and the environment rides `modal run --env`.\n\n`profile` picks whose environments to list (empty: the active one), because\n`modal environment list` only ever describes one profile's workspace.\n\nRead-only and never 500: two bounded `modal … list --json` subprocesses, no\nmutating subcommand, and ~/.modal.toml — which holds every profile's\ntoken_id and token_secret — is never opened. A missing CLI, an expired\ntoken or a listing this build cannot parse come back as a coded `error` in\nthe body, because a failed listing is not a failed launch: with no selection\nthe CLI still resolves the target on its own.",
+        "operationId": "get_remote_inference_gpu_targets",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "profile",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Profile",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GpuTargetsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Remote Inference Gpu Targets",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/remote-inference/transport": {
+      "get": {
+        "description": "What transport a remote-inference child would resolve RIGHT NOW, and\nwhether anything is answering on it. Read-only; touches no hardware and\nstarts nothing.\n\nTwo transports, one shape. When this process runs the Lab's own SFU\n(`makermodslab --sfu`) the url, room and credentials come from sfu.py\nin-process and livekit.env is never read; the `sfu_*` block then carries\nwhat the panel needs for the GPU side's command line — including the key\nNAME and the file the secret lives in, never the secret. Otherwise the\nLiveKit Cloud credentials are resolved through `drtc._env.read_env()`,\nnever `load_env()`: load_env writes os.environ, and a server that has\nstamped a url into its own environment can never re-resolve it.\n\n`endpoint_reachable` / `operator_present` come from one `list_participants`\ncall behind remote_inference._probe_room, bounded at 3s, and are null when\nthat probe did not run at all. A missing [remote] extra is REPORTED here\nrather than raised: the panel's job is to tell the user what to install,\nand the install command must name the PRIMARY CHECKOUT — an editable\ninstall run from a worktree silently re-points every other session's\nmakermodslab.\n\nDeliberately NOT refused while a session is live. Unlike\n/arms/release-torque this reads dotenv files and asks the SFU who is in a\nroom; it touches nothing the running child owns, and a live child already\npinned its transport at spawn (READY echoes the effective values).",
+        "operationId": "get_remote_inference_transport",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteInferenceTransportStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Remote Inference Transport",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/remote-teleoperation": {
+      "get": {
+        "description": "The operator side's status (remote_teleoperate.py): which station,\nwhich room, the remote cameras being re-streamed, Portal RTT metrics.",
+        "operationId": "get_remote_teleoperation_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteTeleoperationStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Remote Teleoperation Status",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
+    "/api/v1/remote-teleoperation/camera/{name}": {
+      "get": {
+        "description": "MJPEG re-stream of one remote camera during a remote teleoperation\nsession, from the frames Portal delivers — the existing camera tiles\nconsume it unchanged. 404 when no session (or no such camera).",
+        "operationId": "get_remote_teleoperation_camera",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Remote Teleoperation Camera",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
+    "/api/v1/remote-teleoperation/engage": {
+      "post": {
+        "description": "Re-energize the station's arm after a Home, with a soft start.",
+        "operationId": "remote_teleoperation_engage",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Remote Teleoperation Engage",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
+    "/api/v1/remote-teleoperation/home": {
+      "post": {
+        "description": "Park the station's arm (return to rest, torque off) and hold it there\nuntil Engage. Forwarded to the station as a Portal RPC; the station\nhonours it only from the seated operator.",
+        "operationId": "remote_teleoperation_home",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Remote Teleoperation Home",
+        "tags": [
+          "remote"
+        ]
       }
     },
     "/api/v1/replay-status": {
@@ -9493,6 +12858,48 @@
         "summary": "Upsert Robot"
       }
     },
+    "/api/v1/robots/{name}/gripper-status": {
+      "get": {
+        "operationId": "get_gripper_status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GripperStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Gripper Status",
+        "tags": [
+          "robots"
+        ]
+      }
+    },
     "/api/v1/robots/{name}/rename": {
       "post": {
         "description": "Rename a robot record. Body: {\"new_name\": \"...\"}. Calibration files are not\naffected (they're keyed by config name, not robot name).",
@@ -9545,7 +12952,7 @@
     },
     "/api/v1/sessions": {
       "post": {
-        "description": "Start a robot session by robot name; ports, configs, mode, right-arm\nfields and cameras resolve server-side from the saved robot record, and\n`options` carries only the kind-specific fields (see schemas/sessions.py).\n\nStartable kinds: teleoperation, recording, inference, replay,\ncalibration, auto_calibration. Only wiggle still starts through its\nlegacy flow endpoint (seconds of open-loop motion, no stop handler) —\nthe identity tracker observes it all the same. Calibration's mid-session\nwizard controls (complete-calibration-step, the status polls) stay on\ntheir existing endpoints, like recording's pause/rerecord.\n\n201 returns the session identity plus optional `warnings` — warn-but-\nallow findings from the feature's start (teleoperation/replay\narm-identity checks) that the legacy start responses used to carry; 409\nsession.held (details name the holder) when any session already holds\nthe hardware; 404 robot.not_found; 400 robot.not_ready (readiness is\nscoped to the arms the kind drives — inference/replay never open the\nleader bus; the calibration kinds need only a port per targeted slot);\n422 request.validation for options that don't fit the kind, an\nempty/oversized owner, or a lease_timeout_s outside 10–600. Other\nfeature refusals pass through with their existing statuses and codes.\n\n`owner` attaches a lease: heartbeat within `lease_timeout_s` (default\n60s) or the session is safety-stopped. No owner, no lease, no\ntimeout-stop — legacy-started and owner-less sessions are never killed.",
+        "description": "Start a robot session by robot name; ports, configs, mode, right-arm\nfields and cameras resolve server-side from the saved robot record, and\n`options` carries only the kind-specific fields (see schemas/sessions.py).\n\nStartable kinds: teleoperation, recording, inference, remote_inference,\nreplay, calibration, auto_calibration. Only wiggle still starts through\nits legacy flow endpoint (seconds of open-loop motion, no stop handler) —\nthe identity tracker observes it all the same. Calibration's mid-session\nwizard controls (complete-calibration-step, the status polls) stay on\ntheir existing endpoints, like recording's pause/rerecord.\n\n201 returns the session identity plus optional `warnings` — warn-but-\nallow findings from the feature's start (teleoperation/replay\narm-identity checks) that the legacy start responses used to carry; 409\nsession.held (details name the holder) when any session already holds\nthe hardware; 404 robot.not_found; 400 robot.not_ready (readiness is\nscoped to the arms the kind drives — inference/replay never open the\nleader bus; the calibration kinds need only a port per targeted slot);\n422 request.validation for options that don't fit the kind, an\nempty/oversized owner, or a lease_timeout_s outside 10–600. Other\nfeature refusals pass through with their existing statuses and codes.\n\n`owner` attaches a lease: heartbeat within `lease_timeout_s` (default\n60s) or the session is safety-stopped. No owner, no lease, no\ntimeout-stop — legacy-started and owner-less sessions are never killed.",
         "operationId": "start_session",
         "requestBody": {
           "content": {
@@ -9753,6 +13160,48 @@
         "summary": "Stop Session",
         "tags": [
           "sessions"
+        ]
+      }
+    },
+    "/api/v1/sfu/token": {
+      "post": {
+        "description": "Sign a short-lived, role-scoped LiveKit room token.\n\nThe station is the only party holding the SFU secret, so participants\n(a laptop's makermodslab, a Modal worker, a browser) get their JWT here\ninstead of carrying the secret. The URL is built from the host the\ncaller reached THIS API on — the one address known to be routable from\nwhere they sit. 409 sfu.disabled when the launcher wasn't started with\n--sfu: the remedy is a restart with the flag, not a retry.",
+        "operationId": "issue_sfu_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SfuTokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SfuTokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Issue Sfu Token",
+        "tags": [
+          "sfu"
         ]
       }
     },
@@ -9998,6 +13447,70 @@
         "summary": "Start Replay"
       }
     },
+    "/api/v1/station": {
+      "get": {
+        "description": "Station mode posture (remote_host.py): whether this machine was started\nwith --host, which robot it hosts, which saved robots it could host.",
+        "operationId": "get_station_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StationStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Station Status",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
+    "/api/v1/station/robot": {
+      "put": {
+        "description": "Choose (or clear) the hosted robot. Remembered across restarts; a\nparked, unseated hosting session of another robot yields and the\nsupervisor re-hosts the new choice within seconds; an engaged one is\nrefused with session.held.",
+        "operationId": "set_station_robot",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StationRobotBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StationStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Station Robot",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
     "/api/v1/stop-auto-calibration": {
       "post": {
         "description": "Stop a running auto-calibration.",
@@ -10034,7 +13547,7 @@
     },
     "/api/v1/stop-calibration": {
       "post": {
-        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the zero-pose flow\nfirst and falling through is unambiguous.",
+        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the step wizard\nfirst and falling through is unambiguous.",
         "operationId": "stop_calibration",
         "responses": {
           "200": {
@@ -10306,6 +13819,72 @@
           }
         },
         "summary": "Install Policy Extra Status",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/system/remote-extra": {
+      "get": {
+        "description": "Whether the `remote` extra (LiveKit Portal's lerobot plugins) is importable.",
+        "operationId": "get_remote_extra",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtraStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Remote Extra",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/system/remote-extra/install": {
+      "post": {
+        "description": "Spawn the Portal plugins' pip install as a background subprocess. No-op if already running.",
+        "operationId": "install_remote_extra",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Install Remote Extra",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/system/remote-extra/install-status": {
+      "get": {
+        "description": "Current install state plus any pending log lines (drained on read).",
+        "operationId": "install_remote_extra_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Install Remote Extra Status",
         "tags": [
           "system"
         ]
@@ -10728,6 +14307,22 @@
               "title": "Arm Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
+            }
           }
         ],
         "responses": {
@@ -10775,6 +14370,22 @@
               "default": "so101",
               "title": "Arm Type",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
             }
           }
         ],
@@ -10845,6 +14456,22 @@
               "title": "Arm Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
+            }
           }
         ],
         "responses": {
@@ -10901,6 +14528,22 @@
               "default": "so101",
               "title": "Arm Type",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
             }
           }
         ],
@@ -10959,6 +14602,22 @@
               "title": "Arm Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "leader_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Leader Kind"
+            }
           }
         ],
         "requestBody": {
@@ -10998,8 +14657,26 @@
     },
     "/calibration-status": {
       "get": {
-        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `awaiting_pose` is present only on the zero-pose\nflow and defaults to False for the SO-101 sweep, which is what lets the\nfrontend switch panels on it.",
+        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `image_url` and `live_positions` are the step\nwizard's own fields and default (null / False) for the SO-101 sweep, so\nthe frontend reads one shape whichever manager answers.",
         "operationId": "calibration_status_calibration_status_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Arm Type"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -11008,6 +14685,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Calibration Status"
@@ -11071,6 +14758,23 @@
       "post": {
         "description": "Complete the current calibration step (either flow).",
         "operationId": "complete_calibration_step_complete_calibration_step_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CompleteCalibrationStepRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {
@@ -11079,6 +14783,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Complete Calibration Step"
@@ -12499,7 +16213,7 @@
     },
     "/jobs/{job_id}/checkpoints/{step}/policy-config": {
       "get": {
-        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, the\nflat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch, and trained_on_robot_type\n(the arm the checkpoint was trained on, for the fine-tune panel's cross-arm\nwarning; null when it can't be established).",
+        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, the\nflat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch, the n_action_steps /\nchunk_size geometry (n_action_steps is the ceiling on a remote-inference\nhorizon), and trained_on_robot_type (the arm the checkpoint was trained on,\nfor the fine-tune panel's cross-arm warning; null when it can't be\nestablished).",
         "operationId": "get_checkpoint_policy_config_jobs__job_id__checkpoints__step__policy_config_get",
         "parameters": [
           {
@@ -13179,7 +16893,7 @@
     },
     "/models/upload": {
       "post": {
-        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.",
+        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.\n\nThe single-checkpoint synchronous push, frozen for SDK clients — including\nits ON-HUB SHAPE: files land at the repo root, loadable by a plain\nfrom_pretrained(repo_id) (root_layout=True). The training view's\nmulti-checkpoint picker uses POST /api/v1/models/publish instead, which\nstep-addresses under checkpoints/<step>/.",
         "operationId": "models_upload_models_upload_post",
         "requestBody": {
           "content": {
@@ -13258,7 +16972,7 @@
     },
     "/open-calibration-folder": {
       "post": {
-        "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type is rejected with 400.",
+        "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type or arm_type is rejected with 400.",
         "operationId": "open_calibration_folder_open_calibration_folder_post",
         "requestBody": {
           "content": {
@@ -13935,7 +17649,7 @@
     },
     "/stop-calibration": {
       "post": {
-        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the zero-pose flow\nfirst and falling through is unambiguous.",
+        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the step wizard\nfirst and falling through is unambiguous.",
         "operationId": "stop_calibration_stop_calibration_post",
         "responses": {
           "200": {

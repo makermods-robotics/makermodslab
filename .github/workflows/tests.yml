@@ -73,5 +73,21 @@ jobs:
       - name: Install MakerMods Lab + test extras
         run: pip install -e ".[test]"
 
+      # The tiny local Molmo checkpoints exercise the real HF model classes.
+      # Reuse the application's exact fork pin when enabling their optional deps.
+      - name: Install MolmoAct2 test dependencies
+        run: |
+          python - <<'PYTHON'
+          import subprocess
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          dependencies = tomllib.loads(Path("pyproject.toml").read_text())["project"]["dependencies"]
+          lerobot = next(dep for dep in dependencies if dep.startswith("lerobot["))
+          source = lerobot.split("@", 1)[1].strip()
+          subprocess.run([sys.executable, "-m", "pip", "install", f"lerobot[molmoact2] @ {source}"], check=True)
+          PYTHON
+
       - name: Run pytest
         run: pytest tests -vv --maxfail=10
