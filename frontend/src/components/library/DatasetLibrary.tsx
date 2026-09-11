@@ -113,16 +113,15 @@ const DatasetCardDetails: React.FC<{ item: DatasetItem }> = ({ item }) => {
     rows.push([t("library.datasets.meta.robot"), info.robot_type]);
   // One task shows the task itself; several collapse to a tally. A real
   // i18next plural rather than a hand-picked "Task"/"Tasks" pair — Chinese has
-  // one form for both.
-  if (info.tasks.length === 1) {
+  // one form for both. `tasks` is null when a Hub summary couldn't read the
+  // task file — no row, same as an empty list.
+  const tasks = info.tasks ?? [];
+  if (tasks.length === 1) {
+    rows.push([t("library.datasets.meta.task", { count: 1 }), tasks[0].task]);
+  } else if (tasks.length > 1) {
     rows.push([
-      t("library.datasets.meta.task", { count: 1 }),
-      info.tasks[0].task,
-    ]);
-  } else if (info.tasks.length > 1) {
-    rows.push([
-      t("library.datasets.meta.task", { count: info.tasks.length }),
-      t("library.datasets.meta.taskCount", { count: info.tasks.length }),
+      t("library.datasets.meta.task", { count: tasks.length }),
+      t("library.datasets.meta.taskCount", { count: tasks.length }),
     ]);
   }
   if (info.size_bytes != null)
