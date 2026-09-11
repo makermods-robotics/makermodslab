@@ -24,6 +24,7 @@ local lerobot run.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import inspect
 import logging
@@ -39,17 +40,55 @@ from pathlib import Path
 from queue import Empty, Queue
 
 from huggingface_hub import get_token
-from huggingface_hub.errors import RepositoryNotFoundError
 from packaging.requirements import Requirement
 
+from .. import sampling as _sampling, train_weighted as _train_weighted
+from ..datasets import resolve_hub_repo_id
 from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
 from ..train import TrainingRequest, build_training_command, parse_hf_duration
-from ..utils.config import with_makermodslab_tag
 from ..utils.hf_auth import cached_whoami, shared_hf_api
+from ._dataset import ensure_dataset_on_hub
 
 logger = logging.getLogger(__name__)
 
 LEROBOT_IMAGE = "huggingface/lerobot-gpu:latest"
+
+# Hub job label carrying the run's identity. Every MakerMods Lab cloud run uses
+# the same image, so without it a job's only Hub-side identifier is
+# LEROBOT_IMAGE — and a job launched from another machine (no local JobRecord
+# to match it against) shows up in the library titled
+# "huggingface/lerobot-gpu:latest" like every other one. The label travels with
+# the job itself, so any machine signed into the account can name it.
+# Read back by _hub_job_run_name in server.py.
+#
+# This is OUR key, deliberately kept alongside run_job's own `name` (below).
+# `name` defaults to a value derived from the image when the caller omits it
+# ("lerobot-gpu-latest-<hash>"), so a `name` read back off a job is not
+# necessarily one we chose; _RUN_LABEL is unambiguous.
+# NO DOT. The Hub serialises each label into a single "key=value" tag and
+# validates that tag against [alphanumeric - _ =]. A dot used to be accepted
+# and no longer is, so the original "makermodslab.run" started failing
+# submission outright with:
+#   Bad Request: `tags` must be 1-256 characters and contain only
+#   alphanumeric characters, '-', '_', or '='
+_RUN_LABEL = "makermodslab_run"
+# The dotted key every job submitted before the rename carries is read back
+# (never written) on the server side — see `_HUB_RUN_LABELS` in server.py, which
+# is what un-names the existing cloud backlog if dropped.
+
+# The charset the Hub accepts in the "key=value" tag a label becomes. Checked
+# BEFORE submission (see _run_job_naming_kwargs) so a non-conforming label is
+# dropped rather than 400-ing the whole job — the same trade the signature
+# probe below already makes: a job listed under its image name beats no job.
+_LABEL_CHARSET_RE = re.compile(r"^[A-Za-z0-9\-_]+$")
+
+# The Hub rejects a label whose key or value exceeds 100 characters. A job id is
+# built from a _SLUG_RE-sanitised dataset name (jobs._generate_job_id), so its
+# charset already conforms — only the length can overrun, via a very long
+# dataset name. NOTE the publish repo id is deliberately NOT labelled: it
+# contains a "/", which the Hub refuses, and _hub_job_run_name can already
+# recover the run name from argv anyway.
+_MAX_LABEL_LEN = 100
 
 # The :latest image ships whatever lerobot was current when it was built —
 # which drifts from the pin in our pyproject.toml that build_training_command's
@@ -57,9 +96,12 @@ LEROBOT_IMAGE = "huggingface/lerobot-gpu:latest"
 # The wrapper therefore pip-installs the exact pin (below) before launching
 # the trainer, so container and host agree on the CLI surface.
 
-# Extras from the pyproject pin that only matter on the host machine (serial
-# motor buses). Dropped from the container install.
-_HOST_ONLY_EXTRAS = frozenset({"feetech"})
+# Extras from the pyproject pin that only matter on the host machine — every
+# motor-bus stack: feetech (SO-101 serial), maker/damiao/robstride/metal
+# (CAN), rebot (FashionStar UART). Dropped from the container install: the
+# training pod has no arms attached, so they are dead weight per job at best
+# and a platform-specific resolve failure at worst.
+_HOST_ONLY_EXTRAS = frozenset({"feetech", "maker", "damiao", "robstride", "metal", "rebot"})
 
 # policy_type -> lerobot extra that carries the policy's model dependencies
 # at the pinned ref (e.g. transformers for smolvla). Policies without an
@@ -224,10 +266,19 @@ def localize_config_for_cloud(config: TrainingRequest, flavor: str) -> None:
     # form, which the wrapper materializes pod-side before launching the trainer
     # (the twin of the resume download above). What cannot work is a host path:
     # the container has no view of this machine's disk.
+    #
+    # Belt-and-braces since F7's fine-tune quadrant landed: a local base picked
+    # in the UI never arrives here as a path any more — JobRegistry.start stages
+    # its weights to a private Hub repo (with the user's consent) and rewrites
+    # the request to the resulting ref before the runner is reached. Only a
+    # request that bypasses the registry can still trip this, so the message
+    # names both ways out rather than claiming the case is unsupported.
     if config.policy_pretrained_path and Path(config.policy_pretrained_path).is_absolute():
         raise ValueError(
-            "Fine-tuning a cloud job from a local checkpoint isn't supported — "
-            "push the source model to the Hub and fine-tune from the Hub copy."
+            "A cloud job can't fine-tune from a checkpoint on this machine — the "
+            "container has no view of this disk. Launch it from the training form, "
+            "which offers to upload the base checkpoint to a private Hub repo first, "
+            "or push the source model to the Hub and fine-tune from the Hub copy."
         )
     # The container resolves the dataset from the Hub by repo_id; a host-local
     # dataset root doesn't exist there.
@@ -484,12 +535,18 @@ def _scan_and_upload():
                 repo_id=repo_id,
                 path_in_repo=f"checkpoints/{entry.name}",
                 commit_message=f"checkpoint {entry.name}",
+                # safetensors writes through a .tmpXXXX file and renames; one
+                # caught mid-rename has landed on the Hub before.
+                ignore_patterns=[".tmp*", "**/.tmp*"],
             )
             seen.add(entry.name)
             waits.pop(entry.name, None)
             print(f"[wrapper] uploaded checkpoint {entry.name}", flush=True)
         except Exception as exc:
+            # NOT added to `seen`: sealing a step whose upload failed (or only
+            # partly landed) is what made incomplete Hub checkpoints permanent.
             print(f"[wrapper] upload failed for {entry.name}: {exc}", flush=True)
+            continue
 
 
 def _watch():
@@ -511,7 +568,32 @@ if trainer_argv and trainer_argv[0] == "python":
 # trainer_argv is passed to Popen as a LIST (never joined and re-split), so
 # values with spaces stay one argument; shlex.join is only for a faithful log.
 print(f"[wrapper] launching trainer: {shlex.join(trainer_argv)}", flush=True)
-proc = subprocess.Popen(list(trainer_argv), env=os.environ.copy())
+# Weighted sampling: the trainer module is ours, not lerobot's, and this image
+# has only lerobot installed. Materialize the two modules it needs into a temp
+# package and put it on PYTHONPATH. Their sources ride in as base64 so no
+# quoting in this template can corrupt them.
+trainer_env = os.environ.copy()
+# Key on the trainer MODULE token (`python -m makermodslab.train_weighted ...`,
+# from _WEIGHTED_TRAINER_MODULE), not on any argv token that merely contains the
+# string — a plain `--dataset.repo_id makermodslab/foo` would otherwise trip it.
+if "makermodslab.train_weighted" in trainer_argv:
+    import base64 as _b64, tempfile as _tmp
+
+    _pkg_root = _tmp.mkdtemp(prefix="makermodslab_pkg_")
+    _pkg = Path(_pkg_root) / "makermodslab"
+    _pkg.mkdir()
+    (_pkg / "__init__.py").write_text("")
+    for _name, _b64src in (
+        ("sampling.py", "__SAMPLING_B64__"),
+        ("train_weighted.py", "__TRAIN_WEIGHTED_B64__"),
+    ):
+        (_pkg / _name).write_text(_b64.b64decode(_b64src).decode("utf-8"))
+    trainer_env["PYTHONPATH"] = (
+        _pkg_root + os.pathsep + trainer_env.get("PYTHONPATH", "")
+    ).rstrip(os.pathsep)
+    print(f"[wrapper] weighted sampling: materialized makermodslab into {_pkg_root}", flush=True)
+
+proc = subprocess.Popen(list(trainer_argv), env=trainer_env)
 try:
     rc = proc.wait()
 finally:
@@ -526,15 +608,45 @@ print(f"[wrapper] trainer exited with rc={rc}", flush=True)
 sys.exit(rc)
 '''
 
-WRAPPER_SOURCE = _WRAPPER_TEMPLATE.replace(
-    "__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan)
-).replace("__CHECKPOINT_READY_SOURCE__", inspect.getsource(_checkpoint_step_ready))
 
-# HF Jobs' platform default timeout has killed legitimate runs that pushed
-# the model successfully but were still uploading auxiliary files. 2h covers
-# our typical ACT/SmolVLA runs on t4-small with comfortable headroom. This is
-# the FALLBACK: used only when the request carries no explicit hf_job_timeout.
-HF_JOB_TIMEOUT = "2h"
+def _module_b64(module) -> str:
+    """A module's own source, base64'd for safe embedding in the wrapper.
+
+    Read from the LIVE module via `inspect.getsource`, exactly like
+    `_install_plan` above — so there is no second copy of the sampler to drift
+    from `makermodslab/sampling.py`. Base64 rather than raw interpolation
+    because these modules contain triple-quoted docstrings that would terminate
+    the template's own string literal.
+    """
+    return base64.b64encode(inspect.getsource(module).encode("utf-8")).decode("ascii")
+
+
+WRAPPER_SOURCE = (
+    _WRAPPER_TEMPLATE.replace("__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan))
+    .replace("__CHECKPOINT_READY_SOURCE__", inspect.getsource(_checkpoint_step_ready))
+    .replace("__SAMPLING_B64__", _module_b64(_sampling))
+    .replace("__TRAIN_WEIGHTED_B64__", _module_b64(_train_weighted))
+)
+
+# HF Jobs' platform default timeout has killed legitimate runs that pushed the
+# model successfully but were still uploading auxiliary files — that is why a
+# generous fallback exists at all. 24h is calibrated on measured a10g-small
+# throughput from real completed runs: SmolVLA at batch 64 is 2.24 s/step
+# (n=12,890), so 15k steps ≈ 8.8h; ACT at batch 8 is 0.162 s/step (n=2,873),
+# so 100k steps ≈ 4.5h (per-step cost is near-linear in batch size — batch 16
+# measured 0.299 s/step). That leaves ~2.7x headroom on the longest run we have
+# actually observed. The previous 2h sat below *every* real run and silently
+# truncated paid GPU time mid-training.
+#
+# This is the FALLBACK: used only when the request carries no explicit
+# hf_job_timeout (that path goes through parse_hf_duration instead). The axis
+# you trade when changing this is coverage vs runaway-billing exposure — a
+# larger value protects longer legitimate runs but also raises the ceiling on
+# what a HUNG job can bill before the platform reaps it, which is why this is
+# 24h (one day) rather than 2d. Keep it a SINGLE-unit string: run_job parses it
+# as float(timeout[:-1]) * factor[timeout[-1]], so a compound form like "1d12h"
+# does not survive the trip.
+HF_JOB_TIMEOUT = "24h"
 
 
 def resolve_job_timeout(config: TrainingRequest) -> int | str:
@@ -552,6 +664,47 @@ def resolve_job_timeout(config: TrainingRequest) -> int | str:
     if config.hf_job_timeout:
         return parse_hf_duration(config.hf_job_timeout)
     return HF_JOB_TIMEOUT
+
+
+def _run_job_naming_kwargs(api, job_id: str) -> dict:
+    """run_job kwargs that give the submitted job `job_id` as its name.
+
+    Two of them, doing different jobs:
+    - `name` is what the Hub's own jobs UI displays. Left unset it defaults to
+      a value derived from the image ("lerobot-gpu-latest-<hash>"), which is
+      why untitled runs are indistinguishable on huggingface.co too.
+    - `labels[_RUN_LABEL]` is the copy _hub_job_run_name reads back, kept
+      separate because a `name` may be that image-derived default rather than
+      ours.
+
+    Both are probed on run_job's signature first: huggingface_hub is an
+    unpinned transitive dependency (it arrives via the lerobot pin), so the
+    installed version is not ours to guarantee, and passing an unsupported
+    kwarg would raise TypeError and take down cloud training entirely — far
+    worse than a job that merely lists under its image name.
+
+    An over-long or non-conforming id is left unnamed rather than truncated or
+    sent anyway: the Hub caps a label at _MAX_LABEL_LEN and validates its
+    charset, and a rejected label fails the WHOLE submission with a 400 —
+    while _hub_job_run_name's argv fallback recovers the name in full anyway.
+    Degrading to an unnamed job is strictly better than no job.
+    """
+    if len(job_id) > _MAX_LABEL_LEN or not _LABEL_CHARSET_RE.match(job_id):
+        logger.warning(
+            "Job id %r cannot be used as a Hub label; submitting unnamed "
+            "(the run name is still recoverable from the job's argv)",
+            job_id,
+        )
+        return {}
+    params: set[str] = set()
+    with contextlib.suppress(Exception):
+        params = set(inspect.signature(api.run_job).parameters)
+    kwargs: dict = {}
+    if "labels" in params:
+        kwargs["labels"] = {_RUN_LABEL: job_id}
+    if "name" in params:
+        kwargs["name"] = job_id
+    return kwargs
 
 
 # Cadence at which the status poller hits inspect_job. inspect_job is the
@@ -604,10 +757,18 @@ class HfCloudJobRunner:
         metrics: TrainingMetrics,
         log_file_path: Path,
         flavor: str,
+        resume_total: int | None = None,
     ) -> None:
         self._metrics = metrics
         self._log_file_path = log_file_path
         self._flavor = flavor
+        # Full step target for a resumed run, so the log parser can rebase the
+        # remaining-window tqdm bar onto the global step (see
+        # jobs.parse_metrics_into / jobs._resume_total_steps). Passed in rather
+        # than derived from `config` because reattach() has no config; both
+        # construction sites in jobs.py must supply it or a resumed cloud run
+        # reports resume-relative steps (e.g. 4251/11000 instead of 8251/15000).
+        self._resume_total = resume_total
         # Shared HfApi: its in-process whoami cache covers run_job's
         # internal self.whoami(token=...) call too (see utils/hf_auth.py),
         # so submitting many jobs doesn't hammer /whoami-v2.
@@ -662,7 +823,15 @@ class HfCloudJobRunner:
 
         # Cloud pods can't see the host's LeRobot cache. If the dataset
         # only exists locally, push it to the Hub before submitting.
-        self._ensure_dataset_on_hub(config.dataset_repo_id)
+        #
+        # A locally-recorded dataset's id is bare; the pod has no local cache to
+        # fall back on and no namespace to guess from, so it must be handed the
+        # namespaced id or the job dies resolving the dataset. Resolve once here
+        # and pin it into the config, which is both what build_training_command
+        # emits and what JobRecord.config persists as "what actually ran".
+        local_dataset_repo_id = config.dataset_repo_id
+        config.dataset_repo_id = resolve_hub_repo_id(local_dataset_repo_id)
+        self._ensure_dataset_on_hub(local_dataset_repo_id, config.dataset_repo_id)
 
         # Mutate the config so build_training_command emits the right flags.
         # The mutated config is what gets persisted in JobRecord.config, so
@@ -698,7 +867,18 @@ class HfCloudJobRunner:
         else:
             config.policy_repo_id = f"{username}/{job_id}"
 
-        trainer_argv = build_training_command(config, _CONTAINER_OUTPUT_DIR)
+        # Local import, mirroring JobRegistry: `datasets` pulls in httpx/pyarrow
+        # that this module otherwise never needs.
+        from ..datasets import dataset_is_weighted
+
+        # A weighted dataset launches OUR trainer module; the wrapper puts the
+        # sampler package on PYTHONPATH pod-side (see _WRAPPER_TEMPLATE).
+        # Resolved from the dataset itself, never the request.
+        trainer_argv = build_training_command(
+            config,
+            _CONTAINER_OUTPUT_DIR,
+            weighted=dataset_is_weighted(config.dataset_repo_id),
+        )
         # The wrapper expects `python -c WRAPPER_SOURCE <spec> [directives] -- <trainer argv>`.
         # `python -c` consumes the first non-option argument as the script,
         # so we prepend a "--" sentinel of our own; the pinned-lerobot spec and
@@ -736,12 +916,23 @@ class HfCloudJobRunner:
                 )
             secrets["WANDB_API_KEY"] = wandb_key
 
+        # Stamp the run's identity onto the job itself. job_id is the slug the
+        # library already titles local records by ("<name>_<timestamp>"), so a
+        # named job reads the same whichever machine is looking at it.
+        naming_kwargs = _run_job_naming_kwargs(self._api, job_id)
+        if not naming_kwargs:
+            logger.warning(
+                "Could not name HF job for %s Hub-side; it will be titled from its argv instead",
+                job_id,
+            )
+
         job = self._api.run_job(
             image=LEROBOT_IMAGE,
             command=wrapped_command,
             flavor=self._flavor,
             secrets=secrets,
             timeout=resolve_job_timeout(config),
+            **naming_kwargs,
         )
         self._hf_job_id = job.id
         self._hf_job_url = getattr(job, "url", None)
@@ -790,42 +981,11 @@ class HfCloudJobRunner:
         except Exception as exc:
             logger.warning("Could not write upload log line: %s", exc)
 
-    def _ensure_dataset_on_hub(self, repo_id: str) -> None:
-        """If the dataset is local-only, push it to the Hub.
-
-        The cloud pod resolves the dataset by repo_id; it can't see the
-        host's `~/.cache/huggingface/lerobot`. We push synchronously and
-        let any failure bubble up — JobRegistry.start marks the record
-        as failed with the exception message.
-        """
-        try:
-            self._api.dataset_info(repo_id)
-            return
-        except RepositoryNotFoundError:
-            pass
-
-        cache_root = Path(os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")).expanduser()
-        if not (cache_root / repo_id / "meta" / "info.json").is_file():
-            # Neither local nor on Hub. Let the trainer surface the error
-            # — same behaviour as before.
-            return
-
-        self._log_line(f"[upload] dataset {repo_id} not on Hub; pushing local copy (public)...")
-        from lerobot.datasets import LeRobotDataset
-
-        try:
-            # Public by default: MakerMods Lab's global policy is that datasets it pushes
-            # to the Hub are public and carry the required org/product tags (see
-            # with_makermodslab_tag / REQUIRED_HUB_TAGS). This implicit cloud-run upload
-            # follows that same default so all MakerMods Lab-produced datasets are
-            # discoverable. (This intentionally reverses the earlier private
-            # default — an implicit upload of a local-only dataset is now public.)
-            LeRobotDataset(repo_id).push_to_hub(tags=with_makermodslab_tag(None), private=False)
-        except Exception as exc:
-            msg = f"Failed to upload local dataset {repo_id} to Hub: {exc}"
-            self._log_line(f"[upload] {msg}")
-            raise RuntimeError(msg) from exc
-        self._log_line(f"[upload] dataset {repo_id} uploaded.")
+    def _ensure_dataset_on_hub(self, local_repo_id: str, hub_repo_id: str) -> None:
+        """If the dataset is local-only, push it to the Hub — the shared
+        remote-runner rule; see runners/_dataset.ensure_dataset_on_hub for the
+        full contract (what pushes, what abstains, and why)."""
+        ensure_dataset_on_hub(local_repo_id, hub_repo_id, self._log_line)
 
     def _tail_loop(self) -> None:
         """Stream HfApi.fetch_job_logs, teeing each line to disk and the
@@ -851,7 +1011,7 @@ class HfCloudJobRunner:
                         stripped = raw.rstrip()
                         if not stripped:
                             continue
-                        parse_metrics_into(stripped, self._metrics)
+                        parse_metrics_into(stripped, self._metrics, self._resume_total)
                         if self._wandb_run_url is None:
                             url = extract_wandb_run_url(stripped)
                             if url is not None:
@@ -909,12 +1069,52 @@ class HfCloudJobRunner:
             return
         # Pre-set CANCELED so the watchdog finalises as canceled regardless
         # of whether the status poller observed a terminal stage first.
+        # (_set_terminal is idempotent, so a stage the poller already saw — a
+        # run that beat us to COMPLETED or ERROR — survives this and is what
+        # the registry classifies on.)
         self._set_terminal("CANCELED")
         try:
             self._api.cancel_job(job_id=self._hf_job_id)
         except Exception as exc:
             # Already-completed jobs may 404; that's fine.
             logger.info("cancel_job(%s) ignored: %s", self._hf_job_id, exc)
+            self._reconcile_stage_after_failed_cancel()
+
+    def _reconcile_stage_after_failed_cancel(self) -> None:
+        """Re-read the real stage when cancel_job refused.
+
+        The usual reason it refuses is that the job had ALREADY ended (404),
+        which means the CANCELED we pre-set above is a lie about a run that
+        finished on its own — and the whole point of tracking cancellation is
+        not to relabel those. The status poller can't fix it: pre-setting a
+        terminal stage stopped it.
+
+        So ask once, and adopt a terminal answer. Writes the fields directly
+        rather than going through the idempotent _set_terminal, since the value
+        being corrected is precisely the one it would refuse to overwrite.
+        Silent on any failure: an unreachable Hub leaves CANCELED standing,
+        which is the best available guess once our cancel is already out.
+        """
+        try:
+            info = self._api.inspect_job(job_id=self._hf_job_id)
+            status_obj = getattr(info, "status", None)
+            stage = getattr(status_obj, "stage", None) if status_obj is not None else None
+            if stage is None:
+                return
+            stage_str = str(stage).upper()
+            if stage_str not in _TERMINAL_STAGES or stage_str == self._terminal_status:
+                return
+            logger.info(
+                "Job %s had already reached %s before the cancel; recording that instead of CANCELED",
+                self._hf_job_id,
+                stage_str,
+            )
+            self._terminal_status = stage_str
+            msg = getattr(status_obj, "message", None)
+            if msg:
+                self._terminal_message = str(msg)
+        except Exception as exc:
+            logger.info("Could not reconcile stage for %s: %s", self._hf_job_id, exc)
 
     def is_running(self) -> bool:
         # Liveness is driven by _status_poll_loop's inspect_job calls.
@@ -944,6 +1144,16 @@ class HfCloudJobRunner:
 
     def wandb_run_url(self) -> str | None:
         return self._wandb_run_url
+
+    def terminal_stage(self) -> str | None:
+        """The platform's terminal stage, or None while the job is live.
+
+        Read by the registry watchdog in preference to returncode(), which
+        collapses every non-COMPLETED stage to 1 and so cannot tell a cancel
+        from a crash — the defect that filed every stopped cloud run as
+        `failed`. One of COMPLETED / CANCELED / ERROR / DELETED.
+        """
+        return self._terminal_status
 
     def terminal_message(self) -> str | None:
         """Status.message captured when the job reached a terminal stage.

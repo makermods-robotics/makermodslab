@@ -1,35 +1,15 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import MetaRows from "@/components/library/MetaRows";
 import { middleEllipsis } from "@/lib/modelNames";
-import { HubModel, deleteHubModel } from "@/lib/jobsApi";
-import { ApiError } from "@/lib/apiClient";
-import { useApi } from "@/contexts/ApiContext";
-import { useToast } from "@/hooks/use-toast";
+import { HubModel } from "@/lib/jobsApi";
 import { useTruncationTitle } from "@/hooks/useTruncationTitle";
-import {
-  ExternalLink,
-  Lock,
-  Play,
-  Sparkles,
-  Trash2,
-  Upload,
-} from "lucide-react";
+import { ExternalLink, Lock, Play, Sparkles, Upload } from "lucide-react";
 
 interface Props {
   model: HubModel;
-  /** Called after a successful delete so the parent can drop the card. */
-  onDeleted?: () => void;
   /**
    * Run inference / Fine-tune on this untracked Hub repo. The parent lazily
    * auto-imports the repo (registering it as a tracked imported model), then
@@ -53,120 +33,8 @@ function relativeTime(iso: string | null): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-/**
- * The strongest confirm in the app: deleting a hub model repo destroys the
- * weights on the Hugging Face Hub permanently — not a local record. Require
- * the user to type the full repo id before the red Delete button enables.
- */
-const DeleteHubModelDialog: React.FC<{
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  repoId: string;
-  onDeleted?: () => void;
-}> = ({ open, onOpenChange, repoId, onDeleted }) => {
-  const { baseUrl, fetchWithHeaders } = useApi();
-  const { toast } = useToast();
-
-  const [value, setValue] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState(false);
-
-  // Reset the field whenever the dialog (re)opens.
-  useEffect(() => {
-    if (open) {
-      setValue("");
-      setError(null);
-    }
-  }, [open]);
-
-  const confirmed = value.trim() === repoId;
-
-  const doDelete = async () => {
-    if (!confirmed || deleting) return;
-    setDeleting(true);
-    setError(null);
-    try {
-      await deleteHubModel(baseUrl, fetchWithHeaders, repoId);
-      toast({
-        title: "Model repo deleted",
-        description: repoId,
-      });
-      onOpenChange(false);
-      onDeleted?.();
-    } catch (e) {
-      setError(
-        e instanceof ApiError && e.detail
-          ? e.detail
-          : e instanceof Error
-            ? e.message
-            : String(e),
-      );
-    } finally {
-      setDeleting(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bg-background border-border">
-        <DialogHeader>
-          <DialogTitle className="text-destructive">Delete model repo</DialogTitle>
-          <DialogDescription className="text-muted-foreground">
-            This permanently deletes the model repository and its files from the
-            Hugging Face Hub. This cannot be undone.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-2">
-          <p className="text-sm text-muted-foreground">
-            Type{" "}
-            <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs text-destructive">
-              {repoId}
-            </code>{" "}
-            to confirm.
-          </p>
-          <Input
-            value={value}
-            onChange={(e) => {
-              setValue(e.target.value);
-              setError(null);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && confirmed) {
-                e.preventDefault();
-                void doDelete();
-              }
-            }}
-            autoFocus
-            autoComplete="off"
-            spellCheck={false}
-            placeholder={repoId}
-            className="bg-background border-input font-mono"
-          />
-        </div>
-        {error && <p className="text-sm text-destructive">{error}</p>}
-        <DialogFooter className="flex gap-2 justify-end">
-          <Button
-            variant="outline"
-            className="border-border bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground"
-            onClick={() => onOpenChange(false)}
-          >
-            Cancel
-          </Button>
-          <Button
-            className="bg-destructive hover:bg-destructive/90 text-destructive-foreground"
-            disabled={!confirmed || deleting}
-            onClick={doDelete}
-          >
-            {deleting ? "Deleting…" : "Delete permanently"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-};
-
-const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
-  const [confirmOpen, setConfirmOpen] = useState(false);
+const HubModelCard: React.FC<Props> = ({ model, onAction }) => {
+  const { t } = useTranslation();
   const [acting, setActing] = useState<"inference" | "finetune" | null>(null);
   const url = `https://huggingface.co/${model.repo_id}`;
   // Same title rule as the imported card next to it in the grid: namespace off
@@ -211,7 +79,7 @@ const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-1.5 text-xs font-semibold text-info">
             <Upload className="w-3.5 h-3.5" />
-            Uploaded
+            {t("jobs.hubModelCard.uploaded")}
           </div>
           <div className="flex items-center gap-0.5">
             <Button
@@ -219,7 +87,7 @@ const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
               size="icon"
               asChild
               className="h-7 w-7 text-muted-foreground hover:text-foreground"
-              aria-label="View on Hub"
+              aria-label={t("jobs.actions.viewOnHub")}
             >
               <a
                 href={url}
@@ -230,18 +98,9 @@ const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
                 <ExternalLink className="w-3.5 h-3.5" />
               </a>
             </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 text-muted-foreground hover:text-destructive"
-              aria-label="Delete model repo"
-              onClick={(e) => {
-                e.stopPropagation();
-                setConfirmOpen(true);
-              }}
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </Button>
+            {/* Hub-repo deletion was removed from the UI — the route remains
+                for a future management surface; for now repos are deleted on
+                huggingface.co itself. */}
           </div>
         </div>
         <div>
@@ -258,7 +117,9 @@ const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
             {model.repo_id}
           </div>
         </div>
-        <MetaRows rows={[["Updated", relativeTime(model.last_modified)]]} />
+        <MetaRows
+          rows={[[t("jobs.meta.updated"), relativeTime(model.last_modified)]]}
+        />
         {/* Same primary actions as an imported model card. Clicking either
             lazily auto-imports the repo (in the parent) and then runs the
             action — so a model trained on another machine is a first-class
@@ -270,10 +131,10 @@ const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
               onClick={(e) => runAction(e, "inference")}
               disabled={acting !== null}
               className="h-8 gap-1 bg-primary hover:bg-primary/90 text-primary-foreground"
-              aria-label="Run inference with this model"
-              title="Run inference"
+              aria-label={t("jobs.actions.runInferenceModel")}
+              title={t("jobs.actions.runInference")}
             >
-              <Play className="w-3.5 h-3.5" /> Run
+              <Play className="w-3.5 h-3.5" /> {t("jobs.actions.run")}
             </Button>
             <Button
               size="sm"
@@ -281,27 +142,21 @@ const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
               onClick={(e) => runAction(e, "finetune")}
               disabled={acting !== null}
               className="h-8 shrink-0 gap-1 border-primary/40 text-primary hover:bg-primary/10"
-              aria-label="Fine-tune a new run from this model's weights"
-              title="Fine-tune a new run from this model's weights"
+              // Same words on both, so one key rather than two that could
+              // drift apart.
+              aria-label={t("jobs.actions.fineTuneHint")}
+              title={t("jobs.actions.fineTuneHint")}
             >
               <Sparkles className="w-3.5 h-3.5" />
               {/* Label only when the card fits the whole row on one line;
                   the tooltip covers the narrow case. */}
-              <span className="hidden @[13rem]:inline">Fine-tune</span>
+              <span className="hidden @[13rem]:inline">
+                {t("jobs.actions.fineTune")}
+              </span>
             </Button>
           </div>
         ) : null}
       </CardContent>
-      {/* Rendered inside the Card but its own click handling stops propagation
-          so opening/closing the dialog never triggers the card's open-in-Hub. */}
-      <div onClick={(e) => e.stopPropagation()}>
-        <DeleteHubModelDialog
-          open={confirmOpen}
-          onOpenChange={setConfirmOpen}
-          repoId={model.repo_id}
-          onDeleted={onDeleted}
-        />
-      </div>
     </Card>
   );
 };

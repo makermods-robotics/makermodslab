@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,7 +35,9 @@ from pydantic import BaseModel
 
 from lerobot.motors.feetech import FeetechMotorsBus
 
+from .api_errors import ErrorCode
 from .motor_power import torque_limit_from_percent
+from .session_events import notify_session_changed
 from .torque import force_disable_bus_torque
 from .utils.config import (
     CALIBRATION_BASE_PATH_ROBOTS,
@@ -212,7 +214,11 @@ class _AutoCalArmRunner:
     def start(self, request: AutoCalibrationRequest) -> dict:
         with self._lock:
             if self.status.active:
-                return {"success": False, "message": "Auto-calibration is already running"}
+                return {
+                    "success": False,
+                    "message": "Auto-calibration is already running",
+                    "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
+                }
 
             # Mutex with every other feature that drives the same serial bus
             # (see CLAUDE.md's "State model & mutual exclusion"). Lazy
@@ -221,23 +227,78 @@ class _AutoCalArmRunner:
             from . import (
                 calibrate as _calibrate,
                 record as _record,
+                remote_host as _remote_host,
+                remote_inference as _remote_inference,
+                remote_teleoperate as _remote_teleoperate,
+                replay as _replay,
                 rollout as _rollout,
                 teleoperate as _teleoperate,
                 wiggle as _wiggle,
             )
 
             if _teleoperate.teleoperation_active:
-                return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Teleoperation is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
+                }
             if _record.recording_active:
-                return {"success": False, "message": "Recording is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Recording is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_RECORDING,
+                }
             if _rollout.inference_active:
-                return {"success": False, "message": "Inference is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Inference is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+                }
+            if _remote_inference.remote_inference_is_active():
+                return {
+                    "success": False,
+                    "message": "Remote inference is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
+                }
             if _calibrate.calibration_is_active():
-                return {"success": False, "message": "Calibration is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Calibration is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
+                }
             if _wiggle.wiggle_active:
                 return {
                     "success": False,
                     "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                    "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+                }
+            if _remote_host.hosting_active:
+                return {
+                    "success": False,
+                    "message": "This robot is hosted for remote teleoperation. Stop hosting first.",
+                    "code": ErrorCode.ROBOT_BUSY_HOSTING,
+                }
+            if _remote_teleoperate.remote_teleoperation_active:
+                return {
+                    "success": False,
+                    "message": "Remote teleoperation is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_REMOTE_TELEOPERATION,
+                }
+            if _replay.replay_active:
+                return {
+                    "success": False,
+                    "message": "Replay is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_REPLAY,
+                }
+
+            # Lazy, because jobs imports this module back the same way.
+            from . import jobs as _jobs
+
+            if (training := _jobs.training_is_active()) is not None:
+                return {
+                    "success": False,
+                    "message": f"Training run '{training}' is using this machine. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_TRAINING,
                 }
 
             if request.device_type not in ("teleop", "robot"):
@@ -292,6 +353,11 @@ class _AutoCalArmRunner:
                 target=self._run, name=f"auto-calibration:{request.port}", daemon=True
             )
             self._thread.start()
+            # The claim above is the real state transition — broadcast the
+            # hint so every WS client refetches the auto-calibration status.
+            # (_notify_autocal_transition takes no locks, so calling it while
+            # holding self._lock is safe.)
+            _notify_autocal_transition(phase="running")
             return {"success": True, "message": "Auto-calibration started"}
 
     def _run(self) -> None:
@@ -340,6 +406,11 @@ class _AutoCalArmRunner:
                     active=False, status="failed", error=f"Auto-calibration exited with code {code}"
                 )
             self._proc = None
+        # This arm's subprocess is gone: completed/failed here (a release),
+        # or still "stopping" while _stop_worker owns the terminal status (in
+        # which case the aggregate keeps active=True and _stop_worker emits
+        # the final release itself).
+        _notify_autocal_transition(phase=self.status.status)
 
     def _finalize_success(self) -> None:
         """Copy the leader file to MakerMods Lab's path (if needed) and write the config
@@ -398,6 +469,9 @@ class _AutoCalArmRunner:
                 target=self._stop_worker, args=(proc, port), name="auto-calibration-stop", daemon=True
             )
             self._stop_thread.start()
+        # Still driving/holding the arm until the escalation finishes — a
+        # phase of this session, not idle yet.
+        _notify_autocal_transition(phase="stopping")
         return {"success": True, "message": "Stopping auto-calibration"}
 
     def stop_and_wait(self, timeout: float = _STOP_AND_WAIT_CEILING_S) -> None:
@@ -503,6 +577,9 @@ class _AutoCalArmRunner:
                             active=False, status="stopped", message="Auto-calibration stopped"
                         )
                 self._proc = None
+            # Final release for the stop path: the escalation (and the
+            # fallback torque release) has finished, whatever the outcome.
+            _notify_autocal_transition(phase=self.status.status)
 
     def get_status(self) -> dict:
         with self._lock:
@@ -569,7 +646,11 @@ class AutoCalibrationBatchManager:
     def start(self, request: AutoCalibrationBatchRequest) -> dict:
         with self._lock:
             if self._active():
-                return {"success": False, "message": "A batch auto-calibration is already running"}
+                return {
+                    "success": False,
+                    "message": "A batch auto-calibration is already running",
+                    "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
+                }
 
             # Mutex with every other feature that drives the same serial bus
             # (see CLAUDE.md's "State model & mutual exclusion"). Checked
@@ -581,23 +662,78 @@ class AutoCalibrationBatchManager:
             from . import (
                 calibrate as _calibrate,
                 record as _record,
+                remote_host as _remote_host,
+                remote_inference as _remote_inference,
+                remote_teleoperate as _remote_teleoperate,
+                replay as _replay,
                 rollout as _rollout,
                 teleoperate as _teleoperate,
                 wiggle as _wiggle,
             )
 
             if _teleoperate.teleoperation_active:
-                return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Teleoperation is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
+                }
             if _record.recording_active:
-                return {"success": False, "message": "Recording is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Recording is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_RECORDING,
+                }
             if _rollout.inference_active:
-                return {"success": False, "message": "Inference is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Inference is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+                }
+            if _remote_inference.remote_inference_is_active():
+                return {
+                    "success": False,
+                    "message": "Remote inference is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
+                }
             if _calibrate.calibration_is_active():
-                return {"success": False, "message": "Calibration is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Calibration is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
+                }
             if _wiggle.wiggle_active:
                 return {
                     "success": False,
                     "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                    "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+                }
+            if _remote_host.hosting_active:
+                return {
+                    "success": False,
+                    "message": "This robot is hosted for remote teleoperation. Stop hosting first.",
+                    "code": ErrorCode.ROBOT_BUSY_HOSTING,
+                }
+            if _remote_teleoperate.remote_teleoperation_active:
+                return {
+                    "success": False,
+                    "message": "Remote teleoperation is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_REMOTE_TELEOPERATION,
+                }
+            if _replay.replay_active:
+                return {
+                    "success": False,
+                    "message": "Replay is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_REPLAY,
+                }
+
+            # Lazy, because jobs imports this module back the same way.
+            from . import jobs as _jobs
+
+            if (training := _jobs.training_is_active()) is not None:
+                return {
+                    "success": False,
+                    "message": f"Training run '{training}' is using this machine. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_TRAINING,
                 }
 
             arms = request.arms
@@ -740,6 +876,23 @@ class AutoCalibrationBatchManager:
 
 auto_calibration_manager = AutoCalibrationManager()
 auto_calibration_batch_manager = AutoCalibrationBatchManager()
+
+
+def _notify_autocal_transition(phase: str | None = None) -> None:
+    """Broadcast an auto-calibration `session_changed` hint.
+
+    `active` is the AGGREGATE across the single-arm manager and every batch
+    runner — one batch arm finishing while another still runs must not read as
+    "auto-calibration over" — mirroring auto_calibration_is_active(), which is
+    what the other features' mutex checks consult. Reads the status dataclass
+    attributes directly (no runner locks, unlike get_status()) so it is safe
+    to call from inside a runner's own locked section without self-deadlock;
+    a hint can tolerate that raciness because consumers refetch the status
+    endpoints rather than trusting the payload."""
+    active = auto_calibration_manager.status.active or any(
+        runner.status.active for runner in auto_calibration_batch_manager._runners
+    )
+    notify_session_changed("auto_calibration", active, phase=phase)
 
 
 def auto_calibration_is_active() -> bool:

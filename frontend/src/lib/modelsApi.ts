@@ -29,6 +29,18 @@ export interface ModelItem {
   /** Whether the Hub repo is private (hub-derived rows only). Mirrors
    * DatasetItem.private; drives the picker's amber "private" badge. */
   private?: boolean;
+  /** What the local side of this row is — a training run or a copy pulled from
+   * the Hub / imported from disk. Absent on hub-only rows. Read by
+   * resolveDeleteAction, because deleting a run costs its unpublished
+   * checkpoints while deleting a copy costs nothing irreplaceable. */
+  local_kind?: "run" | "downloaded";
+  /** Episode subset this model was trained on, from its checkpoint's
+   * train_config.json. null/absent means every episode (no curation), OR the
+   * training dataset didn't resolve as a public Hub dataset — the backend
+   * redacts this field rather than expose it for a private/unresolvable
+   * source (see models._gate_dataset_episodes); the frontend has no way to
+   * tell those two cases apart, by design. */
+  dataset_episodes?: number[] | null;
 }
 
 /** GET /models — merged local + Hub listing, each with a `source`. Mirrors
@@ -38,9 +50,78 @@ export async function getModels(
   fetcher: Fetcher,
   signal?: AbortSignal,
 ): Promise<ModelItem[]> {
-  return apiRequest<ModelItem[]>(baseUrl, fetcher, "/models", {
+  return apiRequest<ModelItem[]>(baseUrl, fetcher, "/api/v1/models", {
     signal,
     action: "List models",
+  });
+}
+
+/** Where a skill's weights came from, as opposed to where they live now
+ * (`source`). This is what the library filters on. */
+export type SkillOrigin =
+  | "trained-local"
+  | "trained-cloud"
+  | "imported"
+  | "downloaded"
+  | "hub-untracked";
+
+/** Whether the weights can be loaded. "unverified" is a Hub-backed row the
+ * server deliberately did NOT probe — confirming each one is a serial round
+ * trip, so the claim is settled by the download the deploy path runs anyway. */
+export type SkillWeights = "ready" | "unverified" | "none";
+
+/** One row of GET /skills. A ModelItem plus the facts that decide whether it
+ * can actually be run, and the job that runs it. */
+export interface SkillItem extends ModelItem {
+  origin: SkillOrigin;
+  weights: SkillWeights;
+  /** Terminal state of the run behind it, when there is one. "failed" rows are
+   * listed and runnable — the weights exist — but must be badged. */
+  state: string | null;
+  /** The run that represents this one's resume chain; non-null means this row
+   * is a link, not a skill, and `deployable` is false. */
+  superseded_by: string | null;
+  /** Derived server-side, never stored: weights are loadable AND nothing
+   * supersedes it. */
+  deployable: boolean;
+  /** The registry record that deploys this row, stamped by the server. Null for
+   * a row no run tracks (a bare Hub repo, a scanned directory) — those still go
+   * through the lazy import on pick. */
+  job_id: string | null;
+  /** Set on a Hub row served from the last complete listing because this
+   * refresh could not reach the Hub. */
+  stale?: boolean;
+}
+
+/** Reachability of the Hub half of the listing. Without this an outage and an
+ * empty shelf are the same screen. */
+export interface SkillsHubStatus {
+  ok: boolean;
+  authenticated: boolean;
+  degraded: boolean;
+  /** Some rows are being served from the last complete listing. */
+  stale_rows: boolean;
+}
+
+export interface SkillsEnvelope {
+  skills: SkillItem[];
+  hub: SkillsHubStatus;
+}
+
+/** GET /skills — every trained policy, each saying whether it can run.
+ *
+ * The deployable projection of the same build /models serves. Both the deploy
+ * picker and the models library read THIS, so they cannot disagree about what a
+ * skill is; /models stays the wider artifact listing the fine-tune base picker
+ * needs. */
+export async function getSkills(
+  baseUrl: string,
+  fetcher: Fetcher,
+  signal?: AbortSignal,
+): Promise<SkillsEnvelope> {
+  return apiRequest<SkillsEnvelope>(baseUrl, fetcher, "/api/v1/skills", {
+    signal,
+    action: "List skills",
   });
 }
 
@@ -62,26 +143,110 @@ export async function getModelInfo(
   return apiRequest<ModelInfo>(
     baseUrl,
     fetcher,
-    `/models/info?id=${encodeURIComponent(id)}`,
+    `/api/v1/models/info?id=${encodeURIComponent(id)}`,
     { signal, action: "Model info" },
   );
 }
 
-/** POST /models/upload — push a local run's final checkpoint to the Hub as a
- * PUBLIC, MakerModsLab-tagged model repo. `id` is the local run id; `repoId` optionally
- * overrides the default namespaced repo id. MUTATES the Hub. Throws ApiError
- * (400 offline, 403 no write access, 404 no checkpoint, 502 Hub failure) with
- * the backend message in `.detail`. Returns {repo_id, url, tags}. */
+/** One of a local run's saved checkpoints as the publish picker sees it.
+ * `published` is true when that step is already in the target Hub repo — the
+ * picker leaves those unselected so a re-publish reads as "add the new ones". */
+export interface RunCheckpoint {
+  step: number;
+  path: string;
+  published: boolean;
+}
+
+/** GET /api/v1/models/checkpoints?id=… — everything the publish picker needs for one
+ * run in a single call. `hf_repo_id` is set only once the run has actually been
+ * published (so the UI can say "add more" instead of "publish");
+ * `default_repo_id` is the target an upload with no explicit repo would pick,
+ * shown as the input's placeholder. `legacy_root_checkpoint` flags a repo whose
+ * first upload predates the step-addressed layout. */
+export interface RunCheckpoints {
+  id: string;
+  default_repo_id: string;
+  hf_repo_id: string | null;
+  legacy_root_checkpoint: boolean;
+  /** False when the Hub couldn't be asked (offline, or the call failed). Every
+   * `published` flag is then `false` by default and means "unknown", not "not
+   * published" — present it that way, or a user re-queues gigabytes they
+   * already sent. */
+  hub_readable: boolean;
+  checkpoints: RunCheckpoint[];
+}
+
+export async function listRunCheckpoints(
+  baseUrl: string,
+  fetcher: Fetcher,
+  id: string,
+  signal?: AbortSignal,
+): Promise<RunCheckpoints> {
+  return apiRequest<RunCheckpoints>(
+    baseUrl,
+    fetcher,
+    `/api/v1/models/checkpoints?id=${encodeURIComponent(id)}`,
+    { signal, action: "List run checkpoints" },
+  );
+}
+
+/** POST /api/v1/models/publish — START publishing a local run's checkpoints to
+ * the Hub as ONE public, MakerModsLab-tagged model repo. `id` is the local run
+ * id; `repoId` optionally overrides the default namespaced repo id; `steps`
+ * names the checkpoints to publish (omitted ⇒ the final one only). Every step
+ * lands in the SAME repo, so a later call adds to the same model card.
+ *
+ * A v1-only endpoint: the legacy flat POST /models/upload is the older,
+ * synchronous single-checkpoint push and is left frozen for SDK clients.
+ *
+ * MUTATES the Hub, and returns as soon as the queue is accepted — the upload
+ * itself runs in the background; poll getModelUploadStatus for progress and for
+ * the failures (offline / permission / Hub) that surface there. Throws ApiError
+ * 409 when a publish is already running. */
 export async function uploadModel(
   baseUrl: string,
   fetcher: Fetcher,
   id: string,
   repoId?: string,
-): Promise<{ repo_id: string; url: string; tags: string[] }> {
-  return apiRequest(baseUrl, fetcher, "/models/upload", {
+  steps?: number[],
+): Promise<{ started: boolean; model_id: string; message: string }> {
+  return apiRequest(baseUrl, fetcher, "/api/v1/models/publish", {
     method: "POST",
-    body: { id, ...(repoId ? { repo_id: repoId } : {}) },
+    body: {
+      id,
+      ...(repoId ? { repo_id: repoId } : {}),
+      ...(steps ? { steps } : {}),
+    },
     action: "Upload model",
+  });
+}
+
+/** Progress of the single background publish. `done`/`total` are queue
+ * position, `current_step` the checkpoint in flight, and `done_steps` the ones
+ * already on the Hub — which stay meaningful on `error`, because a queue that
+ * fails part-way keeps everything it published before it died. */
+export interface ModelUploadStatus {
+  state: "idle" | "running" | "done" | "error";
+  model_id: string | null;
+  repo_id: string | null;
+  url: string | null;
+  message: string | null;
+  error: string | null;
+  total: number;
+  done: number;
+  current_step: number | null;
+  done_steps: number[];
+}
+
+/** GET /api/v1/models/publish-status — poll the background publish. */
+export async function getModelUploadStatus(
+  baseUrl: string,
+  fetcher: Fetcher,
+  signal?: AbortSignal,
+): Promise<ModelUploadStatus> {
+  return apiRequest<ModelUploadStatus>(baseUrl, fetcher, "/api/v1/models/publish-status", {
+    signal,
+    action: "Model upload status",
   });
 }
 
@@ -94,7 +259,7 @@ export async function deleteModel(
   fetcher: Fetcher,
   id: string,
 ): Promise<{ deleted: boolean; id: string }> {
-  return apiRequest(baseUrl, fetcher, "/models/delete", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/models/delete", {
     method: "POST",
     body: { id },
     action: "Delete model",
@@ -108,7 +273,7 @@ export async function saveCustomModel(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ success: boolean; repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/models/custom", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/models/custom", {
     method: "POST",
     body: { repo_id: repoId },
     action: "Save custom model",
@@ -123,7 +288,7 @@ export async function hideModel(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ success: boolean; repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/models/hide", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/models/hide", {
     method: "POST",
     body: { repo_id: repoId },
     action: "Hide model",
@@ -137,7 +302,7 @@ export async function removeCustomModel(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ success: boolean; repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/models/custom", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/models/custom", {
     method: "DELETE",
     body: { repo_id: repoId },
     action: "Remove custom model",
@@ -164,7 +329,7 @@ export async function downloadModel(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ started: boolean; repo_id: string; message: string }> {
-  return apiRequest(baseUrl, fetcher, "/models/download", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/models/download", {
     method: "POST",
     body: { repo_id: repoId },
     action: "Download model",
@@ -181,7 +346,7 @@ export async function getModelDownloadStatus(
   return apiRequest<ModelDownloadStatus>(
     baseUrl,
     fetcher,
-    "/models/download-status",
+    "/api/v1/models/download-status",
     { action: "Model download status", signal },
   );
 }
@@ -199,7 +364,7 @@ export async function importModelFromDisk(
   path: string,
   name?: string,
 ): Promise<{ repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/models/import", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/models/import", {
     method: "POST",
     body: { path, name },
     action: "Import model",

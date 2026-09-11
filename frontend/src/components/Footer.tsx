@@ -1,5 +1,7 @@
 import React from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { Github, BookOpen } from "lucide-react";
+import LanguageSwitcher from "@/components/LanguageSwitcher";
 import hfLogo from "@/assets/hf-logo.svg";
 import lerobotLogo from "@/assets/lerobot-logo.png";
 
@@ -15,39 +17,47 @@ const DiscordIcon: React.FC<{ className?: string }> = ({ className }) => (
   </svg>
 );
 
+/** "GitHub" and "Discord" are product names whose catalog entries are the same
+ * in every language — keyed anyway so every link has one shape. */
 const links = [
   {
     href: "https://github.com/makermods-robotics/makermodslab",
-    label: "GitHub",
+    labelKey: "launchpad.footer.github",
     Icon: Github,
   },
   {
     href: "https://github.com/makermods-robotics/makermodslab",
-    label: "Documentation",
+    labelKey: "launchpad.footer.documentation",
     Icon: BookOpen,
   },
   {
     href: "https://discord.gg/HpXj3ynhhF",
-    label: "Discord",
+    labelKey: "launchpad.footer.discord",
     Icon: DiscordIcon,
   },
-];
+] as const;
 
 const Footer: React.FC = () => {
+  const { t } = useTranslation();
+
   return (
     <footer className="fixed inset-x-0 bottom-0 z-30 border-t border-border bg-background/95 backdrop-blur">
       <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-3 px-4 py-4 text-sm text-muted-foreground sm:flex-row">
         <span className="flex items-center gap-2">
           <span>
-            Powered by{" "}
-            <a
-              href="https://github.com/huggingface/lerobot"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-medium text-foreground hover:text-foreground/80"
-            >
-              LeRobot
-            </a>
+            <Trans
+              i18nKey="launchpad.footer.poweredBy"
+              components={[
+                <span key="0" />,
+                <a
+                  key="1"
+                  href="https://github.com/huggingface/lerobot"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-medium text-foreground hover:text-foreground/80"
+                />,
+              ]}
+            />
           </span>
           <a
             href="https://huggingface.co"
@@ -67,18 +77,23 @@ const Footer: React.FC = () => {
           </a>
         </span>
         <nav className="flex items-center gap-4">
-          {links.map(({ href, label, Icon }) => (
+          {links.map(({ href, labelKey, Icon }) => (
             <a
-              key={label}
+              key={labelKey}
               href={href}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground"
             >
               <Icon className="h-4 w-4" />
-              <span>{label}</span>
+              <span>{t(labelKey)}</span>
             </a>
           ))}
+          {/* The app's ONLY language control. This footer renders on the
+              Launchpad alone, which is deliberate: the studio and the session
+              dialogs are places you are mid-task, and swapping the UI language
+              underneath a running robot flow is not something to offer there. */}
+          <LanguageSwitcher className="text-muted-foreground hover:text-foreground" />
         </nav>
       </div>
     </footer>

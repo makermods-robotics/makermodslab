@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { HardDriveDownload, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -38,6 +39,7 @@ const ImportModelFromDiskDialog: React.FC<ImportModelFromDiskDialogProps> = ({
   onOpenChange,
   onImported,
 }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const [path, setPath] = useState("");
   const [name, setName] = useState("");
@@ -85,13 +87,9 @@ const ImportModelFromDiskDialog: React.FC<ImportModelFromDiskDialogProps> = ({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>
-            Import a model from disk
-          </DialogTitle>
+          <DialogTitle>{t("landing.importModelFromDisk.title")}</DialogTitle>
           <DialogDescription className="text-muted-foreground">
-            Point at a policy checkpoint folder already on this machine. It's
-            copied into your local models cache — the original folder is left
-            untouched.
+            {t("landing.importModelFromDisk.description")}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -103,7 +101,7 @@ const ImportModelFromDiskDialog: React.FC<ImportModelFromDiskDialogProps> = ({
         >
           <div>
             <Label htmlFor="import-model-path" className="text-muted-foreground">
-              Checkpoint folder path
+              {t("landing.importModelFromDisk.pathLabel")}
             </Label>
             <Input
               id="import-model-path"
@@ -119,7 +117,7 @@ const ImportModelFromDiskDialog: React.FC<ImportModelFromDiskDialogProps> = ({
           </div>
           <div>
             <Label htmlFor="import-model-name" className="text-muted-foreground">
-              Name (optional)
+              {t("landing.importModelFromDisk.nameLabel")}
             </Label>
             <Input
               id="import-model-name"
@@ -127,7 +125,7 @@ const ImportModelFromDiskDialog: React.FC<ImportModelFromDiskDialogProps> = ({
               onChange={(e) =>
                 setName(e.target.value.replace(/[^A-Za-z0-9._\-/]/g, "_"))
               }
-              placeholder="Defaults to the folder name"
+              placeholder={t("landing.importModelFromDisk.namePlaceholder")}
               className="mt-1"
             />
           </div>
@@ -139,7 +137,7 @@ const ImportModelFromDiskDialog: React.FC<ImportModelFromDiskDialogProps> = ({
               onClick={() => onOpenChange(false)}
               className=""
             >
-              Cancel
+              {t("common.cancel")}
             </Button>
             <Button
               type="submit"
@@ -151,7 +149,9 @@ const ImportModelFromDiskDialog: React.FC<ImportModelFromDiskDialogProps> = ({
               ) : (
                 <HardDriveDownload className="w-4 h-4 mr-2" />
               )}
-              {importing ? "Importing…" : "Import"}
+              {importing
+                ? t("landing.importModelFromDisk.submitting")
+                : t("landing.importModelFromDisk.submit")}
             </Button>
           </DialogFooter>
         </form>

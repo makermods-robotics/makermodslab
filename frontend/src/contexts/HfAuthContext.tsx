@@ -37,7 +37,7 @@ export const HfAuthProvider: React.FC<{ children: ReactNode }> = ({
   const fetchStatus = useCallback(async () => {
     setAuth({ status: "loading" });
     try {
-      const response = await fetchWithHeaders(`${baseUrl}/hf-auth-status`);
+      const response = await fetchWithHeaders(`${baseUrl}/api/v1/hf-auth-status`);
       const data = await response.json();
       if (data.authenticated) {
         setAuth({

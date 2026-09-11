@@ -16,7 +16,7 @@ on:
       - 'frontend/package-lock.json'
       - '.github/workflows/lockfile_registry_guard.yml'
   push:
-    branches: [main]
+    branches: [main, staging]
     paths:
       - 'frontend/package-lock.json'
       - '.github/workflows/lockfile_registry_guard.yml'

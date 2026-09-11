@@ -1,5 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { useEyebrowClass } from "@/components/studio/panel/primitives";
+import { cn } from "@/lib/utils";
 import { TrainingStatus } from "../types";
 import { Activity, Clock, Gauge, TrendingDown } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
@@ -32,12 +35,89 @@ interface LrPoint {
 
 const HISTORY_CAP = 2000;
 
+// Roughly how many x-axis labels we aim for. The stride is snapped to a round
+// number afterwards, so the realised count lands in ~4-9.
+const TICK_TARGET = 6;
+
+/**
+ * Round x-axis ticks for a step domain: multiples of a 1/2/5×10ⁿ stride sized
+ * from the span, clipped to [min, max].
+ *
+ * Without an explicit `ticks` array Recharts treats the x-axis as its
+ * categorical axis and emits one tick per data point, then culls the labels by
+ * width — so a 50/100/…/2100 run renders as "150, 300, 450 … 1500, 2100":
+ * every label is a real step, but the set reads as arbitrary and reshuffles on
+ * any pane resize. Deriving the ticks instead (rather than hardcoding a list)
+ * keeps them round and lets the stride step up on its own as a live run
+ * extends or a resume chain stitches more lineage in.
+ *
+ * Width culling still applies to these ticks, and the last one is still kept
+ * and clamped inward — so a narrow pane drops labels, but it drops them to a
+ * subset of round numbers.
+ */
+const roundTicks = (min: number, max: number): number[] => {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) {
+    return Number.isFinite(min) ? [min] : [];
+  }
+  const raw = (max - min) / TICK_TARGET;
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  // Snap to the nearest of 1/2/5/10 in log space (Heckbert's nice-number rule);
+  // rounding to nearest rather than up keeps a 15k run at a 2k stride instead
+  // of jumping to 5k.
+  const norm = raw / mag;
+  const nice = norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10;
+  // Steps are integers, so never emit a fractional stride on a tiny span.
+  const stride = Math.max(1, nice * mag);
+  const ticks: number[] = [];
+  // Index-based so the multiples stay exact instead of accumulating float drift.
+  for (let i = Math.ceil(min / stride); i * stride <= max; i += 1) {
+    ticks.push(i * stride);
+  }
+  return ticks;
+};
+
+/** 1500 → "1.5k", 2000 → "2k", 850 → "850". */
+const formatStepTick = (value: number): string => {
+  if (!Number.isFinite(value)) return "";
+  if (Math.abs(value) < 1000) return String(value);
+  // A multiple of 100 divides into an exact single decimal of k. Anything else
+  // (only reachable on a degenerately narrow domain) prints in full rather
+  // than rounding e.g. 1001 down to "1k".
+  if (value % 100 === 0) return `${value / 1000}k`;
+  return value.toLocaleString();
+};
+
+/**
+ * X-axis config shared by the loss and lr charts so their tick logic can't
+ * drift apart. `ticks` is derived per series because the two can end on
+ * different steps (lr is only appended when the backend reports one).
+ * `points` is append-only and step-monotonic, so first/last are the domain
+ * bounds — same values Recharts resolves "dataMin"/"dataMax" to.
+ */
+const stepAxisProps = (points: readonly { step: number }[]) =>
+  ({
+    dataKey: "step",
+    type: "number",
+    scale: "linear",
+    domain: ["dataMin", "dataMax"],
+    ticks: roundTicks(
+      points[0]?.step ?? 0,
+      points[points.length - 1]?.step ?? 0
+    ),
+    tickFormatter: formatStepTick,
+    tick: { fill: "hsl(var(--muted-foreground))", fontSize: 11 },
+    stroke: "hsl(var(--border))",
+  }) satisfies React.ComponentProps<typeof XAxis>;
+
 const MonitoringStats: React.FC<MonitoringStatsProps> = ({
   jobId,
   trainingStatus,
   getProgressPercentage,
   formatTime,
 }) => {
+  const { t } = useTranslation();
+  // `.eyebrow`'s tracking over-spaces CJK; useEyebrowClass drops it there.
+  const eyebrow = useEyebrowClass();
   const [lossHistory, setLossHistory] = useState<LossPoint[]>([]);
   const [lrHistory, setLrHistory] = useState<LrPoint[]>([]);
   const lastStepRef = useRef(0);
@@ -87,6 +167,13 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
 
   // Append new metric points as they arrive; reset when a new run starts
   // (current_step resets back to 0).
+  //
+  // Live x-values and the seeded history must share one step basis, or appends
+  // land at the wrong x (and a lower live step wipes the seed via the regress
+  // reset below). They do: both come from the backend's single
+  // parse_metrics_into, with the same resume rebasing applied — the live stream
+  // via the runner's log tail, the seed via /jobs/{id}/metrics-history. Keep it
+  // that way; a runner that forgets to pass resume_total desynchronises them.
   useEffect(() => {
     const step = trainingStatus.current_step;
     if (step < lastStepRef.current) {
@@ -135,8 +222,10 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
   // "Training starting…" instead of a misleading 0/0 0% reading.
   const isStarting =
     trainingStatus.training_active && trainingStatus.total_steps === 0;
+  // The step counts keep their existing toLocaleString formatting — only the
+  // pre-first-tick message is copy.
   const stepLabel = isStarting
-    ? "Training starting…"
+    ? t("training.monitoring.startingUp")
     : `${trainingStatus.current_step.toLocaleString()} / ${trainingStatus.total_steps.toLocaleString()}`;
   const etaLabel =
     trainingStatus.eta_seconds != null
@@ -149,8 +238,9 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
         <CardContent className="p-5">
           <div className="mb-3 flex items-baseline justify-between gap-3">
             <div>
-              <h3 className="eyebrow flex items-center gap-1.5">
-                <Activity className="h-3.5 w-3.5" /> Progress
+              <h3 className={cn(eyebrow, "flex items-center gap-1.5")}>
+                <Activity className="h-3.5 w-3.5" />{" "}
+                {t("training.monitoring.progress")}
               </h3>
               <div className="mt-1 text-base font-semibold tabular-nums text-foreground">
                 {stepLabel}
@@ -159,7 +249,7 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
             <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
               <Clock className="h-3.5 w-3.5" />
               <span>
-                ETA{" "}
+                {t("training.monitoring.eta")}{" "}
                 <span className="font-semibold tabular-nums text-foreground">
                   {etaLabel}
                 </span>
@@ -173,7 +263,9 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
               style={{ width: `${progress}%` }}
             />
             <div className="absolute inset-0 flex items-center justify-center text-xs font-semibold text-white tabular-nums drop-shadow">
-              {isStarting ? "warming up…" : `${progress.toFixed(1)}%`}
+              {isStarting
+                ? t("training.monitoring.warmingUp")
+                : `${progress.toFixed(1)}%`}
             </div>
           </div>
         </CardContent>
@@ -182,8 +274,9 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card className="bg-card border-border rounded-md">
           <CardHeader className="pb-2">
-            <h3 className="eyebrow flex items-center gap-1.5">
-              <TrendingDown className="h-3.5 w-3.5" /> Loss
+            <h3 className={cn(eyebrow, "flex items-center gap-1.5")}>
+              <TrendingDown className="h-3.5 w-3.5" />{" "}
+              {t("training.monitoring.loss")}
             </h3>
             <div className="text-base font-semibold tabular-nums text-foreground">
               {trainingStatus.current_loss?.toFixed(4) ?? "—"}
@@ -193,7 +286,7 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
             <div className="h-48">
               {lossHistory.length === 0 ? (
                 <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
-                  Waiting for first metric tick…
+                  {t("training.monitoring.waitingForMetrics")}
                 </div>
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
@@ -201,14 +294,7 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
                     data={lossHistory}
                     margin={{ top: 8, right: 12, left: 0, bottom: 0 }}
                   >
-                    <XAxis
-                      dataKey="step"
-                      type="number"
-                      scale="linear"
-                      domain={["dataMin", "dataMax"]}
-                      tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
-                      stroke="hsl(var(--border))"
-                    />
+                    <XAxis {...stepAxisProps(lossHistory)} />
                     <YAxis
                       tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
                       stroke="hsl(var(--border))"
@@ -241,8 +327,9 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
 
         <Card className="bg-card border-border rounded-md">
           <CardHeader className="pb-2">
-            <h3 className="eyebrow flex items-center gap-1.5">
-              <Gauge className="h-3.5 w-3.5" /> Learning rate
+            <h3 className={cn(eyebrow, "flex items-center gap-1.5")}>
+              <Gauge className="h-3.5 w-3.5" />{" "}
+              {t("training.monitoring.learningRate")}
             </h3>
             <div className="text-base font-semibold tabular-nums text-foreground">
               {trainingStatus.current_lr?.toExponential(2) ?? "—"}
@@ -252,7 +339,7 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
             <div className="h-48">
               {lrHistory.length === 0 ? (
                 <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
-                  Waiting for first metric tick…
+                  {t("training.monitoring.waitingForMetrics")}
                 </div>
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
@@ -260,14 +347,7 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
                     data={lrHistory}
                     margin={{ top: 8, right: 12, left: 0, bottom: 0 }}
                   >
-                    <XAxis
-                      dataKey="step"
-                      type="number"
-                      scale="linear"
-                      domain={["dataMin", "dataMax"]}
-                      tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
-                      stroke="hsl(var(--border))"
-                    />
+                    <XAxis {...stepAxisProps(lrHistory)} />
                     <YAxis
                       tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
                       stroke="hsl(var(--border))"

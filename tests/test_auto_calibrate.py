@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -145,6 +145,16 @@ def test_auto_calibration_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyP
     result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
     assert result["success"] is False
     assert "wiggle" in result["message"].lower()
+
+
+def test_auto_calibration_blocked_when_replay_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.auto_calibrate as ac
+
+    monkeypatch.setattr("makermodslab.replay.replay_active", True)
+    mgr = ac.AutoCalibrationManager()
+    result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
+    assert result["success"] is False
+    assert "replay" in result["message"].lower()
 
 
 def test_auto_calibration_rejects_bad_device() -> None:
@@ -942,6 +952,15 @@ def test_batch_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyPatch) -> No
     result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
     assert result["success"] is False
     assert "wiggle" in result["message"].lower()
+
+
+def test_batch_blocked_when_replay_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("makermodslab.replay.replay_active", True)
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="n1")]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
+    assert result["success"] is False
+    assert "replay" in result["message"].lower()
 
 
 def test_batch_rejects_empty() -> None:

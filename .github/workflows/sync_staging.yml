@@ -1,0 +1,242 @@
+# Keeps `staging` continuously fast-forwarded onto `main`, so the eventual
+# staging -> main promotion PR is conflict-free by construction.
+#
+# Why this exists: both branches auto-commit frontend/dist (build_frontend.yml
+# runs on a push to either), and dist is marked `-merge` in
+# frontend/.gitattributes, so a bundle touched on both sides conflicts as a
+# binary file. GitHub's web conflict editor refuses binary conflicts outright,
+# which means the promotion PR would dead-end in the UI and every promotion
+# would need a hand-resolved local merge. Relying on each contributor to
+# remember the right incantation is not a plan.
+#
+# So resolve it on a schedule nobody has to think about: every push to `main`
+# merges straight into `staging` here, with one narrow automatic policy —
+# frontend/dist resolves to staging's copy. That choice is safe because dist is
+# self-healing: this job's push touches frontend/** source, which re-triggers
+# build_frontend.yml on staging, which rebuilds the bundle from the merged tree
+# and commits the real answer. The pick only decides which bundle staging
+# serves for the ~40s until that lands.
+#
+# The policy is deliberately scoped to frontend/dist and nothing else. A
+# conflict anywhere in source aborts the merge and fails the run rather than
+# picking a side — silently resolving a source conflict is how a hotfix on main
+# gets thrown away with no trace.
+
+name: Sync main into staging
+
+on:
+  push:
+    branches: [main]
+  # build_frontend.yml commits dist as `[skip ci]`, which suppresses the push
+  # trigger above. Without this second trigger those commits would sit on `main`
+  # forever unmerged into `staging`, and the next promotion PR would open with
+  # both sides having moved dist — the exact binary conflict this workflow
+  # exists to prevent. `[skip ci]` is kept because it also suppresses
+  # quality.yml, which runs unfiltered on every push to main.
+  #
+  # zizmor: ignore[dangerous-triggers]
+  # `workflow_run` is flagged because it runs privileged and, in the usual
+  # misuse, checks out `github.event.workflow_run.head_sha` — attacker-controlled
+  # whenever the upstream workflow is PR-triggered. Neither half applies here:
+  # "Rebuild frontend/dist" has no `pull_request` trigger at all (push to
+  # main/staging plus manual dispatch), so only someone who can already write to
+  # a protected branch can fire it, and this job checks out the fixed ref
+  # `staging` rather than anything off the event payload.
+  workflow_run:
+    workflows: ["Rebuild frontend/dist"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+# The App token does the writing; the workflow's own GITHUB_TOKEN needs nothing.
+permissions:
+  contents: read
+
+# Concurrency groups are repo-scoped, not workflow-scoped, so naming the group
+# after the branch being written serializes this against build_frontend.yml's
+# push to staging as well as against another sync. That matters: both workflows
+# push to `staging`, and neither retries, so an interleaved pair would leave one
+# run red on a non-fast-forward and its work undone. A queued run has not
+# checked out yet, so whichever goes second always starts from a fresh HEAD.
+#
+# `queue: max` is load-bearing. GitHub's default is `queue: single` — at most one
+# run may be *pending* per group, and a newer pending run cancels the older one.
+# With build_frontend.yml sharing this group, that default would let a staging
+# rebuild silently evict a pending sync. Nothing retries it, so main's commits
+# would simply be stranded: the exact divergence this workflow exists to prevent,
+# now caused by the mechanism meant to prevent it. (Evicting a sync with another
+# sync would have been harmless — the newer one merges a newer main that already
+# subsumes the older commits — which is why the default was survivable before the
+# group was shared.) `queue: max` may not be combined with
+# `cancel-in-progress: true`; that is a validation error.
+concurrency:
+  group: branch-write-staging
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    # A failed dist rebuild pushes nothing, so there is nothing to sync.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      # Same dist-bot App as build_frontend.yml. The first-party GITHUB_TOKEN is
+      # deliberately not used: a push made with it does not trigger further
+      # workflow runs, and this job's whole point is to trigger the staging
+      # rebuild that follows it.
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.DIST_BOT_APP_ID }}
+          private-key: ${{ secrets.DIST_BOT_PRIVATE_KEY }}
+
+      # Credentials are persisted on purpose — the `git push` at the end reuses
+      # them on the origin remote. The token is minted per-run and dies with the
+      # job. fetch-depth: 0 because a merge needs real history, not a shallow
+      # clone; blob:none keeps that history cheap by deferring file contents
+      # until the merge actually asks for them (the pack is ~140MB otherwise).
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:  # zizmor: ignore[artipacked]
+          ref: staging
+          fetch-depth: 0
+          filter: blob:none
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Merge main into staging
+        id: merge
+        env:
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          git config user.name  "${APP_SLUG}[bot]"
+          git config user.email "${APP_SLUG}[bot]@users.noreply.github.com"
+
+          if git merge --no-edit origin/main; then
+            echo "outcome=clean" >> "$GITHUB_OUTPUT"
+            git push origin HEAD:staging
+            exit 0
+          fi
+
+          # A non-zero `git merge` is not proof of a conflict. An unresolvable
+          # ref, unrelated histories, a dirty tree and a merge-driver crash all
+          # exit non-zero with nothing unmerged in the index. Classify first —
+          # running the dist policy against a merge that never began would fail
+          # further down with an unrelated error and no runbook.
+          unmerged="$(mktemp)"
+          git diff -z --name-only --diff-filter=U > "$unmerged"
+
+          if [[ ! -s "$unmerged" ]]; then
+            git merge --abort || true
+            echo "outcome=merge-failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # -z output is NUL-separated and never quoted, so a non-ASCII path
+          # cannot be mangled into looking like it lives outside frontend/dist.
+          dist=()
+          outside=()
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              frontend/dist/*) dist+=("$path") ;;
+              *)               outside+=("$path") ;;
+            esac
+          done < "$unmerged"
+
+          if (( ${#outside[@]} )); then
+            git merge --abort
+            {
+              echo "outcome=source-conflict"
+              # The delimiter ends in `/` on purpose: the body here is a list of
+              # git paths, and no git path ever ends in `/`, so no conflicting
+              # filename can collide with it and truncate the list.
+              echo "conflicts<<CONFLICT_LIST_EOF/"
+              printf '%s\n' "${outside[@]}"
+              echo "CONFLICT_LIST_EOF/"
+            } >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # dist only: take staging's bundle, then let build_frontend.yml
+          # rebuild it from the merged tree on the push below.
+          #
+          # Driven off the index stages rather than one blanket
+          # `git checkout --ours -- frontend/dist`, which exits 1 on a
+          # modify/delete conflict ("does not have our version") and would kill
+          # the step under `set -e` before any outcome is recorded. A path with
+          # no stage 2 is one staging deleted, and deleting it *is* taking
+          # staging's side.
+          #
+          # The count guard is not decoration: expanding an empty array under
+          # `set -u` is fatal on bash < 4.4, and this script should not depend on
+          # which bash the runner image ships.
+          if (( ${#dist[@]} )); then
+            for path in "${dist[@]}"; do
+              if git show ":2:$path" > /dev/null 2>&1; then
+                git checkout --ours -- "$path"
+                git add -- "$path"
+              else
+                git rm -qf -- "$path"
+              fi
+            done
+          fi
+
+          git commit --no-edit -q
+          echo "outcome=dist-resolved" >> "$GITHUB_OUTPUT"
+
+          git push origin HEAD:staging
+
+      # Fires only on the source-conflict path. Puts the runbook on the run's
+      # landing page, which is what the failure notification links to.
+      - name: Explain a source conflict
+        if: failure() && steps.merge.outputs.outcome == 'source-conflict'
+        env:
+          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+        run: |
+          {
+            echo "### :warning: \`main\` and \`staging\` disagree outside \`frontend/dist\`"
+            echo
+            echo "The merge was aborted and \`staging\` is untouched. These files conflict:"
+            echo
+            echo '```'
+            echo "$CONFLICTS"
+            echo '```'
+            echo
+            echo "This is not something to automate away — resolve it by hand:"
+            echo
+            echo '```bash'
+            echo 'git checkout staging && git pull'
+            echo 'git merge main'
+            echo
+            echo '# Keep the dist policy: resolve frontend/dist to staging'"'"'s side.'
+            echo '# Driven off the index because a plain `git checkout --ours` exits 1'
+            echo '# on a modify/delete conflict, which is a shape dist really does hit.'
+            echo 'git diff -z --name-only --diff-filter=U -- frontend/dist |'
+            echo '  while IFS= read -r -d "" p; do'
+            echo '    if git show ":2:$p" >/dev/null 2>&1; then'
+            echo '      git checkout --ours -- "$p" && git add -- "$p"'
+            echo '    else'
+            echo '      git rm -qf -- "$p"'
+            echo '    fi'
+            echo '  done'
+            echo
+            echo '# resolve the source conflicts above, then:'
+            echo 'git add -A && git commit && git push origin staging'
+            echo '```'
+            echo
+            echo "Re-running this workflow after that push is harmless — it will be a no-op."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Fires when `git merge` failed without producing a conflict — a different
+      # class of problem entirely, and one no runbook above applies to.
+      - name: Explain a failed merge
+        if: failure() && steps.merge.outputs.outcome == 'merge-failed'
+        run: |
+          {
+            echo "### :x: \`git merge origin/main\` failed without a conflict"
+            echo
+            echo "Nothing was left unmerged in the index, so this is not a content conflict and the \`frontend/dist\` policy was deliberately not applied. \`staging\` is untouched."
+            echo
+            echo "Look for an infrastructure-shaped cause instead — an unresolvable \`origin/main\`, unrelated histories, a merge driver failing on a \`-merge\` path, or a dirty tree left by an earlier step. The **Merge main into staging** step above has git's own message."
+          } >> "$GITHUB_STEP_SUMMARY"

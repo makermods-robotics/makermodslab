@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { Download, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -34,6 +35,7 @@ const AddDatasetFromHubDialog: React.FC<AddDatasetFromHubDialogProps> = ({
   onOpenChange,
   onAdd,
 }) => {
+  const { t } = useTranslation();
   const [repoId, setRepoId] = useState("");
   const [download, setDownload] = useState(false);
 
@@ -58,12 +60,9 @@ const AddDatasetFromHubDialog: React.FC<AddDatasetFromHubDialogProps> = ({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>
-            Add a dataset from Hugging Face
-          </DialogTitle>
+          <DialogTitle>{t("landing.addDatasetFromHub.title")}</DialogTitle>
           <DialogDescription className="text-muted-foreground">
-            Enter a Hub dataset id to add it to your list. It appears under
-            “Hugging Face” and training fetches it on demand.
+            {t("landing.addDatasetFromHub.description")}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -75,7 +74,7 @@ const AddDatasetFromHubDialog: React.FC<AddDatasetFromHubDialogProps> = ({
         >
           <div>
             <Label htmlFor="hub-dataset-id" className="text-muted-foreground">
-              Hub dataset id
+              {t("landing.addDatasetFromHub.idLabel")}
             </Label>
             <Input
               id="hub-dataset-id"
@@ -90,7 +89,12 @@ const AddDatasetFromHubDialog: React.FC<AddDatasetFromHubDialogProps> = ({
             />
             {showError && (
               <p className="mt-1 text-xs text-destructive">
-                Enter a Hub dataset id as <span className="font-mono">org/name</span>.
+                {/* "org/name" is a format literal, so it rides inside the
+                    sentence as <Trans> markup rather than a concatenation. */}
+                <Trans
+                  i18nKey="landing.addDatasetFromHub.idError"
+                  components={[<span key="0" className="font-mono" />]}
+                />
               </p>
             )}
           </div>
@@ -102,10 +106,9 @@ const AddDatasetFromHubDialog: React.FC<AddDatasetFromHubDialogProps> = ({
               className="mt-0.5 h-4 w-4 accent-blue-500"
             />
             <span>
-              Download to this machine now
+              {t("landing.addDatasetFromHub.downloadNow")}
               <span className="block text-xs text-muted-foreground">
-                Fetches the dataset into the local cache in the background. It can
-                be multi-GB.
+                {t("landing.addDatasetFromHub.downloadNowHint")}
               </span>
             </span>
           </label>
@@ -116,7 +119,7 @@ const AddDatasetFromHubDialog: React.FC<AddDatasetFromHubDialogProps> = ({
               onClick={() => onOpenChange(false)}
               className=""
             >
-              Cancel
+              {t("common.cancel")}
             </Button>
             <Button
               type="submit"
@@ -128,7 +131,9 @@ const AddDatasetFromHubDialog: React.FC<AddDatasetFromHubDialogProps> = ({
               ) : (
                 <Plus className="w-4 h-4 mr-2" />
               )}
-              {download ? "Add & download" : "Add dataset"}
+              {download
+                ? t("landing.addDatasetFromHub.submitWithDownload")
+                : t("landing.addDatasetFromHub.submit")}
             </Button>
           </DialogFooter>
         </form>
