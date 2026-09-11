@@ -71,11 +71,18 @@ def _whoami_default_cache(self, token=None, *, cache=True):
 _WHOAMI_API.whoami = types.MethodType(_whoami_default_cache, _WHOAMI_API)
 
 
-def cached_whoami() -> dict | None:
+def cached_whoami(*, fail_on_error: bool = False) -> dict | None:
     """Return cached whoami() for the active HF token, or None if no token.
 
-    Swallows transport errors and returns None — callers treat that as
-    "unauthenticated" so the UI degrades gracefully instead of 500ing.
+    Swallows transport errors and returns None by default — callers treat
+    that as "unauthenticated" so the UI degrades gracefully instead of
+    500ing. That collapses two different situations into the same None,
+    though: no token, and a token that failed to validate (network blip,
+    cold cache). Pass fail_on_error=True to tell them apart — a token
+    present but the whoami call failing then raises instead, so a caller
+    gating a Hub mutation on identity can fail closed on the transient case
+    like its other Hub calls do, rather than silently treating it as
+    logged-out.
     """
     token = get_token()
     if not token:
@@ -84,6 +91,8 @@ def cached_whoami() -> dict | None:
         return _WHOAMI_API.whoami(token=token, cache=True)
     except Exception as exc:
         logger.info("whoami failed: %s", exc)
+        if fail_on_error:
+            raise
         return None
 
 
@@ -100,6 +109,33 @@ def invalidate_whoami_cache() -> None:
     _WHOAMI_API._whoami_cache.clear()
 
 
+def writable_namespaces(info: dict) -> list[str]:
+    """Namespaces the `whoami` payload's user can push a NEW repo to: their own
+    account plus every org whose role grants write access.
+
+    The single source of truth for that set. `/hf-auth-status` ships it to the
+    frontend to gate buttons, and the server-side ownership gates resolve
+    against the same helper — computing it twice is how a button that the
+    backend refuses ends up rendered anyway.
+    """
+    return [info["name"]] + [o["name"] for o in info.get("orgs", []) if o.get("roleInGroup") in WRITE_ROLES]
+
+
+def canonical_writable_namespace(info: dict, namespace: str) -> str | None:
+    """The entry from `writable_namespaces` matching `namespace`, or None if
+    the user can't write to it. Matches case-insensitively — the namespace a
+    caller passes in typically comes from a local directory name, which may
+    not match whoami's casing (a locally-recorded "MyOrg/foo" vs. the Hub's
+    canonical "myorg") — but returns whoami's own spelling, since Hub calls
+    built from the mismatched local casing risk a 404/502 against a
+    namespace the user does in fact own."""
+    ns = namespace.lower()
+    for candidate in writable_namespaces(info):
+        if candidate.lower() == ns:
+            return candidate
+    return None
+
+
 def handle_hf_auth_status() -> dict:
     try:
         info = whoami()
@@ -111,8 +147,7 @@ def handle_hf_auth_status() -> dict:
             # Namespaces the user can push a NEW dataset to: their own account
             # plus any org where their role grants write access. Consumed by the
             # frontend to gate each dataset row's "Upload to Hub" button.
-            "writable_namespaces": [info["name"]]
-            + [o["name"] for o in orgs if o.get("roleInGroup") in WRITE_ROLES],
+            "writable_namespaces": writable_namespaces(info),
             "login_command": LOGIN_COMMAND,
         }
     except (LocalTokenNotFoundError, HfHubHTTPError, OSError) as e:

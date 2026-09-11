@@ -1,4 +1,5 @@
 import React from "react";
+import { useTranslation } from "react-i18next";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
@@ -13,8 +14,8 @@ import {
 import { cn } from "@/lib/utils";
 import {
   ConfigComponentProps,
-  RESUME_INHERITED_NOTE,
-  RESUME_INHERITED_SHORT,
+  RESUME_INHERITED_NOTE_KEY,
+  RESUME_INHERITED_SHORT_KEY,
 } from "../types";
 
 /** The run's headline settings — steps, batch size, name, and W&B logging.
@@ -39,6 +40,8 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
   updateConfig,
   resumeLocked,
 }) => {
+  const { t } = useTranslation();
+
   // The step this continuation starts FROM, beside the name it continues.
   // Requested here specifically: the name is what the user recognises the run
   // by, and the starting step is the one number that says which attempt this
@@ -51,17 +54,42 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
   // (see CheckpointDropdown) — it and a missing step both read as "latest",
   // the same word the checkpoint picker uses for it.
   const resumeStep = config.resume_from_step;
+  // The step number keeps its existing (non-locale-aware) formatting and is
+  // passed in pre-formatted; only the words around it are translated.
   const resumedFrom = !resumeLocked
     ? null
     : resumeStep
-      ? `from step ${resumeStep.toLocaleString()}`
-      : "from latest checkpoint";
+      ? t("training.essentials.resumedFromStep", {
+          step: resumeStep.toLocaleString(),
+        })
+      : t("training.essentials.resumedFromLatest");
+
+  // On a resume, `steps` is a TOTAL the run trains UP TO — it is not added to
+  // the steps already done. Nothing said so at the field itself (the "from step
+  // N" note sits by the run name), so "20000" read equally well as "20k more".
+  // Spell it out next to the input, with the arithmetic already worked out.
+  const stepsHint = !resumeLocked
+    ? null
+    : resumeStep
+      ? config.steps > resumeStep
+        ? t("training.essentials.stepsTotalHint", {
+            from: resumeStep.toLocaleString(),
+            remaining: (config.steps - resumeStep).toLocaleString(),
+          })
+        : t("training.essentials.stepsTotalTooLow", {
+            from: resumeStep.toLocaleString(),
+          })
+      : t("training.essentials.stepsTotalHintLatest");
 
   return (
     <section className="space-y-4">
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-2">
-          <Label htmlFor="steps">Training steps</Label>
+          <Label htmlFor="steps">
+            {resumeLocked
+              ? t("training.essentials.stepsTotal")
+              : t("training.essentials.steps")}
+          </Label>
           <NumberInput
             id="steps"
             value={config.steps}
@@ -69,10 +97,21 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
               if (v !== undefined) updateConfig("steps", v);
             }}
           />
+          {stepsHint ? (
+            <p
+              className={
+                resumeStep && config.steps <= resumeStep
+                  ? "text-xs text-destructive"
+                  : "text-xs text-muted-foreground"
+              }
+            >
+              {stepsHint}
+            </p>
+          ) : null}
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="batch_size">Batch size</Label>
+          <Label htmlFor="batch_size">{t("training.essentials.batchSize")}</Label>
           <NumberInput
             id="batch_size"
             value={config.batch_size}
@@ -83,7 +122,7 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
           />
           {resumeLocked && (
             <p className="text-xs text-muted-foreground">
-              {RESUME_INHERITED_SHORT}
+              {t(RESUME_INHERITED_SHORT_KEY)}
             </p>
           )}
         </div>
@@ -91,7 +130,7 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
 
       <div className="space-y-2">
         <div className="flex items-baseline gap-2">
-          <Label htmlFor="job_name">Run name</Label>
+          <Label htmlFor="job_name">{t("training.essentials.runName")}</Label>
           {resumedFrom ? (
             <span className="truncate text-xs font-normal text-muted-foreground">
               {resumedFrom}
@@ -102,12 +141,17 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
           id="job_name"
           value={config.job_name || ""}
           onChange={(e) => updateConfig("job_name", e.target.value)}
-          placeholder={`${(config.policy_type || "policy").toUpperCase()} · ${
-            config.dataset_repo_id || "dataset"
+          /* The policy type and dataset id are DATA (rendered verbatim); only
+             the stand-ins shown before either is chosen are copy. */
+          placeholder={`${(
+            config.policy_type || t("training.essentials.runNamePolicyFallback")
+          ).toUpperCase()} · ${
+            config.dataset_repo_id ||
+            t("training.essentials.runNameDatasetFallback")
           }`}
         />
         <p className="text-xs text-muted-foreground">
-          Optional — shown on the job card and searchable.
+          {t("training.essentials.runNameHint")}
         </p>
       </div>
 
@@ -121,7 +165,7 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
       >
         {resumeLocked && (
           <p className="text-xs text-muted-foreground">
-            {RESUME_INHERITED_NOTE}
+            {t(RESUME_INHERITED_NOTE_KEY)}
           </p>
         )}
         <div className="flex items-center gap-3">
@@ -132,25 +176,33 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
             disabled={resumeLocked}
             className="data-[state=checked]:bg-primary"
           />
-          <Label htmlFor="wandb_enable">Log to Weights &amp; Biases</Label>
+          <Label htmlFor="wandb_enable">
+            {t("training.essentials.wandbEnable")}
+          </Label>
         </div>
 
         {config.wandb_enable && (
           <div className="space-y-4 border-l-2 border-border pl-4">
             <div className="space-y-2">
-              <Label htmlFor="wandb_project">Project</Label>
+              <Label htmlFor="wandb_project">
+                {t("training.essentials.wandbProject")}
+              </Label>
               <Input
                 id="wandb_project"
                 value={config.wandb_project || ""}
                 onChange={(e) =>
                   updateConfig("wandb_project", e.target.value || undefined)
                 }
+                // Left English on purpose: this names lerobot's OWN default
+                // W&B project, an identifier sent verbatim, not prose.
                 placeholder="lerobot (default)"
                 disabled={resumeLocked}
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="wandb_entity">Entity</Label>
+              <Label htmlFor="wandb_entity">
+                {t("training.essentials.wandbEntity")}
+              </Label>
               <Input
                 id="wandb_entity"
                 value={config.wandb_entity || ""}
@@ -166,24 +218,25 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
                   was clicked. Naming "a team you belong to" is what stops
                   someone typing a placeholder word into it. */}
               <p className="text-xs text-muted-foreground">
-                Your W&amp;B username or a team you belong to. Blank = your
-                personal account.
+                {t("training.essentials.wandbEntityHint")}
               </p>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="wandb_notes">W&amp;B notes (optional)</Label>
+              <Label htmlFor="wandb_notes">
+                {t("training.essentials.wandbNotes")}
+              </Label>
               <Input
                 id="wandb_notes"
                 value={config.wandb_notes || ""}
                 onChange={(e) =>
                   updateConfig("wandb_notes", e.target.value || undefined)
                 }
-                placeholder="Training run notes..."
+                placeholder={t("training.essentials.wandbNotesPlaceholder")}
                 disabled={resumeLocked}
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="wandb_mode">W&amp;B mode</Label>
+              <Label htmlFor="wandb_mode">{t("training.essentials.wandbMode")}</Label>
               <Select
                 value={config.wandb_mode || "online"}
                 onValueChange={(value) => updateConfig("wandb_mode", value)}
@@ -193,9 +246,17 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="online">Online</SelectItem>
-                  <SelectItem value="offline">Offline</SelectItem>
-                  <SelectItem value="disabled">Disabled</SelectItem>
+                  {/* Values are the wire settings sent to wandb — only the
+                      labels are copy. */}
+                  <SelectItem value="online">
+                    {t("training.essentials.wandbModeOnline")}
+                  </SelectItem>
+                  <SelectItem value="offline">
+                    {t("training.essentials.wandbModeOffline")}
+                  </SelectItem>
+                  <SelectItem value="disabled">
+                    {t("training.essentials.wandbModeDisabled")}
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -210,7 +271,7 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
                 className="data-[state=checked]:bg-primary"
               />
               <Label htmlFor="wandb_disable_artifact">
-                Don't upload checkpoints to W&amp;B
+                {t("training.essentials.wandbDisableArtifact")}
               </Label>
             </div>
           </div>

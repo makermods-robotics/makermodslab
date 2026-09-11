@@ -1,0 +1,1340 @@
+# Copyright 2026 MakerMods. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for makermodslab/sessions.py — the /api/v1/sessions surface — and the
+session_events seam's multi-subscriber extension.
+
+Per CLAUDE.md's testing policy: the tracker (a pure observer, driven entirely
+through the seam), the resolution/mutex refusal branches, request-model
+assembly (pure — the handle_start_* dispatch is monkeypatched to capture), and
+stop-by-id identity checks. No subprocess/thread happy paths.
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+import pytest
+
+from makermodslab import session_events, sessions
+from makermodslab.api_errors import ApiError, ErrorCode
+from makermodslab.session_events import notify_session_changed
+
+
+@pytest.fixture(autouse=True)
+def _fresh_tracker():
+    """Every test starts and ends with no tracked session, whatever earlier
+    suites' claim/release events left behind (the tracker is a process
+    singleton subscribed to a process-wide seam)."""
+    sessions.tracker.reset()
+    yield
+    sessions.tracker.reset()
+
+
+@pytest.fixture
+def _quiet_notifier():
+    """Detach the WS notifier for seam-focused tests, restoring it after."""
+    previous = session_events._notifier
+    session_events.set_notifier(None)
+    yield
+    session_events.set_notifier(previous)
+
+
+# --- the seam's multi-subscriber extension -----------------------------------
+
+
+def test_seam_delivers_to_subscribers_and_notifier(_quiet_notifier) -> None:
+    seen_sub: list[dict] = []
+    seen_notifier: list[dict] = []
+    session_events.subscribe(seen_sub.append)
+    session_events.set_notifier(seen_notifier.append)
+    try:
+        notify_session_changed("teleoperation", True, phase="x")
+    finally:
+        session_events.unsubscribe(seen_sub.append)
+        session_events.set_notifier(None)
+    # Both consumers got the same event; delivery is not either/or.
+    assert len(seen_sub) == 1 and len(seen_notifier) == 1
+    assert seen_sub[0]["session"] == seen_notifier[0]["session"]
+
+
+def test_broken_subscriber_starves_neither_notifier_nor_other_subscribers(_quiet_notifier) -> None:
+    def broken(_event: dict) -> None:
+        raise RuntimeError("subscriber exploded")
+
+    seen_sub: list[dict] = []
+    seen_notifier: list[dict] = []
+    session_events.subscribe(broken)
+    session_events.subscribe(seen_sub.append)
+    session_events.set_notifier(seen_notifier.append)
+    try:
+        notify_session_changed("recording", True)
+    finally:
+        session_events.unsubscribe(broken)
+        session_events.unsubscribe(seen_sub.append)
+        session_events.set_notifier(None)
+    assert len(seen_sub) == 1
+    assert len(seen_notifier) == 1
+
+
+def test_unsubscribe_and_duplicate_subscribe(_quiet_notifier) -> None:
+    seen: list[dict] = []
+    session_events.subscribe(seen.append)
+    session_events.subscribe(seen.append)  # idempotent: still one entry
+    try:
+        notify_session_changed("replay", True)
+        assert len(seen) == 1
+    finally:
+        session_events.unsubscribe(seen.append)
+    notify_session_changed("replay", False)
+    assert len(seen) == 1
+    session_events.unsubscribe(seen.append)  # unknown callable: ignored
+
+
+def sessions_rollout():
+    """The `rollout` module `handle_coaching_command_for_session` imports.
+
+    Imported lazily inside that function (to keep the sessions/rollout import
+    cycle broken), so the patch has to target the real module rather than an
+    attribute on `sessions`."""
+    from makermodslab import rollout
+
+    return rollout
+
+
+# --- tracker lifecycle, driven purely through the seam -----------------------
+
+
+def test_claim_mints_identity() -> None:
+    before = time.time()
+    notify_session_changed("recording", True, phase="preparing")
+    after = time.time()
+
+    current = sessions.tracker.current()
+    assert current is not None
+    assert current["kind"] == "recording"
+    assert current["phase"] == "preparing"
+    assert current["revision"] == 1
+    assert current["robot"] is None and current["owner"] is None
+    assert len(current["id"]) == 32  # uuid4().hex
+    assert before <= current["started_at"] <= after
+
+
+def test_phase_events_bump_revision_and_keep_the_id() -> None:
+    notify_session_changed("recording", True, phase="preparing")
+    first = sessions.tracker.current()
+    notify_session_changed("recording", True, phase="recording")
+    notify_session_changed("recording", True, phase="resetting")
+
+    current = sessions.tracker.current()
+    assert current["id"] == first["id"]
+    assert current["revision"] == 3
+    assert current["phase"] == "resetting"
+
+
+def test_release_clears_current_and_keeps_last_ended() -> None:
+    notify_session_changed("replay", True, phase="easing_in")
+    live = sessions.tracker.current()
+    before = time.time()
+    notify_session_changed("replay", False, phase="stopping")
+    after = time.time()
+
+    assert sessions.tracker.current() is None
+    ended = sessions.tracker.last_ended()
+    assert ended == {
+        "id": live["id"],
+        "kind": "replay",
+        "ended_at": ended["ended_at"],
+        "phase": "stopping",
+        "reason": None,  # a normal ending, not a lease-expiry safety stop
+    }
+    assert before <= ended["ended_at"] <= after
+
+
+def test_release_when_idle_or_for_another_kind_is_ignored() -> None:
+    notify_session_changed("teleoperation", False)
+    assert sessions.tracker.current() is None
+    assert sessions.tracker.last_ended() is None
+
+    notify_session_changed("recording", True)
+    notify_session_changed("teleoperation", False)  # not the live kind
+    assert sessions.tracker.current()["kind"] == "recording"
+    assert sessions.tracker.last_ended() is None
+
+
+def test_attribute_enriches_only_the_matching_kind() -> None:
+    notify_session_changed("teleoperation", True)
+    assert sessions.tracker.attribute("recording", robot="r1") is None
+
+    snap = sessions.tracker.attribute("teleoperation", robot="r1", owner="ui-1")
+    assert snap["robot"] == "r1" and snap["owner"] == "ui-1"
+    assert snap["revision"] == 1  # enrichment, not a transition
+    assert sessions.tracker.current()["robot"] == "r1"
+
+
+def test_legacy_started_session_gets_an_identity(monkeypatch) -> None:
+    """A start through the un-migrated legacy surface must still mint identity
+    — it falls out of seam observation. Reuses test_replay's mocked-connect
+    start path: the real legacy handler runs, hardware-free."""
+    from makermodslab import replay
+
+    monkeypatch.setattr(replay, "replay_active", False)
+    monkeypatch.setattr(replay, "replay_thread", None)
+
+    motors = ("shoulder_pan", "gripper")
+    monkeypatch.setattr(
+        replay,
+        "get_episode_action_series",
+        lambda repo_id, episode_index: {
+            "action_names": [f"{m}.pos" for m in motors],
+            "timestamps": [0.0],
+            "values": [[1.0, 2.0]],
+        },
+    )
+
+    class _FakeBus:
+        def __init__(self) -> None:
+            self.motors = dict.fromkeys(motors)
+
+    class _FakeRobot:
+        action_features = {f"{m}.pos": float for m in motors}
+        bus = _FakeBus()
+
+    class _NoopThread:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def is_alive(self) -> bool:
+            return False
+
+    monkeypatch.setattr(replay, "_connect_follower", lambda request: (_FakeRobot(), []))
+    monkeypatch.setattr(replay.threading, "Thread", _NoopThread)
+
+    result = replay.handle_start_replay(
+        replay.ReplayRequest(
+            repo_id="alice/pick", episode_index=0, follower_port="/dev/f", follower_config="fc"
+        )
+    )
+    assert result["success"] is True
+    try:
+        current = sessions.tracker.current()
+        assert current is not None
+        assert current["kind"] == "replay"
+        assert current["phase"] == "easing_in"
+        assert current["robot"] is None  # only the start wrapper knows; never guessed
+    finally:
+        replay.replay_active = False
+        replay.replay_thread = None
+
+
+# --- endpoint helpers --------------------------------------------------------
+
+
+def _make_robot(name: str = "bench", mode: str = "single", follower_only: bool = False) -> None:
+    """Fabricate a READY robot record on (redirected) disk: ports+configs set
+    and every referenced calibration config file present."""
+    from makermodslab.utils import config as cfg
+
+    data: dict = {"follower_port": "/dev/f", "follower_config": "FC"}
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "FC.json").write_text("{}")
+    if not follower_only:
+        data |= {"leader_port": "/dev/l", "leader_config": "LC"}
+        (Path(cfg.LEADER_CONFIG_PATH) / "LC.json").write_text("{}")
+    if mode == "bimanual":
+        data |= {
+            "mode": "bimanual",
+            "right_follower_port": "/dev/rf",
+            "right_follower_config": "RFC",
+        }
+        (Path(cfg.FOLLOWER_CONFIG_PATH) / "RFC.json").write_text("{}")
+        if not follower_only:
+            data |= {"right_leader_port": "/dev/rl", "right_leader_config": "RLC"}
+            (Path(cfg.LEADER_CONFIG_PATH) / "RLC.json").write_text("{}")
+    cfg.save_robot_record(name, data)
+
+
+def _fake_start(kind: str, captured: list, result: dict | None = None):
+    """A handle_start_* stand-in: records the constructed request model and
+    mimics the contract's claim event on success."""
+
+    def fake(request, websocket_manager=None):
+        captured.append(request)
+        if result is not None:
+            return result
+        notify_session_changed(kind, True)
+        return {"success": True}
+
+    return fake
+
+
+_REPLAY_OPTIONS = {"repo_id": "u/d", "episode_index": 0}
+_REMOTE_OPTIONS = {"policy_ref": "job:1:step:1000"}
+
+
+@pytest.fixture
+def remote_preflight(monkeypatch):
+    """Make remote_inference's transport ladder pass without touching a network.
+
+    The rungs before the ARM checks are the extra, the Lab's own SFU (the one
+    transport — its key file and server are stubbed here, never run) and one
+    `list_participants` call; a test that wants to reach the arm-type or
+    arm-count rung has to get past all three, and `_probe_room` is the single
+    seam that keeps this offline (livekit-api is aiohttp-based, so
+    httpx.MockTransport does not apply)."""
+    from makermodslab import remote_inference as ri
+
+    monkeypatch.setattr(ri, "_extra_missing", lambda: False)
+    monkeypatch.setattr(ri.sfu, "sfu_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(ri.sfu, "api_keys", lambda *a, **k: ("APIkey123", "s3cret"))
+    monkeypatch.setattr(ri.sfu, "local_url", lambda *a, **k: "ws://127.0.0.1:7880")
+    monkeypatch.setattr(ri.sfu, "default_room", lambda instance_id: "mml-abcdef012345")
+    monkeypatch.setattr(ri.sfu, "mint_token", lambda **kw: (f"jwt.{kw['identity']}", 0))
+    monkeypatch.setattr(
+        ri, "_probe_room", lambda *a, **k: ri.RoomProbe(True, True, True, operator_present=True)
+    )
+    monkeypatch.setattr(ri.camera_preview_manager, "stop_all", lambda: None)
+
+
+# --- POST /api/v1/sessions: resolution failures ------------------------------
+
+
+def test_start_unknown_robot_404(client, tmp_lerobot_home) -> None:
+    resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "ghost"})
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "robot.not_found"
+
+
+def test_start_invalid_robot_name_404(client, tmp_lerobot_home) -> None:
+    resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "../etc"})
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "robot.not_found"
+
+
+def test_start_not_ready_400(client, tmp_lerobot_home) -> None:
+    from makermodslab.utils import config as cfg
+
+    cfg.save_robot_record("bare", {"leader_port": "/dev/l"})  # no configs, no files
+    resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "bare"})
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "robot.not_ready"
+
+
+def test_follower_only_kinds_ignore_leader_gaps(client, tmp_lerobot_home, monkeypatch) -> None:
+    """Readiness is scoped to the arms the kind drives (the frontend's
+    robotSetupGap distinction): a leaderless robot can replay but not
+    teleoperate."""
+    _make_robot("armless", follower_only=True)
+
+    resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "armless"})
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "robot.not_ready"
+
+    captured: list = []
+    monkeypatch.setattr("makermodslab.replay.handle_start_replay", _fake_start("replay", captured))
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "replay", "robot": "armless", "options": _REPLAY_OPTIONS},
+    )
+    assert resp.status_code == 201
+    assert len(captured) == 1
+
+
+# --- POST /api/v1/sessions: per-kind options validation ----------------------
+
+
+@pytest.mark.parametrize(
+    ("kind", "options"),
+    [
+        ("recording", {}),  # dataset_repo_id/single_task are required
+        ("inference", {}),  # policy_ref is required
+        ("replay", {"repo_id": "u/d"}),  # episode_index is required
+        ("remote_inference", {}),  # policy_ref is required
+        ("remote_inference", {"policy_ref": "r", "coaching": True}),  # wrong kind's field
+        ("remote_inference", {"policy_ref": "r", "video_codec": "VP8"}),  # closed codec set
+        # Closed engine set: an unknown value would spawn the sync child while
+        # the operator's other terminal runs the rtc server, and Portal answers
+        # a schema-fingerprint mismatch by dropping every packet in silence.
+        ("remote_inference", {"policy_ref": "r", "engine": "inpaint"}),
+        ("remote_inference", {"policy_ref": "r", "s_min": "four"}),
+        ("teleoperation", {"dataset_repo_id": "u/d"}),  # wrong kind's field: extra forbidden
+        ("recording", {"dataset_repo_id": "u/d", "single_task": "t", "num_episodes": "lots"}),
+        ("calibration", {}),  # device_type is required
+        ("calibration", {"device_type": "leader"}),  # not the teleop/robot vocabulary
+        ("calibration", {"device_type": "teleop", "repo_id": "u/d"}),  # extra forbidden
+        ("auto_calibration", {}),  # arms is required
+        ("auto_calibration", {"arms": []}),  # at least one arm
+        ("auto_calibration", {"arms": [{"device_type": "teleop"}], "port": "/dev/x"}),  # extra
+    ],
+)
+def test_options_must_fit_the_kind_422(client, tmp_lerobot_home, kind, options) -> None:
+    _make_robot()
+    resp = client.post("/api/v1/sessions", json={"kind": kind, "robot": "bench", "options": options})
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "request.validation"
+
+
+def test_unknown_kind_is_a_422(client, tmp_lerobot_home) -> None:
+    # wiggle is the one kind still started only through its legacy endpoint
+    # (open-loop seconds, no stop handler — nothing a session could lease).
+    resp = client.post("/api/v1/sessions", json={"kind": "wiggle", "robot": "bench"})
+    assert resp.status_code == 422
+
+
+# --- POST /api/v1/sessions: the exclusivity gate -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("patch_target", "holder_kind"),
+    [
+        ("makermodslab.teleoperate.teleoperation_active", "teleoperation"),
+        ("makermodslab.record.recording_active", "recording"),
+        ("makermodslab.rollout.inference_active", "inference"),
+        ("makermodslab.remote_inference.remote_inference_active", "remote_inference"),
+        ("makermodslab.replay.replay_active", "replay"),
+        ("makermodslab.wiggle.wiggle_active", "wiggle"),
+    ],
+)
+def test_start_while_held_409_names_the_holder(client, monkeypatch, patch_target, holder_kind) -> None:
+    """The gate outranks robot resolution — even an unknown robot gets the
+    held answer while the hardware is claimed (one hardware set per node)."""
+    monkeypatch.setattr(patch_target, True)
+    resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "ghost"})
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["code"] == "session.held"
+    assert body["details"]["holder"] == {"kind": holder_kind, "session_id": None}
+
+
+@pytest.mark.parametrize(
+    ("patch_target", "holder_kind"),
+    [
+        ("makermodslab.calibrate.calibration_is_active", "calibration"),
+        ("makermodslab.auto_calibrate.auto_calibration_is_active", "auto_calibration"),
+    ],
+)
+def test_start_while_calibrating_409_names_the_holder(client, monkeypatch, patch_target, holder_kind) -> None:
+    """The calibration flows report their hold through functions (singleton
+    state), not module flags — the gate must see them all the same."""
+    monkeypatch.setattr(patch_target, lambda: True)
+    resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "ghost"})
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["code"] == "session.held"
+    assert body["details"]["holder"] == {"kind": holder_kind, "session_id": None}
+
+
+def test_held_details_carry_the_holder_session_id(client, monkeypatch) -> None:
+    notify_session_changed("teleoperation", True)
+    holder_id = sessions.tracker.current()["id"]
+    monkeypatch.setattr("makermodslab.teleoperate.teleoperation_active", True)
+
+    resp = client.post("/api/v1/sessions", json={"kind": "recording", "robot": "ghost"})
+    assert resp.status_code == 409
+    assert resp.json()["details"]["holder"] == {"kind": "teleoperation", "session_id": holder_id}
+
+
+def test_busy_refusal_from_a_raced_start_maps_to_held(client, tmp_lerobot_home, monkeypatch) -> None:
+    """The feature's own reciprocal check refusing (the gate raced another
+    start) surfaces identically to the gate: 409 session.held + holder."""
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr(
+        "makermodslab.teleoperate.handle_start_teleoperation",
+        _fake_start(
+            "teleoperation",
+            captured,
+            {"success": False, "message": "Recording is active", "code": ErrorCode.ROBOT_BUSY_RECORDING},
+        ),
+    )
+    resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "bench"})
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["code"] == "session.held"
+    assert body["details"]["holder"]["kind"] == "recording"
+
+
+def test_non_busy_refusal_passes_through(client, tmp_lerobot_home, monkeypatch) -> None:
+    _make_robot()
+    captured: list = []
+    refusal = {
+        "success": False,
+        "status_code": 400,
+        "message": "Malformed dataset name",
+        "code": ErrorCode.REQUEST_INVALID_NAME,
+    }
+    monkeypatch.setattr(
+        "makermodslab.record.handle_start_recording", _fake_start("recording", captured, refusal)
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "recording",
+            "robot": "bench",
+            "options": {"dataset_repo_id": "u/whoo/", "single_task": "t"},
+        },
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["code"] == "request.invalid_name"
+    assert body["detail"] == "Malformed dataset name"
+
+
+# --- POST /api/v1/sessions: success ------------------------------------------
+
+
+def test_start_success_201_returns_the_attributed_identity(client, tmp_lerobot_home, monkeypatch) -> None:
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr(
+        "makermodslab.teleoperate.handle_start_teleoperation", _fake_start("teleoperation", captured)
+    )
+    resp = client.post(
+        "/api/v1/sessions", json={"kind": "teleoperation", "robot": "bench", "owner": "ui-abc"}
+    )
+    assert resp.status_code == 201
+    session = resp.json()["session"]
+    assert session["kind"] == "teleoperation"
+    assert session["robot"] == "bench"
+    assert session["owner"] == "ui-abc"
+    assert session["revision"] == 1
+    assert session["phase"] is None
+    assert session["id"] == sessions.tracker.current()["id"]
+
+    # GET /sessions/current serves the same identity (the lease's
+    # expires_in_s is computed at read time, so compare it apart).
+    got = client.get("/api/v1/sessions/current").json()["session"]
+    assert {k: v for k, v in got.items() if k != "lease"} == {
+        k: v for k, v in session.items() if k != "lease"
+    }
+    assert got["lease"]["owner"] == "ui-abc"
+
+
+def test_start_success_without_a_claim_event_is_a_500(client, tmp_lerobot_home, monkeypatch) -> None:
+    """A feature reporting success without emitting its claim would leave an
+    unidentifiable live session — surfaced loudly, never silently."""
+    _make_robot()
+    monkeypatch.setattr(
+        "makermodslab.teleoperate.handle_start_teleoperation",
+        lambda request, websocket_manager=None: {"success": True},
+    )
+    resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "bench"})
+    assert resp.status_code == 500
+    assert resp.json()["code"] == "internal.unexpected"
+
+
+# --- request-model construction (pure assembly, per kind) --------------------
+
+
+def test_teleoperation_request_built_from_the_record(client, tmp_lerobot_home, monkeypatch) -> None:
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr(
+        "makermodslab.teleoperate.handle_start_teleoperation", _fake_start("teleoperation", captured)
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "teleoperation", "robot": "bench", "options": {"skip_identity_check": True}},
+    )
+    assert resp.status_code == 201
+    req = captured[0]
+    assert (req.leader_port, req.follower_port) == ("/dev/l", "/dev/f")
+    assert (req.leader_config, req.follower_config) == ("LC", "FC")
+    assert req.mode == "single"
+    assert req.robot_name == "bench"
+    assert req.skip_identity_check is True
+
+
+def test_bimanual_record_maps_right_arm_fields(client, tmp_lerobot_home, monkeypatch) -> None:
+    _make_robot("bi", mode="bimanual")
+    captured: list = []
+    monkeypatch.setattr(
+        "makermodslab.teleoperate.handle_start_teleoperation", _fake_start("teleoperation", captured)
+    )
+    resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "bi"})
+    assert resp.status_code == 201
+    req = captured[0]
+    assert req.mode == "bimanual"
+    assert (req.right_leader_port, req.right_follower_port) == ("/dev/rl", "/dev/rf")
+    assert (req.right_leader_config, req.right_follower_config) == ("RLC", "RFC")
+    assert req.robot_name == "bi"
+
+
+def test_recording_request_merges_record_and_options(client, tmp_lerobot_home, monkeypatch) -> None:
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr("makermodslab.record.handle_start_recording", _fake_start("recording", captured))
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "recording",
+            "robot": "bench",
+            "options": {
+                "dataset_repo_id": "alice/pick",
+                "single_task": "pick the cube",
+                "num_episodes": 12,
+                "fps": 25,
+                "push_to_hub": True,
+                "tags": ["so101"],
+            },
+        },
+    )
+    assert resp.status_code == 201
+    req = captured[0]
+    assert (req.leader_port, req.follower_port, req.leader_config, req.follower_config) == (
+        "/dev/l",
+        "/dev/f",
+        "LC",
+        "FC",
+    )
+    assert req.robot_name == "bench"  # cameras resolve from this record server-side
+    assert (req.dataset_repo_id, req.single_task) == ("alice/pick", "pick the cube")
+    assert (req.num_episodes, req.fps) == (12, 25)
+    assert req.push_to_hub is True and req.tags == ["so101"]
+    assert req.episode_time_s == 30  # untouched defaults stay the feature's own
+    assert req.per_episode_task is False  # off unless the option asks for it
+
+
+def test_recording_request_carries_the_per_episode_task_flag(client, tmp_lerobot_home, monkeypatch) -> None:
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr("makermodslab.record.handle_start_recording", _fake_start("recording", captured))
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "recording",
+            "robot": "bench",
+            "options": {
+                "dataset_repo_id": "alice/pick",
+                "single_task": "pick the cube",
+                "per_episode_task": True,
+            },
+        },
+    )
+    assert resp.status_code == 201
+    assert captured[0].per_episode_task is True
+
+
+def test_inference_request_is_follower_only(client, tmp_lerobot_home, monkeypatch) -> None:
+    _make_robot("bi", mode="bimanual", follower_only=True)
+    captured: list = []
+    monkeypatch.setattr("makermodslab.rollout.handle_start_inference", _fake_start("inference", captured))
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "inference",
+            "robot": "bi",
+            "options": {
+                "policy_ref": "alice/act-pick",
+                "task": "pick",
+                "camera_bindings": {"top": "workbench"},
+                "camera_dims": {"top": {"width": 320, "height": 240}},
+                "duration_s": 120,
+                "checkpoint_state_dim": 12,
+                "eval_episodes": 3,
+                "inference_engine": "rtc",
+                "temporal_ensemble_coeff": 0.01,
+            },
+        },
+    )
+    assert resp.status_code == 201
+    req = captured[0]
+    assert (req.follower_port, req.follower_config) == ("/dev/f", "FC")
+    assert req.mode == "bimanual"
+    assert (req.right_follower_port, req.right_follower_config) == ("/dev/rf", "RFC")
+    assert req.robot_name == "bi"
+    assert req.policy_ref == "alice/act-pick"
+    assert req.camera_bindings == {"top": "workbench"}
+    assert req.camera_dims["top"].width == 320 and req.camera_dims["top"].height == 240
+    assert (req.duration_s, req.checkpoint_state_dim, req.eval_episodes) == (120, 12, 3)
+    assert (req.inference_engine, req.temporal_ensemble_coeff) == ("rtc", 0.01)
+
+
+def test_replay_request_built_from_record_and_options(client, tmp_lerobot_home, monkeypatch) -> None:
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr("makermodslab.replay.handle_start_replay", _fake_start("replay", captured))
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "replay", "robot": "bench", "options": {"repo_id": "u/d", "episode_index": 4}},
+    )
+    assert resp.status_code == 201
+    req = captured[0]
+    assert (req.repo_id, req.episode_index) == ("u/d", 4)
+    assert (req.follower_port, req.follower_config) == ("/dev/f", "FC")
+    assert req.robot_name == "bench"
+
+
+def test_remote_inference_is_follower_only(client, tmp_lerobot_home, monkeypatch) -> None:
+    """A leaderless robot can run a remote session. Unconditionally: unlike
+    inference there is no coaching exception, because a remote session has no
+    handover — the operator is a GPU in another datacentre."""
+    _make_robot("armless", follower_only=True)
+    captured: list = []
+    monkeypatch.setattr(
+        "makermodslab.remote_inference.handle_start_remote_inference",
+        _fake_start("remote_inference", captured),
+    )
+
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "remote_inference", "robot": "armless", "options": _REMOTE_OPTIONS},
+    )
+    assert resp.status_code == 201
+    assert "remote_inference" in sessions._FOLLOWER_ONLY_KINDS
+    req = captured[0]
+    # No leader half exists on the request model at all — assert the record's
+    # leader values did not sneak in under any name.
+    assert not any("leader" in field for field in type(req).model_fields)
+
+
+def test_remote_inference_request_built_from_the_record(client, tmp_lerobot_home, monkeypatch) -> None:
+    """The record supplies the hardware, the options the policy and the wire
+    contract — and the camera BINDINGS travel verbatim while the devices stay
+    the record's business (resolving one here is the one way to break Portal's
+    schema fingerprint, which fails as a healthy-looking zero-chunk run)."""
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr(
+        "makermodslab.remote_inference.handle_start_remote_inference",
+        _fake_start("remote_inference", captured),
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "remote_inference",
+            "robot": "bench",
+            "options": {
+                "policy_ref": "job:7:step:20000",
+                "policy_hub_id": "alice/act-pick",
+                "task": "pick the cube",
+                "camera_bindings": {"top": "workbench"},
+                "camera_dims": {"top": {"width": 320, "height": 240}},
+                "checkpoint_state_dim": 6,
+                "duration_s": 120,
+                "horizon": 32,
+                "fps": 25,
+                "video_codec": "MJPEG",
+                "engine": "rtc",
+                "s_min": 6,
+                "lpf_hz": 4,
+                "lpf_order": 2,
+                "camera_send_hz": 5,
+                "video_quality": 65,
+                "video_bitrate_kbps": 2048,
+                "latency_k": 2.5,
+                "skip_identity_check": True,
+            },
+        },
+    )
+    assert resp.status_code == 201
+    req = captured[0]
+    assert (req.follower_port, req.follower_config) == ("/dev/f", "FC")
+    assert (req.mode, req.robot_name, req.arm_type) == ("single", "bench", "so101")
+    assert (req.policy_ref, req.policy_hub_id) == ("job:7:step:20000", "alice/act-pick")
+    assert req.task == "pick the cube"
+    assert req.camera_bindings == {"top": "workbench"}
+    assert req.camera_dims["top"].width == 320 and req.camera_dims["top"].height == 240
+    assert (req.checkpoint_state_dim, req.duration_s) == (6, 120)
+    assert (req.horizon, req.fps, req.video_codec) == (32, 25, "MJPEG")
+    # The engine picks which chunk player is spawned; defaulting it here would
+    # silently run the arm under a regime the caller did not choose.
+    assert (req.engine, req.s_min) == ("rtc", 6)
+    assert (req.lpf_hz, req.lpf_order) == (4, 2)
+    assert (req.camera_send_hz, req.video_quality, req.video_bitrate_kbps, req.latency_k) == (
+        5,
+        65,
+        2048,
+        2.5,
+    )
+    assert req.skip_identity_check is True
+    # Cameras resolve server-side from this record; no device dict rides along.
+    assert not hasattr(req, "cameras")
+
+
+def test_remote_inference_on_a_can_arm_is_refused_400(
+    client, tmp_lerobot_home, monkeypatch, remote_preflight
+) -> None:
+    """A Metal follower is refused SYNCHRONOUSLY and pre-spawn (draccus never
+    registered it in the child), and the refusal must arrive as a 400 — the
+    feature returns a refusal DICT, and handle_start_session's fallback turns
+    an unlabelled one into a 500. The slot must also be released: one bad
+    launch wedging the arm until a restart is the failure this guards."""
+    from makermodslab import remote_inference as ri
+    from makermodslab.utils import config as cfg
+
+    metal_lib = tmp_lerobot_home / "calibration" / "robots" / "metal_follower"
+    metal_lib.mkdir(parents=True)
+    (metal_lib / "MFC.json").write_text("{}")
+    monkeypatch.setattr(cfg, "METAL_FOLLOWER_CONFIG_PATH", str(metal_lib))
+    cfg.save_robot_record(
+        "canbot", {"follower_port": "/dev/can0", "follower_config": "MFC", "arm_type": "metal"}
+    )
+
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "remote_inference", "robot": "canbot", "options": _REMOTE_OPTIONS},
+    )
+    assert resp.status_code == 400
+    assert ri.remote_inference_active is False
+
+
+def test_remote_inference_on_a_bimanual_robot_is_refused_400(
+    client, tmp_lerobot_home, remote_preflight
+) -> None:
+    """The first-action ease-in is single-Feetech-bus only, so a bimanual
+    robot's first move would be a full-speed snap to the policy's pose. Refused
+    at the same rung, with the same 400-not-500 requirement."""
+    from makermodslab import remote_inference as ri
+
+    _make_robot("bi", mode="bimanual", follower_only=True)
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "remote_inference", "robot": "bi", "options": _REMOTE_OPTIONS},
+    )
+    assert resp.status_code == 400
+    assert "bimanual" in resp.json()["detail"]
+    assert ri.remote_inference_active is False
+
+
+def test_remote_inference_start_dispatches_to_its_own_handler(client, tmp_lerobot_home, monkeypatch) -> None:
+    """_dispatch_start falls through to REPLAY, so a kind added without its own
+    branch silently replays somebody's dataset onto the arm. Small, ugly, and
+    the only thing standing between a typo and that."""
+    _make_robot()
+    remote: list = []
+    replayed: list = []
+    monkeypatch.setattr(
+        "makermodslab.remote_inference.handle_start_remote_inference",
+        _fake_start("remote_inference", remote),
+    )
+    monkeypatch.setattr("makermodslab.replay.handle_start_replay", _fake_start("replay", replayed))
+
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "remote_inference", "robot": "bench", "options": _REMOTE_OPTIONS},
+    )
+    assert resp.status_code == 201
+    assert len(remote) == 1
+    assert replayed == []
+
+
+def test_calibration_request_built_from_the_record(client, tmp_lerobot_home, monkeypatch) -> None:
+    """The record resolves the slot's port and assigned config name; the
+    caller chooses only the slot (device_type/arm) and the overwrite flag."""
+    from makermodslab import calibrate
+
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr(
+        calibrate.calibration_manager, "start_calibration", _fake_start("calibration", captured)
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "calibration",
+            "robot": "bench",
+            "options": {"device_type": "teleop", "overwrite": True},
+        },
+    )
+    assert resp.status_code == 201
+    req = captured[0]
+    assert (req.device_type, req.arm) == ("teleop", "left")
+    assert req.port == "/dev/l"
+    assert req.config_file == "LC"  # the slot's assigned config
+    assert req.robot_name == "bench"
+    assert req.overwrite is True
+
+
+def test_calibration_explicit_port_and_config_override_the_record(
+    client, tmp_lerobot_home, monkeypatch
+) -> None:
+    """Calibration is the setup flow: a fresh port pick lives only in the UI
+    draft until the success write-back, so options may carry it."""
+    from makermodslab import calibrate
+
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr(
+        calibrate.calibration_manager, "start_calibration", _fake_start("calibration", captured)
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "calibration",
+            "robot": "bench",
+            "options": {"device_type": "robot", "port": "/dev/fresh", "config_file": "custom"},
+        },
+    )
+    assert resp.status_code == 201
+    req = captured[0]
+    assert req.port == "/dev/fresh"
+    assert req.config_file == "custom"
+    assert req.overwrite is False
+
+
+def test_calibration_config_defaults_to_the_robots_slot_name(client, tmp_lerobot_home, monkeypatch) -> None:
+    """A slot with no assigned config falls back to the UI's own default name:
+    '<robot>_<arm>' bimanual, '<robot>' single."""
+    from makermodslab import calibrate
+    from makermodslab.utils import config as cfg
+
+    cfg.save_robot_record("fresh", {"leader_port": "/dev/l"})  # port, no config
+    captured: list = []
+    monkeypatch.setattr(
+        calibrate.calibration_manager, "start_calibration", _fake_start("calibration", captured)
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "calibration", "robot": "fresh", "options": {"device_type": "teleop"}},
+    )
+    assert resp.status_code == 201
+    assert captured[0].config_file == "fresh"
+
+    cfg.save_robot_record("bi", {"mode": "bimanual", "right_follower_port": "/dev/rf"})
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "calibration",
+            "robot": "bi",
+            "options": {"device_type": "robot", "arm": "right"},
+        },
+    )
+    assert resp.status_code == 201
+    assert captured[1].config_file == "bi_right"
+    assert captured[1].port == "/dev/rf"
+
+
+def test_calibration_on_a_steps_family_reaches_the_step_manager(
+    client, tmp_lerobot_home, monkeypatch
+) -> None:
+    """TB6a: the calibration kind picks the manager. A family whose kind is
+    ``steps`` (an extension's, here a fake) gets a StepCalibrationRequest
+    carrying its arm type and its minted default slot name, dispatched to
+    the step manager's start — no edit to sessions.py per family."""
+    from makermodslab import step_calibrate
+    from makermodslab.arms import registry
+    from makermodslab.utils import config as cfg
+    from tests.mocks import make_arm_family, scratch_registry
+
+    scratch_registry(monkeypatch)
+    registry.register(make_arm_family("nine"))
+    cfg.save_robot_record("ninebot", {"arm_type": "nine", "mode": "single", "follower_port": "/dev/nine0"})
+    captured: list = []
+    monkeypatch.setattr(
+        step_calibrate.step_calibration_manager, "start", _fake_start("calibration", captured)
+    )
+
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "calibration", "robot": "ninebot", "options": {"device_type": "robot"}},
+    )
+    assert resp.status_code == 201, resp.text
+    req = captured[0]
+    assert isinstance(req, step_calibrate.StepCalibrationRequest)
+    assert (req.arm_type, req.port, req.config_file) == ("nine", "/dev/nine0", "ninebot_nine")
+    assert req.robot_name == "ninebot"
+
+
+def test_calibration_on_a_panel_family_is_refused_pointing_at_the_panel(
+    client, tmp_lerobot_home, monkeypatch
+) -> None:
+    """A ``panel`` family calibrates through its extension's own page (TB6b
+    mounts it in the config dialog); the sessions surface has no procedure to
+    run and says where to go instead, with the readiness code."""
+    from makermodslab import calibrate, step_calibrate
+    from makermodslab.arms import registry
+    from makermodslab.utils import config as cfg
+    from tests.mocks import make_arm_family, scratch_registry
+
+    scratch_registry(monkeypatch)
+    registry.register(
+        make_arm_family("paneled", calibration_kind="panel", calibration_panel_url="/api/v1/ext/p/static/cal")
+    )
+    cfg.save_robot_record("panelbot", {"arm_type": "paneled", "mode": "single", "follower_port": "/dev/p0"})
+    for manager, name in (
+        (step_calibrate.step_calibration_manager, "start"),
+        (calibrate.calibration_manager, "start_calibration"),
+    ):
+        monkeypatch.setattr(manager, name, lambda request, *a, **k: pytest.fail("no manager may start"))
+
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "calibration", "robot": "panelbot", "options": {"device_type": "robot"}},
+    )
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["code"] == ErrorCode.ROBOT_NOT_READY
+    assert body["detail"] == (
+        "This arm is calibrated through its extension's own panel; open it from the robot's config window."
+    )
+
+
+def test_stop_of_a_calibration_reaches_the_live_step_manager(monkeypatch) -> None:
+    """Stopping is never owner-gated and the tracker only knows the KIND;
+    the dispatcher stops whichever manager is live — the step wizard when
+    it holds the bus, the sweep otherwise."""
+    from makermodslab import calibrate, step_calibrate
+
+    monkeypatch.setattr(step_calibrate, "step_calibration_is_active", lambda: True)
+    monkeypatch.setattr(
+        step_calibrate.step_calibration_manager, "stop", lambda: {"success": True, "message": "steps stopped"}
+    )
+    monkeypatch.setattr(
+        calibrate.calibration_manager,
+        "stop_calibration_process",
+        lambda: pytest.fail("the sweep manager is not the live one"),
+    )
+    assert sessions._dispatch_stop("calibration")["message"] == "steps stopped"
+
+    monkeypatch.setattr(step_calibrate, "step_calibration_is_active", lambda: False)
+    monkeypatch.setattr(
+        calibrate.calibration_manager,
+        "stop_calibration_process",
+        lambda: {"success": True, "message": "sweep"},
+    )
+    assert sessions._dispatch_stop("calibration")["message"] == "sweep"
+
+
+def test_calibration_without_a_port_anywhere_400(client, tmp_lerobot_home) -> None:
+    """No record-clean gate for the setup kinds — but a slot with no port
+    (record or options) is still unusable."""
+    from makermodslab.utils import config as cfg
+
+    cfg.save_robot_record("bare", {})
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "calibration", "robot": "bare", "options": {"device_type": "teleop"}},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "robot.not_ready"
+
+
+def test_auto_calibration_batch_built_from_the_record(client, tmp_lerobot_home, monkeypatch) -> None:
+    """The one options shape covers single and multi arm: `arms` maps to
+    AutoCalibrationBatchRequest, ports/configs per slot from the record,
+    motor_power defaulting to the record's persisted torque cap."""
+    from makermodslab import auto_calibrate
+
+    _make_robot("bi", mode="bimanual")
+    captured: list = []
+    monkeypatch.setattr(
+        auto_calibrate.auto_calibration_batch_manager, "start", _fake_start("auto_calibration", captured)
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "auto_calibration",
+            "robot": "bi",
+            "options": {
+                "arms": [
+                    {"device_type": "teleop"},
+                    {"device_type": "robot", "arm": "right"},
+                ],
+                "overwrite": True,
+            },
+        },
+    )
+    assert resp.status_code == 201
+    req = captured[0]
+    assert req.robot_name == "bi"
+    assert req.overwrite is True
+    assert req.motor_power == 38  # the record's DEFAULT_MOTOR_POWER
+    assert [(a.device_type, a.arm, a.port, a.config_file) for a in req.arms] == [
+        ("teleop", "left", "/dev/l", "LC"),
+        ("robot", "right", "/dev/rf", "RFC"),
+    ]
+
+
+def test_auto_calibration_motor_power_option_overrides_the_record(
+    client, tmp_lerobot_home, monkeypatch
+) -> None:
+    from makermodslab import auto_calibrate
+
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr(
+        auto_calibrate.auto_calibration_batch_manager, "start", _fake_start("auto_calibration", captured)
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "auto_calibration",
+            "robot": "bench",
+            "options": {"arms": [{"device_type": "robot"}], "motor_power": 55},
+        },
+    )
+    assert resp.status_code == 201
+    assert captured[0].motor_power == 55
+
+
+def test_auto_calibration_arm_without_a_port_400(client, tmp_lerobot_home) -> None:
+    _make_robot()  # single: no right_* ports saved
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "auto_calibration",
+            "robot": "bench",
+            "options": {"arms": [{"device_type": "robot", "arm": "right"}]},
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "robot.not_ready"
+
+
+def test_name_taken_refusal_is_a_409(client, tmp_lerobot_home, monkeypatch) -> None:
+    """The calibration flows' name-collision refusal carries no status_code of
+    its own (legacy callers read it from a 200 body) — the sessions surface
+    maps it to a conflict, never a 500."""
+    from makermodslab import calibrate
+
+    _make_robot()
+    monkeypatch.setattr(
+        calibrate.calibration_manager,
+        "start_calibration",
+        lambda request: {
+            "success": False,
+            "code": "name_taken",
+            "message": "A calibration named 'LC' already exists.",
+        },
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "calibration", "robot": "bench", "options": {"device_type": "teleop"}},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "name_taken"
+
+
+# --- the 201's warnings relay -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kind", "patch_target", "options"),
+    [
+        ("teleoperation", "makermodslab.teleoperate.handle_start_teleoperation", {}),
+        ("replay", "makermodslab.replay.handle_start_replay", _REPLAY_OPTIONS),
+    ],
+)
+def test_start_relays_warn_but_allow_findings(
+    client, tmp_lerobot_home, monkeypatch, kind, patch_target, options
+) -> None:
+    """Teleoperation and replay starts can succeed WITH an arm-identity
+    warning; the legacy start responses carried it and the 201 must too."""
+    _make_robot()
+
+    def fake(request, websocket_manager=None):
+        notify_session_changed(kind, True)
+        return {"success": True, "warning": "EEPROM offsets differ from the saved calibration."}
+
+    monkeypatch.setattr(patch_target, fake)
+    resp = client.post("/api/v1/sessions", json={"kind": kind, "robot": "bench", "options": options})
+    assert resp.status_code == 201
+    assert resp.json()["warnings"] == ["EEPROM offsets differ from the saved calibration."]
+
+
+def test_start_without_findings_relays_no_warnings(client, tmp_lerobot_home, monkeypatch) -> None:
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr(
+        "makermodslab.teleoperate.handle_start_teleoperation", _fake_start("teleoperation", captured)
+    )
+    resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "bench"})
+    assert resp.status_code == 201
+    assert resp.json()["warnings"] is None
+
+
+# --- GET /api/v1/sessions/current --------------------------------------------
+
+
+def test_current_is_null_when_idle(client) -> None:
+    assert client.get("/api/v1/sessions/current").json() == {"session": None, "last_ended": None}
+
+
+def test_current_reports_a_legacy_started_session_and_its_end(client) -> None:
+    notify_session_changed("auto_calibration", True, phase="running")
+    body = client.get("/api/v1/sessions/current").json()
+    assert body["session"]["kind"] == "auto_calibration"
+    assert body["session"]["robot"] is None
+
+    notify_session_changed("auto_calibration", False, phase="done")
+    body = client.get("/api/v1/sessions/current").json()
+    assert body["session"] is None
+    assert body["last_ended"]["kind"] == "auto_calibration"
+    assert body["last_ended"]["phase"] == "done"
+
+
+# --- POST /api/v1/sessions/{id}/stop -----------------------------------------
+
+
+def test_stop_with_no_session_404(client) -> None:
+    resp = client.post("/api/v1/sessions/deadbeef/stop")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "session.not_found"
+
+
+def test_stop_with_a_stale_id_404_and_leaves_the_session_alone(client, monkeypatch) -> None:
+    notify_session_changed("teleoperation", True)
+    live = sessions.tracker.current()
+
+    def must_not_run():
+        raise AssertionError("stop dispatched despite an id mismatch")
+
+    monkeypatch.setattr("makermodslab.teleoperate.handle_stop_teleoperation", must_not_run)
+    resp = client.post("/api/v1/sessions/0000stale0000/stop")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "session.not_found"
+    assert sessions.tracker.current() == live
+
+
+def test_stop_by_id_dispatches_and_returns_final_identity(client, monkeypatch) -> None:
+    """Stop works for a legacy-started session (id via the observer), returns
+    the kind's stop result verbatim, and reports the ended identity."""
+    notify_session_changed("teleoperation", True)
+    live_id = sessions.tracker.current()["id"]
+
+    def fake_stop():
+        notify_session_changed("teleoperation", False, phase="done")
+        return {"success": True, "message": "Teleoperation stopped"}
+
+    monkeypatch.setattr("makermodslab.teleoperate.handle_stop_teleoperation", fake_stop)
+    resp = client.post(f"/api/v1/sessions/{live_id}/stop")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == {"success": True, "message": "Teleoperation stopped"}
+    assert body["session"]["id"] == live_id
+    assert body["session"]["phase"] == "done"  # the release event's phase
+    assert sessions.tracker.current() is None
+
+
+def test_stop_of_a_gracefully_releasing_session_reports_it_live(client, monkeypatch) -> None:
+    """A stop that only BEGINS the release (teleop's grace) leaves the session
+    current, in its releasing phase, still under the same id."""
+    notify_session_changed("teleoperation", True)
+    live_id = sessions.tracker.current()["id"]
+
+    def fake_stop():
+        notify_session_changed("teleoperation", True, phase="releasing")
+        return {"success": True, "message": "Releasing"}
+
+    monkeypatch.setattr("makermodslab.teleoperate.handle_stop_teleoperation", fake_stop)
+    body = client.post(f"/api/v1/sessions/{live_id}/stop").json()
+    assert body["session"]["id"] == live_id
+    assert body["session"]["phase"] == "releasing"
+    assert body["session"]["revision"] == 2
+    assert sessions.tracker.current()["id"] == live_id
+
+
+def test_stop_of_a_wiggle_is_refused(client) -> None:
+    notify_session_changed("wiggle", True)
+    live_id = sessions.tracker.current()["id"]
+    resp = client.post(f"/api/v1/sessions/{live_id}/stop")
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "robot.busy.wiggle"
+
+
+# --- the session-scoped coaching command -------------------------------------
+#
+# Every assertion here exists because a restack silently deleted the thing it
+# checks. The route, its handler, its schemas and its frontend caller all went
+# at once, and the branch kept building and kept passing — the flat
+# `/coaching-*` verbs were still there to fall back to, so nothing failed until
+# an operator drove a robot with a dialog that could no longer say WHICH
+# session it was commanding.
+
+
+def test_a_coaching_command_reaches_the_session_it_names(monkeypatch) -> None:
+    sent = []
+    monkeypatch.setattr(
+        sessions_rollout(), "handle_coaching_command", lambda c: sent.append(c) or {"success": True}
+    )
+    notify_session_changed("inference", True, phase="watching")
+    session_id = sessions.tracker.current()["id"]
+
+    result = sessions.handle_coaching_command_for_session(session_id, "takeover")
+
+    assert sent == ["takeover"]
+    assert result == {"result": {"success": True}}
+
+
+def test_a_command_for_a_session_that_is_no_longer_running_is_refused(monkeypatch) -> None:
+    """THE reason the id is in the URL. A dialog left open across a session
+    change must fail loudly rather than take over an arm in a session the
+    operator has stopped looking at — which is exactly what the flat verb it
+    was reverted to would have done."""
+    called = []
+    monkeypatch.setattr(
+        sessions_rollout(), "handle_coaching_command", lambda c: called.append(c) or {"success": True}
+    )
+    notify_session_changed("inference", True, phase="watching")
+
+    with pytest.raises(ApiError) as excinfo:
+        sessions.handle_coaching_command_for_session("a-stale-id", "takeover")
+
+    assert excinfo.value.status_code == 404
+    assert excinfo.value.code == ErrorCode.SESSION_NOT_FOUND
+    # And it never reached the runner.
+    assert called == []
+
+
+def test_a_command_with_no_session_at_all_is_refused(monkeypatch) -> None:
+    called = []
+    monkeypatch.setattr(
+        sessions_rollout(), "handle_coaching_command", lambda c: called.append(c) or {"success": True}
+    )
+    with pytest.raises(ApiError) as excinfo:
+        sessions.handle_coaching_command_for_session("anything", "takeover")
+    assert excinfo.value.status_code == 404
+    assert called == []
+
+
+def test_the_runners_refusal_is_passed_through_with_its_own_status(monkeypatch) -> None:
+    """A plain (non-coaching) inference session answers 409 from the runner.
+    That verdict is the runner's to make — this layer must not flatten it into
+    a 500, and must not duplicate a phase check the runner already owns."""
+    monkeypatch.setattr(
+        sessions_rollout(),
+        "handle_coaching_command",
+        lambda c: {"success": False, "status_code": 409, "message": "No coaching session is active"},
+    )
+    notify_session_changed("inference", True, phase="running")
+    session_id = sessions.tracker.current()["id"]
+
+    with pytest.raises(ApiError) as excinfo:
+        sessions.handle_coaching_command_for_session(session_id, "takeover")
+    assert excinfo.value.status_code == 409
+
+
+# --- a coaching session is NOT follower-only ---------------------------------
+
+
+def test_a_coaching_session_reserves_the_leader_arm_too() -> None:
+    """Coaching is the one inference flow that DRIVES the leader arm — the
+    operator takes over through it and the runner puts it under torque for the
+    handover glide. So it needs the same all-arms readiness the non-follower-only
+    kinds get, and it lost that in the restack: `arms` fell back to "follower"
+    for every inference session, leaving the leader neither verified present nor
+    held against another feature grabbing its port."""
+    assert "inference" in sessions._FOLLOWER_ONLY_KINDS
+
+    def arms_for(options):
+        follower_only = "inference" in sessions._FOLLOWER_ONLY_KINDS and not (bool(options.get("coaching")))
+        return "follower" if follower_only else "all"
+
+    assert arms_for({}) == "follower"
+    assert arms_for({"coaching": False}) == "follower"
+    assert arms_for({"coaching": True}) == "all"

@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Loader2 } from "lucide-react";
 
 import { useApi } from "@/contexts/ApiContext";
+import { useLanguage } from "@/contexts/LanguageContext";
+import { isCaselessScript } from "@/i18n/config";
 import { useStudio } from "@/contexts/StudioContext";
 import { useJobsChangedSignal } from "@/hooks/useJobsChangedSignal";
 import {
@@ -22,6 +25,9 @@ import { cn } from "@/lib/utils";
  */
 const ActivityStrip: React.FC = () => {
   const { baseUrl, fetchWithHeaders } = useApi();
+  const { t } = useTranslation();
+  const { language } = useLanguage();
+  const isCJK = isCaselessScript(language);
   const { openJobMonitor } = useStudio();
   const [jobs, setJobs] = useState<JobRecord[]>([]);
 
@@ -116,8 +122,20 @@ const ActivityStrip: React.FC = () => {
                 {pct}%
               </span>
             ) : null}
-            <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary">
-              {job.state}
+            {/* `job.state` is a backend enum: the value is data and never
+                translated, only the label shown for it. An unmapped state
+                falls back to the raw string rather than rendering a key.
+                `uppercase` is a no-op on Chinese, but the tracking is not —
+                dropped there so the pill doesn't render over-spaced. */}
+            <span
+              className={cn(
+                "rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary",
+                isCJK ? "" : "uppercase tracking-wide",
+              )}
+            >
+              {t(`launchpad.jobState.${job.state}` as never, {
+                defaultValue: job.state,
+              })}
             </span>
           </button>
         );

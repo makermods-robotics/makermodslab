@@ -4,12 +4,54 @@ export interface JobCheckpoint {
   step: number;
   source: "local" | "hub";
   ref: string;
+  /** Which run in a resume chain actually saved this checkpoint. Present only
+   * on a `lineage: true` listing, where a step is no longer unique; a
+   * single-run listing omits it because every row would say the same thing.
+   *
+   * `(owner_job_id, step)` IS unique, so it is the safe way to address one
+   * checkpoint by step — e.g. the policy-config endpoint, which takes a job id
+   * and a step. */
+  owner_job_id?: string;
+  owner_job_number?: number;
+  owner_name?: string;
 }
 
 export interface PolicyConfigSummary {
   policy_type: string | null;
   image_features: Record<string, { height: number; width: number }>;
   requires_task: boolean;
+  /** Whether this checkpoint's ARCHITECTURE can run the Real-Time Chunking
+   * inference engine. `false` means the server refuses `inference_engine:
+   * "rtc"` for it with a 400 before any hardware is claimed, so the dialogs
+   * take the option off the menu. `null` means "not established" — a policy
+   * type newer than the server's table — and must be read as "offer it and let
+   * the server decide", never as "no". */
+  supports_rtc: boolean | null;
+  /** Whether the two GPU-launch knobs apply to THIS checkpoint, so the remote
+   * panel can disable a select with a reason instead of sending a value the
+   * launcher would drop.
+   *
+   * `supports_model_dtype` is "this config carries a `model_dtype` field" — in
+   * the current pin only MolmoAct2 does, which is exactly the trap: a precision
+   * picked for a MolmoAct2 run is remembered per browser and is still selected
+   * when the operator switches to SmolVLA. Optional here for a server too old
+   * to report it, and the client must read a missing one as "offer it". */
+  supports_model_dtype?: boolean;
+  /** Whether the checkpoint's family samples its actions in steps at all
+   * (smolvla, pi0, pi05, MolmoAct2 do; ACT and pi0_fast do not). Separate from
+   * the default below because null there is BOTH "no such knob" and "the knob
+   * exists and this checkpoint saved nothing". */
+  supports_flow_steps?: boolean;
+  /** Whether extra camera views may be DECLARED on this checkpoint at launch
+   * (S3.8g) — true only for a family whose image-view count is a property of
+   * its lerobot wrapper rather than of its architecture (MolmoAct2 today).
+   * Absent on a server too old to answer, which the panel reads as false. */
+  supports_extra_image_roles?: boolean;
+  /** The steps-per-chunk this checkpoint would run with, when its config says.
+   * Null means "no number to show", never "no default": MolmoAct2 saves
+   * `num_inference_steps: null` and the number that then applies (10) lives in
+   * its backbone's own config, which the server cannot see from here. */
+  flow_steps_default?: number | null;
   // Flat proprioceptive state / action widths from the checkpoint. For an
   // SO-101 arm this is 6 (one per joint); a bimanual-trained checkpoint carries
   // 12 (two arms). The inference modal compares state_dim against the selected
@@ -17,6 +59,23 @@ export interface PolicyConfigSummary {
   // null when the checkpoint omits the feature.
   state_dim: number | null;
   action_dim: number | null;
+  /** The checkpoint's chunk geometry, null when the config omits it.
+   *
+   * `n_action_steps` is how many steps `predict_action_chunk` actually returns,
+   * and therefore the CEILING on a remote-inference horizon: declare more and
+   * the two Portal peers disagree about the action-chunk shape, the wire-schema
+   * fingerprint stops matching, and every packet is dropped in silence — a
+   * connected session that receives nothing. `chunk_size` is the wider window
+   * the policy predicts internally (>= n_action_steps); carried for display and
+   * diagnosis, never used as the ceiling. */
+  n_action_steps: number | null;
+  chunk_size: number | null;
+  /** Raw lerobot robot_type of the dataset this checkpoint was trained on
+   * (recovered via its train_config.json). null when it can't be
+   * established — an imported flat model, a deleted training dataset, an
+   * untagged one. The fine-tune panel normalises it with armTypeFromRobotType
+   * and warns when it disagrees with the selected dataset's arm. */
+  trained_on_robot_type?: string | null;
 }
 
 /** Collapse checkpoint entries that point at the same underlying checkpoint.
@@ -46,11 +105,16 @@ export async function listJobCheckpoints(
   fetcher: Fetcher,
   jobId: string,
   signal?: AbortSignal,
+  /** Widen to the whole resume chain — this run plus the runs it resumed.
+   * A chain is ONE model trained across several records, so anything offering
+   * "which checkpoint do you want to run" needs all of them; without this the
+   * tip offers only the steps it personally saved. */
+  lineage = false,
 ): Promise<JobCheckpoint[]> {
   const body = await apiRequest<{ checkpoints: JobCheckpoint[] }>(
     baseUrl,
     fetcher,
-    `/jobs/${jobId}/checkpoints`,
+    `/api/v1/jobs/${jobId}/checkpoints${lineage ? "?lineage=true" : ""}`,
     { signal, action: "List checkpoints" },
   );
   return body.checkpoints;
@@ -66,7 +130,7 @@ export async function getCheckpointPolicyConfig(
   return apiRequest<PolicyConfigSummary>(
     baseUrl,
     fetcher,
-    `/jobs/${jobId}/checkpoints/${step}/policy-config`,
+    `/api/v1/jobs/${jobId}/checkpoints/${step}/policy-config`,
     { signal, action: "Load policy config" },
   );
 }

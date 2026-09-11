@@ -21,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -349,6 +349,7 @@ def _clear_hub_status_cache() -> None:
 
     with ds._HUB_STATUS_LOCK:
         ds._HUB_STATUS_CACHE.clear()
+        ds._HUB_HAS_DATA_CACHE.clear()
 
 
 def test_get_hub_status_reports_on_hub_when_repo_exists() -> None:
@@ -471,21 +472,65 @@ def test_hub_status_endpoint(client: TestClient) -> None:
     assert body["url"] == "https://huggingface.co/datasets/alice/pick"
 
 
+def test_hub_status_endpoint_carries_the_emptiness_claim_over_the_wire(client: TestClient) -> None:
+    """Through the ROUTE, not the function: the typed response model FILTERS
+    undeclared fields, so a hub_has_data missing from DatasetHubStatusResponse
+    is stripped silently — every function-level test still passes while the
+    card's 'Upload didn't finish' warning and the cache dialog's not-backed-up
+    gate go dark. This pins the field to the wire."""
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    fake_api.get_paths_info.return_value = []  # repo exists, holds no dataset
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.local_pushable_copy_exists", return_value=True),
+    ):
+        resp = client.get("/datasets/hub-status", params={"repo_id": "alice/pick"})
+    assert resp.status_code == 200
+    assert resp.json()["hub_has_data"] is False
+
+
 # --- Rename -----------------------------------------------------------------
+
+
+def _whoami(name: str, orgs: list[tuple[str, str]] | None = None) -> dict:
+    """A whoami payload. `orgs` entries are ``(name, roleInGroup)`` — the role
+    is what decides whether the org counts as a writable namespace."""
+    return {"name": name, "orgs": [{"name": n, "roleInGroup": r} for n, r in (orgs or [])]}
+
+
+def _signed_in_as(name: str = "makermods", orgs: list[tuple[str, str]] | None = None):
+    """Pin the Hub identity the rename path resolves ownership against.
+
+    Rename gates on cached_whoami, so every rename test states its identity
+    rather than inheriting whatever HF token the machine running the suite
+    happens to have — otherwise the ownership branch taken would vary by
+    developer laptop.
+    """
+    return patch("makermodslab.datasets.cached_whoami", return_value=_whoami(name, orgs))
 
 
 def test_rename_local_dataset_moves_directory(tmp_lerobot_home: Path) -> None:
     """Happy path: the directory moves, only the name segment changes, and the
-    returned repo id carries the fixed namespace prefix."""
+    returned repo id carries the fixed namespace prefix. Not on the Hub, so no
+    HfApi mutation call is made."""
     from makermodslab.datasets import rename_local_dataset
 
     _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=3)
 
-    new_id = rename_local_dataset("makermods/old_name", "new_name")
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = False
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        result = rename_local_dataset("makermods/old_name", "new_name")
 
-    assert new_id == "makermods/new_name"
+    assert result == {"repo_id": "makermods/new_name", "hub": "none"}
     assert not (tmp_lerobot_home / "makermods" / "old_name").exists()
     assert (tmp_lerobot_home / "makermods" / "new_name" / "meta" / "info.json").is_file()
+    fake_api.move_repo.assert_not_called()
 
 
 def test_rename_endpoint_old_id_404s_new_id_resolves(client: TestClient, tmp_lerobot_home: Path) -> None:
@@ -497,12 +542,18 @@ def test_rename_endpoint_old_id_404s_new_id_resolves(client: TestClient, tmp_ler
         {"total_episodes": 3, "total_frames": 900, "fps": 30, "features": {}},
     )
 
-    resp = client.post(
-        "/datasets/rename",
-        json={"repo_id": "makermods/pick", "new_name": "place"},
-    )
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = False
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        resp = client.post(
+            "/datasets/rename",
+            json={"repo_id": "makermods/pick", "new_name": "place"},
+        )
     assert resp.status_code == 200
-    assert resp.json() == {"success": True, "repo_id": "makermods/place"}
+    assert resp.json() == {"success": True, "repo_id": "makermods/place", "hub": "none"}
 
     old = client.get("/datasets/info", params={"repo_id": "makermods/pick"})
     assert old.status_code == 404
@@ -512,19 +563,38 @@ def test_rename_endpoint_old_id_404s_new_id_resolves(client: TestClient, tmp_ler
 
 
 def test_rename_bare_dataset_keeps_no_namespace(tmp_lerobot_home: Path) -> None:
-    """A dataset with no namespace renames to a bare name (no prefix invented)."""
+    """A dataset with no namespace renames to a bare name (no prefix invented)
+    LOCALLY, while the Hub side is qualified to the user's own account.
+
+    repo_exists here models what the real Hub answers: the canonical `solo`
+    (unqualified) is absent, and `makermods/solo` -- where push_to_hub
+    actually put it -- is present. A blanket-False stub would let a rename
+    that never qualifies the id pass this test just as easily as a correct
+    one, which is exactly how the original bare-id bug went unnoticed."""
     from makermodslab.datasets import rename_local_dataset
 
     _make_dataset(tmp_lerobot_home, "solo", episodes=1)
-    assert rename_local_dataset("solo", "solo2") == "solo2"
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/solo"
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        result = rename_local_dataset("solo", "solo2")
+
+    assert result == {"repo_id": "solo2", "hub": "renamed"}
+    # Qualifying is a Hub-side concern only: the local path and the returned
+    # id stay bare, while move_repo gets the ids the Hub actually uses.
+    fake_api.move_repo.assert_called_once_with("makermods/solo", "makermods/solo2", repo_type="dataset")
     assert (tmp_lerobot_home / "solo2" / "meta" / "info.json").is_file()
+    assert not (tmp_lerobot_home / "solo").exists()
 
 
 def test_rename_same_name_is_noop(tmp_lerobot_home: Path) -> None:
     from makermodslab.datasets import rename_local_dataset
 
     _make_dataset(tmp_lerobot_home, "makermods/keep", episodes=1)
-    assert rename_local_dataset("makermods/keep", "keep") == "makermods/keep"
+    assert rename_local_dataset("makermods/keep", "keep") == {"repo_id": "makermods/keep", "hub": "none"}
 
 
 def test_rename_rejects_invalid_name(tmp_lerobot_home: Path) -> None:
@@ -540,6 +610,31 @@ def test_rename_rejects_invalid_name(tmp_lerobot_home: Path) -> None:
         assert exc.value.status == 400
     # The source was never moved by a rejected rename.
     assert (tmp_lerobot_home / "makermods" / "src").exists()
+
+
+def test_rename_rejects_malformed_source_repo_id(tmp_lerobot_home: Path) -> None:
+    """The SOURCE id is validated too, the same way record and merge validate
+    at creation (validate_dataset_repo_id). A nested id like `a/b/c` is not a
+    Hub id at all -- reject it on shape before doing anything else, rather
+    than silently renaming it to another equally malformed local path."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "a/b/c", episodes=1)
+
+    fake_api = MagicMock()
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("a/b/c", "d")
+
+    # 400, not 404: the id is rejected on its shape, before the cache is even
+    # consulted — and no Hub round-trip is spent on an id the Hub can't hold.
+    assert exc.value.status == 400
+    fake_api.repo_exists.assert_not_called()
+    fake_api.move_repo.assert_not_called()
+    assert (tmp_lerobot_home / "a" / "b" / "c").exists()
 
 
 def test_rename_missing_source_404s(tmp_lerobot_home: Path) -> None:
@@ -638,15 +733,17 @@ def test_rename_busy_guard_local_training(tmp_lerobot_home: Path) -> None:
     _make_dataset(tmp_lerobot_home, "makermods/train_ds", episodes=1)
 
     # _dataset_in_use imports job_registry from .jobs lazily (datasets<->record
-    # cycle), so patch it at its source module.
+    # cycle), so patch it at its source module. The registry answers via
+    # local_dataset_in_use (exact scan; matching covered by
+    # test_dataset_in_use_sees_every_active_run_not_a_page).
     from makermodslab import jobs
 
-    job = MagicMock()
-    job.state = "running"
-    job.runner = "local"
-    job.config.dataset_repo_id = "makermods/train_ds"
     with (
-        patch.object(jobs.job_registry, "list", return_value=[job]),
+        patch.object(
+            jobs.job_registry,
+            "local_dataset_in_use",
+            side_effect=lambda repo_id: repo_id == "makermods/train_ds",
+        ),
         pytest.raises(DatasetRenameError) as exc,
     ):
         rename_local_dataset("makermods/train_ds", "renamed")
@@ -660,11 +757,483 @@ def test_rename_invalidates_hub_status_for_both_ids(tmp_lerobot_home: Path) -> N
 
     _make_dataset(tmp_lerobot_home, "makermods/before", episodes=1)
 
-    with patch("makermodslab.datasets.invalidate_hub_status") as inval:
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = False
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.invalidate_hub_status") as inval,
+    ):
         ds.rename_local_dataset("makermods/before", "after")
 
     called = {c.args[0] for c in inval.call_args_list}
     assert called == {"makermods/before", "makermods/after"}
+
+
+# --- Rename: Hub sync ---------------------------------------------------
+
+
+def test_rename_moves_hub_repo_when_dataset_is_on_hub(tmp_lerobot_home: Path) -> None:
+    """When the dataset also exists on the Hub, the Hub repo is moved (via
+    HfApi.move_repo) in addition to the local directory."""
+    from makermodslab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/old_name"
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        result = rename_local_dataset("makermods/old_name", "new_name")
+
+    assert result == {"repo_id": "makermods/new_name", "hub": "renamed"}
+    fake_api.move_repo.assert_called_once_with(
+        "makermods/old_name", "makermods/new_name", repo_type="dataset"
+    )
+    assert not (tmp_lerobot_home / "makermods" / "old_name").exists()
+    assert (tmp_lerobot_home / "makermods" / "new_name" / "meta" / "info.json").is_file()
+
+
+def test_rename_new_name_taken_on_hub_409s_before_any_move(tmp_lerobot_home: Path) -> None:
+    """If the new name is already used on the Hub, the rename is refused before
+    touching either the Hub repo or the local directory."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True  # both old and new names exist on the Hub
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("makermods/old_name", "new_name")
+
+    assert exc.value.status == 409
+    fake_api.move_repo.assert_not_called()
+    assert (tmp_lerobot_home / "makermods" / "old_name").exists()
+
+
+def test_rename_hub_409_is_reported_as_a_name_conflict(tmp_lerobot_home: Path) -> None:
+    """The target was free when the pre-check ran and got taken before the
+    write landed -- a genuine race, distinct from test_rename_new_name_taken_
+    on_hub_409s_before_any_move above. A 409 raised by move_repo itself has to
+    stay a 409: "already exists" tells the user to pick another name, while
+    the generic 502 "the Hub rejected the change" tells them to file a bug."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    # The status is read from the exception's response rather than pattern-
+    # matched out of its text, so this message deliberately spells out neither
+    # "409" nor "conflict": text-matching alone would fall through to the 502.
+    race = Exception("Repository already exists on the Hub")
+    race.response = MagicMock(status_code=409)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/old_name"
+    fake_api.move_repo.side_effect = race
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("makermods/old_name", "new_name")
+
+    assert exc.value.status == 409
+    # The Hub move never landed, so the local copy must not move either.
+    assert (tmp_lerobot_home / "makermods" / "old_name").exists()
+    assert not (tmp_lerobot_home / "makermods" / "new_name").exists()
+
+
+def test_rename_hub_failure_blocks_local_rename(tmp_lerobot_home: Path) -> None:
+    """A Hub-side rename failure (e.g. no write permission) aborts the whole
+    operation — the local directory is left untouched rather than diverging
+    from the (unrenamed) Hub copy."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/old_name"
+    fake_api.move_repo.side_effect = Exception("403 Forbidden: no write access")
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("makermods/old_name", "new_name")
+
+    assert exc.value.status == 403
+    assert (tmp_lerobot_home / "makermods" / "old_name").exists()
+    assert not (tmp_lerobot_home / "makermods" / "new_name").exists()
+
+
+def test_rename_skips_hub_check_when_offline(tmp_lerobot_home: Path) -> None:
+    """Explicit HF_HUB_OFFLINE skips the Hub check entirely — a never-uploaded
+    dataset still renames locally without a network call. Because the Hub
+    wasn't consulted at all, a copy there (if any) keeps its old name, so this
+    is "skipped" rather than "none"."""
+    from makermodslab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.hf_hub_offline", return_value=True),
+    ):
+        result = rename_local_dataset("makermods/old_name", "new_name")
+
+    assert result == {"repo_id": "makermods/new_name", "hub": "skipped"}
+    fake_api.repo_exists.assert_not_called()
+    fake_api.move_repo.assert_not_called()
+
+
+def test_rename_hub_status_check_failure_502s(tmp_lerobot_home: Path) -> None:
+    """A transient error while checking Hub status (offline/rate-limited)
+    blocks the rename rather than silently doing a local-only rename that
+    could leave a stale Hub copy under the old name."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = OSError("no network")
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("makermods/old_name", "new_name")
+
+    assert exc.value.status == 502
+    assert (tmp_lerobot_home / "makermods" / "old_name").exists()
+    # The escape hatch has to be discoverable from the error itself — a user in
+    # the field with a flaky connection can't act on "try again" alone. But it
+    # must not be presented as a free equivalent: HF_HUB_OFFLINE=1 skips the
+    # Hub move it's suggested as an alternative to, so a user who follows the
+    # hint on a dataset that IS on the Hub reproduces the exact stale-name bug
+    # this whole change exists to prevent. The message has to say so.
+    assert "HF_HUB_OFFLINE" in exc.value.message
+    assert "local copy only" in exc.value.message
+    assert "old name" in exc.value.message
+
+
+def test_rename_new_name_hub_check_failure_502s(tmp_lerobot_home: Path) -> None:
+    """Same as test_rename_hub_status_check_failure_502s, but the transient
+    failure is on the second repo_exists call (checking whether the new name
+    is free on the Hub) rather than the first (checking whether the dataset
+    itself is on the Hub) -- a distinct code path with its own message."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = [True, OSError("no network")]
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("makermods/old_name", "new_name")
+
+    assert exc.value.status == 502
+    assert (tmp_lerobot_home / "makermods" / "old_name").exists()
+    fake_api.move_repo.assert_not_called()
+    assert "HF_HUB_OFFLINE" in exc.value.message
+    assert "local copy only" in exc.value.message
+    assert "old name" in exc.value.message
+
+
+# --- Rename: ownership gate ---------------------------------------------
+
+
+def test_rename_third_party_dataset_renames_locally_and_skips_the_hub(
+    tmp_lerobot_home: Path,
+) -> None:
+    """THE REGRESSION TEST for the case the Hub-sync change let through: a
+    downloaded third-party dataset (`lerobot/pusht`) has a local copy, so the
+    card offers Rename, and repo_exists would say True — but move_repo in
+    someone else's namespace can never succeed. That has to gate the HUB STEP,
+    not the whole rename: the local directory is the user's own and moving it
+    needs no Hub permission at all. Refusing outright would take away a local
+    capability that works today, and with the frontend hiding the button for
+    an unowned namespace the user would have no recourse. "skipped" is how the
+    caller knows not to claim the Hub copy moved too."""
+    from makermodslab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "lerobot/pusht", episodes=1)
+
+    fake_api = MagicMock()
+    with (
+        _signed_in_as("makermods"),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        result = rename_local_dataset("lerobot/pusht", "mine")
+
+    assert result == {"repo_id": "lerobot/mine", "hub": "skipped"}
+    # No Hub round-trips at all: the answer is knowable from whoami alone.
+    fake_api.repo_exists.assert_not_called()
+    fake_api.move_repo.assert_not_called()
+    assert not (tmp_lerobot_home / "lerobot" / "pusht").exists()
+    assert (tmp_lerobot_home / "lerobot" / "mine" / "meta" / "info.json").is_file()
+
+
+def test_rename_allows_write_role_org_namespace(tmp_lerobot_home: Path) -> None:
+    """Ownership isn't just the username: an org the user has write access to
+    is renameable, and its Hub copy moves like any other."""
+    from makermodslab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "myorg/pick", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "myorg/pick"
+    with (
+        _signed_in_as("makermods", orgs=[("myorg", "write")]),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        result = rename_local_dataset("myorg/pick", "place")
+
+    assert result == {"repo_id": "myorg/place", "hub": "renamed"}
+    fake_api.move_repo.assert_called_once_with("myorg/pick", "myorg/place", repo_type="dataset")
+
+
+def test_rename_read_only_org_namespace_skips_the_hub(tmp_lerobot_home: Path) -> None:
+    """A read-role org is NOT writable, so the Hub move would 403 -- gate the
+    Hub step exactly as for a third-party namespace, not the local rename.
+    This is also where token scope bites: a fine-grained token that doesn't
+    enumerate an org makes it look unwritable, and locking a legitimate
+    member out of a purely local move over that would be indefensible."""
+    from makermodslab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "readonlyorg/pick", episodes=1)
+
+    fake_api = MagicMock()
+    with (
+        _signed_in_as("makermods", orgs=[("readonlyorg", "read")]),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        result = rename_local_dataset("readonlyorg/pick", "place")
+
+    assert result == {"repo_id": "readonlyorg/place", "hub": "skipped"}
+    fake_api.repo_exists.assert_not_called()
+    fake_api.move_repo.assert_not_called()
+    assert (tmp_lerobot_home / "readonlyorg" / "place" / "meta" / "info.json").is_file()
+
+
+def test_rename_namespace_ownership_is_case_insensitive(tmp_lerobot_home: Path) -> None:
+    """The namespace comes from a local directory name, whoami's casing is the
+    Hub's — comparing them case-sensitively would refuse the user's own data.
+
+    The dataset is ON the Hub here so move_repo is actually reached: with a
+    blanket-False repo_exists the ownership comparison this test is named for
+    could be case-sensitive (silently skipping the Hub) or case-insensitive
+    (checking and finding nothing) and this test wouldn't tell them apart."""
+    from makermodslab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "MakerMods/pick", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/pick"
+    with (
+        _signed_in_as("makermods"),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        result = rename_local_dataset("MakerMods/pick", "place")
+
+    assert result == {"repo_id": "MakerMods/place", "hub": "renamed"}
+    # The id keeps the local directory's casing — the Hub resolves it either way.
+    fake_api.move_repo.assert_called_once_with("makermods/pick", "makermods/place", repo_type="dataset")
+
+
+def test_rename_qualifies_hub_calls_with_canonical_namespace_casing(tmp_lerobot_home: Path) -> None:
+    """Ownership matches namespace case-insensitively, but the Hub calls that
+    follow must use whoami's own spelling, not the local directory's — a local
+    dir named `MyOrg/foo` clearing the gate and then hitting the Hub as
+    `MyOrg` instead of the canonical `myorg` risks a 404/502 on a namespace the
+    user does in fact own. The local path and returned id stay bare/original-
+    cased either way: qualifying is a Hub-side concern only."""
+    from makermodslab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "MyOrg/pick", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "myorg/pick"
+    with (
+        _signed_in_as("makermods", orgs=[("myorg", "write")]),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        assert rename_local_dataset("MyOrg/pick", "place") == {"repo_id": "MyOrg/place", "hub": "renamed"}
+
+    fake_api.move_repo.assert_called_once_with("myorg/pick", "myorg/place", repo_type="dataset")
+    assert (tmp_lerobot_home / "MyOrg" / "place" / "meta" / "info.json").is_file()
+
+
+def test_rename_bare_id_syncs_hub_copy_under_the_users_namespace(
+    tmp_lerobot_home: Path,
+) -> None:
+    """A locally-RECORDED dataset has a bare id, but its uploaded Hub copy lives
+    at `<username>/<name>`. Qualifying the bare id for the Hub check and move is
+    what keeps the recorded-then-uploaded dataset — the common case — from
+    skipping Hub sync and recreating the stale-Hub-name bug. The local path and
+    the returned id stay bare."""
+    from makermodslab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "pick", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/pick"
+    with (
+        _signed_in_as("makermods"),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        assert rename_local_dataset("pick", "place") == {"repo_id": "place", "hub": "renamed"}
+
+    fake_api.move_repo.assert_called_once_with("makermods/pick", "makermods/place", repo_type="dataset")
+    assert (tmp_lerobot_home / "place" / "meta" / "info.json").is_file()
+    assert not (tmp_lerobot_home / "pick").exists()
+
+
+def test_rename_without_a_token_skips_the_hub_and_renames_locally(
+    tmp_lerobot_home: Path,
+) -> None:
+    """No HF token: there's no identity to resolve ownership against and no
+    credential to move a repo with, so the Hub is skipped entirely and the
+    local rename still works — the logged-out, never-uploaded case must not
+    start failing on a Hub error it can do nothing about."""
+    from makermodslab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value=None),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        result = rename_local_dataset("makermods/old_name", "new_name")
+
+    assert result == {"repo_id": "makermods/new_name", "hub": "skipped"}
+    fake_api.repo_exists.assert_not_called()
+    fake_api.move_repo.assert_not_called()
+    assert (tmp_lerobot_home / "makermods" / "new_name" / "meta" / "info.json").is_file()
+
+
+def test_rename_whoami_failure_with_token_502s(tmp_lerobot_home: Path) -> None:
+    """A token IS present but the whoami call itself fails (network blip, cold
+    whoami cache) — cached_whoami() collapses that into the same None as "no
+    token", so without the fail_on_error split this used to fall through to a
+    local-only rename that leaves a stale Hub copy under the old name. It must
+    fail closed instead, like the neighboring repo_exists checks."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.datasets.cached_whoami", side_effect=RuntimeError("whoami failed")),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("makermods/old_name", "new_name")
+
+    assert exc.value.status == 502
+    # Same disclosure requirement as the repo_exists failures below: the hint
+    # must not read as a free equivalent when it silently leaves a Hub copy
+    # under the old name.
+    assert "HF_HUB_OFFLINE" in exc.value.message
+    assert "local copy only" in exc.value.message
+    assert "old name" in exc.value.message
+    fake_api.repo_exists.assert_not_called()
+    fake_api.move_repo.assert_not_called()
+    assert (tmp_lerobot_home / "makermods" / "old_name").exists()
+
+
+# --- Rename: local-failure rollback -------------------------------------
+
+
+def test_rename_rolls_the_hub_back_when_the_local_move_fails(
+    tmp_lerobot_home: Path,
+) -> None:
+    """The Hub moves first, so a failing os.rename leaves the two copies
+    diverged. Undo the one step that landed: a best-effort reverse move_repo
+    restores sync instead of stranding the user mid-rename."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/old_name"
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.os.rename", side_effect=OSError("disk full")),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("makermods/old_name", "new_name")
+
+    assert exc.value.status == 500
+    assert fake_api.move_repo.call_args_list == [
+        call("makermods/old_name", "makermods/new_name", repo_type="dataset"),
+        call("makermods/new_name", "makermods/old_name", repo_type="dataset"),
+    ]
+
+
+def test_rename_invalidates_hub_status_when_the_local_move_fails(
+    tmp_lerobot_home: Path,
+) -> None:
+    """The Hub move can land before the local move fails (whether or not the
+    best-effort rollback then succeeds) -- that's exactly when the cached
+    Hub-existence answer is most wrong, so it has to be dropped on the failure
+    path too, not just after a full success. A stale on_hub cached for the old
+    id would otherwise survive for the process lifetime and point the info
+    card at a URL that 404s."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/old_name"
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.os.rename", side_effect=OSError("disk full")),
+        patch("makermodslab.datasets.invalidate_hub_status") as inval,
+        pytest.raises(DatasetRenameError),
+    ):
+        rename_local_dataset("makermods/old_name", "new_name")
+
+    called = {c.args[0] for c in inval.call_args_list}
+    assert called == {"makermods/old_name", "makermods/new_name"}
+
+
+def test_rename_logs_divergence_when_the_hub_rollback_also_fails(
+    tmp_lerobot_home: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the rollback itself fails there's nothing left to try, so the
+    divergence has to be loud — someone has to reconcile it by hand."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/old_name"
+    fake_api.move_repo.side_effect = [None, Exception("hub down")]
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.os.rename", side_effect=OSError("disk full")),
+        caplog.at_level(logging.ERROR, logger="makermodslab.datasets"),
+        pytest.raises(DatasetRenameError),
+    ):
+        rename_local_dataset("makermods/old_name", "new_name")
+
+    assert "out of sync" in caplog.text
 
 
 # --- Hub visibility / tags editing (post-upload) ----------------------------
@@ -1262,6 +1831,105 @@ def test_pin_route_auto_unhides(
     resp = client.post("/datasets/custom", json={"repo_id": "alice/pick"})
     assert resp.status_code == 200
     assert get_hidden_datasets() == set()
+
+
+# ---------------------------------------------------------------------------
+# Excluded episodes — persistent per-dataset training-curation filter.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def excluded_episodes_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect EXCLUDED_EPISODES_FILE into a tmp file so these tests never
+    touch the developer's real ~/.cache."""
+    from makermodslab.utils import config as cfg
+
+    path = tmp_path / "excluded_episodes.json"
+    monkeypatch.setattr(cfg, "EXCLUDED_EPISODES_FILE", str(path))
+    return path
+
+
+def test_excluded_episodes_round_trip(excluded_episodes_file: Path) -> None:
+    from makermodslab.utils.config import get_excluded_episodes, set_excluded_episodes
+
+    assert get_excluded_episodes("alice/pick") == []
+
+    set_excluded_episodes("alice/pick", [3, 1, 1, 2])
+    assert get_excluded_episodes("alice/pick") == [1, 2, 3]  # deduped, sorted
+    assert get_excluded_episodes("bob/place") == []  # other datasets untouched
+
+    set_excluded_episodes("alice/pick", [])
+    assert get_excluded_episodes("alice/pick") == []  # empty list clears the entry
+
+
+def test_excluded_episodes_corrupt_file_degrades_to_empty(excluded_episodes_file: Path) -> None:
+    from makermodslab.utils.config import get_excluded_episodes
+
+    excluded_episodes_file.write_text("{not json")
+    assert get_excluded_episodes("alice/pick") == []
+    excluded_episodes_file.write_text(json.dumps(["not", "an", "object"]))
+    assert get_excluded_episodes("alice/pick") == []
+
+
+def test_excluded_episodes_endpoints_round_trip(client: TestClient, excluded_episodes_file: Path) -> None:
+    """v1-only surface (see test_api_contract.V1_ONLY_ROUTES) — there is no
+    flat mirror to exercise."""
+    resp = client.get("/api/v1/datasets/excluded-episodes", params={"repo_id": "alice/pick"})
+    assert resp.status_code == 200
+    assert resp.json() == {"repo_id": "alice/pick", "episode_indices": []}
+
+    resp = client.put(
+        "/api/v1/datasets/excluded-episodes",
+        json={"repo_id": "alice/pick", "episode_indices": [2, 0]},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"success": True, "repo_id": "alice/pick", "episode_indices": [0, 2]}
+
+    resp = client.get("/api/v1/datasets/excluded-episodes", params={"repo_id": "alice/pick"})
+    assert resp.json()["episode_indices"] == [0, 2]
+
+
+# ---------------------------------------------------------------------------
+# is_dataset_private — the marketplace-visibility gate for a policy's
+# dataset_episodes (see models._gate_dataset_episodes).
+# ---------------------------------------------------------------------------
+
+
+def test_is_dataset_private_true() -> None:
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.dataset_info.return_value = MagicMock(private=True)
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.is_dataset_private("alice/pick") is True
+    fake_api.dataset_info.assert_called_once_with("alice/pick", expand=["private"])
+
+
+def test_is_dataset_private_false() -> None:
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.dataset_info.return_value = MagicMock(private=False)
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.is_dataset_private("alice/pick") is False
+
+
+def test_is_dataset_private_none_when_unresolvable() -> None:
+    """Never pushed to the Hub, deleted, or no access — callers must treat
+    this the same as an explicit private=True, not as public."""
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.dataset_info.side_effect = RuntimeError("404")
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.is_dataset_private("alice/local-only") is None
+
+
+def test_is_dataset_private_none_offline() -> None:
+    from makermodslab import datasets as ds
+
+    with patch("makermodslab.datasets.hf_hub_offline", return_value=True):
+        assert ds.is_dataset_private("alice/pick") is None
 
 
 # ---------------------------------------------------------------------------
@@ -2019,6 +2687,90 @@ def test_get_episode_joint_series_hub_fallback_degrades_on_download_failure(
         assert ds.get_episode_joint_series("alice/hub_only", 0) is None
 
 
+def test_get_episode_action_series_local_unchanged(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"action": {"names": ["shoulder_pan.pos", "gripper.pos"]}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [0], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+    data_dir = d / "data" / "chunk-000"
+    data_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0, 0],
+                "timestamp": [0.0, 0.033],
+                "action": [[10.0, 50.0], [10.5, 51.0]],
+            }
+        ),
+        data_dir / "file-000.parquet",
+    )
+
+    with patch("makermodslab.datasets._ensure_hub_episodes_root") as hub_fetch:
+        result = ds.get_episode_action_series("alice/local", 0)
+
+    hub_fetch.assert_not_called()
+    assert result is not None
+    assert result["action_names"] == ["shoulder_pan.pos", "gripper.pos"]
+    assert result["timestamps"] == [0.0, 0.033]
+    assert result["values"] == [[10.0, 50.0], [10.5, 51.0]]
+
+
+def test_get_episode_action_series_returns_none_on_malformed_chunk_index(
+    tmp_lerobot_home: Path,
+) -> None:
+    """Mirrors get_episode_joint_series's malformed-index guard — a corrupt
+    or adversarial Hub dataset must 404 gracefully, not raise, since this
+    now feeds a hardware-driving code path."""
+    from makermodslab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"action": {"names": ["shoulder_pan.pos"]}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [float("nan")], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+
+    assert ds.get_episode_action_series("alice/local", 0) is None
+
+
+def test_get_episode_action_series_missing_episode_returns_none(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"action": {"names": ["shoulder_pan.pos"]}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [0], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+    data_dir = d / "data" / "chunk-000"
+    data_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "timestamp": [0.0], "action": [[1.0]]}),
+        data_dir / "file-000.parquet",
+    )
+
+    assert ds.get_episode_action_series("alice/local", 7) is None
+
+
 # ---------------------------------------------------------------------------
 # End-to-end route coverage for Hub dataset viewer — Tasks 1–5 integrated
 # through the real FastAPI routes without production code changes.
@@ -2120,3 +2872,668 @@ def test_hub_dataset_viewer_endpoints_404_without_video(
 
     assert resp.status_code == 404
     dl.assert_called_once()  # only the meta/info.json probe inside get_hub_dataset_info
+
+
+# --- Hub identity: resolve_hub_repo_id + hub_repo_exists --------------------
+#
+# Every Hub call in the app addresses a dataset through resolve_hub_repo_id and
+# asks whether it exists through hub_repo_exists, so both contracts are pinned
+# here once rather than at each call site.
+
+
+def test_resolve_hub_repo_id_qualifies_a_bare_id() -> None:
+    """A locally-recorded dataset's id has no namespace — the literal-lookup
+    Hub calls would 404 on it."""
+    from makermodslab import datasets as ds
+
+    with patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}):
+        assert ds.resolve_hub_repo_id("pick") == "alice/pick"
+
+
+def test_resolve_hub_repo_id_canonicalises_casing_of_an_owned_namespace() -> None:
+    """A locally-recorded "MyOrg/foo" must reach the Hub as the canonical
+    "myorg/foo" the account actually owns."""
+    from makermodslab import datasets as ds
+
+    who = {"name": "alice", "orgs": [{"name": "myorg", "roleInGroup": "write"}]}
+    with patch("makermodslab.datasets.cached_whoami", return_value=who):
+        assert ds.resolve_hub_repo_id("MyOrg/foo") == "myorg/foo"
+
+
+def test_resolve_hub_repo_id_leaves_a_third_party_id_alone() -> None:
+    """A downloaded third-party dataset is already the right id; ownership is
+    irrelevant to reading it."""
+    from makermodslab import datasets as ds
+
+    with patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}):
+        assert ds.resolve_hub_repo_id("lerobot/pusht") == "lerobot/pusht"
+
+
+def test_resolve_hub_repo_id_degrades_when_unauthenticated() -> None:
+    """No token → no namespace to resolve against. Callers degrade rather than
+    raise."""
+    from makermodslab import datasets as ds
+
+    with patch("makermodslab.datasets.cached_whoami", return_value=None):
+        assert ds.resolve_hub_repo_id("pick") == "pick"
+
+
+def test_hub_repo_exists_looks_up_the_resolved_id() -> None:
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        assert ds.hub_repo_exists("pick") is True
+
+    fake_api.repo_exists.assert_called_once_with("alice/pick", repo_type="dataset")
+
+
+def test_hub_repo_exists_returns_none_on_transport_error() -> None:
+    """Offline / rate-limited / anything else is "no claim" (None), never a
+    soft False — callers must not block or overwrite on it."""
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = OSError("connection failed")
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_repo_exists("alice/pick") is None
+
+
+def test_get_hub_status_url_uses_the_resolved_id() -> None:
+    """A url built from the bare id would 404."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        result = ds.get_hub_status("pick")
+
+    # The public contract is unchanged: repo_id echoes back exactly as passed.
+    assert result["repo_id"] == "pick"
+    assert result["status"] == "on_hub"
+    assert result["url"] == "https://huggingface.co/datasets/alice/pick"
+
+
+def test_get_hub_status_cache_does_not_survive_an_account_switch() -> None:
+    """Keyed by the resolved id, so an answer never outlives the auth state it
+    came from — logging in as someone else re-checks instead of serving the
+    previous account's answer."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        assert ds.get_hub_status("pick")["url"].endswith("alice/pick")
+
+    fake_api.repo_exists.return_value = False
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "bob", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.is_dataset_available_locally", return_value=True),
+    ):
+        assert ds.get_hub_status("pick")["status"] == "local_only"
+
+    assert fake_api.repo_exists.call_args_list[-1].args[0] == "bob/pick"
+
+
+def test_invalidate_hub_status_from_a_bare_id_drops_the_namespaced_entry() -> None:
+    """The upload path holds the bare id; the cache is keyed by the resolved
+    one. Without the suffix sweep the card would stay on "Local only"."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_STATUS_CACHE["alice/pick"] = "local_only"
+    ds._HUB_STATUS_CACHE["alice/other"] = "on_hub"
+
+    ds.invalidate_hub_status("pick")
+
+    assert "alice/pick" not in ds._HUB_STATUS_CACHE
+    assert ds._HUB_STATUS_CACHE["alice/other"] == "on_hub"
+
+
+def test_get_hub_settings_reads_the_resolved_id() -> None:
+    """dataset_info is a literal-lookup call: the editor is offered exactly
+    when get_hub_status says on_hub, so it must resolve the same way or 404 on
+    a dataset the card just said is on the Hub."""
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.dataset_info.return_value = MagicMock(private=False, tags=["makermods"])
+    with (
+        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        result = ds.get_hub_settings("pick")
+
+    fake_api.dataset_info.assert_called_once_with("alice/pick")
+    # The public contract is unchanged: repo_id echoes back as passed.
+    assert result["repo_id"] == "pick"
+
+
+def test_set_dataset_visibility_writes_to_the_resolved_id() -> None:
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        ds.set_dataset_visibility("pick", True)
+
+    fake_api.update_repo_settings.assert_called_once_with("alice/pick", private=True, repo_type="dataset")
+
+
+def test_get_hub_dataset_info_caches_under_the_resolved_id(tmp_path: Path) -> None:
+    """Keyed by the id actually fetched, so the summary can't outlive the auth
+    state it came from — and a bare-id invalidation still finds it."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_dataset_info_cache()
+    meta = tmp_path / "info.json"
+    meta.write_text(json.dumps({"total_episodes": 3, "total_frames": 90, "fps": 30, "features": {}}))
+
+    with (
+        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.hf_hub_download", return_value=str(meta)) as dl,
+    ):
+        assert ds.get_hub_dataset_info("pick")["total_episodes"] == 3
+
+    assert dl.call_args.args[0] == "alice/pick"
+    assert "alice/pick" in ds._HUB_DATASET_INFO_CACHE
+
+    # The upload path holds the bare id; the sweep must still find the entry.
+    ds.invalidate_hub_dataset_info("pick")
+    assert ds._HUB_DATASET_INFO_CACHE == {}
+
+
+# ---------------------------------------------------------------------------
+# Per-episode sampling weights (weighted sampling, step 1.2).
+# ---------------------------------------------------------------------------
+
+
+def _write_episodes_dataset(root: Path, repo_id: str, columns: dict[str, Any], n_episodes: int) -> Path:
+    """A viewable v3.0 dataset whose episodes parquet carries `columns`."""
+    d = _write_info(
+        root,
+        repo_id,
+        {"fps": 30, "features": {"observation.images.front": {"dtype": "video"}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": list(range(n_episodes)),
+                "tasks": [["task"]] * n_episodes,
+                "length": [30] * n_episodes,
+                "videos/observation.images.front/from_timestamp": [0.0] * n_episodes,
+                "videos/observation.images.front/to_timestamp": [1.0] * n_episodes,
+                **columns,
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+    return d
+
+
+def test_list_episode_summaries_defaults_missing_weight_column_to_one(
+    tmp_lerobot_home: Path,
+) -> None:
+    """R3, and the trap this feature could have walked into: a dataset recorded
+    before `sampling_weight` existed must return the SAME episodes it always did,
+    each at weight 1.0 — not an empty list, which callers read as "not viewable"
+    and which would have blanked the viewer for every existing dataset."""
+    from makermodslab import datasets as ds
+
+    _write_episodes_dataset(tmp_lerobot_home, "alice/pre_feature", {}, n_episodes=3)
+
+    result = ds.list_episode_summaries("alice/pre_feature")
+
+    assert result is not None
+    assert [e["episode_index"] for e in result] == [0, 1, 2]
+    assert [e["sampling_weight"] for e in result] == [1.0, 1.0, 1.0]
+
+
+def test_list_episode_summaries_reads_the_weight_column(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+
+    _write_episodes_dataset(
+        tmp_lerobot_home,
+        "alice/weighted",
+        {"sampling_weight": [1.0, 3.0, 1.5]},
+        n_episodes=3,
+    )
+
+    result = ds.list_episode_summaries("alice/weighted")
+
+    assert result is not None
+    assert [e["sampling_weight"] for e in result] == [1.0, 3.0, 1.5]
+
+
+def test_list_episode_summaries_treats_a_null_weight_as_one(tmp_lerobot_home: Path) -> None:
+    """A null cell is a missing weight (1.0), never 0.0 — which would silently
+    drop the episode from training."""
+    from makermodslab import datasets as ds
+
+    _write_episodes_dataset(
+        tmp_lerobot_home,
+        "alice/partly_weighted",
+        {"sampling_weight": [None, 3.0]},
+        n_episodes=2,
+    )
+
+    result = ds.list_episode_summaries("alice/partly_weighted")
+
+    assert result is not None
+    assert [e["sampling_weight"] for e in result] == [1.0, 3.0]
+
+
+def test_dataset_is_weighted_detects_a_non_unit_weight(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+
+    _write_episodes_dataset(tmp_lerobot_home, "alice/weighted", {"sampling_weight": [1.0, 3.0]}, n_episodes=2)
+    assert ds.dataset_is_weighted("alice/weighted") is True
+
+
+def test_dataset_is_weighted_is_false_without_the_column(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+
+    _write_episodes_dataset(tmp_lerobot_home, "alice/pre_feature", {}, n_episodes=2)
+    assert ds.dataset_is_weighted("alice/pre_feature") is False
+
+
+def test_dataset_is_weighted_is_false_when_every_weight_is_one(tmp_lerobot_home: Path) -> None:
+    """R2: an all-1 column is not a weighted dataset — it must take the untouched
+    lerobot training path."""
+    from makermodslab import datasets as ds
+
+    _write_episodes_dataset(tmp_lerobot_home, "alice/ones", {"sampling_weight": [1.0, 1.0]}, n_episodes=2)
+    assert ds.dataset_is_weighted("alice/ones") is False
+
+
+def test_dataset_is_weighted_is_false_for_an_unknown_dataset(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+
+    with patch("makermodslab.datasets._ensure_hub_episodes_root", return_value=None):
+        assert ds.dataset_is_weighted("alice/nowhere") is False
+
+
+# --- half-finished uploads --------------------------------------------------
+#
+# A repo can exist on the Hub and hold nothing: an upload is create-then-send,
+# and a failure after the create leaves the empty repo behind. "Exists" then
+# reads as "backed up" for a repo with no data in it — the one mistake that can
+# cost the user their only copy.
+
+
+def test_hub_copy_has_data_false_when_the_repo_is_empty() -> None:
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.get_paths_info.return_value = []
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is False
+
+
+def test_hub_copy_has_data_true_when_the_dataset_is_there() -> None:
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.get_paths_info.return_value = [MagicMock()]
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is True
+
+
+def test_hub_copy_has_data_returns_none_when_the_listing_fails() -> None:
+    """A degraded read must not manufacture an "empty repo" claim."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.get_paths_info.side_effect = OSError("connection failed")
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is None
+
+
+def test_get_hub_status_flags_an_empty_hub_repo_with_a_local_copy() -> None:
+    """The case that costs data: the card would otherwise say "Uploaded to
+    HuggingFace" for a repo holding nothing, next to 25 local episodes."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    fake_api.get_paths_info.return_value = []
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.local_pushable_copy_exists", return_value=True),
+    ):
+        result = ds.get_hub_status("alice/pick")
+
+    assert result["status"] == "on_hub"
+    assert result["hub_has_data"] is False
+
+
+def test_get_hub_status_makes_no_emptiness_claim_without_a_local_copy() -> None:
+    """An empty repo with nothing local is just litter on the Hub — no claim,
+    and no extra listing call on the common path."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.local_pushable_copy_exists", return_value=False),
+    ):
+        result = ds.get_hub_status("alice/pick")
+
+    assert result["status"] == "on_hub"
+    assert result["hub_has_data"] is None
+    fake_api.get_paths_info.assert_not_called()
+
+
+def test_get_hub_status_emptiness_claim_survives_the_status_cache_hit() -> None:
+    """status is memoized; the claim must still be attached on a cache hit, or
+    the warning would vanish on the card's second render."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    fake_api.get_paths_info.return_value = []
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.local_pushable_copy_exists", return_value=True),
+    ):
+        ds.get_hub_status("alice/pick")
+        second = ds.get_hub_status("alice/pick")
+
+    assert fake_api.repo_exists.call_count == 1  # status came from the cache
+    assert second["hub_has_data"] is False
+
+
+def test_invalidate_hub_status_drops_the_emptiness_answer_too() -> None:
+    """After a successful upload the repo is no longer empty — both cached Hub
+    facts must go, or the card would keep warning about a finished upload."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_STATUS_CACHE["alice/pick"] = "on_hub"
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = (False, None)
+
+    ds.invalidate_hub_status("pick")
+
+    assert ds._HUB_STATUS_CACHE == {}
+    assert ds._HUB_HAS_DATA_CACHE == {}
+
+
+def test_push_dataset_to_hub_invalidates_the_cached_hub_facts() -> None:
+    """A successful push falsifies both cached Hub answers for the dataset.
+
+    Invalidating inside the one push function rather than at each call site is
+    what keeps a caller from leaving the card insisting "Local only" — or
+    "Upload didn't finish" — about a dataset it just uploaded. The cloud
+    runner's implicit upload is exactly such a caller.
+    """
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    _clear_hub_dataset_info_cache()
+    ds._HUB_STATUS_CACHE["alice/pick"] = "on_hub"
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = (False, None)
+    ds._HUB_DATASET_INFO_CACHE["alice/pick"] = {"total_episodes": 0}
+
+    fake_dataset = MagicMock(num_episodes=25)
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("lerobot.datasets.LeRobotDataset", return_value=fake_dataset),
+    ):
+        assert ds.push_dataset_to_hub("pick", tags=["makermods"], private=False) == "alice/pick"
+
+    fake_dataset.push_to_hub.assert_called_once()
+    assert fake_dataset.repo_id == "alice/pick"
+    assert ds._HUB_STATUS_CACHE == {}
+    assert ds._HUB_HAS_DATA_CACHE == {}
+    assert ds._HUB_DATASET_INFO_CACHE == {}
+
+
+def test_hub_copy_has_data_fresh_bypasses_the_memo() -> None:
+    """A caller deciding whether to WRITE (the runners' push-if-absent) must
+    see the Hub, not a memo — a stale True would skip the refill and send the
+    remote job at an empty repo."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = (True, None)
+    fake_api = MagicMock()
+    fake_api.get_paths_info.return_value = []
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick", fresh=True) is False
+    fake_api.get_paths_info.assert_called_once()
+
+
+def test_hub_copy_has_data_empty_answer_expires() -> None:
+    """ "Empty" can be falsified from OUTSIDE the app (huggingface-cli, the Hub
+    web UI), with no invalidation hook, so a cached False must re-check after
+    its TTL instead of warning — or refusing — for the process lifetime."""
+    import time as _time
+
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = (False, _time.monotonic() - 1.0)
+    fake_api = MagicMock()
+    fake_api.get_paths_info.return_value = [MagicMock()]
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is True
+
+
+def test_hub_copy_has_data_positive_answer_is_served_from_the_memo() -> None:
+    """Only in-app flows change "has data", and they invalidate — so True is
+    stable and never re-pays the probe."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = (True, None)
+    fake_api = MagicMock()
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is True
+    fake_api.get_paths_info.assert_not_called()
+
+
+def test_hub_copy_has_data_loses_the_race_against_an_invalidation() -> None:
+    """A probe that straddles a concurrent push's invalidation must NOT write
+    its answer back: it was computed against the pre-push repo, and storing it
+    after the invalidation would resurrect exactly the stale "empty" claim the
+    invalidation removed — permanently, since only another push drops it."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+
+    def _push_finishes_mid_probe(*args, **kwargs):
+        ds.invalidate_hub_status("alice/pick")
+        return []
+
+    fake_api.get_paths_info.side_effect = _push_finishes_mid_probe
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        # This call's own answer stands (it describes the repo it saw)...
+        assert ds.hub_copy_has_data("alice/pick") is False
+    # ...but it must not outlive the invalidation that raced it.
+    assert ds._HUB_HAS_DATA_CACHE == {}
+
+
+def test_invalidate_hub_status_drops_a_miscased_bare_entry() -> None:
+    """The bare branch must casefold too: an unauthenticated session caches
+    the caller's own spelling unresolved, and a slash-free key can never be
+    matched by the "/<name>" suffix sweep — so a case-sensitive pop would
+    leave 'PICK' serving a stale answer after 'pick' was deleted."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_STATUS_CACHE["PICK"] = "local_only"
+    ds._HUB_HAS_DATA_CACHE["PICK"] = (False, None)
+
+    with patch("makermodslab.datasets.cached_whoami", return_value=None):
+        ds.invalidate_hub_status("pick")
+
+    assert ds._HUB_STATUS_CACHE == {}
+    assert ds._HUB_HAS_DATA_CACHE == {}
+
+
+def test_get_hub_status_loses_the_race_against_an_invalidation() -> None:
+    """Same straddle rule as hub_copy_has_data, on the status cache: an
+    existence read that began before a concurrent push finished must not write
+    its pre-push answer back AFTER that push's invalidation — status answers
+    are memoized for the process lifetime, so the stale 'local_only' would
+    hide the uploaded dataset (and silence hub_has_data) until restart."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+
+    def _push_finishes_mid_read(*args, **kwargs):
+        ds.invalidate_hub_status("alice/pick")
+        return False  # computed against the pre-push Hub
+
+    fake_api.repo_exists.side_effect = _push_finishes_mid_read
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.is_dataset_available_locally", return_value=True),
+        patch("makermodslab.datasets.local_pushable_copy_exists", return_value=False),
+    ):
+        result = ds.get_hub_status("alice/pick")
+
+    # This call's own answer stands, but it must not outlive the invalidation.
+    assert result["status"] == "local_only"
+    assert ds._HUB_STATUS_CACHE == {}
+
+
+def test_hub_copy_has_data_failed_probe_is_not_repaid_within_its_ttl() -> None:
+    """The shared HfApi client has no request timeout, so re-probing a
+    black-holed connection on every call would pin a threadpool worker per
+    card poll. A failed probe's "no claim" is cached briefly instead."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.get_paths_info.side_effect = OSError("connection failed")
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is None
+        assert ds.hub_copy_has_data("alice/pick") is None
+    fake_api.get_paths_info.assert_called_once()
+
+
+def test_invalidate_hub_status_drops_a_miscased_namespaced_entry() -> None:
+    """Entries are keyed by the CANONICAL casing the resolver produced; the
+    upload path may hold the local spelling ("MyOrg/pick"). A case-sensitive
+    pop would miss the entry and leave a stale "empty" claim serving for the
+    process lifetime."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_STATUS_CACHE["myorg/pick"] = "on_hub"
+    ds._HUB_HAS_DATA_CACHE["myorg/pick"] = (False, None)
+
+    ds.invalidate_hub_status("MyOrg/pick")
+
+    assert ds._HUB_STATUS_CACHE == {}
+    assert ds._HUB_HAS_DATA_CACHE == {}
+
+
+def test_dataset_in_use_sees_every_active_run_not_a_page(tmp_lerobot_home: Path) -> None:
+    """_dataset_in_use scanned `job_registry.list(limit=200)` — a PAGE — so an
+    active local run past the 200th record was invisible and its dataset
+    could be renamed or deleted out from under it. The check now asks the
+    registry exactly (one snapshot under the lock), so no depth of queue or
+    history can hide a consumer."""
+    from unittest.mock import patch as _patch
+
+    from makermodslab import jobs
+    from makermodslab.datasets import _dataset_in_use
+    from makermodslab.jobs import JobRecord, JobRegistry
+    from makermodslab.train import TrainingRequest
+
+    with _patch.object(JobRegistry, "_start_watchdog", lambda self: None):
+        reg = JobRegistry(tmp_lerobot_home / "outputs" / "train")
+
+    # 201 queued runs on other datasets ahead of the one that matters.
+    for i in range(201):
+        reg._records[f"q{i:03d}"] = JobRecord(
+            id=f"q{i:03d}",
+            name=f"q{i:03d}",
+            state="queued",
+            config=TrainingRequest(dataset_repo_id="user/other"),
+            output_dir=str(reg._output_root / f"q{i:03d}" / "run"),
+            started_at=float(i),
+            runner="local",
+            queue_seq=i + 1,
+        )
+    reg._records["target"] = JobRecord(
+        id="target",
+        name="target",
+        state="queued",
+        config=TrainingRequest(dataset_repo_id="user/held"),
+        output_dir=str(reg._output_root / "target" / "run"),
+        started_at=999.0,
+        runner="local",
+        queue_seq=999,
+    )
+
+    with _patch.object(jobs, "job_registry", reg):
+        assert _dataset_in_use("user/held") is not None
+        assert _dataset_in_use("user/untouched") is None
+
+
+# --- read_dataset_robot_type ------------------------------------------------
+
+
+def test_read_dataset_robot_type_reads_the_local_info_json(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import read_dataset_robot_type
+
+    _write_info(tmp_lerobot_home, "alice/pick", {"robot_type": "maker_follower", "features": {}})
+    assert read_dataset_robot_type("alice/pick") == "maker_follower"
+
+
+def test_read_dataset_robot_type_is_none_when_absent_or_blank(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import read_dataset_robot_type
+
+    _write_info(tmp_lerobot_home, "alice/no_tag", {"features": {}})
+    _write_info(tmp_lerobot_home, "alice/blank_tag", {"robot_type": "  ", "features": {}})
+    assert read_dataset_robot_type("alice/no_tag") is None
+    assert read_dataset_robot_type("alice/blank_tag") is None
+    assert read_dataset_robot_type("alice/not_local_and_offline") is None
+
+
+def test_read_dataset_robot_type_is_local_only_never_hits_the_hub() -> None:
+    """Deliberately no Hub fallback — the one caller is a synchronous GET
+    handler and this is a display nicety, so a not-cached dataset is just
+    "can't tell"."""
+    from makermodslab import datasets as ds
+
+    with (
+        patch("makermodslab.datasets._resolve_local_dataset_path", return_value=None),
+        patch(
+            "makermodslab.datasets.hf_hub_download",
+            side_effect=AssertionError("must not download"),
+        ),
+    ):
+        assert ds.read_dataset_robot_type("bob/not-cached") is None

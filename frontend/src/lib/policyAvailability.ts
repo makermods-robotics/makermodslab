@@ -19,7 +19,7 @@ export function fetchPolicyAvailability(
   if (cached) return Promise.resolve(cached);
   if (!inflight) {
     inflight = (async () => {
-      const r = await fetchWithHeaders(`${baseUrl}/policy-optimizer-defaults`);
+      const r = await fetchWithHeaders(`${baseUrl}/api/v1/policy-optimizer-defaults`);
       if (!r.ok) throw new Error(`policy-optimizer-defaults: HTTP ${r.status}`);
       const data: { available?: PolicyAvailability } = await r.json();
       cached = data.available ?? {};
