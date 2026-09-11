@@ -1193,8 +1193,13 @@ const DeployPanel: React.FC = () => {
     policyConfig?.dataset_repo_id,
     selectedJob?.config?.dataset_repo_id,
   );
+  // Gated on `open` like the policyConfig fetch above: closing the studio
+  // nulls policyConfig, which changes taskPrefillTarget (to the job record's
+  // id, or to nothing) and — without this guard — fired a dataset-info request
+  // for a panel nobody is looking at. Reopening re-derives the target from the
+  // freshly reloaded policyConfig and this effect runs again on its own.
   useEffect(() => {
-    if (!taskPrefillTarget) {
+    if (!open || !taskPrefillTarget) {
       setTaskPrefill({ kind: "idle" });
       return;
     }
@@ -1224,7 +1229,7 @@ const DeployPanel: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [taskPrefillTarget, baseUrl, fetchWithHeaders]);
+  }, [open, taskPrefillTarget, baseUrl, fetchWithHeaders]);
 
   // Animate the loading placeholder's trailing dots, and give up saying
   // "loading" after TASK_LOADING_MAX_MS.
