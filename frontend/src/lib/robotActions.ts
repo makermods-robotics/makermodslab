@@ -6,7 +6,8 @@ import type { StartableSessionKind } from "@/lib/sessionApi";
  * Two treatments, one map:
  *
  * - `robot` — the amber affordance (Button variant="robot", worn by
- *   `RobotActionButton`). Pressing it ENERGIZES an arm.
+ *   `RobotActionButton`). Pressing it moves an arm or authorizes a session
+ *   that can move it.
  * - `destructive` — the existing red variant (worn by `ReleaseActionButton`).
  *   Pressing it ends with the arm DE-ENERGIZED.
  *
@@ -25,24 +26,29 @@ import type { StartableSessionKind } from "@/lib/sessionApi";
 export type RobotActionTreatment = "robot" | "destructive";
 
 /**
- * Session kinds whose start energizes an arm. Equal to the backend's
- * startable set — see the parity test.
+ * Session kinds that control an arm. Hosting starts parked, but permits a
+ * remote operator to engage it without another local start press. Equal to
+ * the backend's startable set — see the parity test.
  */
 export const ENERGIZING_SESSION_KINDS = [
   "teleoperation",
   "recording",
   "inference",
+  "remote_inference",
+  "hosting",
+  "remote_teleoperation",
   "replay",
   "calibration",
   "auto_calibration",
 ] as const satisfies readonly StartableSessionKind[];
 
 /**
- * Non-session hardware actions that still drive a servo. `wiggle` is seconds
+ * Device commands that drive a servo. Remote Home parks an existing session.
+ * `wiggle` is seconds
  * of open-loop gripper motion through the legacy flow endpoint (there is no
  * lease to hold), but it moves the arm, so it wears the same amber.
  */
-export const ENERGIZING_DEVICE_ACTIONS = ["wiggle"] as const;
+export const ENERGIZING_DEVICE_ACTIONS = ["wiggle", "remote_home"] as const;
 
 /** De-energizing actions: both end with torque released. */
 export const RELEASE_ACTIONS = ["stop", "release_now"] as const;
@@ -82,6 +88,22 @@ export const ROBOT_ACTIONS: Record<RobotActionKey, RobotActionSpec> = {
     treatment: "robot",
     tooltipKey: "shared.robotAction.tooltip.inference",
   },
+  hosting: {
+    treatment: "robot",
+    tooltipKey: "shared.robotAction.tooltip.hosting",
+  },
+  remote_teleoperation: {
+    treatment: "robot",
+    tooltipKey: "shared.robotAction.tooltip.remote_teleoperation",
+  },
+  remote_inference: {
+    treatment: "robot",
+    tooltipKey: "shared.robotAction.tooltip.remote_inference",
+  },
+  remote_home: {
+    treatment: "robot",
+    tooltipKey: "shared.robotAction.tooltip.remote_home",
+  },
   replay: {
     treatment: "robot",
     tooltipKey: "shared.robotAction.tooltip.replay",
@@ -105,8 +127,7 @@ export const ROBOT_ACTIONS: Record<RobotActionKey, RobotActionSpec> = {
     tooltipKey: "shared.robotAction.tooltip.stop",
   },
   // Second press while that return is in flight: abort it and release now.
-  // No UI surfaces this yet — the entry exists so the one that does gets the
-  // treatment and copy from here rather than inventing its own.
+  // Hosting exposes this while the arm is returning.
   release_now: {
     treatment: "destructive",
     tooltipKey: "shared.robotAction.tooltip.releaseNow",

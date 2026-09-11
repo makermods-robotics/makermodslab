@@ -27,6 +27,8 @@ export interface CollectFormState {
   formOpen: boolean;
   datasetName: string;
   singleTask: string;
+  /** Ask for each episode's task before capture and wait for Space to start. */
+  perEpisodeTask: boolean;
   numEpisodes: number;
   episodeTimeS: number;
   resetTimeS: number;
@@ -46,6 +48,7 @@ const DEFAULT_COLLECT_FORM: CollectFormState = {
   formOpen: false,
   datasetName: "",
   singleTask: "",
+  perEpisodeTask: false,
   numEpisodes: 5,
   episodeTimeS: 60,
   resetTimeS: 15,

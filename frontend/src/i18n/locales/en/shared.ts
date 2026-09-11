@@ -15,10 +15,13 @@ export default {
       teleoperation: "teleoperation",
       recording: "a recording session",
       inference: "an inference run",
+      remote_inference: "a remote inference run",
       replay: "an episode replay",
       calibration: "a calibration",
       auto_calibration: "an auto-calibration",
       wiggle: "a gripper wiggle",
+      hosting: "remote-teleop hosting",
+      remote_teleoperation: "remote teleoperation",
     },
   },
   // Tooltips for the shared hardware affordances (RobotActionButton /
@@ -27,6 +30,10 @@ export default {
   // session-kind enum values — data, matched on and never translated.
   robotAction: {
     tooltip: {
+      hosting: "Makes this arm available to a remote operator, who can engage and move it.",
+      remote_teleoperation: "Connects to the remote arm and lets the leader drive it.",
+      remote_inference: "Lets a policy running remotely drive this robot arm.",
+      remote_home: "Returns the remote arm to its rest pose and releases torque.",
       teleoperation:
         "Moves the robot arm: the follower mirrors the leader while this runs.",
       recording:
@@ -70,6 +77,11 @@ export default {
     turnOff: "Turn off",
   },
   camera: {
+    title: "Cameras",
+    waiting: "Waiting for camera frames…",
+    paused: "Paused — showing the last captured frames.",
+    off: "Camera previews are off.",
+
     retry: "Retry camera feeds",
     retryTitle: "Retry camera feeds (e.g. after reconnecting a camera)",
     loadingRobot: "Loading robot...",
@@ -83,16 +95,17 @@ export default {
     done: "Done",
     leftArm: "Left arm",
     rightArm: "Right arm",
-    // Shown in the 3D viewer's place on a Maker arm, which has no URDF yet.
+    // Shown in the 3D viewer's place on the Metal arm, which has no URDF yet
+    // (the SO-101 and Maker arm both drive the model).
     jointAngles: "Live joint angles",
     waitingForJoints: "Waiting for joint data…",
-    // Family-neutral on purpose: the readout serves every CAN arm (Maker,
-    // Metal), and none of them ships a URDF yet.
+    // Kept arm-neutral: only the Metal arm falls back to the readout today,
+    // but a future arm type without a URDF would land here too.
     noModel: "No 3D model is available for this arm yet.",
   },
   urdf: {
     switchedDefaultTitle: "Switched to default model",
-    switchedDefaultDescription: "The default ARM100 robot model is now displayed.",
+    switchedDefaultDescription: "The default SO-101 robot model is now displayed.",
     loadingTitle: "Loading Urdf model...",
     loadingDescription: "Preparing 3D visualization",
     loadedTitle: "Urdf model loaded successfully",

@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -102,10 +102,13 @@ def test_session_kinds_match_the_mutex_features() -> None:
         "teleoperation",
         "recording",
         "inference",
+        "remote_inference",
         "replay",
         "calibration",
         "auto_calibration",
         "wiggle",
+        "hosting",
+        "remote_teleoperation",
     } == session_events.SESSION_KINDS
 
 

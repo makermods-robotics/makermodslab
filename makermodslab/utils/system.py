@@ -18,11 +18,13 @@ import logging
 import os
 import platform
 import queue
+import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from pydantic import BaseModel
@@ -96,8 +98,11 @@ def _find_uv() -> str | None:
     return None
 
 
-def _build_install_cmd(package: str) -> list[str]:
+def _build_install_cmd(package: str | Sequence[str]) -> list[str]:
     """Pick the best installer for the running Python.
+
+    ``package`` is one requirement or several (each its own argv token —
+    never a space-joined string, which pip would read as one bogus name).
 
     Venvs created with `uv venv` don't ship pip, so `python -m pip` fails with
     `No module named pip`. Find uv (PATH, then the standard install
@@ -105,10 +110,11 @@ def _build_install_cmd(package: str) -> list[str]:
     install lands in this Python's site-packages. Otherwise fall back to
     `python -m pip`.
     """
+    packages = [package] if isinstance(package, str) else list(package)
     uv = _find_uv()
     if uv:
-        return [uv, "pip", "install", "--python", sys.executable, package]
-    return [sys.executable, "-m", "pip", "install", package]
+        return [uv, "pip", "install", "--python", sys.executable, *packages]
+    return [sys.executable, "-m", "pip", "install", *packages]
 
 
 class ExtraStatus(BaseModel):
@@ -228,6 +234,28 @@ class InstallManager:
 
 training_install_manager = InstallManager("accelerate")
 wandb_install_manager = InstallManager("wandb")
+# The LiveKit Portal lerobot plugins (remote teleoperation / inference) —
+# the packages of pyproject's `remote` extra, installed BY NAME. Not
+# `makermodslab[remote]`: a bare package name makes uv treat the lerobot git
+# pin inside makermodslab as a transitive URL dependency and refuse to
+# resolve ("URL dependencies must be expressed as direct requirements"), and
+# pip would go looking for a `makermodslab` on PyPI instead. Keep these pins
+# in step with pyproject.toml's extra.
+REMOTE_PROBE_MODULE = "lerobot_teleoperator_livekit"
+# Exact pins, mirroring pyproject's `remote` extra: Portal fingerprints the
+# wire schema, so the station, the operator and the GPU image must all run
+# the same version (see pyproject.toml).
+REMOTE_INSTALL_TARGET = (
+    "livekit-portal==0.2.4",
+    "lerobot-teleoperator-livekit==0.2.4",
+    "lerobot-robot-livekit==0.2.4",
+)
+REMOTE_INSTALL_HINT = (
+    "Remote teleoperation and remote inference need LiveKit Portal (Python 3.12; Linux x86_64/aarch64 or Apple Silicon). "
+    "From a checkout: `uv pip install -e '.[remote]'`; for a `uv tool` install: "
+    "`uv tool install 'makermodslab[remote] @ git+https://github.com/makermods-robotics/makermodslab'`. Then restart."
+)
+remote_install_manager = InstallManager(REMOTE_INSTALL_TARGET)
 
 
 def handle_get_training_extra() -> dict[str, Any]:
@@ -243,6 +271,21 @@ def handle_install_training_extra() -> dict[str, Any]:
 
 def handle_install_training_extra_status() -> dict[str, Any]:
     return training_install_manager.get_status()
+
+
+def handle_get_remote_extra() -> dict[str, Any]:
+    return {
+        "available": _extra_available(REMOTE_PROBE_MODULE),
+        "install_hint": REMOTE_INSTALL_HINT,
+    }
+
+
+def handle_install_remote_extra() -> dict[str, Any]:
+    return remote_install_manager.start()
+
+
+def handle_install_remote_extra_status() -> dict[str, Any]:
+    return remote_install_manager.get_status()
 
 
 def handle_get_wandb_extra() -> dict[str, Any]:
@@ -275,7 +318,346 @@ POLICY_EXTRAS: dict[str, tuple[str, str]] = {
     "pi0_fast": ("transformers", "lerobot[pi]"),
     "pi05": ("transformers", "lerobot[pi]"),
     "diffusion": ("diffusers", "lerobot[diffusion]"),
+    # MolmoAct2's `lerobot[molmoact2]` extra is transformers + peft + scipy, but
+    # only TRANSFORMERS is a construction-time requirement for a rollout on this
+    # pin, so that is what we probe:
+    #   * peft is reached only from `_apply_lora_adapters`, i.e. when
+    #     `enable_lora_vlm` is set — a training-side option;
+    #   * scipy is the discrete action tokenizer, required by
+    #     `MolmoAct2PackInputsProcessorStep.__post_init__` only when the
+    #     checkpoint's `action_mode` is "discrete" or "both". The released
+    #     `lerobot/MolmoAct2-*-LeRobot` checkpoints save `action_mode:
+    #     "continuous"`, which is the one value that skips it.
+    # Probing either would report needs_extra && !available for a checkpoint
+    # that runs fine, and DeployPanel REFUSES to launch on that — a false
+    # blocker is worse than a buried ImportError. Revisit when MolmoAct2
+    # training lands, or if a "both"/"discrete" checkpoint ships.
+    "molmoact2": ("transformers", "lerobot[molmoact2]"),
 }
+
+
+# --------------------------------------------------------------------------- #
+# Policy runtime requirements
+# --------------------------------------------------------------------------- #
+# Sibling of POLICY_EXTRAS above, and the same shape of question: not "which
+# package does this policy need installed" but "which flags does this lerobot
+# pin REQUIRE to run this policy at all". Kept here rather than in rollout.py
+# because three front-ends will want the same answer — the rollout/eval/coaching
+# subprocess builders today, a MolmoAct2 training config later, and the remote
+# inference policy server after that.
+#
+# Everything below is a pure function of the checkpoint's own saved config.json
+# (the dict lerobot writes next to the weights), so it is trivially testable and
+# has no import-time cost.
+
+MOLMOACT2 = "molmoact2"
+
+# `--policy.*` overrides are applied by lerobot ON TOP of the checkpoint's saved
+# config (RolloutConfig.__post_init__ → PreTrainedConfig.from_pretrained(
+# cli_overrides=...)), which is why filling a gap here is enough and why
+# overriding a value the checkpoint deliberately saved would be wrong.
+
+
+def molmoact2_inference_action_mode(policy_config: Mapping[str, Any]) -> str:
+    """The action mode a MolmoAct2 rollout will actually run in.
+
+    `MolmoAct2Config.inference_action_mode` defaults to None and
+    `_resolve_inference_action_mode` raises on None — "MolmoAct2 inference
+    requires `inference_action_mode` to be set explicitly" — so a checkpoint
+    that never saved one cannot be rolled out at all without an override.
+
+    The released `lerobot/MolmoAct2-SO100_101-LeRobot` config DOES save
+    ``"inference_action_mode": "continuous"``, so this only fills a gap: a
+    locally fine-tuned checkpoint, or a raw `allenai/MolmoAct2` repo. The
+    default mirrors the checkpoint's TRAINING mode, because forcing continuous
+    onto an `action_mode="discrete"` checkpoint raises in `__post_init__` —
+    which would turn "no mode saved" into a different, equally fatal error.
+    """
+    saved = policy_config.get("inference_action_mode")
+    if saved in ("continuous", "discrete"):
+        return str(saved)
+    return "discrete" if policy_config.get("action_mode") == "discrete" else "continuous"
+
+
+def policy_inference_args(policy_config: Mapping[str, Any]) -> list[str]:
+    """Extra ``--policy.*`` rollout flags this pin requires for a checkpoint.
+
+    Keyed on the checkpoint's own ``type``; empty for every policy that needs
+    nothing (act, smolvla, pi0, …), which is all of them but MolmoAct2 today.
+    Deliberately emits NOTHING when the checkpoint already saved an explicit
+    choice — a rollout must run the policy the way its config says.
+    """
+    if policy_config.get("type") != MOLMOACT2:
+        return []
+    if policy_config.get("inference_action_mode") in ("continuous", "discrete"):
+        return []
+    return [f"--policy.inference_action_mode={molmoact2_inference_action_mode(policy_config)}"]
+
+
+def molmoact2_rtc_conflict(policy_config: Mapping[str, Any]) -> str | None:
+    """Why RTC can't drive this MolmoAct2 checkpoint, or None when it can.
+
+    `MolmoAct2Policy.supports_rtc()` is literally
+    ``inference_action_mode == "continuous"``, and `build_rollout_context`
+    turns a False into a ValueError — but only AFTER loading a multi-GB VLM
+    onto the accelerator. Answering from the saved config costs nothing and
+    fails in the launch panel instead. Only meaningful for MolmoAct2: every
+    other policy's RTC support is decided elsewhere (upstream's
+    `supports_rtc_inference`), and this returns None for them rather than
+    pretending to know.
+    """
+    if policy_config.get("type") != MOLMOACT2:
+        return None
+    if molmoact2_inference_action_mode(policy_config) == "continuous":
+        return None
+    return (
+        "Real-Time Chunking needs continuous actions, and this MolmoAct2 checkpoint runs "
+        "discrete ones. Use the standard (sync) inference engine for it."
+    )
+
+
+def molmoact2_device_warning(policy_config: Mapping[str, Any], device: str) -> str | None:
+    """Why a MolmoAct2 rollout on `device` is likely to disappoint, or None.
+
+    A WARNING and deliberately not a refusal. Nothing in this lerobot pin
+    requires CUDA: the only CUDA-specific code is the action-flow graph cache,
+    and `ActionCudaGraphManager.can_use_action_flow` returns False off-CUDA and
+    falls back to the eager loop. So refusing would be MakerMods Lab inventing
+    a hardware requirement lerobot does not state — the honest thing is to say
+    what the operator is in for and let them decide.
+
+    What they are in for is the model's size, not a missing kernel: MolmoAct2
+    is a ~7B vision-language model queried inside a 30 Hz control loop.
+
+    `device` is injected (rollout passes `_detect_device()`) so this stays a
+    pure function and the tests never touch a real accelerator.
+    """
+    if policy_config.get("type") != MOLMOACT2:
+        return None
+    if device == "cuda":
+        return None
+    return (
+        "MolmoAct2 is a ~7B vision-language model and this machine has no CUDA GPU "
+        f"(running on {device}). Expect very slow inference, or an out-of-memory failure. "
+        "Run it on a machine with an NVIDIA GPU for a usable control rate."
+    )
+
+
+# Policy types whose forward pass is conditioned on a natural-language task
+# string. THE single source of truth: jobs.py's `requires_task` (what the launch
+# UI gates its task field on) and the two DRTC policy servers' startup refusal
+# both read it, so the Lab and the GPU can never disagree about whether a run
+# needs a task.
+#
+# Why a hard requirement and not a nudge: with no task the policies here do not
+# fail, they DEGRADE SILENTLY. MolmoAct2 is the worst of them — its processor
+# renders `None` as the empty string into a fixed template, so the VLM is
+# prompted with the literal "The task is to ." and produces confidently wrong
+# actions with nothing in any log to say why. Refusing at startup costs an
+# operator one flag; not refusing costs them a session and a diagnosis.
+#
+# Mirrored by hand from the pinned fork's modeling_<policy>.py, alongside
+# POLICY_EXTRAS above — update both on a pin bump.
+LANGUAGE_CONDITIONED_POLICY_TYPES = frozenset({"smolvla", "pi0", "pi0_fast", "pi05", MOLMOACT2})
+
+
+def policy_requires_task(policy_type: object) -> bool:
+    """Whether a checkpoint of this architecture needs a ``--task`` string.
+
+    Takes ``object`` rather than ``str`` because both callers hand it a value
+    read straight out of a checkpoint's config.json, where the key can be
+    missing (None) or, in a corrupt file, some other type entirely. An
+    unreadable type is NOT language-conditioned: a False here only means the
+    task field stays optional, and a policy that really wanted one still says
+    so from inside the subprocess.
+    """
+    return isinstance(policy_type, str) and policy_type in LANGUAGE_CONDITIONED_POLICY_TYPES
+
+
+# --------------------------------------------------------------------------- #
+# Flow-matching / denoising steps per chunk, by policy family (S3.8f)
+# --------------------------------------------------------------------------- #
+# WHICH config field decides how many integration steps the action sampler takes
+# for ONE chunk. It is the cheapest latency lever a VLA has — the action expert
+# is re-run once per step, so halving the count roughly halves the GPU term of
+# the round trip — and every family spells it differently.
+#
+# Verified against the pinned fork's own source, not from memory:
+#
+#   * smolvla  → ``num_steps`` (configuration_smolvla.py, default 10).
+#   * pi0      → ``num_inference_steps`` (configuration_pi0.py, default 10).
+#   * pi05     → ``num_inference_steps`` (configuration_pi05.py, default 10).
+#   * molmoact2→ ``num_inference_steps`` (configuration_molmoact2.py, default
+#     **None**), and NOT ``num_flow_timesteps``. This one is worth spelling out
+#     because the names invite the opposite guess: `num_flow_timesteps` (8) is a
+#     TRAINING knob — how many flow timesteps are sampled per example to build
+#     the loss (`_prepare_flow_matching_tensors`, and the joint-flow loss) — and
+#     is never read on an inference path. `predict_action_chunk` reads
+#     ``kwargs.get("num_steps", config.num_inference_steps)`` and passes it down
+#     to `generate_actions_from_inputs`, which resolves ``num_steps or
+#     self.config.flow_matching_num_steps`` against the BACKBONE's HF config
+#     (default 10). So a MolmoAct2 checkpoint that saved nothing is really
+#     taking 10 steps, that 10 is not readable from the checkpoint's own
+#     config.json, and setting `num_inference_steps` is the only override that
+#     reaches the sampler. The RTC path resolves it identically.
+#
+# `pi0_fast` is deliberately absent: it decodes action TOKENS autoregressively
+# and has no denoising loop, so there is no field to point at and the knob is
+# correctly reported as inapplicable.
+#
+# Mirrored by hand from the pin, alongside POLICY_EXTRAS and
+# LANGUAGE_CONDITIONED_POLICY_TYPES — update all three on a pin bump.
+POLICY_FLOW_STEPS_FIELDS: dict[str, str] = {
+    "smolvla": "num_steps",
+    "pi0": "num_inference_steps",
+    "pi05": "num_inference_steps",
+    MOLMOACT2: "num_inference_steps",
+}
+
+# What MolmoAct2 actually samples with when its own config says nothing, which
+# is what the PUBLISHED checkpoint says (`num_inference_steps: null`). The
+# number is NOT in the checkpoint: `modeling_molmoact2.py` resolves
+# `steps = int(num_steps or self.config.flow_matching_num_steps)` against the
+# BACKBONE's HF config, whose `flow_matching_num_steps` defaults to 10
+# (`molmoact2_hf_model/configuration_molmoact2.py`), and nothing on the rollout
+# path passes `num_steps`. Stated here rather than left as "unknown" because
+# "unknown" is what made the panel offer 8 — `num_flow_timesteps` (default 8) is
+# a TRAINING knob (how many flow timesteps each example is sampled at to build
+# the loss) and is never read at inference. Re-verify on a lerobot pin bump: it
+# is the pin's default, not ours.
+MOLMOACT2_FLOW_STEPS_DEFAULT = 10
+
+
+def policy_flow_steps_field(policy_type: object) -> str | None:
+    """The config field a flow-steps override has to write for this policy.
+
+    ``object`` rather than ``str`` for the same reason `policy_requires_task`
+    takes one: every caller reads the type straight out of a checkpoint's
+    config.json, where it can be missing or, in a corrupt file, anything at
+    all. None means "this architecture has no such knob" — which is the answer
+    that makes the caller DROP the override rather than send a flag that dies
+    in the container after a paid cold start.
+    """
+    if not isinstance(policy_type, str):
+        return None
+    return POLICY_FLOW_STEPS_FIELDS.get(policy_type)
+
+
+def policy_supports_model_dtype(policy_config: Mapping[str, Any]) -> bool:
+    """Whether ``--model-dtype`` has anything to write on this checkpoint.
+
+    Answered from the SAVED config rather than from a table of policy types,
+    because a saved config.json is a dataclass dump: every field the config
+    class declares is a key in it, so key presence IS "the class has this
+    field" — and it stays right through a pin bump that gives another family
+    the knob. In this pin MolmoAct2 is the only one (`model_dtype: "bfloat16"`).
+
+    One function so the two places that ask cannot drift: the policy-config
+    route (which disables the panel's select) and `modal_launcher` (which drops
+    the flag before spending a cold start on a `SystemExit`).
+    """
+    return "model_dtype" in policy_config
+
+
+def policy_flow_steps_default(policy_config: Mapping[str, Any]) -> int | None:
+    """The step count this checkpoint would run with, or None when unknown.
+
+    Read off the checkpoint's own saved config, so it is what the panel shows
+    beside "Checkpoint default".
+
+    ONE exception, and it is the family the knob is for: a MolmoAct2 whose
+    ``num_inference_steps`` is absent or null answers
+    ``MOLMOACT2_FLOW_STEPS_DEFAULT`` (10) rather than None, because the number
+    that applies is a documented constant in the pin's own backbone config, not
+    an unknown — see that constant for the citation. A saved value still wins;
+    this is the fallback the container itself takes.
+
+    Non-positive and non-integral values answer None (`bool` explicitly, since
+    it is an `int` subclass): every policy config validates this itself at
+    construction, so anything else means a hand-edited config, and the honest
+    answer downstream is "unknown" rather than a number somebody sets a latency
+    budget from. That includes a hand-edited MolmoAct2 — only null (or absent)
+    takes the documented fallback.
+    """
+    policy_type = policy_config.get("type")
+    field = policy_flow_steps_field(policy_type)
+    if field is None:
+        return None
+    value = policy_config.get(field)
+    if value is None and policy_type == MOLMOACT2:
+        return MOLMOACT2_FLOW_STEPS_DEFAULT
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
+
+
+# Policy families whose IMAGE VIEW COUNT is a property of the checkpoint's
+# wrapper rather than of the architecture — the only ones an extra camera role
+# may be added to (S3.8g).
+#
+# MolmoAct2 is the case that motivated it, and the reasoning is specific rather
+# than a general "VLAs take any number of pictures". The allenai model takes a
+# LIST of images and was fine-tuned across community datasets carrying one to
+# three cameras; lerobot's wrapper
+# (`lerobot/MolmoAct2-SO100_101-LeRobot`) simply FIXED that list at two by
+# declaring `observation.images.cam0` / `cam1` in `input_features`. Nothing
+# downstream of that declaration counts: verified against the pin's own
+# `policies/molmoact2/processor_molmoact2.py`, the pack step builds its image
+# list by iterating whatever image keys it resolves (`_extract_images`), and the
+# prompt and the sequence budget are both computed from `len(images)`
+# (`_build_prompt`'s `Image {i}<|image|>` join, `image_tokens = num_images *
+# 196`). So a third declared feature is a third picture, not a crash.
+#
+# CLOSED and small on purpose. Adding a view to a policy whose vision tower
+# really is fixed at N is not a degraded run, it is a shape error inside the
+# container after a paid cold start — and worse, some architectures would accept
+# the feature and silently ignore it. A family goes in here only after someone
+# has read ITS processor and confirmed the same three things.
+#
+# Mirrored by the container (`drtc/policy.py`, `drtc/policy_rtc.py`), the
+# launcher (which drops the knob for a checkpoint that is not in it) and
+# `remote_inference` (which refuses an unknown camera role for one), so all
+# three answer identically. Update on a lerobot pin bump.
+VARIABLE_VIEW_POLICY_TYPES: frozenset[str] = frozenset({MOLMOACT2})
+
+# How many extra roles a single launch may add. Not a model limit — it is a
+# LATENCY one, and it is deliberately conservative: each view is another 196
+# image tokens through the prefill of a ~7B VLM, on a round trip an rtc run has
+# 867 ms to spend. Two is enough for "the two the checkpoint declares plus one
+# or two more"; a bench that wants five should measure first and raise it here.
+MAX_EXTRA_IMAGE_ROLES = 2
+
+# A camera role, as `observation.images.<role>` will spell it. Deliberately
+# narrower than "any string": the role becomes a policy feature key, a Portal
+# VIDEO TRACK NAME, a `--robot.cameras` dict key inside a draccus-parsed argv,
+# and a `--extra-image-roles` element in a COMMA-separated flag. A comma, a
+# space, a brace or a dot in it breaks one of those four in a place that
+# presents as "the session receives nothing" rather than as an error.
+_IMAGE_ROLE_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+
+
+def is_valid_image_role(name: object) -> bool:
+    """Whether ``name`` is a camera role this stack will carry end to end.
+
+    ``object`` rather than ``str`` for the same reason `policy_flow_steps_field`
+    takes one: the callers read these off a request body and a comma-split CLI
+    string, either of which can hand over something that is not a string at all.
+    """
+    return isinstance(name, str) and bool(_IMAGE_ROLE_RE.match(name))
+
+
+def policy_supports_extra_image_roles(policy_type: object) -> bool:
+    """Whether extra image roles may be added to this policy type (S3.8g).
+
+    The single reading of :data:`VARIABLE_VIEW_POLICY_TYPES`, so the container,
+    the launcher and the robot side cannot disagree about which checkpoints take
+    a third camera. False for a type this pin has never heard of, which is the
+    safe direction: an unknown architecture gets the checkpoint's own views, and
+    the operator gets a refusal instead of a shape error ninety seconds into a
+    cold start.
+    """
+    return isinstance(policy_type, str) and policy_type in VARIABLE_VIEW_POLICY_TYPES
+
 
 # One install manager per install target (lerobot[smolvla] / lerobot[pi] / …),
 # created lazily so pi0 and pi0_fast share the lerobot[pi] install.

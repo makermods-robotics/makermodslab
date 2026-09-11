@@ -17,7 +17,7 @@ import {
 /**
  * The two shared affordances for hardware controls.
  *
- * `RobotActionButton` marks a button that ENERGIZES an arm; the sibling
+ * `RobotActionButton` marks motion or permission for arm control; the sibling
  * `ReleaseActionButton` marks one that ends with the arm de-energized. Both
  * pin the icon and the tooltip to the action, so a call site cannot ship one
  * without the other and two screens cannot drift into two different amber

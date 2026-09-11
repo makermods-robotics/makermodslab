@@ -10,14 +10,21 @@ export default {
       teleoperation: "遥操作",
       recording: "录制会话",
       inference: "推理运行",
+      remote_inference: "远程推理运行",
       replay: "回合回放",
       calibration: "标定",
       auto_calibration: "自动标定",
       wiggle: "夹爪摆动",
+      hosting: "远程遥操作托管",
+      remote_teleoperation: "远程遥操作",
     },
   },
   robotAction: {
     tooltip: {
+      hosting: "允许远程操作者连接此机械臂，并启用和移动它。",
+      remote_teleoperation: "连接远程机械臂，并让主臂控制其运动。",
+      remote_inference: "允许远程运行的策略驱动此机械臂。",
+      remote_home: "让远程机械臂回到休息姿态并释放扭矩。",
       teleoperation: "会移动机械臂：运行期间从臂将跟随主臂动作。",
       recording: "会移动机械臂，同时把回合录制到数据集中。",
       inference: "会移动机械臂：由训练好的策略驱动。",
@@ -55,6 +62,11 @@ export default {
     turnOff: "关闭",
   },
   camera: {
+    title: "摄像头",
+    waiting: "正在等待摄像头画面…",
+    paused: "已暂停 — 显示最后捕获的画面。",
+    off: "摄像头预览已关闭。",
+
     retry: "重试摄像头画面",
     retryTitle: "重试摄像头画面（例如重新连接摄像头后）",
     loadingRobot: "正在加载机器人…",
@@ -74,7 +86,7 @@ export default {
   },
   urdf: {
     switchedDefaultTitle: "已切换到默认模型",
-    switchedDefaultDescription: "现已显示默认的 ARM100 机器人模型。",
+    switchedDefaultDescription: "现已显示默认的 SO-101 机器人模型。",
     loadingTitle: "正在加载 URDF 模型…",
     loadingDescription: "正在准备 3D 可视化",
     loadedTitle: "URDF 模型加载成功",

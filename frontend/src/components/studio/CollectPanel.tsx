@@ -80,6 +80,7 @@ const CollectPanel: React.FC = () => {
     formOpen,
     datasetName,
     singleTask,
+    perEpisodeTask,
     numEpisodes,
     episodeTimeS,
     resetTimeS,
@@ -179,7 +180,9 @@ const CollectPanel: React.FC = () => {
     // now (400 robot.not_ready from POST /api/v1/sessions, rendered by the
     // session dialog's start-failure toast). The Start button below still
     // disables on the same condition as a courtesy.
-    if (!datasetName || !singleTask) {
+    // With per-episode tasks there is no dataset-level task to require — each
+    // episode names its own during the session.
+    if (!datasetName || (!perEpisodeTask && !singleTask.trim())) {
       toast({
         title: t("studio.collect.toast.missingDetailsTitle"),
         description: t("studio.collect.toast.missingDetailsBody"),
@@ -226,10 +229,13 @@ const CollectPanel: React.FC = () => {
     const recordingConfig = {
       robot: robot.name,
       dataset_repo_id: datasetRepoId,
-      single_task: singleTask,
+      // Per-episode-task sessions carry no dataset-level task; the first
+      // episode's prompt just starts blank.
+      single_task: perEpisodeTask ? "" : singleTask,
+      per_episode_task: perEpisodeTask,
       num_episodes: numEpisodes,
       episode_time_s: episodeTimeS,
-      reset_time_s: resetTimeS,
+      reset_time_s: perEpisodeTask ? 0 : resetTimeS,
       fps: 30,
       video: true,
       push_to_hub: false,
@@ -269,12 +275,13 @@ const CollectPanel: React.FC = () => {
   );
 
   // Gate for the pinned Start button: robot ready + every required parameter
-  // filled in (name valid per the backend's rules, task described).
+  // filled in (name valid per the backend's rules, task described — unless
+  // each episode names its own task, which drops the dataset-level one).
   const canStart =
     !!selectedRecord &&
     selectedRecord.is_clean &&
     datasetNameIssue(datasetName) === null &&
-    singleTask.trim().length > 0;
+    (perEpisodeTask || singleTask.trim().length > 0);
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
@@ -307,6 +314,8 @@ const CollectPanel: React.FC = () => {
             setDatasetName={(v) => updateCollectForm({ datasetName: v })}
             singleTask={singleTask}
             setSingleTask={(v) => updateCollectForm({ singleTask: v })}
+            perEpisodeTask={perEpisodeTask}
+            setPerEpisodeTask={(v) => updateCollectForm({ perEpisodeTask: v })}
             numEpisodes={numEpisodes}
             setNumEpisodes={(v) => updateCollectForm({ numEpisodes: v })}
             episodeTimeS={episodeTimeS}
@@ -324,33 +333,32 @@ const CollectPanel: React.FC = () => {
         </CollapsibleContent>
       </Collapsible>
 
-      {/* Start recording — pinned directly above the dataset library so the
-          panel's primary action sits at the same level as Train's Start and
-          Deploy's Start/Stop. Disabled until the robot is ready and the
-          required parameters are filled in.
+      {/* Start recording — directly under the form, at the panel's normal
+          gap-5 rhythm, same as Train's Start and Deploy's Start/Stop. Nothing
+          in the column is bottom-pinned any more: everything top-packs and the
+          column scrolls when it overflows. Disabled until the robot is ready
+          and the required parameters are filled in. */}
+      <RobotActionButton
+        action="recording"
+        onClick={handleStartRecording}
+        disabled={!canStart}
+        className="w-full gap-2"
+      >
+        {t("studio.collect.start")}
+      </RobotActionButton>
 
-          This is also the recording session's real start: the session dialog
-          it mounts POSTs /api/v1/sessions on mount, so this press is the one
-          that energizes the arm — hence the shared robot-action affordance. */}
-      <div className="mt-auto pt-2">
-        <RobotActionButton
-          action="recording"
-          onClick={handleStartRecording}
-          disabled={!canStart}
-          className="w-full"
-        >
-          {t("studio.collect.start")}
-        </RobotActionButton>
-      </div>
-
-      {/* Dataset library — the user's own datasets, pinned to the panel foot
-          like Train's jobs and Deploy's models. The selected-dataset chip
-          lives in the header row, beside Merge. */}
-      <LibrarySection className="mt-0">
+      {/* Dataset library — the user's own datasets. LibrarySection's own
+          stretch now stands (no mt-0 override): the opener and Start row
+          top-pack, the free space falls between them and this, and the library
+          sits at the column foot so its "Show all" footer lines up with Train's
+          and Deploy's. Its body is a fixed-height viewport, so expanding
+          scrolls inside it and the footer never moves. The selected-dataset
+          chip lives in the header row, beside Merge. */}
+      <LibrarySection>
         <Collapsible
           open={libraryOpen}
           onOpenChange={setLibraryOpen}
-          className="space-y-3"
+          className="flex min-h-0 flex-1 flex-col space-y-3"
         >
           <LibraryHeader
             title={t("studio.collect.library.title")}
@@ -405,7 +413,9 @@ const CollectPanel: React.FC = () => {
               </>
             }
           />
-          <CollapsibleContent className={SLIDE}>
+          <CollapsibleContent
+            className={cn(SLIDE, "flex min-h-0 flex-1 flex-col")}
+          >
             <DatasetLibraryList
               datasets={libraryDatasets}
               loading={datasetsLoading}

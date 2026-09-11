@@ -74,7 +74,19 @@ import threading
 import time
 from pathlib import Path
 
-ROBOTS_PATH = Path(os.path.expanduser("~/.cache/huggingface/lerobot/robots"))
+
+def _makermodslab_home() -> Path:
+    """Mirror of makermodslab.utils.config.resolve_makermodslab_home, kept
+    inline so this script stays standalone: $MAKERMODSLAB_HOME, else
+    ~/.makermods/makermodslab. Robot records live under it, not in lerobot's
+    cache (see CLAUDE.md, "Persistent state on disk")."""
+    override = os.environ.get("MAKERMODSLAB_HOME")
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path.home() / ".makermods" / "makermodslab"
+
+
+ROBOTS_PATH = _makermodslab_home() / "robots"
 
 # Feetech STS3215 register ranges. Torque_Limit is 0-1000 in the servo's own
 # units (it is a permille of Max_Torque_Limit, not a percentage).

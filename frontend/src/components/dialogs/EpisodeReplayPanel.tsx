@@ -234,6 +234,9 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
         <span className="text-xs font-medium">
           {t(PHASE_LABEL_KEY[status?.phase ?? "idle"] as never)}
         </span>
+        {/* During the stopping phase the arm is returning to its start pose;
+            a second press asks the server to release it now (the same
+            two-press contract as teleoperation). */}
         <ReleaseActionButton
           action="stop"
           onClick={handleStop}
@@ -241,7 +244,7 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
           busy={stopping}
           size="sm"
         >
-          {t("dialogs.replay.stop")}
+          {status?.phase === "stopping" ? t("dialogs.replay.releaseNow") : t("dialogs.replay.stop")}
         </ReleaseActionButton>
       </div>
       {Object.keys(liveJoints).length > 0 ? (

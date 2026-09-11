@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ReleaseActionButton } from "@/components/ui/robot-action-button";
-import UrdfViewer from "@/components/UrdfViewer";
+import SessionLiveView from "@/components/control/SessionLiveView";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { useRobots } from "@/hooks/useRobots";
@@ -37,8 +37,6 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({
   // The teleop session is for the currently-selected robot; show two arms when
   // it's bimanual.
   const { selectedRecord } = useRobots();
-  const bimanual = selectedRecord?.mode === "bimanual";
-
   // Stop teleoperation exactly once, however the user leaves, so Done, the
   // dialog close, and the unmount safety net can't double-stop or
   // double-toast. Reset when a new session opens the dialog.
@@ -231,9 +229,7 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({
     <div
       role="dialog"
       aria-label={title}
-      className={`fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-border bg-background shadow-2xl ${
-        bimanual ? "w-[min(94vw,1000px)]" : "w-[min(92vw,640px)]"
-      }`}
+      className="fixed left-1/2 top-1/2 z-50 flex max-h-[92vh] w-[min(94vw,1200px)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto rounded-lg border border-border bg-background shadow-2xl"
     >
       <div className="flex items-center gap-2 border-b border-border px-4 py-2">
         <span className="h-2 w-2 animate-pulse rounded-full bg-destructive" />
@@ -291,30 +287,7 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({
           </div>
         )}
 
-        {bimanual ? (
-          <div className="flex gap-3">
-            <div className="flex-1">
-              <span className="mb-1 block text-xs text-muted-foreground">
-                {t("dialogs.teleop.leftArm")}
-              </span>
-              <div className="h-[400px] overflow-hidden rounded-md border border-border">
-                <UrdfViewer jointsKey="joints" variant="light" compact />
-              </div>
-            </div>
-            <div className="flex-1">
-              <span className="mb-1 block text-xs text-muted-foreground">
-                {t("dialogs.teleop.rightArm")}
-              </span>
-              <div className="h-[400px] overflow-hidden rounded-md border border-border">
-                <UrdfViewer jointsKey="joints_right" variant="light" compact />
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="h-[440px] overflow-hidden rounded-md border border-border">
-            <UrdfViewer variant="light" compact />
-          </div>
-        )}
+        <SessionLiveView robot={selectedRecord} />
       </div>
     </div>
   );

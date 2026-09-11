@@ -94,6 +94,8 @@ export default {
     // {{robot}} is the robot's own name — data.
     movesArmWarning: "Moves {{robot}}'s arm — make sure the area is clear.",
     stop: "Stop",
+    // Second press while the arm returns to its start pose.
+    releaseNow: "Release now",
     toast: {
       failedTitle: "Replay failed",
       // Last-resort fallback: the backend hint and error text win when present.
@@ -171,5 +173,156 @@ export default {
       checkArm: "Check the arm",
       disconnected: "The arm was disconnected cleanly.",
     },
+  },
+  // Station side of remote teleoperation — the status view of a station-mode
+  // host. Robot names, operator identities and room names are data; the
+  // phase VALUES (remote_host.PHASES) are data too, only the labels localize.
+  hosting: {
+    details: "Technical details",
+    title: "Hosting",
+    titleWithRobot: "Hosting {{robot}}",
+    // The stop: hands the arm back to whoever is at the station.
+    release: "Release for local use",
+    releaseNow: "Release now",
+    releasingBanner:
+      "Returning the arm to rest before releasing torque. Press Release now to skip the return.",
+    // Shown only when the descriptor says station_mode.
+    stationModeNote:
+      "Station mode: hosting re-arms itself a few seconds after any local session ends.",
+    // The dialog is open but no hosting session is live right now.
+    inactive:
+      "Not hosting right now — a local session has the arm, or hosting stopped.",
+    phaseLabel: "Arm",
+    phase: {
+      parked: "Parked",
+      engaging: "Engaging…",
+      engaged: "Engaged",
+      parking: "Parking…",
+    },
+    operatorLabel: "Operator",
+    waitingOperator: "Waiting for an operator…",
+    roomLabel: "Room",
+    leftArm: "Left arm",
+    rightArm: "Right arm",
+    endedWithWarning: "Hosting ended with a cleanup warning",
+    failed: "Hosting failed",
+    // Station mode only: opens the hosted-robot picker (StationRobotDialog).
+    changeRobot: "Change robot",
+    toast: {
+      stoppedCheckArm: "Hosting stopped — check the arm",
+      stopped: "Hosting stopped",
+      releasing: "The arm returns to its starting position, then goes limp.",
+      checkArm: "Check the arm",
+      disconnected: "The arm was disconnected cleanly.",
+    },
+  },
+  // Station side — which saved robot this station hosts (PUT
+  // /api/v1/station/robot). Robot names are data; the list is the backend's
+  // `hostable` (saved robots whose follower side is set up).
+  stationRobot: {
+    title: "Hosted robot",
+    description: "Choose the robot to host for remote control.",
+    listLabel: "Robots this station can host",
+    // The row of the robot hosted right now.
+    hostedNow: "Hosted now",
+    // The row of the chosen robot while its hosting is down (a local session
+    // has the arm, or it is still re-arming).
+    chosen: "Chosen",
+    // No saved robot has its follower side set up.
+    empty:
+      "Set up a follower arm to host an SO-101, Maker, or Metal robot here.",
+    openSettings: "Open Robot settings",
+    createRobot: "Create robot",
+    host: "Host this robot",
+    applying: "Applying…",
+    stopHosting: "Stop hosting",
+    toast: {
+      changedTitle: "Hosted robot changed",
+      changedDescription: "This station now hosts {{robot}}.",
+      stoppedTitle: "Hosting stopped",
+      stoppedDescription: "This station no longer hosts a robot.",
+    },
+  },
+  // Operator side — the station picker, then the live viewer. Station names,
+  // hosted robot names, camera names and instance ids are data.
+  remoteTeleop: {
+    title: "Remote teleoperation",
+    titleWithRobot: "Remote teleoperation — {{robot}}",
+    stationsHeading: "Stations",
+    refreshStations: "Refresh stations",
+    stationsLoading: "Looking for stations…",
+    stationsEmpty:
+      "No station is hosting right now. Start one with makermodslab --sfu --host <robot>, then refresh.",
+    // {{robot}} is the hosted robot's name.
+    hostingRobot: "Hosting {{robot}}",
+    // Why a station row is greyed out: its hosted arm's family differs from
+    // the local record's, which the server would refuse as a schema mismatch.
+    armMismatch: "Different arm family",
+    // The station's seat state on a picker row. {{operator}} is the seat
+    // holder's identity (data); a seated station is greyed out with the
+    // second line.
+    rowParked: "Parked",
+    rowEngagedBy: "Engaged by {{operator}}",
+    seatTaken: "Someone else is driving",
+    start: "Start",
+    starting: "Starting…",
+    stop: "Stop",
+    // Home parks the station's arm and holds it; Engage re-energizes it.
+    home: "Home",
+    homeHint: "Park the station's arm and hold it there.",
+    engage: "Engage",
+    engageHint: "Re-energize the station's arm with a soft start.",
+    // The live phase of the station's arm, from station_phase.
+    stationPhaseLabel: "Station arm",
+    stationPhase: {
+      parked: "Parked",
+      engaging: "Engaging…",
+      engaged: "Engaged",
+      parking: "Parking…",
+      // station_phase is null: the station could not be read.
+      unknown: "Unknown",
+    },
+    softStart: "Soft start…",
+    stationLabel: "Station",
+    roomLabel: "Room",
+    cameras: "Cameras",
+    noCameras: "The station publishes no cameras.",
+    // {{name}} is the camera's name.
+    cameraAlt: "Remote camera {{name}}",
+    cameraFailed: "Stream unavailable",
+    latency: "Round trip",
+    latencyLast: "last",
+    latencyMean: "mean",
+    latencyP95: "p95",
+    latencyWaiting: "Waiting for the first sample…",
+    observations: "observations",
+    dropped: "dropped",
+    leftArm: "Left arm",
+    rightArm: "Right arm",
+    endedWithWarning: "Remote teleoperation ended with a cleanup warning",
+    failed: "Remote teleoperation failed",
+    toast: {
+      startedTitle: "Remote teleoperation started",
+      // {{station}} is the station's display name.
+      startedFallback: "Driving {{station}}.",
+      startedWarningTitle: "Started with a warning",
+      stoppedCheckArm: "Remote teleoperation stopped — check the arm",
+      stopped: "Remote teleoperation stopped",
+      checkArm: "Check the arm",
+      disconnected: "The leader arm was disconnected cleanly.",
+      // Home / Engage answered success=false; the reason is server prose.
+      commandRefused: "The station refused the command",
+    },
+  },
+  // Install flow for the `remote` optional extra (mirrors the training and
+  // W&B install dialogs; the generic install copy lives in training.install).
+  remoteExtra: {
+    title: "Remote teleoperation extra not installed",
+    srDescription: "Install the remote extra to enable remote teleoperation.",
+    // <0> is the extra's name — a pip identifier, rendered verbatim.
+    description:
+      "Remote teleoperation needs the <0>remote</0> extra, which isn't installed in this environment. Install it to host a robot or drive one over the network.",
+    ready:
+      "Install complete — remote teleoperation is available immediately, no restart needed. Start again.",
   },
 } as const;
