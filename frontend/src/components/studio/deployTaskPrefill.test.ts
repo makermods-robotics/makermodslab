@@ -11,6 +11,7 @@ import {
   TASK_LOADING_WORD_KEYS,
   TASK_LOADING_DOT_MS,
   TASK_LOADING_MAX_MS,
+  coachNameBase,
   taskFieldVisible,
   taskIsAmbiguous,
   taskPlaceholderKey,
@@ -319,5 +320,26 @@ describe("taskPlaceholderKey", () => {
     expect(taskPlaceholderKey({ kind: "loading" }, false)).toBe(
       "studio.deploy.task.placeholderSlow",
     );
+  });
+});
+
+describe("coachNameBase", () => {
+  it("names itself after the trained-on dataset's last path segment", () => {
+    expect(coachNameBase("alice/pick-cube", "My Policy")).toBe("pick-cube");
+  });
+
+  it("falls back to the job display name with no real dataset id", () => {
+    // Same nullability as taskPrefillRepoId: an import with no train_config,
+    // an untagged dataset, or a resume-chain ancestor with no lineage answer.
+    expect(coachNameBase(null, "My Policy")).toBe("My Policy");
+  });
+
+  it("agrees with taskPrefillRepoId's resolved id — same source, same answer", () => {
+    // Regression for the coach name and the task prefill disagreeing about
+    // which dataset trained an ancestor checkpoint on a resume chain: the
+    // coach name used to be named after the record's (tip) dataset while the
+    // task was correctly named after the checkpoint's OWN training dataset.
+    const trainedOn = taskPrefillRepoId("ancestor/repo", "tip/repo");
+    expect(coachNameBase(trainedOn, "fallback")).toBe("repo");
   });
 });

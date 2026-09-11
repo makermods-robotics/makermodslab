@@ -93,6 +93,7 @@ import {
 } from "@/components/remote-inference/remoteRunConfig";
 import {
   classifyTaskLookup,
+  coachNameBase,
   defaultTaskFrom,
   effectiveTaskFor,
   loadingDots,
@@ -1141,21 +1142,27 @@ const DeployPanel: React.FC = () => {
   // Named after the DATASET the checkpoint was trained on, falling back to the
   // model. That is the thing the corrections will be merged back into, so it is
   // the name that makes the pair findable a week later.
+  //
+  // Resolved through the same taskPrefillRepoId the task prefill uses (not
+  // selectedJob's dataset_repo_id directly) so the two agree about which
+  // dataset trained THIS checkpoint: on a resume chain, an ancestor's own
+  // training dataset can differ from the chain tip's, which is what
+  // selectedJob.config.dataset_repo_id always names.
   const defaultCoachName = useMemo(() => {
     if (!selectedJob) return "";
-    const trainedOn = selectedJob.config?.dataset_repo_id;
-    const base =
-      trainedOn && trainedOn !== "(imported)"
-        ? trainedOn.split("/").pop()
-        : jobDisplayName(selectedJob);
+    const trainedOn = taskPrefillRepoId(
+      policyConfig?.dataset_repo_id,
+      selectedJob.config?.dataset_repo_id,
+    );
+    const base = coachNameBase(trainedOn, jobDisplayName(selectedJob));
     // Same character class the backend accepts in a repo id; collapse anything
     // else so a name with spaces or slashes cannot produce a bad path.
-    const slug = (base ?? "")
+    const slug = base
       .trim()
       .replace(/[^a-zA-Z0-9._-]+/g, "_")
       .replace(/^_+|_+$/g, "");
     return slug ? `correction_${slug}` : "";
-  }, [selectedJob]);
+  }, [selectedJob, policyConfig]);
 
   // What actually gets sent: whatever they typed, else the default.
   const effectiveCoachName = coachDatasetName.trim() || defaultCoachName;

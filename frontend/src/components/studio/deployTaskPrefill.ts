@@ -206,6 +206,23 @@ export function effectiveTaskFor(
   return typed.trim() || defaultTaskFrom(state);
 }
 
+/** The name the Deploy panel's corrections-dataset default is built from: the
+ * last path segment of the checkpoint's OWN training dataset repo id, falling
+ * back to the job's display name when there is no real id to name it after.
+ *
+ * Takes `trainedOnRepoId` already resolved by `taskPrefillRepoId` — not a job
+ * record's `dataset_repo_id` directly — so the coach-dataset name and the
+ * task prefill agree about which dataset trained THIS checkpoint. They used
+ * to read different sources: on a resume chain, an ancestor checkpoint's task
+ * correctly came from its own training dataset while the coach name kept
+ * naming itself after the chain tip's. */
+export function coachNameBase(
+  trainedOnRepoId: string | null,
+  fallback: string,
+): string {
+  return trainedOnRepoId?.split("/").pop() || fallback;
+}
+
 /** Which placeholder KEY explains an empty task box.
  *
  * Covers every state EXCEPT loading's cycling animation: `loading` here
