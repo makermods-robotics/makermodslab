@@ -52,7 +52,12 @@ from ..jobs import (
     extract_wandb_run_url,
     parse_metrics_into,
 )
-from ..train import TrainingRequest, build_training_command, parse_hf_duration
+from ..train import (
+    TrainingRequest,
+    build_training_command,
+    parse_hf_duration,
+    wandb_requires_online_credentials,
+)
 from ..utils.hf_auth import cached_whoami, shared_hf_api
 from ._dataset import ensure_dataset_on_hub
 
@@ -979,7 +984,7 @@ class HfCloudJobRunner:
         # after a local-only dataset had already been pushed to the Hub, so a
         # missing key left a published dataset behind for a job that never ran.
         # ValueError so server.py maps it to a 400 with this detail.
-        if config.wandb_enable and not resolve_wandb_api_key():
+        if wandb_requires_online_credentials(config) and not resolve_wandb_api_key():
             raise ValueError(WANDB_KEY_MISSING_MESSAGE)
 
         # Open the log file early so dataset-upload progress is recorded
@@ -1071,7 +1076,7 @@ class HfCloudJobRunner:
         # HF_TOKEN goes via `secrets` (not `env`) so it doesn't show up in
         # the job's environment variable inspection / logs.
         secrets = {"HF_TOKEN": token}
-        if config.wandb_enable:
+        if wandb_requires_online_credentials(config):
             wandb_key = resolve_wandb_api_key()
             if not wandb_key:
                 raise ValueError(WANDB_KEY_MISSING_MESSAGE)

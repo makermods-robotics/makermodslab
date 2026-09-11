@@ -310,7 +310,7 @@ from .teleoperate import (
     handle_teleoperation_status,
     stop_and_wait as stop_teleoperation_and_wait,
 )
-from .train import TrainingRequest
+from .train import TrainingRequest, wandb_requires_online_credentials
 from .update import handle_run_update, handle_update_check
 from .utils.config import (
     HOME_IS_OVERRIDDEN,
@@ -2807,9 +2807,9 @@ async def create_training_job(req: Request):
                 ),
             )
 
-    # W&B credentials, the FAST half (MT40). Any run that asks for W&B needs an
-    # API key on THIS machine, on either runner: a cloud job gets it forwarded
-    # as a job secret, and a local job's trainer is a non-tty subprocess that
+    # W&B credentials, the FAST half (MT40). Online logging needs a key on
+    # its execution host. A LAN peer validates its own key; a cloud job gets
+    # ours forwarded as a job secret, and a local trainer is a subprocess that
     # can't prompt for a login. Refuse here, before anything is uploaded,
     # submitted or spawned.
     #
@@ -2819,7 +2819,12 @@ async def create_training_job(req: Request):
     # (a continuation always re-opens the parent's W&B run). So resumes are
     # skipped here and re-asked there, once the inherited value is known; that
     # check is the authority and raises ValueError -> the 400 below.
-    if cfg.wandb_enable and not cfg.resume and not resolve_wandb_api_key():
+    if (
+        runner != "lan_node"
+        and not cfg.resume
+        and wandb_requires_online_credentials(cfg)
+        and not resolve_wandb_api_key()
+    ):
         logger.warning("Rejecting run: W&B enabled but no API key resolvable on this host.")
         raise HTTPException(status_code=400, detail=WANDB_KEY_MISSING_MESSAGE)
 

@@ -271,11 +271,12 @@ class TrainingRequest(BaseModel):
     # configs persisted before F7 — all of them cloud→cloud — keep their meaning.
     resume_from_uploaded_checkpoint: bool = False
 
-    # Weights & Biases. A run that enables this needs an API key resolvable on
-    # the HOST (env or ~/.netrc): the cloud runner forwards it to the pod as a
+    # Weights & Biases. Online logging needs an API key on the execution host
+    # (env or ~/.netrc): the cloud runner forwards this host's key to the pod as a
     # job secret, and a local trainer is a non-tty subprocess in which
     # `wandb.init` cannot prompt for a login. JobRegistry.start refuses at
     # submit time rather than letting either fail once the record says running.
+    # Offline/disabled modes need no key; LAN peers validate their own key.
     #
     # On a RESUME these are overwritten from the parent record — lerobot
     # re-opens the parent's W&B run via the run id in the checkpoint's
@@ -343,6 +344,11 @@ class TrainingRequest(BaseModel):
         # Raises ValueError with a user-facing message when malformed or <= 0.
         parse_hf_duration(text)
         return text
+
+
+def wandb_requires_online_credentials(request: TrainingRequest) -> bool:
+    """Whether the effective W&B configuration will contact its server."""
+    return request.wandb_enable and request.wandb_mode not in ("offline", "disabled")
 
 
 def _policy_optimizer_flags(request: "TrainingRequest") -> list[str]:

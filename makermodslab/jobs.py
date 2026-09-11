@@ -41,7 +41,7 @@ from pydantic import BaseModel
 from tqdm.auto import tqdm as _base_tqdm
 
 from .datasets import CAMERA_FEATURE_PREFIX, read_dataset_features, read_dataset_robot_type
-from .train import TrainingRequest
+from .train import TrainingRequest, wandb_requires_online_credentials
 from .utils.config import validate_job_name
 from .utils.errors import is_out_of_memory
 from .utils.hf_auth import LOGIN_COMMAND, cached_whoami, hf_hub_offline, shared_hf_api
@@ -3994,13 +3994,13 @@ class JobRegistry:
                     # that run is identified by the checkpoint, not by where the
                     # trainer happens to execute.
                     #
-                    # Only enable/project/entity. mode/notes/disable_artifact
-                    # are NOT copied because they are not sent either — the
-                    # resume branch emits no flags for them and lerobot rebuilds
-                    # them from the checkpoint's own train_config.json.
+                    # Copy mode too: although no resume mode flag is emitted,
+                    # credential validation must match the checkpoint mode the
+                    # trainer restores, rather than the form's fresh-run default.
                     config.wandb_enable = owner.config.wandb_enable
                     config.wandb_project = owner.config.wandb_project
                     config.wandb_entity = owner.config.wandb_entity
+                    config.wandb_mode = owner.config.wandb_mode
                     # A resume may continue on EITHER runner (F7). What changes
                     # across the four combinations is only where the parent's
                     # checkpoint has to end up before the trainer can read it —
@@ -4122,8 +4122,8 @@ class JobRegistry:
                     )
 
             # W&B credentials, THE authoritative preflight (MT40). Applies to
-            # BOTH runners: W&B needs a key wherever it runs, and neither runner
-            # can ask for one once it has started.
+            # local/cloud online modes. LAN peers validate their own credentials;
+            # offline and disabled modes never need a server login.
             #
             #   * cloud — the key is forwarded into the pod as a job secret;
             #     without it the trainer dies inside a billed GPU container.
@@ -4145,7 +4145,11 @@ class JobRegistry:
             # The original MT40 defect was exactly this check being absent on
             # the resume path: a W&B-enabled parent resumed on the cloud with no
             # key, and died inside a billed GPU container.
-            if config.wandb_enable and not resolve_wandb_api_key():
+            if (
+                target.runner != "lan_node"
+                and wandb_requires_online_credentials(config)
+                and not resolve_wandb_api_key()
+            ):
                 raise ValueError(WANDB_KEY_MISSING_MESSAGE)
 
             job_id = self._unique_job_id(config.policy_type, config.dataset_repo_id)

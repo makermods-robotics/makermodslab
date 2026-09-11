@@ -114,7 +114,8 @@ def test_resolve_wandb_api_key_returns_none_when_password_is_empty(
     assert resolve_wandb_api_key() is None
 
 
-def test_cloud_run_forwards_the_wandb_key_as_a_job_secret(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("mode", ["online", "offline", "disabled"])
+def test_cloud_run_forwards_the_wandb_key_as_a_job_secret(tmp_path, monkeypatch, mode) -> None:
     """The one place the key is read for its VALUE rather than its presence.
 
     It must ride `secrets` (like HF_TOKEN), never `env`: HF Jobs redacts
@@ -128,7 +129,12 @@ def test_cloud_run_forwards_the_wandb_key_as_a_job_secret(tmp_path, monkeypatch)
 
     monkeypatch.setattr("makermodslab.runners.hf_cloud.get_token", lambda: "hf-token")
     monkeypatch.setattr("makermodslab.runners.hf_cloud.cached_whoami", lambda: {"name": "alice"})
-    monkeypatch.setattr("makermodslab.runners.hf_cloud.resolve_wandb_api_key", lambda: "wandb-key")
+
+    def key_for_online_only():
+        assert mode == "online", "non-online cloud runs must not inspect credentials"
+        return "wandb-key"
+
+    monkeypatch.setattr("makermodslab.runners.hf_cloud.resolve_wandb_api_key", key_for_online_only)
 
     runner = HfCloudJobRunner(TrainingMetrics(), tmp_path / "log.jsonl", "t4-small")
     api = MagicMock()
@@ -138,11 +144,16 @@ def test_cloud_run_forwards_the_wandb_key_as_a_job_secret(tmp_path, monkeypatch)
     monkeypatch.setattr("makermodslab.runners.hf_cloud.resolve_hub_repo_id", lambda repo_id: repo_id)
     monkeypatch.setattr(runner, "_start_worker_threads", lambda label: None)
 
-    config = TrainingRequest(dataset_repo_id="user/ds", wandb_enable=True, wandb_project="proj")
+    config = TrainingRequest(
+        dataset_repo_id="user/ds", wandb_enable=True, wandb_project="proj", wandb_mode=mode
+    )
     runner.start("child_run", config, "/host/out")
 
     kwargs = api.run_job.call_args.kwargs
-    assert kwargs["secrets"]["WANDB_API_KEY"] == "wandb-key"
+    if mode == "online":
+        assert kwargs["secrets"]["WANDB_API_KEY"] == "wandb-key"
+    else:
+        assert "WANDB_API_KEY" not in kwargs["secrets"]
     assert kwargs["secrets"]["HF_TOKEN"] == "hf-token"
     # Never in `env` — that channel is not redacted.
     assert "WANDB_API_KEY" not in (kwargs.get("env") or {})
