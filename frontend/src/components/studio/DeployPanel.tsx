@@ -100,6 +100,7 @@ import {
   TASK_LOADING_DOT_MS,
   TASK_LOADING_MAX_MS,
   taskIsAmbiguous,
+  taskPrefillRepoId,
   tasksFrom,
   type TaskPrefillState,
 } from "./deployTaskPrefill";
@@ -1179,13 +1180,21 @@ const DeployPanel: React.FC = () => {
   // the job record only as a fallback for a backend too old to send the field.
   // The record is the wrong source twice over: an import's carries the
   // "(imported)" placeholder rather than a repo id, and on a resume chain the
-  // tip's record does not describe a checkpoint owned by an ancestor. Keying on
-  // policyConfig also means the lookup re-runs when the STEP changes, which
-  // keying on selectedJob never did.
+  // tip's record does not describe a checkpoint owned by an ancestor.
+  //
+  // Resolved to a STRING before the effect, and the effect keys on THAT rather
+  // than on policyConfig itself: every checkpoint of one job shares its
+  // training dataset, so walking steps re-fetches a fresh policyConfig object
+  // on every step, and keying on the object re-ran this lookup (and the
+  // "loading" flicker with it) on every step even though the target never
+  // changed. taskPrefillRepoId is pure and tested precisely so this stays a
+  // string comparison rather than an object-identity one.
+  const taskPrefillTarget = taskPrefillRepoId(
+    policyConfig?.dataset_repo_id,
+    selectedJob?.config?.dataset_repo_id,
+  );
   useEffect(() => {
-    const repoId =
-      policyConfig?.dataset_repo_id ?? selectedJob?.config?.dataset_repo_id;
-    if (!repoId || repoId === "(imported)") {
+    if (!taskPrefillTarget) {
       setTaskPrefill({ kind: "idle" });
       return;
     }
@@ -1197,7 +1206,7 @@ const DeployPanel: React.FC = () => {
     setTaskPrefill({ kind: "loading" });
     (async () => {
       try {
-        const info = await getDatasetInfo(baseUrl, fetchWithHeaders, repoId);
+        const info = await getDatasetInfo(baseUrl, fetchWithHeaders, taskPrefillTarget);
         if (cancelled) return;
         // Ranking and the placeholder contract both live in deployTaskPrefill,
         // where they can be tested: the default is offered GREYED rather than
@@ -1215,7 +1224,7 @@ const DeployPanel: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [policyConfig, selectedJob, baseUrl, fetchWithHeaders]);
+  }, [taskPrefillTarget, baseUrl, fetchWithHeaders]);
 
   // Animate the loading placeholder's trailing dots, and give up saying
   // "loading" after TASK_LOADING_MAX_MS.

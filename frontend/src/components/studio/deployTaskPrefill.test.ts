@@ -13,6 +13,7 @@ import {
   TASK_LOADING_MAX_MS,
   taskFieldVisible,
   taskIsAmbiguous,
+  taskPrefillRepoId,
   tasksFrom,
   type TaskPrefillState,
 } from "./deployTaskPrefill";
@@ -49,6 +50,39 @@ describe("rankDatasetTasks", () => {
 
   it("drops empty task strings", () => {
     expect(rankDatasetTasks([task("", 5), task("real", 1)])).toEqual(["real"]);
+  });
+});
+
+describe("taskPrefillRepoId", () => {
+  it("prefers the checkpoint's own dataset over the job record's", () => {
+    expect(taskPrefillRepoId("checkpoint/repo", "record/repo")).toBe(
+      "checkpoint/repo",
+    );
+  });
+
+  it("falls back to the job record for an older backend with no field", () => {
+    expect(taskPrefillRepoId(undefined, "record/repo")).toBe("record/repo");
+    expect(taskPrefillRepoId(null, "record/repo")).toBe("record/repo");
+  });
+
+  it("is null with nothing to fall back to", () => {
+    expect(taskPrefillRepoId(undefined, undefined)).toBeNull();
+    expect(taskPrefillRepoId(null, null)).toBeNull();
+  });
+
+  it("never resolves the import placeholder", () => {
+    expect(taskPrefillRepoId(undefined, "(imported)")).toBeNull();
+  });
+
+  it("returns an EQUAL string across two different-identity checkpoints on the", () => {
+    // same job — the property the Deploy panel's prefill effect relies on to
+    // avoid re-fetching on every checkpoint step: every checkpoint of one job
+    // shares its training dataset, so a fresh policyConfig object with the
+    // same dataset_repo_id must resolve to the same lookup target.
+    const stepA = taskPrefillRepoId("shared/repo", undefined);
+    const stepB = taskPrefillRepoId("shared/repo", undefined);
+    expect(stepA).toBe(stepB);
+    expect(stepA).toBe("shared/repo");
   });
 });
 

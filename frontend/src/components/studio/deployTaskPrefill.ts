@@ -101,6 +101,28 @@ export function rankDatasetTasks(tasks: DatasetTask[]): string[] {
   return ordered.map((t) => t.task).filter(Boolean);
 }
 
+/** The repo id to look up training tasks for, or null when there is nothing
+ * real to look up.
+ *
+ * Prefers the CHECKPOINT's own id (`policyConfig.dataset_repo_id`, read from
+ * its train_config.json) over the owning job record's, falling back to the
+ * record only when the checkpoint hasn't reported one (an older backend that
+ * predates the field). `"(imported)"` is a placeholder the record carries for
+ * an import, never a real id.
+ *
+ * Returns a STRING (or null) rather than taking the policyConfig OBJECT,
+ * deliberately: every checkpoint of one job shares its training dataset, so a
+ * caller that keys an effect on this return value re-fetches only when the
+ * dataset actually changes — not on every checkpoint-step fetch, which hands
+ * back a fresh policyConfig object with the same dataset_repo_id inside it. */
+export function taskPrefillRepoId(
+  policyConfigRepoId: string | null | undefined,
+  jobRecordRepoId: string | null | undefined,
+): string | null {
+  const repoId = policyConfigRepoId ?? jobRecordRepoId;
+  return repoId && repoId !== "(imported)" ? repoId : null;
+}
+
 /** Classify what came back from `getDatasetInfo`.
  *
  * A 404 is a dataset that is not on this machine and not resolvable on the Hub
