@@ -261,7 +261,9 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_real_user_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_real_user_state(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Cut every real-machine path the dataset/model listings read out of the suite.
 
     `tmp_lerobot_home` redirects the calibration / robots / ports state, but the
@@ -300,7 +302,12 @@ def _isolate_real_user_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     """
     from makermodslab.utils import config as cfg
 
-    isolated = tmp_path / "isolated_user_state"
+    # Keep fixture bookkeeping outside the output directory owned by each test.
+    isolated = tmp_path_factory.mktemp("isolated-user-state")
+    # Saved repo lists are application state and must remain beneath its home.
+    # The module-level setup has already isolated MAKERMODSLAB_HOME from the user.
+    saved_root = Path(cfg.MAKERMODSLAB_HOME) / isolated.name
+    saved_root.mkdir()
     lerobot_home = isolated / "lerobot"
     hub_cache = isolated / "hub"
     for d in (lerobot_home, hub_cache):
@@ -309,10 +316,10 @@ def _isolate_real_user_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("HF_LEROBOT_HOME", str(lerobot_home))
     monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", str(hub_cache))
     # str(), not Path: these config constants are strings everywhere else.
-    monkeypatch.setattr(cfg, "SAVED_CUSTOM_DATASETS_FILE", str(isolated / "saved_custom_datasets.json"))
-    monkeypatch.setattr(cfg, "SAVED_HIDDEN_DATASETS_FILE", str(isolated / "hidden_datasets.json"))
-    monkeypatch.setattr(cfg, "SAVED_CUSTOM_MODELS_FILE", str(isolated / "saved_custom_models.json"))
-    monkeypatch.setattr(cfg, "SAVED_HIDDEN_MODELS_FILE", str(isolated / "hidden_models.json"))
+    monkeypatch.setattr(cfg, "SAVED_CUSTOM_DATASETS_FILE", str(saved_root / "saved_custom_datasets.json"))
+    monkeypatch.setattr(cfg, "SAVED_HIDDEN_DATASETS_FILE", str(saved_root / "hidden_datasets.json"))
+    monkeypatch.setattr(cfg, "SAVED_CUSTOM_MODELS_FILE", str(saved_root / "saved_custom_models.json"))
+    monkeypatch.setattr(cfg, "SAVED_HIDDEN_MODELS_FILE", str(saved_root / "hidden_models.json"))
 
 
 @pytest.fixture(autouse=True)
