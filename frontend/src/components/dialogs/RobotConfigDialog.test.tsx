@@ -197,6 +197,16 @@ async function startAndSave() {
 }
 
 describe("zero-pose calibration", () => {
+  it("describes cancel as disconnecting without a return motion", async () => {
+    await openAll();
+    fireEvent.click(await screen.findByRole("button", { name: "Set zero pose" }));
+    const cancel = await screen.findByRole("button", { name: "Cancel calibration" });
+    fireEvent.focus(cancel);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Cancels calibration and disconnects the arm without returning it to its start pose.",
+    );
+  });
+
   it("keeps the live joint grid in place when subsequent samples arrive in a different order", async () => {
     const positions = {
       wrist_roll: 5.7,

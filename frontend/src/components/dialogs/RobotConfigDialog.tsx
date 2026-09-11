@@ -2565,7 +2565,7 @@ const RobotConfigWindow = ({
 
         {running ? (
           <ReleaseActionButton
-            action="stop"
+            action="cancel_calibration"
             onClick={handleStopCalibration}
             className="w-full"
           >

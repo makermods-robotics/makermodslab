@@ -45,6 +45,7 @@ export default {
         "Drives the robot arm under torque against its joint limits.",
       wiggle: "Moves the gripper so you can see which arm is on this port.",
       stop: "Returns the arm to its start pose, then releases torque.",
+      cancelCalibration: "Cancels calibration and disconnects the arm without returning it to its start pose.",
       releaseNow: "Skips the return and releases torque immediately.",
     },
   },

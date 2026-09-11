@@ -238,7 +238,7 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
             a second press asks the server to release it now (the same
             two-press contract as teleoperation). */}
         <ReleaseActionButton
-          action="stop"
+          action={status?.phase === "stopping" ? "release_now" : "stop"}
           onClick={handleStop}
           disabled={stopping}
           busy={stopping}

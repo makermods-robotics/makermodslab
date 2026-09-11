@@ -50,8 +50,8 @@ export const ENERGIZING_SESSION_KINDS = [
  */
 export const ENERGIZING_DEVICE_ACTIONS = ["wiggle", "remote_home"] as const;
 
-/** De-energizing actions: both end with torque released. */
-export const RELEASE_ACTIONS = ["stop", "release_now"] as const;
+/** Stop and cleanup actions; tooltip copy names each action's own behavior. */
+export const RELEASE_ACTIONS = ["stop", "release_now", "cancel_calibration"] as const;
 
 export type EnergizingActionKey =
   | (typeof ENERGIZING_SESSION_KINDS)[number]
@@ -125,6 +125,10 @@ export const ROBOT_ACTIONS: Record<RobotActionKey, RobotActionSpec> = {
   stop: {
     treatment: "destructive",
     tooltipKey: "shared.robotAction.tooltip.stop",
+  },
+  cancel_calibration: {
+    treatment: "destructive",
+    tooltipKey: "shared.robotAction.tooltip.cancelCalibration",
   },
   // Second press while that return is in flight: abort it and release now.
   // Hosting exposes this while the arm is returning.

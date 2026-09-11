@@ -33,6 +33,7 @@ export default {
       auto_calibration: "会在扭矩下驱动机械臂顶到各关节限位。",
       wiggle: "摆动夹爪，以便确认此端口对应哪条手臂。",
       stop: "先让机械臂回到起始姿态，然后释放扭矩。",
+      cancelCalibration: "取消标定并断开机械臂连接，不会让它回到起始姿态。",
       releaseNow: "跳过回位，立即释放扭矩。",
     },
   },
