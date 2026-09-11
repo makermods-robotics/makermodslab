@@ -6,17 +6,65 @@ import React, {
   useState,
 } from "react";
 import InferenceSessionDialog from "@/components/inference/InferenceSessionDialog";
+import RemoteSessionDialog from "@/components/inference/RemoteSessionDialog";
 
 /**
  * Hosts the live-inference session dialog above the router — /inference is no
- * longer a route. Both launch flows (the studio Deploy panel and the legacy
- * InferenceModal) call `openInferenceSession()` right after POST
- * /inference/start succeeds; the dialog then owns status polling, the stop
- * flow, and the exit guard, and closing it lands back on whatever surface
+ * longer a route. The launch flow (the studio's Deploy panel) calls
+ * `openInferenceSession(sessionId)` right after POST
+ * /api/v1/sessions succeeds; the dialog then owns status polling, the lease
+ * heartbeat, and the stop flow, and closing it lands back on whatever surface
  * launched the run.
  */
+/**
+ * What a coaching session needs to know to hand the operator onward when it
+ * ends: which skill was being coached, and what it was trained on.
+ *
+ * Corrections are worth nothing on their own. They have to be merged with the
+ * demonstrations the policy was trained on and the policy fine-tuned on the
+ * result — `TrainPanel` takes exactly one dataset, so merging is mandatory, not
+ * an optimisation. Until now the end-of-session summary explained that in prose
+ * and offered no buttons, which put the entire payoff of the feature behind a
+ * manual chore the UI did not help with.
+ *
+ * Carried from the launch site (DeployPanel knows the job it launched from)
+ * rather than resolved server-side, because it is display and navigation state,
+ * not session state. The cost is that it does not survive a page reload: the
+ * corrections are still on disk and still mergeable by hand, but the one-click
+ * path is gone. Worth it to avoid teaching the rollout module about the job
+ * registry.
+ */
+export interface CoachingLineage {
+  /** Job registry id of the skill being coached — the fine-tune base. */
+  jobId: string;
+  /** Display name for that skill, for the summary's own copy. */
+  jobName?: string;
+  /** The dataset the skill was trained on: the other half of the merge. */
+  trainingDatasetRepoId?: string;
+}
+
+/**
+ * Which session the dialog is holding. `inference` is a LOCAL rollout (plain,
+ * scored or coached); `remote_inference` is a DRTC run — the same robot and the
+ * same checkpoint with the policy on a remote GPU.
+ *
+ * It picks WHICH dialog renders, because the two read different status
+ * endpoints and hold their leases off different flags. They share the frame,
+ * not the machinery — see `components/inference/RemoteSessionDialog`.
+ */
+export type InferenceSessionKind = "inference" | "remote_inference";
+
 interface InferenceSessionContextValue {
-  openInferenceSession: () => void;
+  /** `sessionId` is the identity POST /api/v1/sessions returned — the dialog
+   * heartbeats its lease and stops it by id. `lineage` is coaching-only: what
+   * the summary needs to offer the merge and the fine-tune. `kind` defaults to
+   * a local run, so every existing caller is unchanged. */
+  openInferenceSession: (
+    sessionId: string,
+    lineage?: CoachingLineage | null,
+    kind?: InferenceSessionKind,
+  ) => void;
+  sessionOpen: boolean;
 }
 
 const InferenceSessionContext =
@@ -26,19 +74,47 @@ export const InferenceSessionProvider: React.FC<{
   children: React.ReactNode;
 }> = ({ children }) => {
   const [sessionOpen, setSessionOpen] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [lineage, setLineage] = useState<CoachingLineage | null>(null);
+  const [kind, setKind] = useState<InferenceSessionKind>("inference");
 
-  const openInferenceSession = useCallback(() => setSessionOpen(true), []);
+  const openInferenceSession = useCallback(
+    (
+      id: string,
+      next?: CoachingLineage | null,
+      nextKind: InferenceSessionKind = "inference",
+    ) => {
+      setSessionId(id);
+      setLineage(next ?? null);
+      setKind(nextKind);
+      setSessionOpen(true);
+    },
+    [],
+  );
+  // Deliberately NOT cleared on exit: the summary that uses it is rendered by
+  // the dialog itself, and clearing here would blank the handoff at the exact
+  // moment the operator reaches for it.
   const handleExit = useCallback(() => setSessionOpen(false), []);
 
   const value = useMemo(
-    () => ({ openInferenceSession }),
-    [openInferenceSession],
+    () => ({ openInferenceSession, sessionOpen }),
+    [openInferenceSession, sessionOpen],
   );
 
   return (
     <InferenceSessionContext.Provider value={value}>
       {children}
-      {sessionOpen ? <InferenceSessionDialog onExit={handleExit} /> : null}
+      {sessionOpen ? (
+        kind === "remote_inference" ? (
+          <RemoteSessionDialog sessionId={sessionId} onExit={handleExit} />
+        ) : (
+          <InferenceSessionDialog
+            sessionId={sessionId}
+            onExit={handleExit}
+            coachingLineage={lineage}
+          />
+        )
+      ) : null}
     </InferenceSessionContext.Provider>
   );
 };

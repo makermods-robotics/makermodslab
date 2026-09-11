@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useApi } from "@/contexts/ApiContext";
 import { ApiError } from "@/lib/apiClient";
 import {
@@ -44,6 +45,7 @@ export function useDatasetUpload({
   onDone,
   onError,
 }: UseDatasetUploadArgs): UseDatasetUploadResult {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const [status, setStatus] = useState<UploadStatus | null>(null);
   // Guards the one-shot callbacks so a lingering "done"/"error" status isn't
@@ -51,10 +53,14 @@ export function useDatasetUpload({
   const notified = useRef(false);
 
   // Latest callbacks without retriggering the poll effect on every render.
+  // `t` rides along for the same reason: the poll effect must not restart (and
+  // re-arm its one-shot callbacks) just because the UI language changed.
   const onDoneRef = useRef(onDone);
   const onErrorRef = useRef(onError);
+  const tRef = useRef(t);
   onDoneRef.current = onDone;
   onErrorRef.current = onError;
+  tRef.current = t;
 
   const isMine = status?.repo_id === repoId;
   const uploading = isMine && status?.state === "running";
@@ -97,7 +103,8 @@ export function useDatasetUpload({
         } else if (s.state === "error" && !notified.current) {
           notified.current = true;
           onErrorRef.current?.(
-            s.message ?? "Upload failed.",
+            // `s.message` is the backend's own text; only this fallback is ours.
+            s.message ?? tRef.current("landing.hubUpload.failed"),
             s.docs_url ?? null,
           );
         }
@@ -119,7 +126,7 @@ export function useDatasetUpload({
           isPrivate,
         );
         if (!res.started) {
-          return res.message ?? "Upload could not be started.";
+          return res.message ?? t("landing.hubUpload.couldNotStart");
         }
         // Seed a running status so the poll effect attaches immediately.
         notified.current = false;
@@ -136,10 +143,10 @@ export function useDatasetUpload({
         if (e instanceof ApiError && e.detail) return e.detail;
         return e instanceof Error
           ? e.message
-          : "Could not reach the backend to upload.";
+          : t("landing.hubUpload.unreachable");
       }
     },
-    [baseUrl, fetchWithHeaders, repoId],
+    [t, baseUrl, fetchWithHeaders, repoId],
   );
 
   return { uploading, start };

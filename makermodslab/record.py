@@ -13,13 +13,14 @@
 # limitations under the License.
 
 import collections
-import contextlib
 import json
 import logging
 import shutil
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime
+from functools import partial
 from typing import Any
 
 from pydantic import BaseModel
@@ -27,22 +28,28 @@ from pydantic import BaseModel
 from lerobot.configs.dataset import DatasetRecordConfig
 from lerobot.configs.video import RGBEncoderConfig
 from lerobot.datasets import LeRobotDataset
-from lerobot.motors.motors_bus import MotorsBus
 
 # Import the main record functionality to reuse it
 from lerobot.scripts.lerobot_record import RecordConfig
 
-from .arm_identity import ArmIdentityError, verify_devices
+from .api_errors import ErrorCode
+from .arm_capabilities import require_known_arm_type
+from .arm_identity import ArmIdentityError
+from .arms import registry as arm_registry
+from .bus_retry import BUS_SYNC_READ_RETRIES as _BUS_SYNC_READ_RETRIES  # noqa: F401
 from .camera_preview import camera_preview_manager
 from .datasets import (
     _lerobot_cache_root,
     invalidate_dataset_listing_cache,
-    invalidate_hub_dataset_info,
     invalidate_hub_status,
+    push_dataset_to_hub,
 )
-from .motor_power import clear_goal_velocity, reset_torque_limit
-from .rest_pose import RETURN_CEILING_S, capture_rest_pose
-from .teleoperate import _device_buses, _return_followers_to_rest, force_disable_torque
+from .maker_rest_pose import MAKER_RETURN_FPS, maker_targets_from_action, return_maker_arms_to_rest
+from .recording_preview import observation_tap, recording_preview
+from .rest_pose import RETURN_CEILING_S
+from .session_events import notify_session_changed
+from .teleoperate import force_disconnect_partial
+from .torque import de_energize_can_device
 from .utils.config import (
     CameraResolutionError,
     load_robot_cameras,
@@ -66,28 +73,15 @@ logger = logging.getLogger(__name__)
 _DEFAULT_FOURCC = "MJPG"
 
 # --- Motor bus read retries ----------------------------------------------------
-# lerobot's SO-10x follower/leader call bus.sync_read("Present_Position") with
-# the default num_retry=0, so a single missed reply kills the whole recording
-# session ("[TxRxResult] There is no status packet!"). Replies do get missed:
-# on hosts where the arm serial adapters share a USB bus with streaming
-# cameras (e.g. the Jetson rig, cameras and CH34x adapters on the same hubs),
-# isochronous camera traffic occasionally delays a bulk serial reply past the
-# packet timeout. Position reads are idempotent, and a retry costs only the
-# packet timeout (single-digit ms at 1 Mbps) *when a read actually glitched* —
-# invisible at a 30 Hz loop. Patch the class-level default (process-wide);
-# an explicit num_retry from any caller still wins.
-_BUS_SYNC_READ_RETRIES = 2
-_original_sync_read = MotorsBus.sync_read
+# Moved to makermodslab/bus_retry.py so the two subprocess runners (eval and
+# coaching) get it too — importing it is what applies the patch, and they were
+# each running with lerobot's zero-retry default and dying on a single dropped
+# packet. Imported for that side effect; the constant is re-exported because
+# tests and readers looked for it here.
+# Robot-connect attempts before giving up on transient camera turbulence (see
+# the retry loop below and connect_retry_attempt above).
+_CONNECT_ATTEMPTS = 3
 
-
-def _sync_read_with_default_retries(
-    self, data_name, motors=None, *, normalize=True, num_retry=_BUS_SYNC_READ_RETRIES
-):
-    return _original_sync_read(self, data_name, motors, normalize=normalize, num_retry=num_retry)
-
-
-if MotorsBus.sync_read.__name__ != "_sync_read_with_default_retries":  # idempotent under --reload
-    MotorsBus.sync_read = _sync_read_with_default_retries
 
 # --- Recording log capture (bounded ring buffer) ------------------------------
 # The record flow logs progress through the Python `logger` rather than a
@@ -97,11 +91,14 @@ if MotorsBus.sync_read.__name__ != "_sync_read_with_default_retries":  # idempot
 # polled GET endpoint. The deque is capacity-capped (maxlen) so memory can never
 # grow unbounded no matter how chatty or long a session is.
 _RECORD_LOG_MAX_LINES = 500
-# Loggers whose records describe a recording session: this module's logger and
+# Loggers whose records describe a recording session: this module's logger,
 # lerobot's own record/control loggers (the "Recording episode N", save/reset
-# lines come from there). Attaching to the shared "lerobot" ancestor captures
-# any lerobot child logger via propagation.
-_RECORD_LOG_LOGGER_NAMES = (__name__, "lerobot")
+# lines come from there; attaching to the shared "lerobot" ancestor captures
+# any lerobot child logger via propagation), and teleoperate's connect/
+# teardown logger — force_disconnect_partial's warnings and torque-disable
+# errors otherwise only ever reach the server console, invisible to an
+# operator watching the Record page during a failed/retried connect.
+_RECORD_LOG_LOGGER_NAMES = (__name__, "lerobot", "makermodslab.teleoperate")
 
 
 class _RingBufferLogHandler(logging.Handler):
@@ -193,8 +190,38 @@ recording_start_time = None  # Track when recording started
 session_end_elapsed_seconds = None  # Final session duration after the run ends
 current_episode = 1  # Track current episode number
 saved_episodes = 0  # Track how many episodes have been saved
-current_phase = "preparing"  # Track current phase: "preparing", "recording", "resetting", "completed"
+# Track current phase: "preparing", "recording", "naming" (per-episode task),
+# "resetting", "completed".
+current_phase = "preparing"
 phase_start_time = None  # Track when current phase started
+# The task string a per-episode-task session should PREFILL the next naming
+# prompt with — the previous episode's task, or `single_task` before the first
+# one is named. Seeded in handle_start_recording, advanced on every submit
+# (handle_submit_episode_task). None outside a per-episode-task session.
+last_episode_task = None
+
+
+def _set_phase(phase: str) -> None:
+    """Record the session phase and broadcast the transition as a
+    `session_changed` hint (see makermodslab/session_events.py).
+
+    Pure assignment plus a droppable notification — every consumer refetches
+    /recording-status rather than trusting the hint, so this changes no
+    behavior. Phase transitions go through here; the flag claim/release sites
+    emit their own hints where the active flag actually flips."""
+    global current_phase
+    current_phase = phase
+    notify_session_changed("recording", recording_active, phase=phase)
+
+
+# Set only while current_phase == "reconnecting_robot" (the teardown and
+# backoff sleep between connect retries below); 0 otherwise — including on a
+# successful connect and on the terminal failure, so a reader can treat
+# "connect_retry_attempt > 0" as "a retry is in flight right now". Lets the
+# frontend show which retry attempt that is ("Camera hiccup, retrying (2/3)…")
+# instead of one static "Connecting arm & cameras…" label for a window that
+# can run past ten seconds across multiple component-wise teardowns.
+connect_retry_attempt = 0
 # Total time spent paused during the CURRENT reset phase, credited on resume
 # (see handle_resume_recording). Reset to 0.0 at the start of every new reset
 # phase (both reset-phase call sites in record_with_web_events) AND at the
@@ -205,12 +232,33 @@ phase_start_time = None  # Track when current phase started
 # current_phase == "resetting" — the two resets alone aren't sufficient,
 # since this is a stateless global any thread's status read can observe
 # between the reset-phase end and the next reset-phase start.
+#
+# Since the reset loop publishes its own countdown (reset_phase_elapsed_s,
+# below), this pair is the FALLBACK the status uses only in the sub-tick
+# before that loop's first publish — the loop's figure is authoritative
+# whenever it exists, because paused time is no longer the only thing the
+# countdown declines to spend.
 paused_accum_seconds: float = 0.0
 # Wall-clock time.time() the current pause began; None while not paused. Kept
 # separate from the reset loop's own internal perf_counter()-based pacing —
 # this pair exists purely so handle_recording_status can freeze the
 # frontend-facing countdown, independent of how the tick loop paces itself.
 pause_started_at: float | None = None
+# The reset loop's OWN countdown position: seconds of ACTIVE reset time spent
+# so far in the current reset phase, republished by _reset_loop_with_pause
+# every tick, None whenever no reset loop is running.
+#
+# This exists because the loop spends its control_time_s budget on strictly
+# less than wall time, and on more than one axis: a pause isn't spent (the
+# operator's gap time is what reset_time_s buys them), and neither is a
+# follower re-alignment (machine time — see _realign_follower_to_leader,
+# whose chase runs for seconds). handle_recording_status used to reconstruct
+# the same figure from wall clock minus paused time, which silently went
+# wrong the moment a second credited-back branch existed: the countdown ran
+# past its limit by however long the re-alignments took. Publishing the
+# loop's own timestamp keeps ONE clock for the countdown, so any future
+# credited-back branch is reported correctly without touching the status.
+reset_phase_elapsed_s: float | None = None
 # True when the most recent session saved zero episodes and its (freshly
 # created) dataset directory was discarded. Surfaced in the session-end status
 # so the frontend can tell the user nothing was kept (see Upload.tsx).
@@ -355,8 +403,22 @@ class RecordingRequest(BaseModel):
     # read-only now); pydantic ignores unknown fields, so an older frontend's
     # payload still parses and its stale camera set is correctly ignored.
     robot_name: str = ""
+    # Hardware family: "so101" (Feetech serial) or "maker" (RobStride CAN
+    # follower + Star Arm 102 leader). Decides which lerobot config classes the
+    # robot factory builds, which calibration library the names resolve in, and
+    # which of the Feetech-only safety helpers apply. Defaults to so101 so a
+    # request from a client that predates the Maker arm is unchanged.
+    arm_type: str = "so101"
+    # Which of the family's leaders drives the follower (the record's
+    # leader_kind; blank = the family's default). See TeleoperateRequest.
+    leader_kind: str | None = None
     dataset_repo_id: str
     single_task: str
+    # When true, wait for a task before recording each episode. Between takes
+    # the operator resets the environment and can re-record the pending take.
+    # `single_task` may be empty; the first prompt then starts blank.
+    # Off ⇒ every episode records under `single_task`, exactly as before.
+    per_episode_task: bool = False
     num_episodes: int = 5
     episode_time_s: int = 30
     reset_time_s: int = 10
@@ -448,6 +510,58 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
     return camera_configs
 
 
+def _is_transient_camera_error(msg: str) -> bool:
+    """True when a robot-connect failure is transient camera-session
+    turbulence, curable by a clean re-connect, rather than a real failure.
+
+    An AVCaptureSession opened into another session's asynchronous teardown
+    (e.g. right after a hot-unplug) intermittently comes up wrong —
+    forensically established 2026-07-09:
+      * "failed to set fps=30 (actual_fps=5.0)" — cold-open fps read-back
+      * "timed out waiting for frame" — session came up frame-dead (opens
+        fine, background reader never receives a frame)
+      * "read thread is not running" — the same frame-dead session after its
+        background reader has already died (see below)
+
+    What reaches us, and what doesn't. Only `connect()`'s own exceptions land
+    here; anything raised inside a camera's background reader thread does not.
+    That matters for the wrong-native-format case (session lands 640x360
+    instead of 640x480): lerobot detects it in `_postprocess_image`, which
+    runs *only* in `_read_loop`, so its "do not match configured" text never
+    propagates — after 12 consecutive mismatches the loop dies and the caller
+    sees `async_read`'s "read thread is not running" instead (or, if the
+    reader is merely stalled, the timeout above). "do not match configured" is
+    kept in the tuple as a cheap guard in case upstream ever surfaces it
+    synchronously, but do not expect it to fire; "read thread is not running"
+    is the marker that actually catches that case today.
+
+    NOT included: "failed to set capture_" (width/height mismatch). That
+    string is also produced when a camera simply doesn't support the
+    configured resolution — a permanent misconfiguration, not turbulence —
+    and `utils/errors.py::friendly_hint` classifies it that way for the
+    operator. Retrying it would burn ~4s of backoff plus three connects on a
+    failure that cannot succeed before showing the correct "click Auto" hint.
+
+    Note "failed to set fps" has the *same* permanent-misconfiguration mode
+    (an operator can type an fps the device can't do, in the same settings
+    panel), so it is retried on the optimistic reading and then, if it never
+    recovers, handed to `friendly_hint`'s matching fps branch for the same
+    "click Auto" guidance. Keep those two in sync: any marker added here that
+    can also be a permanent misconfiguration needs a `friendly_hint` branch,
+    or the operator waits out the retries and gets no advice at the end.
+    """
+    low = msg.lower()
+    return any(
+        marker in low
+        for marker in (
+            "failed to set fps",
+            "do not match configured",
+            "read thread is not running",
+            "timed out waiting for frame",
+        )
+    )
+
+
 def create_record_config(request: RecordingRequest, cameras: dict | None = None) -> RecordConfig:
     """Create a RecordConfig from the recording request.
 
@@ -494,17 +608,8 @@ def create_record_config(request: RecordingRequest, cameras: dict | None = None)
         tags=with_makermodslab_tag(request.tags) if request.push_to_hub else None,
         private=request.private,
         streaming_encoding=request.streaming_encoding,
-        # lerobot 0.6.0 shim: vcodec moved off DatasetRecordConfig into the
-        # nested RGBEncoderConfig. "auto" resolves a hardware encoder on this
-        # machine (RGBEncoderConfig.__post_init__ probes the local FFmpeg) —
-        # h264_videotoolbox on macOS, h264_nvenc/hevc_nvenc on Jetson/Linux-
-        # NVIDIA — falling back to software libsvtav1 (a logged warning, no
-        # error) when none exists. This matters because streaming_encoding is on
-        # by default: on Jetson-class CPUs, software SVT-AV1 can run below
-        # realtime, fill the encoder queue, and block the capture loop — the
-        # suspected cause of record-lag. Hardware encoding keeps encode off the
-        # capture thread's critical path.
-        rgb_encoder=RGBEncoderConfig(vcodec="auto"),
+        # Use software H.264 with the ultrafast preset for recording.
+        rgb_encoder=RGBEncoderConfig(vcodec="h264", preset="ultrafast"),
     )
 
     # Create the main record config
@@ -516,6 +621,8 @@ def create_record_config(request: RecordingRequest, cameras: dict | None = None)
         display_data=False,  # Don't display data in API mode
         play_sounds=False,  # Don't play sounds in API mode
     )
+    # Local application context, not a LeRobot configuration/CLI field.
+    record_config._makermodslab_robot_name = request.robot_name
 
     return record_config
 
@@ -538,19 +645,30 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         saved_episodes, \
         current_phase, \
         phase_start_time, \
+        last_episode_task, \
         last_session_discarded_empty, \
         last_session_outcome, \
         last_session_error, \
         identity_warnings, \
-        discard_requested
+        discard_requested, \
+        connect_retry_attempt
 
     from . import (
         auto_calibrate as _auto_calibrate,
         calibrate as _calibrate,
+        remote_host as _remote_host,
+        remote_inference as _remote_inference,
+        remote_teleoperate as _remote_teleoperate,
+        replay as _replay,
         rollout as _rollout,
         teleoperate as _teleoperate,
         wiggle as _wiggle,
     )
+
+    # Argument validation first: an arm type nothing registered is refused
+    # (400 robot.arm_type.unavailable) before the flag is claimed or a device
+    # config built.
+    require_known_arm_type(request.arm_type)
 
     # Claim the active flag under the lock so two concurrent starts can't both
     # pass the precondition check.
@@ -578,36 +696,81 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     if releasing
                     else "Recording is already active"
                 ),
+                "code": ErrorCode.ROBOT_BUSY_RELEASING if releasing else ErrorCode.ROBOT_BUSY_RECORDING,
             }
         if _teleoperate.teleoperation_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Teleoperation is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
             }
         if _rollout.inference_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Inference is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+            }
+        if _remote_inference.remote_inference_is_active():
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Remote inference is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
             }
         if _calibrate.calibration_is_active():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
             }
         if _auto_calibrate.auto_calibration_is_active():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Auto-calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
             }
         if _wiggle.wiggle_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+            }
+        if _remote_host.hosting_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "This robot is hosted for remote teleoperation. Stop hosting first.",
+                "code": ErrorCode.ROBOT_BUSY_HOSTING,
+            }
+        if _remote_teleoperate.remote_teleoperation_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Remote teleoperation is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REMOTE_TELEOPERATION,
+            }
+        if _replay.replay_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Replay is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REPLAY,
+            }
+
+        # Lazy, because jobs imports this module back the same way.
+        from . import jobs as _jobs
+
+        if (training := _jobs.training_is_active()) is not None:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": f"Training run '{training}' is using this machine. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_TRAINING,
             }
         # Refuse a malformed dataset name up front (before claiming the flag or
         # touching hardware). Rejecting beats silent sanitization: "whoo/" used to
@@ -619,7 +782,12 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 request.dataset_repo_id,
                 name_reason,
             )
-            return {"success": False, "status_code": 400, "message": name_reason}
+            return {
+                "success": False,
+                "status_code": 400,
+                "message": name_reason,
+                "code": ErrorCode.REQUEST_INVALID_NAME,
+            }
         # Resolve the session's cameras from the robot record NAMED BY THE
         # REQUEST — the request itself carries no camera payload. Done here,
         # before the flag is claimed, so a wrong robot name or an ambiguous
@@ -654,6 +822,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         saved_episodes = 0
         current_phase = "preparing"
         phase_start_time = None
+        connect_retry_attempt = 0
         last_session_discarded_empty = False
         last_session_outcome = None
         last_session_error = None
@@ -663,6 +832,10 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         # stale flag can never make this fresh session delete its own dataset.
         discard_requested = False
 
+    # The claim above is the real state transition — broadcast the hint so
+    # every WS client (any page, any remote UI) refetches /recording-status.
+    notify_session_changed("recording", True, phase="preparing")
+
     # Backend camera previews hold the cv2 devices; hand them over before we open
     # the same indices. Ordered deliberately: `recording_active` is already True
     # (set under the lock above), so /camera-preview now 409s and no client can
@@ -670,6 +843,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
     # open. Doing it the other way round leaves that race open, and a preview
     # still holding index 0 starves the recorder (OpenCVCamera(0) actual_fps=5.0).
     camera_preview_manager.stop_all()
+    recording_preview.start()
 
     # Start capturing this session's logs into a fresh bounded ring buffer so the
     # Record page can display them (detaches any previous session's handler).
@@ -687,11 +861,17 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         logger.info(f"Task: {request.single_task}")
 
         recording_config = request
+        # Prefill for the first episode's naming prompt (per-episode-task
+        # sessions); advanced to the previous episode's task on every submit.
+        last_episode_task = request.single_task
         recording_events = {
             "exit_early": False,  # Right arrow key -> "Skip to next episode" button
             "stop_recording": False,  # ESC key -> "Stop recording" button
             "rerecord_episode": False,  # Left arrow key -> "Re-record episode" button
             "paused": False,  # Reset-phase pause/resume (mouse-only, no keyboard shortcut)
+            # Set to the named task string by handle_submit_episode_task while
+            # the session waits in the "naming" phase; None the rest of the time.
+            "episode_task_submitted": None,
         }
 
         record_config = create_record_config(request, cameras=session_cameras)
@@ -709,12 +889,14 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 last_session_outcome, \
                 last_session_error, \
                 paused_accum_seconds, \
-                pause_started_at
+                pause_started_at, \
+                reset_phase_elapsed_s
             recording_start_time = time.time()
             current_episode = 1
             saved_episodes = 0
             paused_accum_seconds = 0.0
             pause_started_at = None
+            reset_phase_elapsed_s = None
 
             try:
                 logger.info(
@@ -771,12 +953,13 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 work_completed = current_phase == "completed"
                 last_session_outcome = classify_outcome(work_completed, last_session_error)
                 if not work_completed:
-                    current_phase = "error"
+                    _set_phase("error")
                 if recording_start_time:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
             finally:
+                recording_preview.stop()
                 if current_phase != "error":
-                    current_phase = "completed"
+                    _set_phase("completed")
                 if recording_start_time:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
 
@@ -804,7 +987,22 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                         request.dataset_repo_id, request.resume
                     )
 
+                # The happy path adds a dataset to the local listing and nothing
+                # else drops the cache for it; a quit removes one. Invalidate for
+                # both, BEFORE the release hint, so a client that refetches on
+                # the hint sees the new state instead of a <=45s-stale one. The
+                # zero-episode-no-quit case is left to _discard_empty_dataset,
+                # which invalidates itself iff it actually removed a directory —
+                # a session that created nothing (e.g. a connect failure) must
+                # not force a needless Hub re-fan-out.
+                if saved_episodes > 0 or discard_requested:
+                    invalidate_dataset_listing_cache()
+
                 recording_active = False
+                # Final release: record_with_web_events' own finally already
+                # released torque and disconnected before this ran, so the
+                # ports are free now — including on error paths.
+                notify_session_changed("recording", False, phase=current_phase)
                 recording_start_time = None
                 phase_start_time = None
                 current_episode = 1
@@ -826,7 +1024,11 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         }
 
     except Exception as e:
+        recording_preview.stop()
         recording_active = False
+        # The claim above already broadcast active=True; undo the hint now
+        # that the failed start released the flag.
+        notify_session_changed("recording", False)
         logger.error(f"Failed to start recording: {e}")
         return {"success": False, "message": f"Failed to start recording: {str(e)}"}
 
@@ -866,7 +1068,7 @@ def handle_stop_recording(discard: bool = False) -> dict[str, Any]:
         discard_requested = True
     recording_events["stop_recording"] = True
     recording_events["exit_early"] = True
-    current_phase = "stopping"
+    _set_phase("stopping")
     phase_start_time = None
     logger.info("Stop recording triggered from web interface (discard=%s)", discard)
     if discard:
@@ -892,6 +1094,8 @@ def handle_exit_early() -> dict[str, Any]:
     """Handle exit early request - replaces right arrow key"""
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
+    if current_phase == "naming":
+        return {"success": False, "message": "Enter the episode task before recording"}
     if _reset_paused():
         # Design decision: skip-to-next-episode is disabled while paused (the
         # operator must explicitly resume first). Enforced here, not just in
@@ -921,6 +1125,12 @@ def handle_rerecord_episode() -> dict[str, Any]:
     """Handle rerecord episode request - replaces left arrow key"""
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
+    if current_phase != "recording" and not (
+        current_phase == "naming" and recording_events.get("pending_episode", False)
+    ):
+        return {"success": False, "message": "No episode is available to re-record"}
+    if recording_events.get("episode_task_submitted"):
+        return {"success": False, "message": "The next episode is already starting"}
     recording_events["rerecord_episode"] = True
     recording_events["exit_early"] = True
     logger.info("Re-record episode triggered")
@@ -988,6 +1198,38 @@ def handle_resume_recording() -> dict[str, Any]:
     return {"success": True, "message": "Pause cleared", "events_state": dict(recording_events)}
 
 
+def handle_submit_episode_task(task: str) -> dict[str, Any]:
+    """Name the task for the episode the session is holding in the "naming"
+    phase (per-episode-task sessions only — see RecordingRequest).
+
+    Recording only starts with a non-empty description: there is no timeout
+    or skip. Done/Quit can end the session without starting another take. A
+    submission outside the naming phase is refused rather than applied to the
+    wrong episode. A refusal comes back as HTTP 200 + {success: False}, the
+    same shape the pause/exit-early controls use — the frontend reads
+    `data.success`."""
+    global last_episode_task
+
+    if not recording_active or recording_events is None:
+        return {"success": False, "message": "No recording session is active"}
+    if current_phase != "naming":
+        return {
+            "success": False,
+            "message": "The session is not waiting for an episode task",
+            "current_phase": current_phase,
+        }
+    if recording_events.get("episode_task_submitted") or recording_events.get("rerecord_episode"):
+        return {"success": False, "message": "An episode transition is already pending"}
+    cleaned = (task or "").strip()
+    if not cleaned:
+        return {"success": False, "message": "An episode task description is required"}
+
+    recording_events["episode_task_submitted"] = cleaned
+    last_episode_task = cleaned
+    logger.info("Episode task named for episode %s: %r", current_episode, cleaned)
+    return {"success": True, "message": "Episode task saved"}
+
+
 def _reset_paused() -> bool:
     """True only while a live session is genuinely paused DURING THE RESET
     PHASE — i.e. the pause is actually freezing the countdown/passthrough
@@ -1037,6 +1279,10 @@ def handle_recording_status() -> dict[str, Any]:
     status = {
         "recording_active": recording_active,
         "current_phase": current_phase,  # "preparing", "recording", "resetting", "completed"
+        # Only meaningful while current_phase == "reconnecting_robot": which
+        # connect attempt is about to be retried, out of _CONNECT_ATTEMPTS.
+        "connect_retry_attempt": connect_retry_attempt,
+        "connect_retry_max": _CONNECT_ATTEMPTS,
         "session_ended": session_ended,  # New field to indicate session completion
         # True during the post-session rest-pose return: the recording loop is
         # over but the arm is still energized and driving back to its
@@ -1051,17 +1297,28 @@ def handle_recording_status() -> dict[str, Any]:
         # which is available in both phases.
         "pause_armed": _pause_armed(),
         "available_controls": {
-            "stop_recording": recording_active,  # ESC key replacement
+            # Naming gates the next recording, but the operator can still
+            # finish the session or discard and re-record the pending take.
+            "stop_recording": recording_active,
             "exit_early": recording_active
+            and current_phase != "naming"
             and not _reset_paused(),  # Right arrow key replacement; disabled while paused
             "rerecord_episode": recording_active
-            and current_phase == "recording",  # Only during recording phase
+            and (
+                current_phase == "recording"
+                or (
+                    current_phase == "naming"
+                    and bool(recording_events and recording_events.get("pending_episode"))
+                )
+            ),
             "pause_recording": recording_active
             and current_phase in ("recording", "resetting")
+            and not getattr(recording_config, "per_episode_task", False)
             and not _pause_armed(),
             "resume_recording": recording_active
             and current_phase in ("recording", "resetting")
             and _pause_armed(),
+            "submit_episode_task": recording_active and current_phase == "naming",
         },
         "message": "Recording session failed with error - check logs"
         if current_phase == "error"
@@ -1080,6 +1337,12 @@ def handle_recording_status() -> dict[str, Any]:
     # can read the actual on-disk repo_id (post stamp) for upload navigation.
     if recording_config:
         status["dataset_repo_id"] = recording_config.dataset_repo_id
+        # Prefill for the "name this episode's task" prompt: the previous
+        # episode's task, or `single_task` before the first one is named.
+        # Only meaningful while current_phase == "naming"; harmless otherwise.
+        status["current_episode_task_default"] = last_episode_task or getattr(
+            recording_config, "single_task", ""
+        )
 
     # When the session has ended, tell the frontend honestly whether anything
     # was kept. A session that saved zero episodes had its (freshly created)
@@ -1122,15 +1385,28 @@ def handle_recording_status() -> dict[str, Any]:
         if phase_start_time:
             status["phase_start_time"] = phase_start_time
             elapsed = time.time() - phase_start_time
-            # Only the reset phase ever accumulates paused time; gate the
-            # adjustment on phase so a leftover paused_accum_seconds/
-            # pause_started_at from a finished reset phase (this is a
-            # stateless read of module globals, so it can race a phase
-            # transition) never corrupts the recording phase's countdown.
+            # Only the reset phase ever spends less than wall time; gate the
+            # adjustment on phase so a leftover reset countdown from a
+            # finished reset phase (this is a stateless read of module
+            # globals, so it can race a phase transition) never corrupts the
+            # recording phase's countdown.
             if current_phase == "resetting":
-                elapsed -= paused_accum_seconds
-                if pause_started_at is not None:
-                    elapsed -= time.time() - pause_started_at
+                if reset_phase_elapsed_s is not None:
+                    # THE reset countdown: the loop's own budget position,
+                    # republished every tick. It already excludes paused time
+                    # AND re-alignment time, and stays correct for any credit
+                    # the loop grows later. Reconstructing it here from wall
+                    # clock is what made the displayed timer run past
+                    # reset_time_s by the length of every re-alignment.
+                    elapsed = reset_phase_elapsed_s
+                else:
+                    # No loop publishing yet (the sub-tick between the phase
+                    # flipping and the loop's first tick, or a phase entered
+                    # by a path that runs no loop): wall clock minus the
+                    # pause bookkeeping is the best available answer.
+                    elapsed -= paused_accum_seconds
+                    if pause_started_at is not None:
+                        elapsed -= time.time() - pause_started_at
             status["phase_elapsed_seconds"] = int(elapsed)
 
             # Add phase time limits
@@ -1178,8 +1454,12 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
         return {"success": False, "message": f"Failed to delete dataset: {e}"}
 
     # The listing just changed — drop the cached /datasets listing so the delete
-    # reflects immediately instead of after the TTL.
+    # reflects immediately instead of after the TTL. Also drop the cached
+    # Hub-existence answer: get_hub_status memoizes "local_only" (and "on_hub")
+    # for the process lifetime, so without this a dataset checked before the
+    # delete would keep reporting "local_only" forever instead of "absent".
     invalidate_dataset_listing_cache()
+    invalidate_hub_status(repo_id)
 
     logger.info(f"Deleted dataset directory {target}")
     return {"success": True, "message": f"Deleted {repo_id}"}
@@ -1391,38 +1671,39 @@ class UploadManager:
             return status
 
     def _worker(self, request: UploadRequest) -> None:
-        from lerobot.datasets import LeRobotDataset
-
         repo_id = request.dataset_repo_id
         try:
-            logger.info(f"Loading dataset {repo_id} for upload")
-            dataset = LeRobotDataset(repo_id)
-            logger.info(f"Dataset loaded with {dataset.num_episodes} episodes")
-
             tags = with_makermodslab_tag(request.tags)
             logger.info(f"Uploading to HuggingFace Hub with tags: {tags}, private: {request.private}")
-            dataset.push_to_hub(tags=tags, private=request.private)
-            logger.info(f"Dataset {repo_id} uploaded successfully to HuggingFace Hub")
+            # A locally-recorded dataset's id is bare; push_dataset_to_hub
+            # resolves it and returns the id it actually landed under, which is
+            # what the success message and url below must name — the bare one
+            # would send the user to a 404.
+            hub_repo_id = push_dataset_to_hub(repo_id, tags=tags, private=request.private)
+            logger.info(f"Dataset {hub_repo_id} uploaded successfully to HuggingFace Hub")
 
-            # The dataset now exists on the Hub; drop any cached "local_only"
-            # answer so the info card's next hub-status check flips to "On Hub",
-            # drop the cached /datasets listing so the newly-pushed repo appears
-            # immediately, and drop any cached hub summary (the push changed
-            # meta/info.json on the Hub).
-            invalidate_hub_status(repo_id)
+            # push_dataset_to_hub already dropped the cached Hub facts for this
+            # dataset (existence + summary), so the card's next hub-status check
+            # flips to "On Hub". The merged /datasets listing is this site's to
+            # drop: it isn't a Hub fact, but the newly-pushed repo should appear
+            # in it immediately rather than after the TTL.
             invalidate_dataset_listing_cache()
-            invalidate_hub_dataset_info(repo_id)
 
             with self._lock:
                 self.state = "done"
-                self.message = f"Dataset {repo_id} uploaded successfully to the Hugging Face Hub"
-                self.dataset_url = f"https://huggingface.co/datasets/{repo_id}"
+                self.message = f"Dataset {hub_repo_id} uploaded successfully to the Hugging Face Hub"
+                self.dataset_url = f"https://huggingface.co/datasets/{hub_repo_id}"
                 self.docs_url = None
         except Exception as e:
             logger.error(f"Error uploading dataset {repo_id}: {e}")
             import traceback
 
             logger.error(f"Full traceback: {traceback.format_exc()}")
+            # No invalidation here: push_dataset_to_hub drops the cached Hub
+            # facts on its own failure path (a failed push may still have
+            # CREATED the repo), so every push caller — this worker, record's
+            # trailing push, the runners' refill — surfaces the half-finished
+            # state without each remembering to.
             auth = _upload_auth_error(e)
             with self._lock:
                 self.state = "error"
@@ -1454,6 +1735,244 @@ def handle_upload_status() -> dict[str, Any]:
     return upload_manager.get_status()
 
 
+class _ResetPhaseAbort:
+    """A ``threading.Event``-shaped view of the reset phase's stop signals.
+
+    ``maker_rest_pose``'s returns poll ``abort_event.is_set()`` between
+    setpoints so a stop can cut a multi-second move short. The reset phase's
+    own signals are plain dict flags on ``web_events`` (Stop sets both
+    ``exit_early`` and ``stop_recording``; Pause sets ``paused``), so wrap them
+    in the shape the return already understands rather than spawning a thread
+    to mirror them into a real Event.
+
+    ``paused`` counts as an abort on purpose: pressing Pause during a
+    re-alignment means the operator wants the follower to stop tracking the
+    leader right now. The move is abandoned and the reset loop re-runs it on
+    the next resume, from wherever the arm got to.
+    """
+
+    __slots__ = ("_events",)
+
+    def __init__(self, events: dict) -> None:
+        self._events = events
+
+    def is_set(self) -> bool:
+        return bool(
+            self._events.get("exit_early", False)
+            or self._events.get("stop_recording", False)
+            or self._events.get("paused", False)
+            or _release_now.is_set()
+        )
+
+
+class _LeaderTargetSource:
+    """Where the leader is RIGHT NOW, split per follower sub-arm.
+
+    The re-alignment's move takes seconds (a 45-90 deg reposition at 30 deg/s),
+    and the UI flips to "resumed" the instant Resume is pressed — so the
+    operator's hand is back on the Star leader while the follower is still
+    walking. A destination sampled once at the start of the move is stale by
+    the end of it, and whatever the leader moved during the walk is delivered
+    in one unramped step when passthrough resumes: the same lurch, just later.
+    So the move CHASES this, one sample per control tick.
+
+    Two things this class buys over a bare closure:
+
+    - **One leader read per tick, not one per arm.** The coordinated bimanual
+      chase asks for each arm's target in the same tick. The read happens
+      under a lock and is reused for ``ttl_s``, so both requests share one
+      sample instead of doubling the UART bus traffic.
+    - **A read failure is survivable and quiet.** The last good split is kept
+      and handed out again, and the failure is logged once rather than 30 times
+      a second for the whole ceiling.
+
+    The split itself stays in ``maker_targets_from_action`` — this only calls
+    it, so the one place that knows about ``left_``/``right_`` prefixes remains
+    the one place.
+    """
+
+    def __init__(
+        self,
+        robot,
+        teleop,
+        teleop_action_processor,
+        robot_action_processor,
+        ttl_s: float = 1.0 / MAKER_RETURN_FPS,
+        strict: bool = False,
+    ) -> None:
+        self._robot = robot
+        self._teleop = teleop
+        self._teleop_action_processor = teleop_action_processor
+        self._robot_action_processor = robot_action_processor
+        self._ttl_s = ttl_s
+        self._strict = strict
+        self._lock = threading.Lock()
+        self._split: list[tuple[object, dict[str, float]]] = []
+        self._read_at: float | None = None
+        self._warned = False
+
+    def split(self) -> list[tuple[object, dict[str, float]]]:
+        """Per-sub-arm targets, re-reading the leader at most once per ``ttl_s``.
+
+        Sides carrying no joints are dropped, so an empty result means "no
+        target at all" — either the leader could not be read or its action
+        carried nothing this follower recognises.
+        """
+        with self._lock:
+            now = time.monotonic()
+            if self._read_at is None or now - self._read_at >= self._ttl_s:
+                self._refresh(now)
+            return self._split
+
+    def _refresh(self, now: float) -> None:
+        try:
+            observation = self._robot.get_observation()
+            action = self._teleop.get_action()
+            processed = self._teleop_action_processor((action, observation))
+            robot_action = self._robot_action_processor((processed, observation))
+        except Exception as e:
+            if self._strict:
+                raise RuntimeError("Cannot read the leader during recording preparation") from e
+            if not self._warned:
+                logger.warning(f"Could not read the leader to re-align the follower: {e}")
+                self._warned = True
+            # Keep the last good split and stop trying until the next tick;
+            # the caller drives to where the leader last was.
+            self._read_at = now
+            return
+        # include_gripper=True: unlike a teardown capture this is mid-session,
+        # so the jaws are the operator's to command. See maker_targets_from_action.
+        self._split = [
+            (device, pose)
+            for device, pose in maker_targets_from_action(self._robot, robot_action, include_gripper=True)
+            if pose
+        ]
+        self._read_at = now
+
+    def for_device(self, device) -> dict[str, float] | None:
+        """This device's slice of the current split, or None if it has none."""
+        for candidate, pose in self.split():
+            if candidate is device:
+                return dict(pose)
+        return None
+
+
+def _realign_follower_to_leader(
+    robot,
+    teleop,
+    arm_type: str,
+    teleop_action_processor,
+    robot_action_processor,
+    abort_event=None,
+    require_settled: bool = False,
+) -> bool:
+    """Walk a CAN follower to the leader's CURRENT pose at a bounded rate.
+
+    Recording has two mid-session gaps where the follower stops tracking the
+    leader while the operator is free to move it: a pause (the reset loop
+    deliberately freezes passthrough) and the episode boundary itself
+    (``dataset.save_episode()`` is seconds of file I/O, and a re-record
+    decision sits in the same place). When passthrough resumes, the very next
+    send points the follower straight at wherever the leader has ended up.
+
+    On a Feetech arm that is merely abrupt. On a CAN arm it is a SNAP: the
+    fork's followers ramp their first commands (``startup_sync_speed_deg``,
+    1 deg per step until within tolerance) but re-arm that ramp only in
+    ``connect()``, so once the follower has caught up at session start every
+    later send goes through at full MIT gain. This shapes the catch-up the
+    same way the stop path shapes the return home — see maker_rest_pose.py.
+
+    The target is computed through the SAME processors the reset loop's
+    passthrough uses, so the arm is walked to exactly the pose the next raw
+    send would have jumped to — and it is RE-computed every tick of the move,
+    because the operator's hand is back on the leader long before the follower
+    finishes walking (see ``_LeaderTargetSource``).
+
+    The gripper IS included here, unlike every teardown capture. Excluding it
+    at stop time protects a held object; at a resume the session continues and
+    the jaws span ~118 deg, so leaving them out just moves the snap to the
+    first passthrough tick. ``maker_targets_from_action`` carries the full
+    rationale for the two callers differing.
+
+    By default, failures are logged and passthrough may resume. Episode
+    preparation sets ``require_settled=True`` instead: a failed move or leader
+    read raises before any recorded frames, and the startup ramp must be ready.
+
+    Returns True when passthrough may resume — the move finished, settled,
+    stopped short, or there was nothing to do. False ONLY when the abort event
+    cut a move short, which leaves the arm part-way and is the caller's cue to
+    keep the re-alignment pending.
+
+    Every path that declines to move says so in the log at WARNING: "the
+    re-alignment did not run" must never be something you have to infer from
+    the absence of a line.
+    """
+    if arm_registry.get(arm_type).uses_feetech_bus:
+        # SO-101: rest_pose.py's bounded-velocity move is only exposed as
+        # "return to the captured session-start pose", not to an arbitrary
+        # target, so the Feetech path stays plain passthrough exactly as
+        # before. Extending it is a refactor of rest_pose.py, not of this.
+        # Silent by design: this is the arm type's normal behaviour, not a
+        # re-alignment that failed to happen.
+        return True
+
+    if teleop is None:
+        if require_settled:
+            raise RuntimeError("Cannot prepare CAN follower without a leader")
+        logger.warning("No leader to re-align the CAN follower to; resuming passthrough as-is")
+        return True
+
+    # Announced BEFORE the target is read, so a session that skipped the move
+    # says both that it meant to and why it didn't.
+    logger.info("Re-aligning the follower to the leader before passthrough resumes")
+
+    source = _LeaderTargetSource(
+        robot, teleop, teleop_action_processor, robot_action_processor, strict=require_settled
+    )
+    targets = source.split()
+    if not targets:
+        if require_settled:
+            raise RuntimeError("No leader targets for recording preparation")
+        logger.warning("No leader target to re-align the CAN follower to; resuming passthrough unaligned")
+        return True
+
+    verdicts = return_maker_arms_to_rest(
+        targets,
+        abort_event=abort_event,
+        target_label="the leader's pose",
+        # One fn per arm, each closed over its own device. The bimanual chase
+        # drives both sides until they converge together.
+        target_fns=[partial(source.for_device, device) for device, _pose in targets],
+    )
+    cut_short = False
+    for ok, reason in verdicts:
+        if reason == "cut-short":
+            cut_short = True
+            continue
+        if ok:
+            continue
+        if require_settled:
+            raise RuntimeError(f"Follower did not settle before recording: {reason}")
+        logger.warning(f"The follower did not fully re-align to the leader ({reason}); continuing")
+    if require_settled and not cut_short:
+        # Already-aligned arms can return without a send, leaving the pinned
+        # follower's connect-time startup ramp armed. Send its CURRENT measured
+        # pose once so the stock follower finishes that ramp without motion.
+        for device, _pose in targets:
+            if abort_event is not None and abort_event.is_set():
+                return False
+            if (
+                getattr(device, "_synced", None) is False
+                and getattr(device.config, "startup_sync_speed_deg", None) is not None
+            ):
+                observation = device.get_observation()
+                hold = {f"{motor}.pos": observation[f"{motor}.pos"] for motor in device.bus.motors}
+                device.send_action(hold)
+                if device._synced is False:
+                    raise RuntimeError("Follower startup synchronization is not ready for recording")
+    return not cut_short
+
+
 def _reset_loop_with_pause(
     robot,
     teleop,
@@ -1462,6 +1981,8 @@ def _reset_loop_with_pause(
     teleop_action_processor,
     robot_action_processor,
     control_time_s: float,
+    realign: Callable[[], bool | None] | None = None,
+    observation_callback=None,
 ) -> None:
     """Reset-phase tick loop: same per-tick shape as lerobot's record_loop
     (lerobot.scripts.lerobot_record.record_loop) called with dataset=None —
@@ -1477,6 +1998,12 @@ def _reset_loop_with_pause(
     time regardless of how long they stayed paused. Pausing is indefinite —
     this loop enforces no timeout of its own.
 
+    Publishes its budget position to ``record.reset_phase_elapsed_s`` every
+    tick, and that is the ONLY correct source for the frontend's reset
+    countdown: wall clock disagrees with it by however long the phase spent
+    paused AND re-aligning, so a status endpoint that reconstructs the figure
+    itself drifts every time this loop grows another credited-back branch.
+
     Never blocks on an unbounded wait while paused: sleeps one control tick
     at a time and rechecks events["exit_early"]/events["stop_recording"] every
     iteration BEFORE the pause check, so Stop remains responsive within about
@@ -1484,41 +2011,198 @@ def _reset_loop_with_pause(
     together, so the stop_recording check is redundant in practice today —
     it's here so this loop's own contract (matching the design spec: check
     both every tick) doesn't depend on caller discipline.
+
+    `realign` (optional) is run ONCE before the first passthrough send of the
+    phase, and again on the first tick after each resume — the two moments the
+    follower has stopped tracking the leader for long enough that the operator
+    can have moved it (the episode-save gap, and the pause itself). It is
+    ``record._realign_follower_to_leader`` in the real session and a no-op for
+    an SO-101; None here keeps the loop's old shape exactly, which is what the
+    pause/passthrough tests exercise. Nothing runs it on an ordinary tick, so
+    the steady state is unchanged. Returning False from it means the move was
+    cut short and must be re-run before passthrough resumes (see below); None
+    — what a caller that predates the verdict returns — reads as "done".
     """
     from lerobot.utils.robot_utils import precise_sleep
 
+    global reset_phase_elapsed_s
+
     control_interval = 1 / fps
-    timestamp = 0.0
     start_episode_t = time.perf_counter()
+    # Armed at entry: the phase is REACHED across a discontinuity — the episode
+    # save (seconds of file I/O) or a re-record decision — during which the
+    # follower held its last commanded pose while the leader was free to move.
+    realign_pending = True
 
-    while timestamp < control_time_s:
-        start_loop_t = time.perf_counter()
+    def _spent() -> float:
+        """Active reset time spent so far, published for the status endpoint.
 
-        if events.get("exit_early", False):
-            events["exit_early"] = False
-            break
+        Every branch that credits time back does it by pushing
+        ``start_episode_t`` forward, so this one expression is the whole
+        countdown — and the ONLY thing the frontend's `elapsed / limit`
+        timer should be derived from. Reconstructing it from wall clock
+        elsewhere is what let the displayed countdown run past reset_time_s
+        by the duration of each re-alignment; see reset_phase_elapsed_s.
+        """
+        global reset_phase_elapsed_s
 
-        if events.get("stop_recording", False):
-            break
+        spent = time.perf_counter() - start_episode_t
+        reset_phase_elapsed_s = spent
+        return spent
 
-        if events.get("paused", False):
-            precise_sleep(control_interval)
-            # Paused time isn't spent from control_time_s: push the reference
-            # point forward by the tick we just spent paused.
-            start_episode_t += time.perf_counter() - start_loop_t
-            timestamp = time.perf_counter() - start_episode_t
+    timestamp = _spent()
+
+    try:
+        while timestamp < control_time_s:
+            start_loop_t = time.perf_counter()
+
+            if events.get("exit_early", False):
+                events["exit_early"] = False
+                break
+
+            if events.get("stop_recording", False):
+                break
+
+            if events.get("paused", False):
+                # Resuming reopens the same gap that entering the phase did: frozen
+                # passthrough is exactly the operator repositioning the leader while
+                # the follower holds still.
+                realign_pending = True
+                precise_sleep(control_interval)
+                # Paused time isn't spent from control_time_s: push the reference
+                # point forward by the tick we just spent paused.
+                start_episode_t += time.perf_counter() - start_loop_t
+                timestamp = _spent()
+                continue
+
+            if realign_pending and realign is not None:
+                # A move the abort event cut short (a pause pressed during it, a
+                # forced release) leaves the arm part-way, so it stays pending and
+                # the next resume runs it again. The pause branch above re-arms it
+                # too, but only while `paused` is still set when control reaches
+                # the loop head — a pause and resume that both land inside the move
+                # would otherwise slip through into a raw send.
+                #
+                # Not covered here: an `exit_early` set right after a resume breaks
+                # the loop at the head before the re-run happens, leaving the arm
+                # part-way with the pending flag lost. Closing that means teaching
+                # the phase exit to finish the move, which is a separate change.
+                realign_pending = realign() is False
+                if realign_pending:
+                    # It cannot be re-run immediately: the abort that cut it short
+                    # may still be hot, and a hot abort makes the next attempt
+                    # return at its first check. One tick of sleep keeps a pending
+                    # re-run from becoming a busy spin — the loop head is where the
+                    # stop or the pause is actually acted on.
+                    precise_sleep(control_interval)
+                # Machine time, not the operator's gap time: don't spend the move
+                # from control_time_s, same as a pause isn't spent. Then go round
+                # again rather than falling through — a stop or a fresh pause that
+                # cut the move short is honoured at the loop head, before any raw
+                # passthrough send can undo what the move just did.
+                start_episode_t += time.perf_counter() - start_loop_t
+                timestamp = _spent()
+                continue
+
+            if teleop is not None:
+                obs = robot.get_observation()
+                if observation_callback is not None:
+                    observation_callback(obs)
+                act = teleop.get_action()
+                act_processed_teleop = teleop_action_processor((act, obs))
+                robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+                robot.send_action(robot_action_to_send)
+
+            dt_s = time.perf_counter() - start_loop_t
+            precise_sleep(max(control_interval - dt_s, 0.0))
+            timestamp = _spent()
+    finally:
+        # Nothing is publishing a countdown once this returns — on any exit
+        # path, including the exception that ends the session. A stale float
+        # here would let handle_recording_status report a frozen elapsed for
+        # a phase that is over (its phase gate is the other half of that).
+        reset_phase_elapsed_s = None
+
+
+def _record_task_episodes(
+    cfg: RecordConfig,
+    dataset: LeRobotDataset,
+    events: dict,
+    capture: Callable[[str], None],
+    prepare: Callable[[], bool],
+    preview: Callable[[], None],
+) -> None:
+    """Manually gated episodes. Hold the completed buffer until Next or Done
+    so Re-record can discard it without deleting an already saved episode.
+    Task strings are passed into capture, never rewritten after recording.
+    """
+    global current_episode, saved_episodes, phase_start_time
+    global paused_accum_seconds, pause_started_at, reset_phase_elapsed_s
+
+    pending = False
+    while saved_episodes < cfg.dataset.num_episodes:
+        events.update(episode_task_submitted=None, exit_early=False, rerecord_episode=False, paused=False)
+        events["pending_episode"] = pending
+        current_episode = saved_episodes + (2 if pending else 1)
+        phase_start_time = time.time()
+        paused_accum_seconds = 0.0
+        pause_started_at = None
+        reset_phase_elapsed_s = None
+        _set_phase("naming")
+        while recording_active and not events.get("stop_recording"):
+            if events.get("episode_task_submitted") or events.get("rerecord_episode"):
+                break
+            # Keep camera previews fresh without teleoperating or writing frames.
+            preview()
+            time.sleep(0.1)
+
+        if events.get("stop_recording") or not recording_active:
+            if pending and not discard_requested:
+                dataset.save_episode()
+                saved_episodes += 1
+            else:
+                dataset.clear_episode_buffer()
+            events["pending_episode"] = False
+            return
+
+        if events.get("rerecord_episode"):
+            _set_phase("preparing")
+            dataset.clear_episode_buffer()
+            pending = False
             continue
 
-        if teleop is not None:
-            obs = robot.get_observation()
-            act = teleop.get_action()
-            act_processed_teleop = teleop_action_processor((act, obs))
-            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
-            robot.send_action(robot_action_to_send)
-
-        dt_s = time.perf_counter() - start_loop_t
-        precise_sleep(max(control_interval - dt_s, 0.0))
-        timestamp = time.perf_counter() - start_episode_t
+        # Close the gate before consuming the submission, including during
+        # slow disk I/O or alignment; duplicate requests must stay refused.
+        _set_phase("preparing")
+        task = events.pop("episode_task_submitted")
+        events["pending_episode"] = False
+        if pending:
+            dataset.save_episode()
+            saved_episodes += 1
+            pending = False
+        current_episode = saved_episodes + 1
+        events["exit_early"] = False
+        events["_exit_early_triggered"] = False
+        phase_start_time = None
+        if not prepare():
+            return
+        if events.get("stop_recording") or not recording_active:
+            return
+        phase_start_time = time.time()
+        _set_phase("recording")
+        capture(task)
+        if events.get("stop_recording"):
+            dataset.clear_episode_buffer()
+            return
+        # Preserve the existing timeout policy: unfinished takes are discarded.
+        if events.get("rerecord_episode") or not events.get("_exit_early_triggered"):
+            dataset.clear_episode_buffer()
+            continue
+        pending = True
+        if saved_episodes + 1 == cfg.dataset.num_episodes:
+            dataset.save_episode()
+            saved_episodes += 1
+            return
 
 
 def record_with_web_events(
@@ -1549,13 +2233,29 @@ def record_with_web_events(
     from lerobot.utils.utils import log_say
 
     global current_phase, phase_start_time, current_episode, saved_episodes, releasing
-    global identity_warnings
-    global paused_accum_seconds, pause_started_at
+    global identity_warnings, connect_retry_attempt
+    global paused_accum_seconds, pause_started_at, reset_phase_elapsed_s
 
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
 
+    # Read the family back off the assembled config rather than taking it as
+    # a parameter, so it can never disagree with the devices actually built.
+    # Everything below that touches a Feetech register by name is gated on it.
+    family = arm_registry.family_for_robot_config_type(getattr(cfg.robot, "type", None))
+    feetech = family.uses_feetech_bus
+
+    if family.supports_gripper_effort_control:
+        from .metal_gripper import install_metal_gripper
+
+        install_metal_gripper(robot, getattr(cfg, "_makermodslab_robot_name", ""))
+
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
+    publish_preview = observation_tap(robot, family)
+
+    def process_observation(observation):
+        publish_preview(observation)
+        return robot_observation_processor(observation)
 
     action_features = hw_to_dataset_features(robot.action_features, "action", cfg.dataset.video)
     obs_features = hw_to_dataset_features(robot.observation_features, "observation", cfg.dataset.video)
@@ -1623,15 +2323,14 @@ def record_with_web_events(
     # can't cleanly split arm-connect from camera-warmup — they share this
     # substep. (Both surface through the same current_phase global the status
     # handler already returns; no new plumbing.)
-    current_phase = "connecting_robot"
+    _set_phase("connecting_robot")
     phase_start_time = time.time()
-    connect_attempts = 3
-    for attempt in range(1, connect_attempts + 1):
+    for attempt in range(1, _CONNECT_ATTEMPTS + 1):
         try:
             logger.info(
                 "🔧 ROBOT CONNECTION: Attempting to connect robot (attempt %d/%d)...",
                 attempt,
-                connect_attempts,
+                _CONNECT_ATTEMPTS,
             )
             # Calibration is already on disk (loaded via the configs above), so never
             # let connect() drop into interactive recalibration — that would hang the
@@ -1641,23 +2340,7 @@ def record_with_web_events(
             break
         except Exception as e:
             msg = str(e)
-            # Transient camera-session turbulence, all observed on this bench and
-            # all curable by a clean re-connect (an AVCaptureSession opened into
-            # another session's asynchronous teardown intermittently comes up
-            # wrong — forensically established 2026-07-09):
-            #   * "failed to set fps=30 (actual_fps=5.0)" — cold-open fps read-back
-            #   * "do not match configured"   — session landed the neighboring
-            #     native format (e.g. 640x360 instead of 640x480)
-            #   * "timed out waiting for frame" — session came up frame-dead
-            #     (opens fine, background reader never receives a frame)
-            transient_camera = any(
-                marker in msg.lower()
-                for marker in (
-                    "failed to set fps",
-                    "do not match configured",
-                    "timed out waiting for frame",
-                )
-            )
+            transient_camera = _is_transient_camera_error(msg)
             logger.error(f"❌ ROBOT CONNECTION: Failed to connect robot: {e}")
             # If robot connection fails due to camera conflict, provide clear error
             if (
@@ -1672,19 +2355,53 @@ def record_with_web_events(
                 logger.error(
                     "💡 ROBOT CONNECTION: Make sure frontend camera streams are released before recording"
                 )
-            if attempt < connect_attempts and transient_camera:
-                # Drop any half-open handles from this failed attempt so the retry
-                # starts from a clean device, then let the OS release settle past
-                # the turbulence window before re-rolling the connect.
-                with contextlib.suppress(Exception):
-                    robot.disconnect()
+            will_retry = attempt < _CONNECT_ATTEMPTS and transient_camera
+            if will_retry:
+                # Enter the retry substep BEFORE the teardown, not after: the
+                # component-wise release below is the slow part (each wedged
+                # camera's disconnect joins a read thread that is waiting out
+                # a frame timeout), so bracketing only the 2s sleep would
+                # leave the operator staring at a static "Connecting arm &
+                # cameras…" for the window this substep exists to explain.
+                # Logged at INFO through this module's own logger (already in
+                # _RECORD_LOG_LOGGER_NAMES) so it reaches the visible
+                # Record-page log panel, not just the server console.
+                _set_phase("reconnecting_robot")
+                # The attempt about to run, not the one that just failed —
+                # same convention as the log line below, so the Record page's
+                # dialog and its log panel can't disagree about the number
+                # (they sit one above the other).
+                connect_retry_attempt = attempt + 1
+                logger.info(
+                    "🔁 ROBOT CONNECTION: Camera hiccup, retrying (%d/%d) after OS release settles...",
+                    attempt + 1,
+                    _CONNECT_ATTEMPTS,
+                )
+            # Drop any half-open handles from this failed attempt so the retry
+            # starts from a clean device — and so a *terminal* failure doesn't
+            # leak the opened bus and camera read threads into the rest of the
+            # process. Must be the component-wise teardown, not
+            # robot.disconnect(): connect() dies with the later cameras still
+            # unopened, and lerobot's all-or-nothing is_connected guard makes
+            # disconnect() a no-op raise in exactly that state (see
+            # force_disconnect_partial).
+            force_disconnect_partial(robot, "robot")
+            if will_retry:
+                # Let the OS release settle past the turbulence window before
+                # re-rolling the connect.
                 time.sleep(2.0)
+                _set_phase("connecting_robot")
+                # Back to a plain connect attempt: keep the "0 unless we are
+                # in reconnecting_robot" contract this field documents, so a
+                # later reader can't mistake a healthy session for a retrying
+                # one.
+                connect_retry_attempt = 0
                 continue
             raise
 
     if teleop is not None:
         # Second detectable substep of the preparing window: the leader bus.
-        current_phase = "connecting_teleop"
+        _set_phase("connecting_teleop")
         phase_start_time = time.time()
         try:
             logger.info("🔧 TELEOP CONNECTION: Attempting to connect teleoperator...")
@@ -1699,6 +2416,17 @@ def record_with_web_events(
             logger.info("✅ TELEOP CONNECTION: Teleoperator connected successfully")
         except Exception as e:
             logger.error(f"❌ TELEOP CONNECTION: Failed to connect teleoperator: {e}")
+            # The robot connected fine a moment ago; release both so a leader
+            # failure can't strand the follower's bus and camera threads for
+            # the rest of the process (partial teardown for the same reason as
+            # the robot-connect path above). A CAN family's leader first goes
+            # through the Damiao recovery: an energized leader whose handshake
+            # raised partway is holding the motors that answered (a no-op on
+            # the Star leader, which has no CAN bus).
+            if not feetech:
+                de_energize_can_device(teleop, "leader arm")
+            force_disconnect_partial(robot, "robot")
+            force_disconnect_partial(teleop, "teleop")
             raise
 
     # Arm-identity guard: read-only check that each connected arm matches its
@@ -1707,7 +2435,11 @@ def record_with_web_events(
     # mismatch, release the arms (torque was never enabled) and let the worker's
     # error path surface the message via the recording status.
     try:
-        identity_warnings = verify_devices(
+        # A CAN family answers with nothing to compare — its zero lives inside
+        # the motors and its calibration writes homing_offset=0 for every
+        # joint — so the guard is a no-op there rather than left to fail open
+        # per arm.
+        identity_warnings = family.verify_identity(
             ((robot, "follower"), (teleop, "leader")),
             skip=skip_identity_check,
             config_names=identity_config_names,
@@ -1748,18 +2480,22 @@ def record_with_web_events(
                 f"{label.capitalize()} bus or calibration not available - calibration may not be applied"
             )
 
-    _write_calibration(robot, "robot")
-    _write_calibration(teleop, "teleop")
+    if feetech:
+        _write_calibration(robot, "robot")
+        _write_calibration(teleop, "teleop")
+    else:
+        # The CAN devices' own connect() already registered their calibration
+        # on the bus. Re-writing it here would also hit the Star 102 leader,
+        # whose bus is a FashionStar handle with no write_calibration at all —
+        # its zero is set by set_origin_point during calibration and lives in
+        # the servos, not in a file the bus reloads.
+        logger.info("CAN arm: calibration registered by connect(); skipping the explicit write")
 
-    # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) — the
-    # follower only, never the human-held leader. Clears any torque cap a
-    # previous auto-calibration left in RAM; a failed write degrades to the
-    # previous limit (logged inside) and must not abort the session.
-    reset_torque_limit(robot, "follower arm")
-    # Clear any leftover Goal_Velocity speed cap a previous arm-driving feature
-    # stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400); the
-    # follower only, never the human-held leader. See makermodslab/motor_power.py.
-    clear_goal_velocity(robot, "follower arm")
+    # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) and a
+    # cleared Goal_Velocity speed cap — the follower only, never the human-held
+    # leader; a failed write degrades to the previous value (logged inside)
+    # and must not abort the session. A no-op on a CAN family.
+    family.prepare_follower_registers(robot)
 
     # Capture the follower's rest pose now — after connect/configure/identity
     # guard, before the recording loop moves anything — so a normal stop can
@@ -1768,10 +2504,29 @@ def record_with_web_events(
     # follower buses), NEVER the human-held leader. The gripper is excluded: at
     # stop time it may be holding an object, and returning it to its (likely
     # open) starting width would drop the object mid-return.
-    follower_rest_poses = [
-        (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
-        for bus in _device_buses(robot)
-    ]
+    # Both arm types are driven back to this pose on a normal stop; only the
+    # mechanism differs by bus (see teleoperate's matching branch and
+    # maker_rest_pose.py). A Maker arm has no brakes, so releasing torque
+    # wherever the last episode ended would drop it.
+    rest_poses = family.capture_rest_poses(robot)
+    # An energized leader (the Metal leader) is captured and returned with
+    # the followers; every other leader contributes nothing here.
+    if teleop is not None:
+        rest_poses += family.capture_leader_rest_poses(teleop)
+
+    # Rate-bounded catch-up for the reset phase's two discontinuities (entering
+    # it across the episode-save gap, and resuming from a pause). Built once and
+    # handed to both reset-loop call sites; a no-op on the SO-101, and it only
+    # ever runs on the tick after a gap — see _realign_follower_to_leader.
+    realign = partial(
+        _realign_follower_to_leader,
+        robot,
+        teleop,
+        family.id,
+        teleop_action_processor,
+        robot_action_processor,
+        _ResetPhaseAbort(web_events),
+    )
 
     # Start with episode 1 - but track it properly
     current_episode = 1
@@ -1783,10 +2538,63 @@ def record_with_web_events(
     # release is attempted immediately: the bus may already be unreachable.
     ended_normally = False
 
+    from .recording_preparation import install_episode_preparation, prepare_recording_episode
+
+    prepared_encoder = None
+
+    def cancelled():
+        return bool(web_events.get("stop_recording") or _release_now.is_set())
+
+    prepare_alignment = partial(realign, require_settled=True)
     try:
-        while saved_episodes < cfg.dataset.num_episodes:
+        prepared_encoder = install_episode_preparation(dataset)
+        per_episode_task = getattr(recording_config, "per_episode_task", False)
+        if per_episode_task:
+
+            def capture_task(task):
+                record_loop(
+                    robot=robot,
+                    events=web_events,
+                    fps=cfg.dataset.fps,
+                    teleop_action_processor=teleop_action_processor,
+                    robot_action_processor=robot_action_processor,
+                    robot_observation_processor=process_observation,
+                    teleop=teleop,
+                    dataset=dataset,
+                    control_time_s=cfg.dataset.episode_time_s,
+                    single_task=task,
+                    display_data=cfg.display_data,
+                )
+
+            _record_task_episodes(
+                cfg,
+                dataset,
+                web_events,
+                capture_task,
+                lambda: prepare_recording_episode(
+                    robot,
+                    dataset,
+                    prepared_encoder,
+                    prepare_alignment,
+                    cancelled,
+                    observation_processor=process_observation,
+                ),
+                lambda: publish_preview(robot.get_observation()),
+            )
+        while not per_episode_task and saved_episodes < cfg.dataset.num_episodes:
+            _set_phase("preparing")
+            phase_start_time = None
+            if not prepare_recording_episode(
+                robot,
+                dataset,
+                prepared_encoder,
+                prepare_alignment,
+                cancelled,
+                observation_processor=process_observation,
+            ):
+                break
             # RECORDING PHASE - with dataset (matches original record.py exactly)
-            current_phase = "recording"
+            _set_phase("recording")
             phase_start_time = time.time()
             # Defense in depth alongside the phase gate in handle_recording_status:
             # a reset phase's pause bookkeeping must never survive into the
@@ -1794,6 +2602,7 @@ def record_with_web_events(
             # recording phase of the session or the one after a reset gap.
             paused_accum_seconds = 0.0
             pause_started_at = None
+            reset_phase_elapsed_s = None
             logger.info(f"Starting recording phase for episode {current_episode}")
             logger.info(f"Events state at start of recording phase: {web_events}")
             print(
@@ -1812,7 +2621,7 @@ def record_with_web_events(
                 fps=cfg.dataset.fps,
                 teleop_action_processor=teleop_action_processor,
                 robot_action_processor=robot_action_processor,
-                robot_observation_processor=robot_observation_processor,
+                robot_observation_processor=process_observation,
                 teleop=teleop,
                 dataset=dataset,
                 control_time_s=cfg.dataset.episode_time_s,
@@ -1873,10 +2682,13 @@ def record_with_web_events(
 
                 # Go through reset phase before re-recording (don't increment episode counters)
                 # RESET PHASE - without dataset (matches original record.py exactly)
-                current_phase = "resetting"
+                _set_phase("resetting")
                 phase_start_time = time.time()
                 paused_accum_seconds = 0.0
                 pause_started_at = None
+                # No loop is publishing a countdown yet; the status falls back
+                # to wall clock for the sub-tick until the loop's first tick.
+                reset_phase_elapsed_s = None
                 logger.info(f"Starting reset phase for re-record of episode {current_episode}")
                 logger.info(f"Events state at start of reset phase: {web_events}")
                 print(f"🔄 STATUS CHANGE: Starting reset phase for episode {current_episode}")
@@ -1901,6 +2713,8 @@ def record_with_web_events(
                     teleop_action_processor=teleop_action_processor,
                     robot_action_processor=robot_action_processor,
                     control_time_s=cfg.dataset.reset_time_s,
+                    realign=realign,
+                    observation_callback=publish_preview,
                 )
 
                 # The loop may have exited (e.g. via exit_early/stop) while
@@ -1953,10 +2767,13 @@ def record_with_web_events(
             # Skip reset for the last episode that was just saved
             if saved_episodes < cfg.dataset.num_episodes:
                 # RESET PHASE - without dataset (matches original record.py exactly)
-                current_phase = "resetting"
+                _set_phase("resetting")
                 phase_start_time = time.time()
                 paused_accum_seconds = 0.0
                 pause_started_at = None
+                # No loop is publishing a countdown yet; the status falls back
+                # to wall clock for the sub-tick until the loop's first tick.
+                reset_phase_elapsed_s = None
                 logger.info(f"Starting reset phase for next episode {current_episode}")
                 logger.info(f"Events state at start of reset phase: {web_events}")
                 print(f"🔄 STATUS CHANGE: Starting reset phase for episode {current_episode}")
@@ -1981,6 +2798,8 @@ def record_with_web_events(
                     teleop_action_processor=teleop_action_processor,
                     robot_action_processor=robot_action_processor,
                     control_time_s=cfg.dataset.reset_time_s,
+                    realign=realign,
+                    observation_callback=publish_preview,
                 )
 
                 # The loop may have exited (e.g. via exit_early/stop) while
@@ -2005,7 +2824,7 @@ def record_with_web_events(
                     break
 
         # Recording completed
-        current_phase = "completed"
+        _set_phase("completed")
         phase_start_time = None
         print("🏁 STATUS CHANGE: Recording session completed - all episodes finished")
         log_say("Stop recording", cfg.play_sounds, blocking=True)
@@ -2021,20 +2840,42 @@ def record_with_web_events(
                 # stop). A second stop (release-now) skips/aborts the return;
                 # error exits skip this — the bus may be gone, release ASAP.
                 releasing = True
-                _return_followers_to_rest(follower_rest_poses, _release_now)
+                # Still energized and holding the ports — a phase of this
+                # session, not idle yet (the worker's finally emits the final
+                # release hint once cleanup is done).
+                notify_session_changed("recording", True, phase="releasing")
+                family.return_to_rest(rest_poses, _release_now)
             # Belt and braces: disable torque explicitly before disconnect, so a
             # failure inside disconnect() can't leave an arm energized (rigid).
             # force_disable_torque logs any failure at ERROR level with the port.
-            force_disable_torque(robot, "robot")
-            force_disable_torque(teleop, "teleop")
+            # Every family releases the follower AND the leader: the family's
+            # release is a no-op on a leader without motors (the Star Arm
+            # 102) and stops the gravity thread then disables the bus on an
+            # energized one (the Metal leader).
+            if feetech:
+                family.release_torque(robot, "robot")
+                family.release_torque(teleop, "teleop")
+            else:
+                family.release_torque(robot, "CAN follower arm")
+                if teleop is not None:
+                    family.release_torque(teleop, "CAN leader arm")
             robot.disconnect()
             if teleop:
                 teleop.disconnect()
         finally:
             releasing = False
+            if prepared_encoder is not None:
+                prepared_encoder.close(preserve_failure=not ended_normally)
 
     if cfg.dataset.push_to_hub:
-        dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
+        # Same bare-id hazard as the UploadManager path, and the same single
+        # workaround: cfg.dataset.repo_id is the local (bare) id, and calling
+        # dataset.push_to_hub directly would let create_repo resolve it while
+        # the upload_folder right after it doesn't — stranding an empty repo.
+        # Unreachable from the browser today (the recording dialog sends
+        # push_to_hub: false and lets the user upload afterwards), but this is
+        # an HTTP API a non-UI caller can set.
+        push_dataset_to_hub(cfg.dataset.repo_id, tags=cfg.dataset.tags, private=cfg.dataset.private)
 
     log_say("Exiting", cfg.play_sounds)
     return dataset

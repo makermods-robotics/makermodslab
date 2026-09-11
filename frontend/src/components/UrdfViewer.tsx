@@ -7,6 +7,8 @@ import React, {
   memo,
 } from "react";
 import { cn } from "@/lib/utils";
+import type { ArmType } from "@/lib/armTypes";
+import { urdfConfigFor } from "@/lib/urdfConfigs";
 
 import URDFManipulator from "urdf-loader/src/urdf-manipulator-element.js";
 import { useUrdf } from "@/hooks/useUrdf";
@@ -61,13 +63,21 @@ interface UrdfViewerProps {
   /** Small-tile mode (e.g. the studio's corner PIP): shrinks the connection
    * pill to a status dot and the joint label to fit a ~300px card. */
   compact?: boolean;
+  /**
+   * Which arm's URDF to load (path + mesh rewrite). "so101" (default) or
+   * "maker" or "metal"; see lib/urdfConfigs. An arm type with no shipped URDF should
+   * render JointAngleReadout instead of this component.
+   */
+  armType?: ArmType;
 }
 
 const UrdfViewer: React.FC<UrdfViewerProps> = ({
   jointsKey = "joints",
   variant = "dark",
   compact = false,
+  armType = "so101",
 }) => {
+  const urdfConfig = useMemo(() => urdfConfigFor(armType), [armType]);
   const containerRef = useRef<HTMLDivElement>(null);
   const [highlightedJoint, setHighlightedJoint] = useState<string | null>(null);
   const webglOk = isWebglSupported();
@@ -116,61 +126,23 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
     registerUrdfProcessor(urdfProcessor);
   }, [registerUrdfProcessor, urdfProcessor]);
 
-  // Create URL modifier function for default model
-  const defaultUrlModifier = useCallback((url: string) => {
-    console.log(`🔗 defaultUrlModifier called with: ${url}`);
-
-    // Handle various package:// URL formats for the default SO-101 model
-    if (url.startsWith("package://so_arm_description/meshes/")) {
-      const modifiedUrl = url.replace(
-        "package://so_arm_description/meshes/",
-        "/so-101-urdf/meshes/"
-      );
-      console.log(`🔗 Modified URL (package): ${modifiedUrl}`);
-      return modifiedUrl;
-    }
-
-    // Handle case where package path might be partially resolved
-    if (url.includes("so_arm_description/meshes/")) {
-      const modifiedUrl = url.replace(
-        /.*so_arm_description\/meshes\//,
-        "/so-101-urdf/meshes/"
-      );
-      console.log(`🔗 Modified URL (partial): ${modifiedUrl}`);
-      return modifiedUrl;
-    }
-
-    // Handle the specific problematic path pattern we're seeing in logs
-    if (url.includes("/so-101-urdf/so_arm_description/meshes/")) {
-      const modifiedUrl = url.replace(
-        "/so-101-urdf/so_arm_description/meshes/",
-        "/so-101-urdf/meshes/"
-      );
-      console.log(`🔗 Modified URL (problematic path): ${modifiedUrl}`);
-      return modifiedUrl;
-    }
-
-    // Handle relative paths that might need mesh folder prefix
-    if (
-      url.endsWith(".stl") &&
-      !url.startsWith("/") &&
-      !url.startsWith("http")
-    ) {
-      const modifiedUrl = `/so-101-urdf/meshes/${url}`;
-      console.log(`🔗 Modified URL (relative): ${modifiedUrl}`);
-      return modifiedUrl;
-    }
-
-    console.log(`🔗 Unmodified URL: ${url}`);
-    return url;
-  }, []);
+  // Mesh-URL rewrite for the shipped model, from the per-arm URDF config.
+  const defaultUrlModifier = useCallback(
+    (url: string) => urdfConfig.rewriteMeshUrl(url),
+    [urdfConfig]
+  );
 
   // Main effect to create and setup the viewer only once
   useEffect(() => {
     if (!webglOk || !containerRef.current) return;
 
     // Create and configure the URDF viewer element
-    const viewer = createUrdfViewer(containerRef.current, variant === "dark");
+    const viewer = createUrdfViewer(
+      containerRef.current,
+      variant === "dark",
+      urdfConfig.up,
+      urdfConfig.ignoreLimits ?? false
+    );
     viewerRef.current = viewer; // Store reference to the viewer
 
     // Setup mesh loading function with appropriate URL modifier
@@ -179,26 +151,14 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
       : urlModifierFunc;
     setupMeshLoader(viewer, activeUrlModifier);
 
-    // Determine which URDF to load - fixed path to match the actual available file
+    // The shipped model for this arm type, or a drag-and-dropped upload.
     const urdfPath = isDefaultModel
-      ? "/so-101-urdf/urdf/so101_new_calib.urdf"
+      ? urdfConfig.urdfPath
       : customUrdfPath || "";
 
-    // Set the package path for the default model
+    // Set the package path for the shipped model.
     if (isDefaultModel) {
-      packageRef.current = "/"; // Set to root so we can handle full path resolution in URL modifier
-    }
-
-    // Setup model loading if a path is available
-    let cleanupModelLoading = () => {};
-    if (urdfPath) {
-      cleanupModelLoading = setupModelLoading(
-        viewer,
-        urdfPath,
-        packageRef.current,
-        setCustomUrdfPath,
-        alternativeUrdfModels
-      );
+      packageRef.current = urdfConfig.packagePath;
     }
 
     // Setup joint highlighting
@@ -217,37 +177,22 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
       }
 
       try {
-        // Create a bounding box for the robot
-        const boundingBox = new THREE.Box3().setFromObject(viewer.robot);
-
-        // Calculate the center of the bounding box
-        const center = new THREE.Vector3();
-        boundingBox.getCenter(center);
-
-        // Calculate the size of the bounding box
-        const size = new THREE.Vector3();
-        boundingBox.getSize(size);
-
-        // Get the maximum dimension to ensure the entire robot is visible
-        const maxDim = Math.max(size.x, size.y, size.z);
-
-        // Position camera to see the center of the model
-        viewer.camera.position.copy(center);
-
-        // Move the camera back to see the entire robot
-        // Use the model's up direction to determine which axis to move along
-        const upVector = new THREE.Vector3();
-        if (viewer.up === "+Z" || viewer.up === "Z") {
-          upVector.set(1, 1, 1); // Move back in a diagonal
-        } else if (viewer.up === "+Y" || viewer.up === "Y") {
-          upVector.set(1, 1, 1); // Move back in a diagonal
-        } else {
-          upVector.set(1, 1, 1); // Default direction
-        }
-
-        // Normalize the vector and multiply by the size
-        upVector.normalize().multiplyScalar(maxDim * 1.3);
-        viewer.camera.position.add(upVector);
+        // Cached meshes may finish before the first render updates the scene.
+        viewer.robot.updateWorldMatrix(true, true);
+        const bounds = new THREE.Box3().setFromObject(viewer.robot);
+        if (bounds.isEmpty()) return;
+        const sphere = bounds.getBoundingSphere(new THREE.Sphere());
+        // Reserve room for a CAN arm to unfold after its first live sample.
+        // Fit the narrower field of view, including tall bimanual panels.
+        const radius = Math.max(sphere.radius, isDefaultModel ? urdfConfig.minViewRadius ?? 0 : 0);
+        const aspect = viewer.clientWidth / Math.max(viewer.clientHeight, 1);
+        const halfVerticalFov = THREE.MathUtils.degToRad(viewer.camera.fov / 2);
+        const halfFov = Math.atan(Math.tan(halfVerticalFov) * Math.min(aspect, 1));
+        const distance = radius * 1.15 / Math.sin(halfFov);
+        const center = sphere.center;
+        viewer.camera.position.copy(center).add(
+          new THREE.Vector3(1, 0.8, 1).normalize().multiplyScalar(distance)
+        );
 
         // Make the camera look at the center of the model
         viewer.controls.target.copy(center);
@@ -263,8 +208,10 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
     };
 
     // Add event listener for when the robot is loaded to auto-fit to view
+    let fitFrame = 0;
     const onRobotLoad = () => {
-      fitRobotToView(viewer);
+      cancelAnimationFrame(fitFrame);
+      fitFrame = requestAnimationFrame(() => fitRobotToView(viewer));
     };
 
     // Setup animation event handler for the default model or when hasAnimation is true
@@ -282,9 +229,26 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
     };
 
     viewer.addEventListener("urdf-processed", onModelProcessed);
+    const resizeObserver = new ResizeObserver(onRobotLoad);
+    resizeObserver.observe(viewer);
+
+    // Register listeners before loading: cached meshes can complete synchronously.
+    // Setup model loading if a path is available
+    let cleanupModelLoading = () => {};
+    if (urdfPath) {
+      cleanupModelLoading = setupModelLoading(
+        viewer,
+        urdfPath,
+        packageRef.current,
+        setCustomUrdfPath,
+        alternativeUrdfModels
+      );
+    }
 
     // Return cleanup function
     return () => {
+      resizeObserver.disconnect();
+      cancelAnimationFrame(fitFrame);
       if (cleanupAnimationRef.current) {
         cleanupAnimationRef.current();
         cleanupAnimationRef.current = null;
@@ -301,6 +265,7 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
     customUrdfPath,
     urlModifierFunc,
     defaultUrlModifier,
+    urdfConfig,
     alternativeUrdfModels,
   ]);
 

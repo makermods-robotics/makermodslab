@@ -1,43 +1,46 @@
 import React, { useEffect, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { Trans, useTranslation } from "react-i18next";
 import { CheckCircle, Loader2, Trash2, Upload as UploadIcon, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { useStudio } from "@/contexts/StudioContext";
+import { useStudio, type RecordedInfo } from "@/contexts/StudioContext";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { useDatasetUpload } from "@/hooks/useDatasetUpload";
 import UploadDatasetDialog from "@/components/landing/UploadDatasetDialog";
-
-/** Router-state payload left by the Recording page when a session ends (see
- * Recording.tsx). Replaces the old /upload page hop. */
-interface RecordedInfo {
-  repo_id: string;
-  saved_episodes?: number;
-  // Set when the session saved zero episodes and the backend discarded the
-  // (empty) dataset directory — nothing is on disk.
-  discarded_empty?: boolean;
-}
+import MilestoneReveal from "@/components/onboarding/MilestoneReveal";
+import { useOnceFlag } from "@/lib/onboarding/storage";
 
 /**
- * Post-recording handoff banner on the Launchpad. Reads the `recorded` payload
- * the Recording page leaves in router state and offers the two next steps that
- * used to live on the /upload page + home info card: train on the just-recorded
- * dataset, or upload it to the Hub. Dismissible; clears the router state so it
- * doesn't resurrect on re-render.
+ * Post-recording handoff banner, rendered at the top of the studio's Collect
+ * panel. Offers the two next steps that used to live on the /upload page + home
+ * info card: train on the just-recorded dataset, or upload it to the Hub. It
+ * also carries two side effects that are the real payload — preselecting the
+ * dataset for Train, and kicking off the automatic Hub push — so it has to
+ * mount after every saved session, not just when someone is looking at it.
+ *
+ * The `recorded` payload comes from StudioContext. It used to arrive in router
+ * state, stamped by a navigate("/") that also closed the studio; a session now
+ * leaves the user in the studio, so there is no navigation to hang it on.
  */
-const CollectHandoff: React.FC = () => {
-  const location = useLocation();
-  const navigate = useNavigate();
+const CollectHandoff: React.FC<{
+  recorded: RecordedInfo | null;
+  onDismiss: () => void;
+}> = ({ recorded, onDismiss }) => {
+  const { t } = useTranslation();
   const { setSelectedDataset } = useSelectedDataset();
   const { openStudio, collectForm } = useStudio();
-
-  const recorded = location.state?.recorded as RecordedInfo | undefined;
-  const [dismissed, setDismissed] = useState(false);
 
   const discardedEmpty = recorded?.discarded_empty ?? false;
   // A discarded (empty) session left nothing on disk, so there's no repo id to
   // link, preselect, or upload.
   const repoId = discardedEmpty ? null : (recorded?.repo_id ?? null);
+
+  const { seen: hasSeenRecordingMilestone, markSeen: markRecordingMilestoneSeen } =
+    useOnceFlag("makerlab:milestone-first-recording");
+  const { seen: hasSeenHubUploadMilestone, markSeen: markHubUploadMilestoneSeen } =
+    useOnceFlag("makerlab:milestone-first-hub-upload");
+  const [showRecordingMilestone, setShowRecordingMilestone] = useState(false);
+  const [showHubMilestone, setShowHubMilestone] = useState(false);
 
   // Preserve the old Upload page's effect: preselect the just-recorded dataset
   // so the Train panel (useSelectedDataset) opens straight onto it.
@@ -45,14 +48,30 @@ const CollectHandoff: React.FC = () => {
     if (repoId) setSelectedDataset(repoId);
   }, [repoId, setSelectedDataset]);
 
-  if (!recorded || dismissed) return null;
+  // Keyed on the payload, NOT on mount. This banner used to remount for each
+  // session (it was driven by router state on a page the user navigated back
+  // to), so an empty dep array fired exactly once per recording. It now lives
+  // in the always-mounted Collect panel, where a mount-only effect would run
+  // once with no payload and never again — the milestone would never show.
+  // markSeen flips `seen` synchronously, so this settles after one pass.
+  useEffect(() => {
+    if (
+      recorded &&
+      !discardedEmpty &&
+      (recorded.saved_episodes ?? 0) > 0 &&
+      !hasSeenRecordingMilestone
+    ) {
+      setShowRecordingMilestone(true);
+      markRecordingMilestoneSeen();
+    }
+  }, [
+    recorded,
+    discardedEmpty,
+    hasSeenRecordingMilestone,
+    markRecordingMilestoneSeen,
+  ]);
 
-  const dismiss = () => {
-    setDismissed(true);
-    // Clear the router state so a reload / re-render doesn't bring the banner
-    // back for a session already handled.
-    navigate(".", { replace: true, state: null });
-  };
+  if (!recorded) return null;
 
   const trainOnThis = () => {
     if (!repoId) return;
@@ -61,68 +80,97 @@ const CollectHandoff: React.FC = () => {
   };
 
   return (
-    <div className="w-full rounded-lg border border-border bg-card p-4 shadow-1">
-      <div className="flex items-start gap-3">
-        {discardedEmpty ? (
-          <Trash2 className="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
-        ) : (
-          <CheckCircle className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
-        )}
-        <div className="min-w-0 flex-1">
+    <div className="w-full space-y-3">
+      <div className="w-full rounded-lg border border-border bg-card p-4 shadow-1">
+        <div className="flex items-start gap-3">
           {discardedEmpty ? (
-            <>
-              <p className="font-medium text-foreground">
-                No episodes were recorded
-              </p>
-              <p className="mt-0.5 text-sm text-muted-foreground">
-                Nothing was saved — the empty dataset was discarded so it
-                doesn't take up disk space.
-              </p>
-            </>
+            <Trash2 className="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
           ) : (
-            <>
-              <p className="font-medium text-foreground">
-                Dataset{" "}
-                <span className="break-all font-mono text-foreground">
-                  {repoId}
-                </span>{" "}
-                saved
-                {recorded.saved_episodes != null && (
-                  <span className="text-muted-foreground">
-                    {" · "}
-                    {recorded.saved_episodes} episode
-                    {recorded.saved_episodes === 1 ? "" : "s"}
-                  </span>
-                )}
-              </p>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <Button size="sm" onClick={trainOnThis}>
-                  Train on this dataset
-                </Button>
-                {repoId && (
-                  <UploadToHubAction
-                    repoId={repoId}
-                    // Kick off the Hub push automatically when the Collect
-                    // form's advanced toggle (default on) says so. A repo id
-                    // without a namespace means the user wasn't logged in at
-                    // record time — the push would only 401, so stay manual.
-                    autoStart={collectForm.pushToHub && repoId.includes("/")}
-                  />
-                )}
-              </div>
-            </>
+            <CheckCircle className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
           )}
+          <div className="min-w-0 flex-1">
+            {discardedEmpty ? (
+              <>
+                <p className="font-medium text-foreground">
+                  {t("studio.handoff.emptyTitle")}
+                </p>
+                <p className="mt-0.5 text-sm text-muted-foreground">
+                  {t("studio.handoff.emptyBody")}
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="font-medium text-foreground">
+                  {/* The repo id is DATA: interpolated whole into the <0> slot
+                      rather than concatenated around translated fragments. */}
+                  <Trans
+                    i18nKey="studio.handoff.savedTitle"
+                    values={{ repoId: repoId ?? "" }}
+                    components={[
+                      <span
+                        key="0"
+                        className="break-all font-mono text-foreground"
+                      />,
+                    ]}
+                  />
+                  {recorded.saved_episodes != null && (
+                    <span className="text-muted-foreground">
+                      {" · "}
+                      {t("studio.handoff.episodes", {
+                        count: recorded.saved_episodes,
+                      })}
+                    </span>
+                  )}
+                </p>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <Button size="sm" onClick={trainOnThis}>
+                    {t("studio.handoff.trainOnThis")}
+                  </Button>
+                  {repoId && (
+                    <UploadToHubAction
+                      repoId={repoId}
+                      // Kick off the Hub push automatically when the Collect
+                      // form's advanced toggle (default on) says so. A repo id
+                      // without a namespace means the user wasn't logged in at
+                      // record time — the push would only 401, so stay manual.
+                      autoStart={collectForm.pushToHub && repoId.includes("/")}
+                      onUploaded={() => {
+                        if (!hasSeenHubUploadMilestone) {
+                          setShowHubMilestone(true);
+                          markHubUploadMilestoneSeen();
+                        }
+                      }}
+                    />
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={t("studio.common.dismiss")}
+            onClick={onDismiss}
+            className="h-7 w-7 shrink-0 text-muted-foreground"
+          >
+            <X className="h-4 w-4" />
+          </Button>
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="Dismiss"
-          onClick={dismiss}
-          className="h-7 w-7 shrink-0 text-muted-foreground"
-        >
-          <X className="h-4 w-4" />
-        </Button>
       </div>
+      {showRecordingMilestone && (
+        <MilestoneReveal
+          title={t("studio.handoff.milestone.recording.title")}
+          description={t("studio.handoff.milestone.recording.description")}
+          onDismiss={() => setShowRecordingMilestone(false)}
+        />
+      )}
+      {showHubMilestone && (
+        <MilestoneReveal
+          title={t("studio.handoff.milestone.hubUpload.title")}
+          description={t("studio.handoff.milestone.hubUpload.description")}
+          onDismiss={() => setShowHubMilestone(false)}
+        />
+      )}
     </div>
   );
 };
@@ -137,34 +185,43 @@ const autoPushed = new Set<string>();
  * only when there's a local dataset to upload, so the hook has a real repoId.
  * With `autoStart`, the upload kicks off on mount (no tags, public — the
  * dialog's own defaults) instead of waiting for a click. */
-const UploadToHubAction: React.FC<{ repoId: string; autoStart?: boolean }> = ({
-  repoId,
-  autoStart = false,
-}) => {
+const UploadToHubAction: React.FC<{
+  repoId: string;
+  autoStart?: boolean;
+  onUploaded?: () => void;
+}> = ({ repoId, autoStart = false, onUploaded }) => {
+  const { t } = useTranslation();
   const { toast } = useToast();
   const { uploading, start } = useDatasetUpload({
     repoId,
     onDone: (url) => {
       toast({
-        title: "Uploaded to Hub",
+        title: t("studio.handoff.upload.doneTitle"),
         description: (
           <span>
-            {repoId} is now on the Hub.{" "}
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-medium underline"
-            >
-              View dataset
-            </a>
+            <Trans
+              i18nKey="studio.handoff.upload.doneBody"
+              values={{ repoId }}
+              components={[
+                <a
+                  key="0"
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-medium underline"
+                />,
+              ]}
+            />
           </span>
         ),
       });
+      onUploaded?.();
     },
     onError: (message, docsUrl) => {
       toast({
-        title: "Upload failed",
+        title: t("studio.handoff.upload.failedTitle"),
+        // `message` is the backend's own failure text and stays as sent —
+        // only the link label beside it is translated.
         description: docsUrl ? (
           <span>
             {message}{" "}
@@ -174,7 +231,7 @@ const UploadToHubAction: React.FC<{ repoId: string; autoStart?: boolean }> = ({
               rel="noopener noreferrer"
               className="font-medium underline"
             >
-              Open setup guide
+              {t("studio.handoff.upload.setupGuide")}
             </a>
           </span>
         ) : (
@@ -194,18 +251,19 @@ const UploadToHubAction: React.FC<{ repoId: string; autoStart?: boolean }> = ({
     start([], false).then((error) => {
       if (error) {
         toast({
-          title: "Automatic Hub upload not started",
+          title: t("studio.handoff.upload.autoFailedTitle"),
+          // `error` comes from useDatasetUpload / the backend — shown as sent.
           description: error,
         });
       }
     });
-  }, [autoStart, repoId, start, toast]);
+  }, [autoStart, repoId, start, toast, t]);
 
   if (uploading) {
     return (
       <span className="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
         <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        Uploading to Hub…
+        {t("studio.handoff.upload.uploading")}
       </span>
     );
   }
@@ -214,7 +272,7 @@ const UploadToHubAction: React.FC<{ repoId: string; autoStart?: boolean }> = ({
     <UploadDatasetDialog repoId={repoId} start={start}>
       <Button size="sm" variant="outline" className="gap-1.5">
         <UploadIcon className="h-3.5 w-3.5" />
-        Upload to Hub
+        {t("studio.handoff.upload.button")}
       </Button>
     </UploadDatasetDialog>
   );
