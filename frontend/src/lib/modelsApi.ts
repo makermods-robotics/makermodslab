@@ -168,7 +168,7 @@ export interface RunCheckpoints {
   default_repo_id: string;
   hf_repo_id: string | null;
   legacy_root_checkpoint: boolean;
-  /** False when the Hub couldn't be asked (offline, or the call failed). Every
+  /** False when the Hub couldn't be asked (unreachable, or the call failed). Every
    * `published` flag is then `false` by default and means "unknown", not "not
    * published" — present it that way, or a user re-queues gigabytes they
    * already sent. */
@@ -201,7 +201,7 @@ export async function listRunCheckpoints(
  *
  * MUTATES the Hub, and returns as soon as the queue is accepted — the upload
  * itself runs in the background; poll getModelUploadStatus for progress and for
- * the failures (offline / permission / Hub) that surface there. Throws ApiError
+ * the failures (network / permission / Hub) that surface there. Throws ApiError
  * 409 when a publish is already running. */
 export async function uploadModel(
   baseUrl: string,

@@ -266,7 +266,6 @@ def test_set_dataset_visibility_invalidates_listing_cache() -> None:
     listing cache so a visibility flip shows up on the next /datasets load."""
     api = MagicMock()
     with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.shared_hf_api", return_value=api),
         patch("makermodslab.datasets.invalidate_dataset_listing_cache") as inv,
     ):
@@ -277,7 +276,6 @@ def test_set_dataset_visibility_invalidates_listing_cache() -> None:
 def test_set_dataset_tags_invalidates_listing_cache() -> None:
     """set_dataset_tags must invalidate the listing cache."""
     with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.metadata_update"),
         patch("makermodslab.datasets.invalidate_dataset_listing_cache") as inv,
     ):

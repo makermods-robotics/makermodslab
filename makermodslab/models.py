@@ -74,7 +74,7 @@ from .utils.config import (
     validate_dataset_repo_id,
     with_makermodslab_tag,
 )
-from .utils.hf_auth import cached_whoami, get_token, hf_hub_offline, shared_hf_api
+from .utils.hf_auth import cached_whoami, get_token, shared_hf_api
 from .utils.naming import (
     KNOWN_POLICY_TYPES,
     POLICY_TYPES_BY_LENGTH as _POLICY_TYPES_BY_LENGTH,
@@ -206,7 +206,7 @@ def forget_hub_repo(repo_id: str) -> None:
 
 class ModelError(Exception):
     """Raised when a model mutation (upload/delete) can't proceed. `status` is
-    the HTTP status the route should return (400 offline/invalid, 403 no write
+    the HTTP status the route should return (400 invalid, 403 no write
     permission, 404 not found, 409 busy, 502 other Hub failure); `message` is
     the user-facing reason; `docs_url` (optional) links auth docs for a login
     failure; `code` (optional) is the machine-readable ErrorCode value the
@@ -2029,17 +2029,15 @@ def get_model_info(id_or_repo: str) -> dict[str, Any] | None:
         summary["size_bytes"] = _dir_size_bytes(model_dir)
         return _gate_dataset_episodes(summary)
 
-    # Not local at all — try the Hub. Offline ⇒ can't read a hub-only model.
-    if hf_hub_offline():
-        return None
+    # Not local at all — try the Hub.
     summary = _hub_model_info(id_or_repo)
     return _gate_dataset_episodes(summary) if summary is not None else None
 
 
 # In-process cache of per-repo Hub model metadata (the /models/info hub
 # branch), mirroring datasets._HUB_STATUS_CACHE conventions: successful answers
-# are memoized for the process lifetime; the offline/error degrade is NEVER
-# cached, so connectivity returning is picked up on the next check. Invalidated
+# are memoized for the process lifetime; the error degrade is NEVER cached, so
+# connectivity returning is picked up on the next check. Invalidated
 # alongside the listing cache on the mutations that change a repo (upload,
 # download-complete, delete, hide) — see invalidate_model_hub_info.
 _MODEL_HUB_INFO_CACHE: dict[str, dict[str, Any]] = {}
@@ -2476,16 +2474,12 @@ def upload_local_model(
     step-addressed layout above silently replaced this for the legacy route and
     broke root loaders — a "frozen" surface must keep its old on-Hub shape.
 
-    Refuses offline (can't mutate the Hub) with a clear error. Auth/permission
-    failures map like the dataset upload path. Invalidates the model-listing
-    cache so the freshly-pushed repo appears immediately. Returns
+    Auth/permission failures map like the dataset upload path. Invalidates the
+    model-listing cache so the freshly-pushed repo appears immediately. Returns
     {repo_id, url, tags, steps, published_steps}.
 
     NOTE: a MULTI-step call moves real weight — the route runs it through
     model_upload_manager (background thread, start/poll) rather than inline."""
-    if hf_hub_offline():
-        raise ModelError(400, "The Hub is offline — you can't upload a model right now.")
-
     record = _find_local_record(model_id)
     if record is None:
         # A mid-chain parent is a real run holding real weights, so "not found"
@@ -2656,9 +2650,10 @@ def list_run_checkpoints(model_id: str) -> dict[str, Any]:
         )
     available = _checkpoint_dirs(record)
     target_repo_id = record.hf_repo_id or _default_model_repo_id(record)
-    state = PublishedRepoState({}, False, False)
-    if not hf_hub_offline():
-        state = _published_repo_state(target_repo_id)
+    # Best-effort by construction: an unreachable Hub comes back readable=False
+    # with no steps (see _published_repo_state), which is what the picker needs
+    # to distinguish "nothing published" from "couldn't ask".
+    state = _published_repo_state(target_repo_id)
     published = state.steps
 
     return {

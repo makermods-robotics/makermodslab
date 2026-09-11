@@ -391,8 +391,6 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const [authenticated, setAuthenticated] = useState<boolean>(false);
   const [flavors, setFlavors] = useState<RunnerFlavor[]>([]);
   const [hardwareLoading, setHardwareLoading] = useState(true);
-  // HF_HUB_OFFLINE on the backend: Hub writes (incl. dataset upload) disabled.
-  const [offline, setOffline] = useState<boolean>(false);
 
   // Whether the user has hand-toggled the AMP switch this session — once they
   // have, their choice wins over the per-policy default below, same as any
@@ -448,12 +446,10 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       .then((data) => {
         setAuthenticated(data.authenticated);
         setFlavors(data.flavors);
-        setOffline(!!data.offline);
       })
       .catch(() => {
         setAuthenticated(false);
         setFlavors([]);
-        setOffline(false);
       })
       .finally(() => setHardwareLoading(false));
   }, [baseUrl, fetchWithHeaders, auth.status]);
@@ -895,35 +891,21 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
           step: resumeSeed.step.toLocaleString(),
         })
       : null;
-  // A local-only dataset on a cloud run is uploadable — unless the backend is
-  // in offline mode, in which case uploads are impossible and Start is a hard
-  // block. (needsUpload is already gated on isCloud.)
-  const uploadBlockedOffline = needsUpload && offline;
-  // A local run continued on the cloud has to push its checkpoint to the Hub
-  // first, which offline mode makes impossible — a hard block, exactly like the
-  // dataset case above.
-  const checkpointUploadBlockedOffline = needsCheckpointUpload && offline;
   const startDisabled =
     isStarting ||
     uploading ||
     !datasetRepoId ||
     (targetRequiresAuth && !authenticated) ||
     targetMissingFlavor ||
-    uploadBlockedOffline ||
-    checkpointUploadBlockedOffline ||
     resumeStepError != null;
   const startTooltip =
     targetRequiresAuth && !authenticated
       ? t("training.configurator.tooltip.needAuth")
       : targetMissingFlavor
         ? t("training.configurator.tooltip.needFlavor")
-        : uploadBlockedOffline
-          ? t("training.configurator.tooltip.offlineDataset")
-          : checkpointUploadBlockedOffline
-            ? t("training.configurator.tooltip.offlineCheckpoint")
-            : willQueue
-              ? t("training.configurator.tooltip.willQueue")
-              : undefined;
+        : willQueue
+          ? t("training.configurator.tooltip.willQueue")
+          : undefined;
 
   return (
     <div className="w-full">
@@ -1091,7 +1073,6 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
           <LocalDatasetCloudNotice
             repoId={datasetRepoId}
             sizeBytes={datasetSizeBytes}
-            offline={offline}
             uploading={uploading}
             errorMessage={uploadError}
           />
@@ -1107,7 +1088,6 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
             mode="resume"
             runName={resumeSeed.name}
             step={resumeSeed.step}
-            offline={offline}
           />
         </div>
       ) : checkpointUploadKind === "finetune" && finetuneSeed ? (
@@ -1121,7 +1101,6 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
             mode="finetune"
             runName={finetuneSeed.name}
             step={effectiveFinetuneStep}
-            offline={offline}
           />
         </div>
       ) : null}

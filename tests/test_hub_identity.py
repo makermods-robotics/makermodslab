@@ -349,7 +349,6 @@ def test_get_hub_settings_reads_the_resolved_id() -> None:
     api.dataset_info.return_value = MagicMock(private=True, tags=["makermods"])
     with (
         patch("makermodslab.datasets.cached_whoami", return_value=ALICE),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.shared_hf_api", return_value=api),
     ):
         result = ds.get_hub_settings("pick_place")
@@ -364,7 +363,6 @@ def test_set_dataset_visibility_writes_to_the_resolved_id() -> None:
     api = MagicMock()
     with (
         patch("makermodslab.datasets.cached_whoami", return_value=ALICE),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.shared_hf_api", return_value=api),
     ):
         ds.set_dataset_visibility("pick_place", True)
@@ -377,7 +375,6 @@ def test_set_dataset_tags_writes_to_the_resolved_id() -> None:
 
     with (
         patch("makermodslab.datasets.cached_whoami", return_value=ALICE),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.metadata_update") as update,
     ):
         ds.set_dataset_tags("pick_place", ["mine"])
@@ -392,7 +389,6 @@ def test_get_hub_dataset_info_downloads_the_resolved_id(tmp_path: Path) -> None:
     meta.write_text(json.dumps({"total_episodes": 1, "total_frames": 10, "fps": 30, "features": {}}))
     with (
         patch("makermodslab.datasets.cached_whoami", return_value=ALICE),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.hf_hub_download", return_value=str(meta)) as dl,
     ):
         ds.get_hub_dataset_info("pick_place")
@@ -408,7 +404,6 @@ def test_read_dataset_features_downloads_the_resolved_id(tmp_path: Path) -> None
     with (
         patch("makermodslab.datasets.cached_whoami", return_value=ALICE),
         patch("makermodslab.datasets._resolve_local_dataset_path", return_value=None),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.hf_hub_download", return_value=str(meta)) as dl,
     ):
         assert ds.read_dataset_features("pick_place") == {"action": {"names": ["a"]}}
@@ -430,7 +425,6 @@ def test_ensure_hub_episodes_root_fetches_the_resolved_id(tmp_path: Path) -> Non
     api.list_repo_files.return_value = ["meta/episodes/chunk-000/file-000.parquet"]
     with (
         patch("makermodslab.datasets.cached_whoami", return_value=ALICE),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets._hub_dataset_has_video", return_value=True),
         patch("makermodslab.datasets.shared_hf_api", return_value=api),
         patch("makermodslab.datasets.hf_hub_download", return_value=str(info)) as dl,
@@ -640,7 +634,6 @@ def test_rename_resolves_through_the_shared_primitive(tmp_lerobot_home: Path) ->
     api = _rename_api()
     with (
         patch("makermodslab.datasets.cached_whoami", return_value=ALICE),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.shared_hf_api", return_value=api),
         patch("makermodslab.datasets.resolve_hub_dataset_id", wraps=ds.resolve_hub_dataset_id) as spy,
     ):
@@ -660,7 +653,6 @@ def test_rename_moves_a_bare_id_under_the_users_namespace(tmp_lerobot_home: Path
     api = _rename_api()
     with (
         patch("makermodslab.datasets.cached_whoami", return_value=ALICE),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.shared_hf_api", return_value=api),
     ):
         result = ds.rename_local_dataset("pick_place", "new_name")
@@ -680,7 +672,6 @@ def test_rename_canonicalises_org_casing_for_both_hub_ids(tmp_lerobot_home: Path
     api = _rename_api()
     with (
         patch("makermodslab.datasets.cached_whoami", return_value=ALICE_IN_MYORG),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.shared_hf_api", return_value=api),
     ):
         result = ds.rename_local_dataset("MyOrg/pick_place", "new_name")
@@ -700,7 +691,6 @@ def test_rename_skips_the_hub_for_a_third_party_namespace(tmp_lerobot_home: Path
     api = MagicMock()
     with (
         patch("makermodslab.datasets.cached_whoami", return_value=ALICE),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.shared_hf_api", return_value=api),
     ):
         result = ds.rename_local_dataset("lerobot/pusht", "my_pusht")
@@ -718,7 +708,6 @@ def test_rename_skips_the_hub_for_a_read_only_org(tmp_lerobot_home: Path) -> Non
     api = MagicMock()
     with (
         patch("makermodslab.datasets.cached_whoami", return_value=ALICE_READONLY_ORG),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.shared_hf_api", return_value=api),
     ):
         result = ds.rename_local_dataset("readonly-org/pick", "mine")
@@ -806,7 +795,6 @@ def test_hub_settings_endpoint_reads_the_resolved_id(client: TestClient) -> None
     api.dataset_info.return_value = MagicMock(private=False, tags=["makermods"])
     with (
         patch("makermodslab.datasets.cached_whoami", return_value=ALICE),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.shared_hf_api", return_value=api),
     ):
         r = client.get("/datasets/hub-settings", params={"repo_id": "pick_place"})
@@ -819,7 +807,6 @@ def test_visibility_endpoint_writes_to_the_resolved_id(client: TestClient) -> No
     api = MagicMock()
     with (
         patch("makermodslab.datasets.cached_whoami", return_value=ALICE),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.shared_hf_api", return_value=api),
     ):
         r = client.post("/datasets/visibility", json={"repo_id": "pick_place", "private": True})
@@ -831,7 +818,6 @@ def test_visibility_endpoint_writes_to_the_resolved_id(client: TestClient) -> No
 def test_tags_endpoint_writes_to_the_resolved_id(client: TestClient) -> None:
     with (
         patch("makermodslab.datasets.cached_whoami", return_value=ALICE),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.metadata_update") as update,
     ):
         r = client.post("/datasets/tags", json={"repo_id": "pick_place", "tags": ["mine"]})
@@ -849,7 +835,6 @@ def test_datasets_info_endpoint_falls_back_to_the_resolved_hub_summary(
     meta.write_text(json.dumps({"total_episodes": 2, "total_frames": 20, "fps": 30, "features": {}}))
     with (
         patch("makermodslab.datasets.cached_whoami", return_value=ALICE),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.hf_hub_download", return_value=str(meta)) as dl,
     ):
         r = client.get("/datasets/info", params={"repo_id": "pick_place"})
@@ -914,7 +899,6 @@ def test_rename_endpoint_moves_the_resolved_hub_id(client: TestClient, tmp_lerob
     api = _rename_api()
     with (
         patch("makermodslab.datasets.cached_whoami", return_value=ALICE),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.shared_hf_api", return_value=api),
     ):
         r = client.post("/datasets/rename", json={"repo_id": "pick_place", "new_name": "new_name"})

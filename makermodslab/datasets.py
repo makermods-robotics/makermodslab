@@ -43,7 +43,7 @@ from .utils.config import (
     validate_dataset_repo_id,
     with_makermodslab_tag,
 )
-from .utils.hf_auth import cached_whoami, canonical_writable_namespace, hf_hub_offline, shared_hf_api
+from .utils.hf_auth import cached_whoami, canonical_writable_namespace, shared_hf_api
 from .utils.system import torchcodec_loads
 
 logger = logging.getLogger(__name__)
@@ -641,8 +641,8 @@ def _hub_has_data_claim(repo_id: str, status: str) -> bool | None:
 
 class DatasetHubEditError(Exception):
     """Raised when a Hub visibility/tags edit can't proceed. `status` is the
-    HTTP status the route should return (400 offline/invalid, 403 no write
-    permission, 502 other Hub failure); `message` is the user-facing reason;
+    HTTP status the route should return (400 invalid, 403 no write permission,
+    502 other Hub failure); `message` is the user-facing reason;
     `docs_url` (optional) links auth docs for a login failure."""
 
     def __init__(self, status: int, message: str, docs_url: str | None = None) -> None:
@@ -698,13 +698,11 @@ def get_hub_settings(repo_id: str) -> dict[str, Any]:
     editor. Returns ``{"repo_id": ..., "private": bool, "tags": [str, ...]}``.
 
     Reads ``HfApi().dataset_info(repo_id)`` — the network call is the caller's
-    (the info card fetches it lazily). Raises DatasetHubEditError offline (can't
-    read reliably) or on a Hub failure so the route can surface a clear error.
+    (the info card fetches it lazily). Raises DatasetHubEditError on a Hub
+    failure so the route can surface a clear error.
     Tags come from the dataset card metadata (``dataset_info(...).tags``); the
     REQUIRED_HUB_TAGS are not stripped here — the card shows exactly what's live.
     """
-    if hf_hub_offline():
-        raise DatasetHubEditError(400, "The Hub is offline — dataset settings can't be read right now.")
     hub_repo_id = resolve_hub_repo_id(repo_id)
     api = shared_hf_api()
     try:
@@ -723,14 +721,10 @@ def set_dataset_visibility(repo_id: str, private: bool) -> dict[str, Any]:
     """Flip a Hub dataset's visibility (public <-> private).
 
     Wraps ``HfApi().update_repo_settings(repo_id, private=..., repo_type="dataset")``
-    (this huggingface_hub version has no ``update_repo_visibility``). Refuses
-    offline (can't mutate). Maps auth/permission failures to a clear message.
+    (this huggingface_hub version has no ``update_repo_visibility``). Maps
+    auth/permission failures to a clear message.
     Invalidates the cached Hub-existence answer so the card re-reads settings.
     """
-    if hf_hub_offline():
-        raise DatasetHubEditError(
-            400, "The Hub is offline — you can't change a dataset's visibility right now."
-        )
     hub_repo_id = resolve_hub_repo_id(repo_id)
     api = shared_hf_api()
     try:
@@ -751,11 +745,9 @@ def set_dataset_tags(repo_id: str, tags: list[str]) -> dict[str, Any]:
     User-supplied `tags` are funnelled through ``with_makermodslab_tag`` FIRST, so the
     required org/product tags (makermods / openbooth / MakerModsLab) are never dropped
     by an edit, then written with ``metadata_update(..., overwrite=True)``.
-    Refuses offline. Maps auth/permission failures. Invalidates the cached
-    Hub-existence answer. Returns the final tag list actually written.
+    Maps auth/permission failures. Invalidates the cached Hub-existence answer.
+    Returns the final tag list actually written.
     """
-    if hf_hub_offline():
-        raise DatasetHubEditError(400, "The Hub is offline — you can't edit a dataset's tags right now.")
     final_tags = with_makermodslab_tag(tags)
     hub_repo_id = resolve_hub_repo_id(repo_id)
     try:
@@ -1212,8 +1204,8 @@ def _ensure_hub_episodes_root(repo_id: str) -> Path | None:
     ~/.cache/huggingface/lerobot dataset cache, and NOT a full dataset
     snapshot. Returns the snapshot root directory so the existing local-path
     reading code (_read_episode_rows, etc.) can run against it exactly like a
-    local dataset dir; None if the dataset isn't viewable this way (offline,
-    no video, or the fetch failed).
+    local dataset dir; None if the dataset isn't viewable this way (no video,
+    or the fetch failed).
 
     The episode-metadata parquet files are small regardless of how large the
     dataset's actual video is — this never pulls video/data chunks themselves;
@@ -1223,8 +1215,6 @@ def _ensure_hub_episodes_root(repo_id: str) -> Path | None:
     files and re-touches already-cached files, which is fast (etag-checked
     cache hits), not a re-download.
     """
-    if hf_hub_offline():
-        return None
     if not _hub_dataset_has_video(repo_id):
         return None
     hub_repo_id = resolve_hub_repo_id(repo_id)
@@ -1567,7 +1557,7 @@ def get_episode_action_series(repo_id: str, episode_index: int) -> dict[str, Any
 
 # In-process cache of per-repo Hub dataset summaries (the /datasets/info hub
 # fallback), mirroring _HUB_STATUS_CACHE conventions: successful answers are
-# memoized for the process lifetime; the offline/error degrade is NEVER cached,
+# memoized for the process lifetime; the error degrade is NEVER cached,
 # so connectivity returning is picked up on the next check. A row whose task
 # strings could not be read (tasks is None) counts as a partial failure and is
 # left out too — otherwise a blip freezes "no task" in for the process.
@@ -1607,8 +1597,6 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
     successful answers are cached — a row with null ``tasks`` is returned but
     not memoized, so the next request re-probes (see _HUB_DATASET_INFO_CACHE).
     """
-    if hf_hub_offline():
-        return None
 
     # Resolved, and cached under the id actually fetched: hf_hub_download is a
     # literal lookup, so a bare id needs the namespace — and which namespace
@@ -1722,8 +1710,6 @@ def is_dataset_private(repo_id: str) -> bool | None:
     the Hub at all): callers must treat that as private, not as "public",
     since an unresolvable repo is exactly the case with no way to confirm
     it's safe to show."""
-    if hf_hub_offline():
-        return None
     # Resolved for the same reason every other dataset-scoped Hub call is: a
     # bare local id ("pick-cube") is not a Hub address, and answering "is it
     # private" about the wrong repo is exactly the failure this gate exists to
@@ -1743,9 +1729,10 @@ def _read_dataset_info_json(repo_id: str) -> dict[str, Any] | None:
     the Hub for a dataset with no local copy — the same file get_hub_dataset_info
     uses.
 
-    Returns None when it can't be read — not local, offline, absent/private
-    repo, malformed JSON. None means "not established", never "fine": callers
-    must treat it as a reason to stay silent rather than a clean bill of health.
+    Returns None when it can't be read — not local, absent/private repo,
+    malformed JSON, or no ``features`` map. None means "not established",
+    never "fine": a caller must treat it as a reason to stay silent rather than
+    as a clean bill of health.
     """
     path = _resolve_local_dataset_path(repo_id)
     if path is not None:
@@ -1753,8 +1740,6 @@ def _read_dataset_info_json(repo_id: str) -> dict[str, Any] | None:
             info = json.loads((path / "meta" / "info.json").read_text())
         except (OSError, ValueError):
             return None
-    elif hf_hub_offline():
-        return None
     else:
         try:
             local = hf_hub_download(
@@ -1903,7 +1888,7 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
 
       * ``renamed`` — a Hub copy existed and was moved to match,
       * ``none``    — the Hub was reachable and confirmed it has no copy,
-      * ``skipped`` — the Hub step didn't run (``HF_HUB_OFFLINE``, no token, or
+      * ``skipped`` — the Hub step didn't run (no token, or
         a namespace this account can't write to), so a Hub copy, if one
         exists, KEPT ITS OLD NAME.
 
@@ -2004,8 +1989,7 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
         raise DatasetRenameError(
             502,
             "Couldn't confirm your Hub identity to check dataset ownership, so nothing "
-            "was renamed. Check your connection and try again. Setting HF_HUB_OFFLINE=1 "
-            "renames the local copy only and leaves any Hub copy under the old name.",
+            "was renamed. Check your connection and try again.",
         ) from exc
     hub_state = "skipped"
     hub_repo_id: str | None = None
@@ -2045,9 +2029,7 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
     # NB: a plain `hub_repo_exists` local here would shadow the module-level
     # function of that name for this whole scope.
     hub_copy_exists = False
-    if hub_repo_id is not None and hf_hub_offline():
-        logger.info("rename: HF_HUB_OFFLINE is set — renaming %s locally only", repo_id)
-    elif hub_repo_id is not None:
+    if hub_repo_id is not None:
         try:
             hub_copy_exists = api.repo_exists(hub_repo_id, repo_type="dataset")
         except Exception as exc:
@@ -2055,8 +2037,7 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
             raise DatasetRenameError(
                 502,
                 "Couldn't confirm whether this dataset also exists on the Hub, so nothing "
-                "was renamed. Check your connection and try again. Setting HF_HUB_OFFLINE=1 "
-                "renames the local copy only and leaves any Hub copy under the old name.",
+                "was renamed. Check your connection and try again.",
             ) from exc
         if not hub_copy_exists:
             hub_state = "none"
@@ -2069,8 +2050,7 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
             raise DatasetRenameError(
                 502,
                 "Couldn't confirm whether the new name is free on the Hub, so nothing was "
-                "renamed. Check your connection and try again. Setting HF_HUB_OFFLINE=1 "
-                "renames the local copy only and leaves the Hub copy under the old name.",
+                "renamed. Check your connection and try again.",
             ) from exc
         if new_taken:
             raise DatasetRenameError(409, f"A dataset named '{hub_new_repo_id}' already exists on the Hub.")

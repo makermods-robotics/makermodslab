@@ -297,10 +297,9 @@ class RunnerFlavor(BaseModel):
 
 class RunnersHardwareResponse(BaseModel):
     """server.py get_runners_hardware — every branch (unauthenticated, flavor
-    fetch failed, cached catalog) carries all four keys; username is null (not
+    fetch failed, cached catalog) carries all three keys; username is null (not
     absent) when unauthenticated."""
 
     authenticated: bool
     username: str | None
     flavors: list[RunnerFlavor]
-    offline: bool

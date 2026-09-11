@@ -6396,7 +6396,7 @@
         "type": "object"
       },
       "RunnersHardwareResponse": {
-        "description": "server.py get_runners_hardware — every branch (unauthenticated, flavor\nfetch failed, cached catalog) carries all four keys; username is null (not\nabsent) when unauthenticated.",
+        "description": "server.py get_runners_hardware — every branch (unauthenticated, flavor\nfetch failed, cached catalog) carries all three keys; username is null (not\nabsent) when unauthenticated.",
         "properties": {
           "authenticated": {
             "title": "Authenticated",
@@ -6408,10 +6408,6 @@
             },
             "title": "Flavors",
             "type": "array"
-          },
-          "offline": {
-            "title": "Offline",
-            "type": "boolean"
           },
           "username": {
             "anyOf": [
@@ -6428,8 +6424,7 @@
         "required": [
           "authenticated",
           "username",
-          "flavors",
-          "offline"
+          "flavors"
         ],
         "title": "RunnersHardwareResponse",
         "type": "object"
@@ -9432,7 +9427,7 @@
     },
     "/api/v1/datasets/hub-settings": {
       "get": {
-        "description": "Current Hub-side visibility + tags for a dataset, for pre-filling the\npost-upload editor. Returns ``{repo_id, private, tags}``. 400 offline;\n403/502 on a Hub failure. repo_id is a query param (repo ids contain '/').",
+        "description": "Current Hub-side visibility + tags for a dataset, for pre-filling the\npost-upload editor. Returns ``{repo_id, private, tags}``. 403/502 on a Hub\nfailure. repo_id is a query param (repo ids contain '/').",
         "operationId": "datasets_hub_settings",
         "parameters": [
           {
@@ -9709,7 +9704,7 @@
     },
     "/api/v1/datasets/tags": {
       "post": {
-        "description": "Replace a Hub dataset card's ``tags:`` metadata. User tags run through\nwith_makermodslab_tag first, so the required org tags are never dropped. MUTATES\nthe live card. 400 offline; 403 no write permission; 502 other Hub failure.\nReturns the final tag list actually written.",
+        "description": "Replace a Hub dataset card's ``tags:`` metadata. User tags run through\nwith_makermodslab_tag first, so the required org tags are never dropped. MUTATES\nthe live card. 403 no write permission; 502 other Hub failure.\nReturns the final tag list actually written.",
         "operationId": "datasets_tags",
         "requestBody": {
           "content": {
@@ -9751,7 +9746,7 @@
     },
     "/api/v1/datasets/visibility": {
       "post": {
-        "description": "Flip a Hub dataset's visibility (public <-> private). MUTATES the live\nrepo. 400 offline; 403 when the token can't write the namespace; 502 on any\nother Hub failure. Invalidates the cached hub-status so the card re-reads.",
+        "description": "Flip a Hub dataset's visibility (public <-> private). MUTATES the live\nrepo. 403 when the token can't write the namespace; 502 on any other Hub\nfailure. Invalidates the cached hub-status so the card re-reads.",
         "operationId": "datasets_visibility",
         "requestBody": {
           "content": {
@@ -11435,7 +11430,7 @@
     },
     "/api/v1/models/upload": {
       "post": {
-        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.\n\nThe single-checkpoint synchronous push, frozen for SDK clients — including\nits ON-HUB SHAPE: files land at the repo root, loadable by a plain\nfrom_pretrained(repo_id) (root_layout=True). The training view's\nmulti-checkpoint picker uses POST /api/v1/models/publish instead, which\nstep-addresses under checkpoints/<step>/.",
+        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.\n\nThe single-checkpoint synchronous push, frozen for SDK clients — including\nits ON-HUB SHAPE: files land at the repo root, loadable by a plain\nfrom_pretrained(repo_id) (root_layout=True). The training view's\nmulti-checkpoint picker uses POST /api/v1/models/publish instead, which\nstep-addresses under checkpoints/<step>/.",
         "operationId": "models_upload",
         "requestBody": {
           "content": {
@@ -15235,7 +15230,7 @@
     },
     "/datasets/hub-settings": {
       "get": {
-        "description": "Current Hub-side visibility + tags for a dataset, for pre-filling the\npost-upload editor. Returns ``{repo_id, private, tags}``. 400 offline;\n403/502 on a Hub failure. repo_id is a query param (repo ids contain '/').",
+        "description": "Current Hub-side visibility + tags for a dataset, for pre-filling the\npost-upload editor. Returns ``{repo_id, private, tags}``. 403/502 on a Hub\nfailure. repo_id is a query param (repo ids contain '/').",
         "operationId": "datasets_hub_settings_datasets_hub_settings_get",
         "parameters": [
           {
@@ -15512,7 +15507,7 @@
     },
     "/datasets/tags": {
       "post": {
-        "description": "Replace a Hub dataset card's ``tags:`` metadata. User tags run through\nwith_makermodslab_tag first, so the required org tags are never dropped. MUTATES\nthe live card. 400 offline; 403 no write permission; 502 other Hub failure.\nReturns the final tag list actually written.",
+        "description": "Replace a Hub dataset card's ``tags:`` metadata. User tags run through\nwith_makermodslab_tag first, so the required org tags are never dropped. MUTATES\nthe live card. 403 no write permission; 502 other Hub failure.\nReturns the final tag list actually written.",
         "operationId": "datasets_tags_datasets_tags_post",
         "requestBody": {
           "content": {
@@ -15554,7 +15549,7 @@
     },
     "/datasets/visibility": {
       "post": {
-        "description": "Flip a Hub dataset's visibility (public <-> private). MUTATES the live\nrepo. 400 offline; 403 when the token can't write the namespace; 502 on any\nother Hub failure. Invalidates the cached hub-status so the card re-reads.",
+        "description": "Flip a Hub dataset's visibility (public <-> private). MUTATES the live\nrepo. 403 when the token can't write the namespace; 502 on any other Hub\nfailure. Invalidates the cached hub-status so the card re-reads.",
         "operationId": "datasets_visibility_datasets_visibility_post",
         "requestBody": {
           "content": {
@@ -16919,7 +16914,7 @@
     },
     "/models/upload": {
       "post": {
-        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.\n\nThe single-checkpoint synchronous push, frozen for SDK clients — including\nits ON-HUB SHAPE: files land at the repo root, loadable by a plain\nfrom_pretrained(repo_id) (root_layout=True). The training view's\nmulti-checkpoint picker uses POST /api/v1/models/publish instead, which\nstep-addresses under checkpoints/<step>/.",
+        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.\n\nThe single-checkpoint synchronous push, frozen for SDK clients — including\nits ON-HUB SHAPE: files land at the repo root, loadable by a plain\nfrom_pretrained(repo_id) (root_layout=True). The training view's\nmulti-checkpoint picker uses POST /api/v1/models/publish instead, which\nstep-addresses under checkpoints/<step>/.",
         "operationId": "models_upload_models_upload_post",
         "requestBody": {
           "content": {

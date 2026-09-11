@@ -1,6 +1,6 @@
 import React from "react";
 import { Trans, useTranslation } from "react-i18next";
-import { AlertTriangle, Lock, UploadCloud, WifiOff } from "lucide-react";
+import { AlertTriangle, Lock, UploadCloud } from "lucide-react";
 
 interface LocalCheckpointCloudNoticeProps {
   /** Which crossing this is: a local run being CONTINUED on the cloud (the
@@ -13,9 +13,6 @@ interface LocalCheckpointCloudNoticeProps {
   runName: string;
   /** The checkpoint step involved; null ⇒ the latest. */
   step: number | null;
-  /** Backend is in HF_HUB_OFFLINE mode: nothing can be uploaded, so this
-   * launch can't run on the cloud at all. */
-  offline: boolean;
 }
 
 /**
@@ -41,7 +38,6 @@ const LocalCheckpointCloudNotice: React.FC<LocalCheckpointCloudNoticeProps> = ({
   mode,
   runName,
   step,
-  offline,
 }) => {
   const { t } = useTranslation();
   // A noun phrase naming which checkpoint moves. {{step}} keeps its existing
@@ -53,35 +49,6 @@ const LocalCheckpointCloudNotice: React.FC<LocalCheckpointCloudNoticeProps> = ({
         })
       : t("training.checkpointNotice.latestLabel");
   const isFinetune = mode === "finetune";
-
-  if (offline) {
-    return (
-      <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-700 dark:text-amber-100">
-        <div className="flex items-start gap-2">
-          <WifiOff className="w-4 h-4 mt-0.5 shrink-0 text-amber-600 dark:text-amber-300" />
-          <div>
-            <div className="font-semibold">
-              {t("training.checkpointNotice.title")}
-            </div>
-            <p className="mt-1 text-amber-700/80 dark:text-amber-200/80">
-              <Trans
-                i18nKey={
-                  isFinetune
-                    ? "training.checkpointNotice.offlineFinetune"
-                    : "training.checkpointNotice.offlineResume"
-                }
-                values={{ stepLabel, runName }}
-                components={[
-                  <code key="0" className="text-amber-700 dark:text-amber-100" />,
-                  <span key="1" className="font-medium" />,
-                ]}
-              />
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-700 dark:text-amber-100">

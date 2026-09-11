@@ -949,7 +949,7 @@ def test_get_model_info_local(registry) -> None:
 def test_get_model_info_unknown_returns_none(registry) -> None:
     from makermodslab.models import get_model_info
 
-    with patch("makermodslab.models.hf_hub_offline", return_value=True):
+    with patch("makermodslab.models._hub_model_info", return_value=None):
         assert get_model_info("nope") is None
 
 
@@ -1024,7 +1024,6 @@ def test_upload_local_model_calls_hub_public_and_tagged(registry) -> None:
 
     fake_api = MagicMock()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=fake_api),
         patch("makermodslab.models.metadata_update") as mock_meta,
@@ -1051,20 +1050,11 @@ def test_upload_local_model_calls_hub_public_and_tagged(registry) -> None:
     assert set(result["tags"]) == set(tags)
 
 
-def test_upload_local_model_rejects_offline(registry) -> None:
-    from makermodslab.models import ModelError, upload_local_model
-
-    _seed_run(registry, "off_run", state="done")
-    with patch("makermodslab.models.hf_hub_offline", return_value=True), pytest.raises(ModelError) as ei:
-        upload_local_model("off_run")
-    assert ei.value.status == 400
-
-
 def test_upload_local_model_404_when_no_checkpoint(registry) -> None:
     from makermodslab.models import ModelError, upload_local_model
 
     _seed_run(registry, "empty_run", state="done", with_checkpoint=False)
-    with patch("makermodslab.models.hf_hub_offline", return_value=False), pytest.raises(ModelError) as ei:
+    with pytest.raises(ModelError) as ei:
         upload_local_model("empty_run")
     assert ei.value.status == 404
 
@@ -1076,7 +1066,6 @@ def test_upload_local_model_maps_auth_error(registry) -> None:
     fake_api = MagicMock()
     fake_api.create_repo.side_effect = Exception("401 Client Error: You must be authenticated")
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=fake_api),
         pytest.raises(ModelError) as ei,
@@ -1092,7 +1081,7 @@ def test_upload_local_model_404_for_failed_run_with_checkpoint(registry) -> None
     from makermodslab.models import ModelError, upload_local_model
 
     _seed_run(registry, "failed_run", state="failed", steps=50)
-    with patch("makermodslab.models.hf_hub_offline", return_value=False), pytest.raises(ModelError) as ei:
+    with pytest.raises(ModelError) as ei:
         upload_local_model("failed_run")
     assert ei.value.status == 404
 
@@ -1104,7 +1093,6 @@ def test_upload_local_model_succeeds_for_interrupted_run_with_checkpoint(registr
 
     fake_api = MagicMock()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=fake_api),
         patch("makermodslab.models.metadata_update"),
@@ -1120,7 +1108,7 @@ def test_upload_local_model_404_when_still_running(registry) -> None:
     from makermodslab.models import ModelError, upload_local_model
 
     _seed_run(registry, "running_run", state="running")
-    with patch("makermodslab.models.hf_hub_offline", return_value=False), pytest.raises(ModelError) as ei:
+    with pytest.raises(ModelError) as ei:
         upload_local_model("running_run")
     assert ei.value.status == 404
 
@@ -1129,9 +1117,14 @@ def test_upload_local_model_404_for_failed_run_without_checkpoint(registry) -> N
     from makermodslab.models import ModelError, upload_local_model
 
     _seed_run(registry, "dead_run", state="failed", with_checkpoint=False)
-    with patch("makermodslab.models.hf_hub_offline", return_value=False), pytest.raises(ModelError) as ei:
+    with pytest.raises(ModelError) as ei:
         upload_local_model("dead_run")
     assert ei.value.status == 404
+
+
+# ---------------------------------------------------------------------------
+# upload_local_model — multi-checkpoint publishing into ONE repo.
+# ---------------------------------------------------------------------------
 
 
 def test_get_model_info_still_none_for_failed_run(registry) -> None:
@@ -1139,13 +1132,8 @@ def test_get_model_info_still_none_for_failed_run(registry) -> None:
     from makermodslab.models import get_model_info
 
     _seed_run(registry, "failed_info_run", state="failed", steps=50)
-    with patch("makermodslab.models.hf_hub_offline", return_value=True):
+    with patch("makermodslab.models._hub_model_info", return_value=None):
         assert get_model_info("failed_info_run") is None
-
-
-# ---------------------------------------------------------------------------
-# upload_local_model — multi-checkpoint publishing into ONE repo.
-# ---------------------------------------------------------------------------
 
 
 def _publish(model_id: str, **kwargs):
@@ -1154,7 +1142,6 @@ def _publish(model_id: str, **kwargs):
 
     fake_api = MagicMock()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=fake_api),
         patch("makermodslab.models.metadata_update"),
@@ -1176,7 +1163,6 @@ def test_legacy_root_layout_uploads_to_the_repo_root(registry) -> None:
     _seed_run(registry, "legacy_run", steps=300)
     fake_api = MagicMock()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=fake_api),
         patch("makermodslab.models.metadata_update"),
@@ -1376,7 +1362,6 @@ def test_upload_reports_steps_already_on_the_hub(registry) -> None:
 
     fake_api = MagicMock()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=fake_api),
         patch("makermodslab.models.metadata_update"),
@@ -1403,7 +1388,6 @@ def test_upload_skips_the_card_when_the_repo_cant_be_read(registry) -> None:
 
     fake_api = MagicMock()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=fake_api),
         patch("makermodslab.models.metadata_update"),
@@ -1431,7 +1415,6 @@ def test_upload_reports_progress_per_step(registry, quiet_hub_reads) -> None:
     seen: list[tuple[int, int, int | None]] = []
     fake_api = MagicMock()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=fake_api),
         patch("makermodslab.models.metadata_update"),
@@ -1458,7 +1441,6 @@ def test_upload_signals_all_landed_before_the_tagging_that_fails(registry, quiet
     seen: list[tuple[int, int, int | None]] = []
     fake_api = MagicMock()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=fake_api),
         patch("makermodslab.models.metadata_update", side_effect=RuntimeError("hub 503")),
@@ -1486,7 +1468,6 @@ def test_publish_manager_keeps_every_landed_step_when_the_tagging_fails(registry
     manager = m.ModelUploadManager()
     fake_api = MagicMock()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=fake_api),
         patch("makermodslab.models.metadata_update", side_effect=RuntimeError("hub 503")),
@@ -1514,7 +1495,6 @@ def test_publish_manager_drops_the_step_that_failed_mid_queue(registry, quiet_hu
     # Succeed for step 100, blow up on 200.
     fake_api.upload_folder.side_effect = [None, RuntimeError("connection reset")]
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=fake_api),
         patch("makermodslab.models.metadata_update"),
@@ -1534,7 +1514,6 @@ def test_upload_rejects_a_step_the_run_never_saved(registry) -> None:
 
     _seed_run(registry, "run_g", steps=300)
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         pytest.raises(ModelError) as ei,
     ):
         upload_local_model("run_g", steps=[999])
@@ -1547,7 +1526,6 @@ def test_upload_rejects_an_empty_selection(registry) -> None:
 
     _seed_run(registry, "run_h", steps=300)
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         pytest.raises(ModelError) as ei,
     ):
         upload_local_model("run_h", steps=[])
@@ -1567,7 +1545,6 @@ def test_list_run_checkpoints_marks_the_steps_already_published(registry) -> Non
     _add_checkpoint(registry, "run_i", 200)
 
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch(
             "makermodslab.models._published_repo_state",
             return_value=PublishedRepoState({100: "100", 200: "200"}, False, True),
@@ -1585,27 +1562,6 @@ def test_list_run_checkpoints_marks_the_steps_already_published(registry) -> Non
     ]
 
 
-def test_list_run_checkpoints_skips_the_hub_probe_when_offline(registry) -> None:
-    """Offline is a normal state for this app — the picker still renders, it
-    just can't know what's published, and false-when-unknown only ever costs a
-    redundant re-upload."""
-    from makermodslab.models import list_run_checkpoints
-
-    _seed_run(registry, "run_j", steps=300)
-    probe = MagicMock()
-    with (
-        patch("makermodslab.models.hf_hub_offline", return_value=True),
-        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
-        patch("makermodslab.models._published_repo_state", probe),
-    ):
-        out = list_run_checkpoints("run_j")
-
-    probe.assert_not_called()
-    assert [(c["step"], c["published"]) for c in out["checkpoints"]] == [(300, False)]
-    # The UI must be able to tell "not published" from "couldn't check".
-    assert out["hub_readable"] is False
-
-
 def test_published_run_row_still_reports_its_local_side_as_a_run(registry) -> None:
     """Regression: pinning hf_repo_id collapses a published run onto its own Hub
     repo as source="both". The row must keep local_kind="run", because the
@@ -1617,7 +1573,6 @@ def test_published_run_row_still_reports_its_local_side_as_a_run(registry) -> No
     _seed_run(registry, "run_p", steps=300, hf_repo_id="user/run_p")
 
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         # list_hub_models returns the /jobs hub-row shape, keyed on repo_id.
         patch(
             "makermodslab.models.list_hub_models",
@@ -1645,7 +1600,6 @@ def test_published_run_downloaded_back_keeps_its_trained_origin(registry, tmp_le
     _make_model_checkpoint(_local_models_root(), "user/run_d", shape="tree", step=300)
 
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.is_dataset_private", return_value=False),
         patch(
             "makermodslab.models.list_hub_models",
@@ -1670,7 +1624,6 @@ def test_run_collapse_matches_hub_repo_case_insensitively(registry) -> None:
     _seed_run(registry, "run_c", steps=300, hf_repo_id="User/Run_C")
 
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch(
             "makermodslab.models.list_hub_models",
             return_value=[{"repo_id": "user/run_c", "last_modified": None}],
@@ -1695,7 +1648,6 @@ def test_run_collapse_keeps_dataset_episodes(registry) -> None:
     registry._records["run_ep"].hf_repo_id = "user/run_ep"
 
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.is_dataset_private", return_value=False),
         patch(
             "makermodslab.models.list_hub_models",
@@ -1972,7 +1924,7 @@ def test_models_endpoint_returns_listing(client, registry) -> None:
 
 
 def test_models_info_404(client, registry) -> None:
-    with patch("makermodslab.models.hf_hub_offline", return_value=True):
+    with patch("makermodslab.models._hub_model_info", return_value=None):
         resp = client.get("/models/info", params={"id": "missing"})
     assert resp.status_code == 404
     assert isinstance(resp.json()["detail"], str)
@@ -3120,11 +3072,13 @@ def test_list_all_models_downloaded_only_is_local(registry, tmp_lerobot_home: Pa
 
 def test_get_model_info_downloaded_checkpoint(registry, tmp_lerobot_home: Path) -> None:
     """A downloaded/imported checkpoint resolves in get_model_info without the
-    Hub (works offline) and reports its on-disk size."""
+    Hub at all, and reports its on-disk size."""
     from makermodslab.models import get_model_info
 
     _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "user/policy")
-    with patch("makermodslab.models.hf_hub_offline", return_value=True):
+    with patch(
+        "makermodslab.models._hub_model_info", side_effect=AssertionError("Hub must not be consulted")
+    ):
         info = get_model_info("user/policy")
     assert info is not None
     assert info["policy_type"] == "act"
@@ -3685,7 +3639,9 @@ def test_import_local_model_copies_tree_shape(tmp_lerobot_home: Path, tmp_path: 
     result = import_local_model(str(src), name="team/imported")
     assert result == {"repo_id": "team/imported"}
 
-    with patch("makermodslab.models.hf_hub_offline", return_value=True):
+    with patch(
+        "makermodslab.models._hub_model_info", side_effect=AssertionError("Hub must not be consulted")
+    ):
         info = get_model_info("team/imported")
     assert info is not None
     assert info["steps"] == 300
@@ -4136,7 +4092,6 @@ def test_upload_local_model_stamps_policy_tag(registry) -> None:
 
     fake_api = MagicMock()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=fake_api),
         patch("makermodslab.models.metadata_update") as mock_meta,
@@ -4617,7 +4572,6 @@ def test_padded_checkpoint_dirs_upload_to_padded_hub_paths(registry) -> None:
     _seed_multi(registry, "pad_run", ["000100", "000200", "001000"])
     api = _hub_api()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=api),
         patch("makermodslab.models.metadata_update"),
@@ -4652,7 +4606,6 @@ def test_invalid_user_typed_repo_name_gets_a_useful_error(registry) -> None:
         "Repo id must use alphanumeric chars or '-', '_', '.'; got 'My Run!!'"
     )
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=api),
         pytest.raises(ModelError) as ei,
@@ -4666,7 +4619,6 @@ def test_empty_step_list_is_400(registry) -> None:
 
     _seed_multi(registry, "e_run", ["100"])
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         pytest.raises(ModelError) as ei,
     ):
         upload_local_model("e_run", steps=[])
@@ -4678,7 +4630,6 @@ def test_unknown_step_is_404_and_names_the_saved_steps(registry) -> None:
 
     _seed_multi(registry, "u_run", ["100", "200"])
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         pytest.raises(ModelError) as ei,
     ):
         upload_local_model("u_run", steps=[100, 999])
@@ -4692,7 +4643,6 @@ def test_duplicate_steps_upload_once(registry) -> None:
     _seed_multi(registry, "d_run", ["100", "200"])
     api = _hub_api()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=api),
         patch("makermodslab.models.metadata_update"),
@@ -4725,7 +4675,6 @@ def test_partial_failure_reports_only_the_steps_that_landed(registry) -> None:
 
     mgr = ModelUploadManager()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=api),
         patch("makermodslab.models.metadata_update"),
@@ -4759,7 +4708,6 @@ def test_partial_failure_still_pins_the_repo_it_published_into(registry) -> None
 
     mgr = ModelUploadManager()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=api),
         patch("makermodslab.models.metadata_update"),
@@ -4791,7 +4739,6 @@ def test_retry_after_partial_failure_targets_the_same_repo(registry) -> None:
 
     mgr = ModelUploadManager()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=api),
         patch("makermodslab.models.metadata_update"),
@@ -4824,7 +4771,6 @@ def test_first_publish_does_not_claim_the_hub_was_unreachable(registry) -> None:
     api.list_repo_files.side_effect = RepositoryNotFoundError("404 — repo does not exist", response=resp)
 
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=api),
     ):
@@ -4889,7 +4835,6 @@ def test_second_publish_is_refused_while_one_is_running(registry) -> None:
 
     mgr = ModelUploadManager()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=api),
         patch("makermodslab.models.metadata_update"),
@@ -4922,7 +4867,6 @@ def test_card_index_merges_previously_published_steps(registry) -> None:
         captured["steps"] = dict(steps)
 
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=api),
         patch("makermodslab.models.metadata_update"),
