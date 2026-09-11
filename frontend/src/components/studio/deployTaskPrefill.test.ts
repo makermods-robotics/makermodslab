@@ -13,6 +13,7 @@ import {
   TASK_LOADING_MAX_MS,
   taskFieldVisible,
   taskIsAmbiguous,
+  taskPlaceholderKey,
   taskPrefillRepoId,
   tasksFrom,
   type TaskPrefillState,
@@ -277,6 +278,46 @@ describe("loadingWordKey", () => {
   it("has no duplicate keys", () => {
     expect(new Set(TASK_LOADING_WORD_KEYS).size).toBe(
       TASK_LOADING_WORD_KEYS.length,
+    );
+  });
+});
+
+describe("taskPlaceholderKey", () => {
+  // Loading's cycling words are the caller's job (loadingWordKey needs a
+  // tick); everything else is a pure function of the state.
+  it("is its own key for idle — never claims a dataset was checked", () => {
+    // idle means no checkpoint dataset was even resolvable to attempt a
+    // lookup with. Falling through to placeholderNone would claim the server
+    // looked and found nothing, which never happened.
+    expect(taskPlaceholderKey({ kind: "idle" }, false)).toBe(
+      "studio.deploy.task.placeholderUnresolved",
+    );
+  });
+
+  it("distinguishes a missing dataset from an unreadable one", () => {
+    expect(taskPlaceholderKey({ kind: "unknown", reason: "not_found" }, false)).toBe(
+      "studio.deploy.task.placeholderMissing",
+    );
+    expect(
+      taskPlaceholderKey({ kind: "unknown", reason: "unreachable" }, false),
+    ).toBe("studio.deploy.task.placeholderUnreadable");
+  });
+
+  it("offers the choose prompt only while loaded-and-ambiguous", () => {
+    expect(taskPlaceholderKey({ kind: "loaded", tasks: ["a", "b"] }, true)).toBe(
+      "studio.deploy.task.placeholderChoose",
+    );
+  });
+
+  it("falls back to placeholderNone only for a genuinely empty loaded list", () => {
+    expect(taskPlaceholderKey({ kind: "loaded", tasks: [] }, false)).toBe(
+      "studio.deploy.task.placeholderNone",
+    );
+  });
+
+  it("uses placeholderSlow for a loading state (caller overrides while cycling)", () => {
+    expect(taskPlaceholderKey({ kind: "loading" }, false)).toBe(
+      "studio.deploy.task.placeholderSlow",
     );
   });
 });

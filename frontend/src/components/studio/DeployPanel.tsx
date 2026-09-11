@@ -100,6 +100,7 @@ import {
   TASK_LOADING_DOT_MS,
   TASK_LOADING_MAX_MS,
   taskIsAmbiguous,
+  taskPlaceholderKey,
   taskPrefillRepoId,
   tasksFrom,
   type TaskPrefillState,
@@ -1927,11 +1928,14 @@ const DeployPanel: React.FC = () => {
                 // it back. No invented example: a fake task shown greyed in the
                 // same slot the REAL inherited task uses is indistinguishable
                 // from one. When the lineage yields nothing, say so instead.
-                // Three different situations used to render the same
+                // Four different situations used to render the same
                 // "no task found" sentence, and only one of them was true:
                 // a dataset that really lists none, a lookup that 404'd,
-                // and a lookup that failed. Each says something different
-                // about what the operator should do next.
+                // one that failed outright, and — idle — no checkpoint
+                // dataset even resolvable enough to attempt a lookup.
+                // taskPlaceholderKey (deployTaskPrefill) is the pure,
+                // tested mapping; only the ticking animation stays here,
+                // because it needs the tick, not just the state.
                 placeholder={
                   defaultTask ||
                   (taskPrefill.kind === "loading" && !taskLoadingExpired
@@ -1939,20 +1943,7 @@ const DeployPanel: React.FC = () => {
                       // cycle; the dots are punctuation driven by the tick,
                       // so they stay out of the catalog.
                       `${t(loadingWordKey(taskLoadingTick) as never)}${loadingDots(taskLoadingTick)}`
-                    : taskPrefill.kind === "loading"
-                      ? // Still running, but past the point where watching
-                        // dots beats typing. Does NOT claim the dataset has
-                        // no task — it hasn't answered either way yet.
-                        t("studio.deploy.task.placeholderSlow")
-                      : taskPrefill.kind === "unknown"
-                        ? t(
-                            taskPrefill.reason === "not_found"
-                              ? "studio.deploy.task.placeholderMissing"
-                              : "studio.deploy.task.placeholderUnreadable",
-                          )
-                        : taskAmbiguous
-                          ? t("studio.deploy.task.placeholderChoose")
-                          : t("studio.deploy.task.placeholderNone"))
+                    : t(taskPlaceholderKey(taskPrefill, taskAmbiguous) as never))
                 }
               />
               {/* Whether the field is even read is a property of the checkpoint,

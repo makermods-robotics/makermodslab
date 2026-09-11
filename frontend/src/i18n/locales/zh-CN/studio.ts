@@ -295,6 +295,9 @@ export default {
       placeholderUnreadable: "无法读取训练数据集 — 请手动输入任务",
       // 有多个任务，无法在它们之间做出可靠的猜测。
       placeholderChoose: "请在下方选择你要运行的任务",
+      // 该检查点的训练数据集本身就无法确定（例如没有 train_config 的导入模型），
+      // 服务器根本没能去查——不同于 placeholderNone，不能说"没找到"。
+      placeholderUnresolved: "无法确定该检查点的训练数据集 — 请手动输入任务",
       // 用于不读取任务的策略。指导仍会保存这个字符串。
       hintCoach: "它会随每次纠正一起保存，方便你日后知道这次会话教的是什么。",
       leaveEmpty: "留空即使用灰显的任务，它取自该模型训练所用的数据集。",

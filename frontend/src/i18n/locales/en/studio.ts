@@ -395,6 +395,12 @@ export default {
         "Couldn't read the training dataset — type the task",
       // Several tasks and no defensible guess between them.
       placeholderChoose: "Pick which task you're running, below",
+      // No checkpoint dataset was even resolvable enough to attempt a lookup
+      // (an imported model with no train_config, an untagged one). Distinct
+      // from placeholderNone: the server never got to check, so it must not
+      // say "found none".
+      placeholderUnresolved:
+        "This checkpoint's training dataset isn't known — type the task",
       // Shown for a policy that does NOT read the task. Coaching still saves it.
       hintCoach:
         "Saved with every correction, so you can tell later what this session was teaching.",

@@ -205,3 +205,36 @@ export function effectiveTaskFor(
   if (!taskFieldVisible(requiresTask, runMode)) return "";
   return typed.trim() || defaultTaskFrom(state);
 }
+
+/** Which placeholder KEY explains an empty task box.
+ *
+ * Covers every state EXCEPT loading's cycling animation: `loading` here
+ * returns `placeholderSlow`, the one used once the animation gives up — the
+ * caller substitutes the ticking rummaging word in its place while the
+ * lookup is still young, because that needs a tick counter this pure
+ * function has no business owning.
+ *
+ * `idle` is its own key, not a fallthrough to `placeholderNone`: idle means
+ * no checkpoint dataset was even resolvable enough to ATTEMPT a lookup —
+ * folding it into "no task found on the training dataset" claims a dataset
+ * was checked and came back empty, which never happened. That collapse is
+ * exactly the false-assertion class this module exists to stop making. */
+export function taskPlaceholderKey(
+  state: TaskPrefillState,
+  taskAmbiguous: boolean,
+): string {
+  switch (state.kind) {
+    case "loading":
+      return "studio.deploy.task.placeholderSlow";
+    case "unknown":
+      return state.reason === "not_found"
+        ? "studio.deploy.task.placeholderMissing"
+        : "studio.deploy.task.placeholderUnreadable";
+    case "idle":
+      return "studio.deploy.task.placeholderUnresolved";
+    case "loaded":
+      return taskAmbiguous
+        ? "studio.deploy.task.placeholderChoose"
+        : "studio.deploy.task.placeholderNone";
+  }
+}
