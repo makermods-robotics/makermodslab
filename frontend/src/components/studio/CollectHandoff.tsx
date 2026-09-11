@@ -14,9 +14,14 @@ import { useOnceFlag } from "@/lib/onboarding/storage";
  * Post-recording handoff banner, rendered at the top of the studio's Collect
  * panel. Offers the two next steps that used to live on the /upload page + home
  * info card: train on the just-recorded dataset, or upload it to the Hub. It
- * also carries two side effects that are the real payload — preselecting the
- * dataset for Train, and kicking off the automatic Hub push — so it has to
- * mount after every saved session, not just when someone is looking at it.
+ * also carries a side effect that's part of the real payload — preselecting
+ * the dataset for Train — so it has to mount after every saved session, not
+ * just when someone is looking at it. The Hub push itself is no longer
+ * automatic FROM HERE: CollectPanel's Finalize review fires it (if Push to
+ * Hub was on) before this banner ever mounts, and this component's own
+ * useDatasetUpload re-attaches to that in-flight upload via its usual
+ * /upload-status poll on mount — so the Uploading… state and the done/error
+ * toasts still show correctly, without a second, redundant push.
  *
  * The `recorded` payload comes from StudioContext. It used to arrive in router
  * state, stamped by a navigate("/") that also closed the studio; a session now
@@ -28,7 +33,7 @@ const CollectHandoff: React.FC<{
 }> = ({ recorded, onDismiss }) => {
   const { t } = useTranslation();
   const { setSelectedDataset } = useSelectedDataset();
-  const { openStudio, collectForm } = useStudio();
+  const { openStudio } = useStudio();
 
   const discardedEmpty = recorded?.discarded_empty ?? false;
   // A discarded (empty) session left nothing on disk, so there's no repo id to
@@ -129,11 +134,6 @@ const CollectHandoff: React.FC<{
                   {repoId && (
                     <UploadToHubAction
                       repoId={repoId}
-                      // Kick off the Hub push automatically when the Collect
-                      // form's advanced toggle (default on) says so. A repo id
-                      // without a namespace means the user wasn't logged in at
-                      // record time — the push would only 401, so stay manual.
-                      autoStart={collectForm.pushToHub && repoId.includes("/")}
                       onUploaded={() => {
                         if (!hasSeenHubUploadMilestone) {
                           setShowHubMilestone(true);
@@ -175,21 +175,18 @@ const CollectHandoff: React.FC<{
   );
 };
 
-/** Repo ids already auto-pushed this app session — module-level so a banner
- * remount (e.g. browser-back onto the history entry that carries the
- * `recorded` state) doesn't fire a second, redundant upload. */
-const autoPushed = new Set<string>();
-
 /** "Upload to Hub" affordance — reuses the existing UploadDatasetDialog +
  * useDatasetUpload flow (identical to DatasetInfoCard's HubSyncRow). Rendered
  * only when there's a local dataset to upload, so the hook has a real repoId.
- * With `autoStart`, the upload kicks off on mount (no tags, public — the
- * dialog's own defaults) instead of waiting for a click. */
+ * Manual-click only: the automatic first push (when Push to Hub was on at
+ * record time) is CollectPanel's Finalize action now, not this component —
+ * useDatasetUpload's own mount-time /upload-status poll re-attaches to that
+ * upload here (see the module doc comment), so this shows "Uploading…"
+ * correctly without starting a second one. */
 const UploadToHubAction: React.FC<{
   repoId: string;
-  autoStart?: boolean;
   onUploaded?: () => void;
-}> = ({ repoId, autoStart = false, onUploaded }) => {
+}> = ({ repoId, onUploaded }) => {
   const { t } = useTranslation();
   const { toast } = useToast();
   const { uploading, start } = useDatasetUpload({
@@ -241,23 +238,6 @@ const UploadToHubAction: React.FC<{
       });
     },
   });
-
-  // Auto-push: fire once per repo per app session (the Set guards remounts).
-  // A refused start (another upload running / dataset busy) is surfaced so the
-  // user knows to fall back to the manual button.
-  useEffect(() => {
-    if (!autoStart || autoPushed.has(repoId)) return;
-    autoPushed.add(repoId);
-    start([], false).then((error) => {
-      if (error) {
-        toast({
-          title: t("studio.handoff.upload.autoFailedTitle"),
-          // `error` comes from useDatasetUpload / the backend — shown as sent.
-          description: error,
-        });
-      }
-    });
-  }, [autoStart, repoId, start, toast, t]);
 
   if (uploading) {
     return (
