@@ -763,12 +763,20 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
 interface SessionCameraListProps {
   /** The selected robot record's cameras, exactly as stored. */
   cameras: CameraConfig[];
+  hint?: string;
+  cameraNotes?: Record<string, string>;
   /** Filled with a function that drops every preview stream, so the caller can
    * hand the devices to cv2 before a session starts (same contract as
    * CameraConfiguration's prop of the same name). */
   releaseStreamsRef?: React.MutableRefObject<(() => void) | null>;
   /** Shown when the robot has no cameras. */
   emptyLabel?: string;
+  /** Drive the pause from outside instead of through releaseStreamsRef, for a
+   * caller whose "hand the devices over" state is derived rather than an event
+   * (the Run panel pauses while a rollout is submitting or active, and resumes
+   * on its own when it ends — the ref is one-way and would need a remount).
+   * Left undefined, the list keeps its own state and nothing changes. */
+  paused?: boolean;
 }
 
 /**
@@ -791,8 +799,11 @@ interface SessionCameraListProps {
  */
 export const SessionCameraList: React.FC<SessionCameraListProps> = ({
   cameras,
+  hint,
+  cameraNotes,
   releaseStreamsRef,
   emptyLabel,
+  paused,
 }) => {
   const { t } = useTranslation();
   const eyebrow = useEyebrowClass();
@@ -802,8 +813,9 @@ export const SessionCameraList: React.FC<SessionCameraListProps> = ({
   // Same handover as the editable component: pausing unmounts the streams AND
   // stops the enumeration probe, so cv2 can open the devices exclusively.
   const [streamsPaused, setStreamsPaused] = useState(false);
+  const isPaused = paused ?? streamsPaused;
   const { cameras: availableCameras } = useAvailableCameras({
-    enabled: !streamsPaused,
+    enabled: !isPaused,
   });
 
   const releaseAllCameraStreams = useCallback(() => setStreamsPaused(true), []);
@@ -819,7 +831,7 @@ export const SessionCameraList: React.FC<SessionCameraListProps> = ({
           eyebrow heading — matching the editable component. */}
       <h3 className={eyebrow}>{t("recording.cameras.heading")}</h3>
       <p className="text-xs text-muted-foreground">
-        {t("recording.cameras.sessionHint")}
+        {hint ?? t("recording.cameras.sessionHint")}
       </p>
 
       {cameras.length === 0 ? (
@@ -843,10 +855,13 @@ export const SessionCameraList: React.FC<SessionCameraListProps> = ({
                       : undefined
                   }
                   uniqueId={camera.unique_id}
-                  paused={streamsPaused}
+                  paused={isPaused}
                   emptyLabel={t("recording.cameras.disconnectedSettings")}
                 />
                 <div className="space-y-0.5 p-3">
+                  {cameraNotes?.[camera.name] ? (
+                    <p className="text-xs text-muted-foreground">{cameraNotes[camera.name]}</p>
+                  ) : null}
                   <h5 className="truncate font-medium text-foreground">
                     {camera.name}
                   </h5>

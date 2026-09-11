@@ -147,6 +147,263 @@ def test_policy_extra_maps_policies_to_install_targets() -> None:
     assert handle_get_policy_extra("diffusion")["install_target"] == "lerobot[diffusion]"
 
 
+def test_policy_extra_molmoact2_probes_transformers_not_peft_or_scipy() -> None:
+    """MolmoAct2's extra is transformers + peft + scipy, but only transformers
+    is a construction-time requirement for a rollout on this pin: peft is
+    reached only under enable_lora_vlm, and scipy only when the checkpoint's
+    action_mode is "discrete"/"both" (the released checkpoints save
+    "continuous"). Probing either would report the extra missing for a
+    checkpoint that runs fine, and DeployPanel refuses to launch on that."""
+    from makermodslab.utils.system import handle_get_policy_extra
+
+    molmo = handle_get_policy_extra("molmoact2")
+    assert molmo["needs_extra"] is True
+    assert molmo["package"] == "transformers"
+    assert molmo["install_target"] == "lerobot[molmoact2]"
+    assert "lerobot[molmoact2]" in molmo["install_hint"]
+
+
+# ── policy runtime requirements (policy_inference_args & friends) ────────────
+#
+# Pure functions of a checkpoint's saved config.json — no filesystem here, the
+# dicts below stand in for the file rollout.py reads.
+
+
+def test_policy_inference_args_are_empty_for_every_other_policy() -> None:
+    from makermodslab.utils.system import policy_inference_args
+
+    assert policy_inference_args({"type": "act"}) == []
+    assert policy_inference_args({"type": "smolvla"}) == []
+    # An unreadable / missing config.json arrives as {} — add nothing rather
+    # than guessing, and let the subprocess report whatever is really wrong.
+    assert policy_inference_args({}) == []
+
+
+def test_policy_inference_args_fill_in_a_missing_molmoact2_action_mode() -> None:
+    """MolmoAct2Config.inference_action_mode defaults to None and the policy
+    raises on None, so a checkpoint that saved no mode cannot be rolled out at
+    all without this override."""
+    from makermodslab.utils.system import policy_inference_args
+
+    assert policy_inference_args({"type": "molmoact2", "action_mode": "both"}) == [
+        "--policy.inference_action_mode=continuous"
+    ]
+    # A discrete-only checkpoint gets discrete: forcing continuous onto it
+    # raises in MolmoAct2Config.__post_init__, which would swap one fatal
+    # error for another.
+    assert policy_inference_args({"type": "molmoact2", "action_mode": "discrete"}) == [
+        "--policy.inference_action_mode=discrete"
+    ]
+
+
+def test_policy_inference_args_leave_an_explicit_molmoact2_mode_alone() -> None:
+    """The released lerobot/MolmoAct2-*-LeRobot configs already save
+    inference_action_mode; a rollout must run the policy the way its own config
+    says, so there is nothing to override."""
+    from makermodslab.utils.system import policy_inference_args
+
+    saved = {"type": "molmoact2", "action_mode": "continuous", "inference_action_mode": "continuous"}
+    assert policy_inference_args(saved) == []
+    saved_discrete = {"type": "molmoact2", "action_mode": "both", "inference_action_mode": "discrete"}
+    assert policy_inference_args(saved_discrete) == []
+
+
+def test_molmoact2_rtc_conflict_only_blocks_discrete_checkpoints() -> None:
+    """MolmoAct2Policy.supports_rtc() is `inference_action_mode ==
+    "continuous"`, and build_rollout_context turns a False into a ValueError —
+    but only after loading a multi-GB VLM. Answer from the saved config."""
+    from makermodslab.utils.system import molmoact2_rtc_conflict
+
+    assert molmoact2_rtc_conflict({"type": "molmoact2", "inference_action_mode": "continuous"}) is None
+    assert molmoact2_rtc_conflict({"type": "molmoact2", "action_mode": "both"}) is None
+    conflict = molmoact2_rtc_conflict({"type": "molmoact2", "inference_action_mode": "discrete"})
+    assert conflict is not None
+    assert "continuous" in conflict
+    # Every other policy's RTC support is decided upstream — don't pretend to
+    # know it here.
+    assert molmoact2_rtc_conflict({"type": "act"}) is None
+    assert molmoact2_rtc_conflict({}) is None
+
+
+def test_the_flow_steps_field_is_per_family_and_verified_against_the_pin() -> None:
+    """WHICH field a `--flow-steps` override writes, and the one that traps:
+    MolmoAct2's `num_flow_timesteps` (8) is a TRAINING knob — how many flow
+    timesteps are sampled per example to build the loss — and is never read on
+    an inference path. `predict_action_chunk` reads `num_inference_steps`."""
+    from makermodslab.utils.system import policy_flow_steps_field
+
+    assert policy_flow_steps_field("smolvla") == "num_steps"
+    assert policy_flow_steps_field("pi0") == "num_inference_steps"
+    assert policy_flow_steps_field("pi05") == "num_inference_steps"
+    assert policy_flow_steps_field("molmoact2") == "num_inference_steps"
+    # No denoising loop to shorten: ACT regresses a chunk in one pass, and
+    # pi0_fast decodes action TOKENS autoregressively.
+    assert policy_flow_steps_field("act") is None
+    assert policy_flow_steps_field("pi0_fast") is None
+    # Same `object` tolerance policy_requires_task has: the type is read
+    # straight out of a config.json, where it can be missing or corrupt.
+    assert policy_flow_steps_field(None) is None
+    assert policy_flow_steps_field(7) is None
+
+
+def test_the_flow_steps_default_is_read_off_the_checkpoint_or_is_unknown() -> None:
+    """The checkpoint's own saved value, with ONE documented fallback: a
+    MolmoAct2 that saved `num_inference_steps: null` (which the published one
+    does) runs at 10, because `modeling_molmoact2.py` resolves
+    `steps = int(num_steps or self.config.flow_matching_num_steps)` against the
+    backbone config, whose default is 10. It is NOT 8 — `num_flow_timesteps` is
+    a training knob."""
+    from makermodslab.utils.system import MOLMOACT2_FLOW_STEPS_DEFAULT, policy_flow_steps_default
+
+    assert MOLMOACT2_FLOW_STEPS_DEFAULT == 10
+    assert policy_flow_steps_default({"type": "smolvla", "num_steps": 10}) == 10
+    assert policy_flow_steps_default({"type": "pi05", "num_inference_steps": 4}) == 4
+    assert policy_flow_steps_default({"type": "molmoact2", "num_inference_steps": None}) == 10
+    # Absent reads the same as null — a config that never wrote the key is in
+    # exactly the state the container's `or` fallback answers.
+    assert policy_flow_steps_default({"type": "molmoact2"}) == 10
+    # A saved value still wins over the fallback.
+    assert policy_flow_steps_default({"type": "molmoact2", "num_inference_steps": 4}) == 4
+    # The fallback is MolmoAct2's alone: pi05's `num_inference_steps` has a
+    # class-level default this file cannot see, so null there stays unknown.
+    assert policy_flow_steps_default({"type": "pi05", "num_inference_steps": None}) is None
+    # No such knob at all.
+    assert policy_flow_steps_default({"type": "act", "n_action_steps": 100}) is None
+    # A hand-edited config: "unknown" beats a number somebody sets a latency
+    # budget from. `True` is an `int` subclass and would otherwise read as 1.
+    assert policy_flow_steps_default({"type": "smolvla", "num_steps": 0}) is None
+    assert policy_flow_steps_default({"type": "smolvla", "num_steps": "ten"}) is None
+    assert policy_flow_steps_default({"type": "smolvla", "num_steps": True}) is None
+    # Hand-edited MolmoAct2 too: only null (or absent) takes the fallback.
+    assert policy_flow_steps_default({"type": "molmoact2", "num_inference_steps": "ten"}) is None
+    assert policy_flow_steps_default({}) is None
+
+
+def test_model_dtype_support_is_answered_from_the_saved_config() -> None:
+    """A config.json is a dataclass dump, so key presence IS "the class
+    declares this field" — which stays right through a pin bump that gives
+    another family the knob. In this pin MolmoAct2 is the only one."""
+    from makermodslab.utils.system import policy_supports_model_dtype
+
+    assert policy_supports_model_dtype({"type": "molmoact2", "model_dtype": "float32"}) is True
+    assert policy_supports_model_dtype({"type": "smolvla", "num_steps": 10}) is False
+    assert policy_supports_model_dtype({}) is False
+
+
+def test_the_variable_view_allowlist_is_closed_and_small() -> None:
+    """Which checkpoints may be given a camera they were not published with
+    (S3.8g). Answered off a TABLE rather than off key presence the way
+    `model_dtype` is, because nothing in a config.json says "this family's
+    vision tower takes any number of pictures" — that is a fact about its
+    processor, established by reading one.
+
+    MolmoAct2 is in it because its lerobot wrapper FIXED at two a list the
+    allenai model takes any length of (`processor_molmoact2._extract_images`
+    iterates whatever keys it resolves; the prompt and the sequence budget are
+    both computed from `len(images)`). Everything else answers False, INCLUDING
+    a type this pin has never heard of — which is the safe direction: the
+    checkpoint then runs with the views it was published with, and the operator
+    gets a refusal instead of a shape error inside a paid container."""
+    from makermodslab.utils.system import (
+        VARIABLE_VIEW_POLICY_TYPES,
+        policy_supports_extra_image_roles,
+    )
+
+    assert frozenset({"molmoact2"}) == VARIABLE_VIEW_POLICY_TYPES
+    assert policy_supports_extra_image_roles("molmoact2") is True
+    for policy_type in ("smolvla", "pi0", "pi05", "act", "pi0_fast", "", "something_new"):
+        assert policy_supports_extra_image_roles(policy_type) is False, policy_type
+    # Read off a config dict whose "type" can be anything at all.
+    assert policy_supports_extra_image_roles(None) is False
+    assert policy_supports_extra_image_roles(7) is False
+
+
+def test_a_camera_role_must_survive_four_journeys() -> None:
+    """The role becomes a policy feature key, a Portal VIDEO TRACK name, a
+    `--robot.cameras` dict key inside a draccus-parsed argv, and one element of
+    a COMMA-separated flag. A comma, a space, a brace or a dot breaks one of
+    those in a place that presents as "the session receives nothing" rather than
+    as an error — hence a rule narrower than "any string"."""
+    from makermodslab.utils.system import is_valid_image_role
+
+    for good in ("cam2", "c", "wrist_cam", "cam_0", "a" * 32):
+        assert is_valid_image_role(good) is True, good
+    for bad in (
+        "",
+        "Cam2",  # uppercase: the feature key is spelled lowercase everywhere
+        "2cam",  # must start with a letter
+        "cam 2",  # a space splits the draccus dict
+        "cam,2",  # a comma splits the flag itself
+        "cam.2",  # a dot is the feature-key separator
+        "cam-2",
+        "{cam2}",
+        "a" * 33,
+        None,
+        7,
+        ["cam2"],
+    ):
+        assert is_valid_image_role(bad) is False, bad
+
+
+def test_molmoact2_device_warning_is_advisory_and_names_the_device() -> None:
+    """A WARNING, not a gate: nothing in this pin requires CUDA (the action-flow
+    CUDA graph falls back off-CUDA), so this only sets expectations about a ~7B
+    VLM in a 30 Hz loop. The device is injected — no real detection here."""
+    from makermodslab.utils.system import molmoact2_device_warning
+
+    molmo = {"type": "molmoact2", "inference_action_mode": "continuous"}
+    assert molmoact2_device_warning(molmo, "cuda") is None
+
+    for device in ("mps", "cpu"):
+        warning = molmoact2_device_warning(molmo, device)
+        assert warning is not None
+        assert device in warning
+        assert "CUDA" in warning
+
+    # Every other policy is unaffected — ACT on MPS is an ordinary, fast run.
+    assert molmoact2_device_warning({"type": "act"}, "mps") is None
+    assert molmoact2_device_warning({}, "cpu") is None
+
+
+# ── the task vocabulary ──────────────────────────────────────────────────────
+
+
+def test_policy_requires_task_covers_every_language_conditioned_type() -> None:
+    """ONE vocabulary, two consumers: jobs.py's `requires_task` (what the launch
+    panel gates its task field on) and the two DRTC policy servers' startup
+    refusal. A type in one and not the other is a run that the panel lets
+    through and the GPU then rejects, or worse, accepts and degrades."""
+    from makermodslab.utils.system import LANGUAGE_CONDITIONED_POLICY_TYPES, policy_requires_task
+
+    assert {"smolvla", "pi0", "pi0_fast", "pi05", "molmoact2"} == LANGUAGE_CONDITIONED_POLICY_TYPES
+    for policy_type in LANGUAGE_CONDITIONED_POLICY_TYPES:
+        assert policy_requires_task(policy_type) is True
+
+
+def test_policy_requires_task_is_false_for_everything_else() -> None:
+    """Including the values a config.json can legitimately hand it: a missing
+    "type" key reads as None, and a corrupt file can hold anything at all. An
+    unreadable type only makes the task field optional — a policy that really
+    wanted one still says so from inside the subprocess."""
+    from makermodslab.utils.system import policy_requires_task
+
+    assert policy_requires_task("act") is False
+    assert policy_requires_task("diffusion") is False
+    assert policy_requires_task("") is False
+    assert policy_requires_task(None) is False
+    assert policy_requires_task(42) is False
+
+
+def test_molmoact2_needs_a_task_which_is_why_it_joined_the_set() -> None:
+    """MolmoAct2 is the reason this became a hard requirement rather than a
+    nudge. Its processor renders a missing task as the empty string into a fixed
+    template, so the VLM is prompted with the literal "The task is to ." and
+    returns confidently wrong actions with nothing in any log to explain it."""
+    from makermodslab.utils.system import MOLMOACT2, policy_requires_task
+
+    assert policy_requires_task(MOLMOACT2) is True
+
+
 def test_policy_extra_core_policy_needs_nothing() -> None:
     from makermodslab.utils.system import handle_get_policy_extra
 
@@ -512,3 +769,20 @@ def test_torchcodec_probe_subprocess_failure_means_unusable(monkeypatch):
 
     monkeypatch.setattr(sysmod.subprocess, "run", boom)
     assert sysmod._probe_torchcodec_uncached() is False
+
+
+def test_build_install_cmd_keeps_several_requirements_as_separate_tokens(monkeypatch) -> None:
+    """The remote extra installs Portal and its two plugin packages by name:
+    each must be its own argv token, never a space-joined string pip would
+    read as one bogus requirement."""
+    from makermodslab.utils import system
+    from makermodslab.utils.system import REMOTE_INSTALL_TARGET, _build_install_cmd
+
+    monkeypatch.setattr(system, "_find_uv", lambda: None)
+    cmd = _build_install_cmd(REMOTE_INSTALL_TARGET)
+    tail = cmd[-len(REMOTE_INSTALL_TARGET) :]
+    assert tail == list(REMOTE_INSTALL_TARGET)
+    assert all(" " not in token for token in tail)
+    # And never the package itself: uv refuses the lerobot git pin as a
+    # transitive URL dependency, pip would look for `makermodslab` on PyPI.
+    assert not any(token.startswith("makermodslab") for token in cmd)

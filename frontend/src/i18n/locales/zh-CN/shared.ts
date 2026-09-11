@@ -10,10 +10,13 @@ export default {
       teleoperation: "遥操作",
       recording: "录制会话",
       inference: "推理运行",
+      remote_inference: "远程推理运行",
       replay: "回合回放",
       calibration: "标定",
       auto_calibration: "自动标定",
       wiggle: "夹爪摆动",
+      hosting: "远程遥操作托管",
+      remote_teleoperation: "远程遥操作",
     },
   },
   update: {
@@ -42,6 +45,11 @@ export default {
     turnOff: "关闭",
   },
   camera: {
+    title: "摄像头",
+    waiting: "正在等待摄像头画面…",
+    paused: "已暂停 — 显示最后捕获的画面。",
+    off: "摄像头预览已关闭。",
+
     retry: "重试摄像头画面",
     retryTitle: "重试摄像头画面（例如重新连接摄像头后）",
     loadingRobot: "正在加载机器人…",
@@ -61,7 +69,7 @@ export default {
   },
   urdf: {
     switchedDefaultTitle: "已切换到默认模型",
-    switchedDefaultDescription: "现已显示默认的 ARM100 机器人模型。",
+    switchedDefaultDescription: "现已显示默认的 SO-101 机器人模型。",
     loadingTitle: "正在加载 URDF 模型…",
     loadingDescription: "正在准备 3D 可视化",
     loadedTitle: "URDF 模型加载成功",

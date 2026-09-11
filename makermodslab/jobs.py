@@ -50,7 +50,14 @@ from .utils.naming import (
     derive_imported_title,
     imported_name_suffixes,
 )
-from .utils.system import torchcodec_loads
+from .utils.system import (
+    policy_flow_steps_default,
+    policy_flow_steps_field,
+    policy_requires_task,
+    policy_supports_extra_image_roles,
+    policy_supports_model_dtype,
+    torchcodec_loads,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1662,9 +1669,99 @@ def _list_hub_checkpoints(api, repo_id: str) -> list[JobCheckpoint]:
     return []
 
 
-_LANGUAGE_CONDITIONED_POLICY_TYPES = {"smolvla", "pi0", "pi0_fast", "pi05"}
+# Which policy types need a task string is `utils.system`'s
+# LANGUAGE_CONDITIONED_POLICY_TYPES / policy_requires_task — ONE vocabulary,
+# because the two DRTC policy servers refuse to start without a task for exactly
+# these types and a second copy here would let the Lab and the GPU disagree.
+# The set gained `molmoact2` with that move (S3.7a): MolmoAct2 renders a missing
+# task as the literal prompt "The task is to ." and degrades silently, so
+# `requires_task` was already wrong for it before this became shared.
 
-# None of _LANGUAGE_CONDITIONED_POLICY_TYPES has a legitimate from-scratch
+# Policy types whose class declares Real-Time Chunking support in the pinned
+# lerobot fork. See policy_type_supports_rtc for how this list was derived and
+# why it is a hand-mirrored table rather than a live import.
+_RTC_CAPABLE_POLICY_TYPES = frozenset({"evo1", "groot", "molmoact2", "pi0", "pi05", "smolvla"})
+
+# Every policy type registered via @PreTrainedConfig.register_subclass in the
+# pinned fork. Membership is what separates "this architecture cannot do RTC"
+# (False) from "we've never heard of it" (None) — a type we don't know about is
+# one the fork gained after this table was written, and guessing False for it
+# would refuse a run the subprocess would have accepted.
+_KNOWN_POLICY_TYPES = frozenset(
+    {
+        "act",
+        "diffusion",
+        "eo1",
+        "evo1",
+        "fastwam",
+        "gaussian_actor",
+        "groot",
+        "lingbot_va",
+        "molmoact2",
+        "multi_task_dit",
+        "pi0",
+        "pi0_fast",
+        "pi05",
+        "smolvla",
+        "tdmpc",
+        "vla_jepa",
+        "vqbet",
+        "wall_x",
+        "xvla",
+    }
+)
+
+
+def policy_type_supports_rtc(policy_type: str) -> bool | None:
+    """Whether a checkpoint of this architecture can run the Real-Time Chunking
+    inference engine (``--inference.type=rtc``).
+
+    True/False for a policy type registered in the pinned lerobot fork; None for
+    anything else, which means "not established", never "no" — callers must not
+    refuse a run on None, they must let the subprocess decide (same
+    silent-when-unreadable discipline as read_pretrained_policy_type).
+
+    **How it decides, and why.** The fork's own authority is
+    ``lerobot.rollout.inference.rtc.supports_rtc_inference(policy)``, which
+    takes an INSTANTIATED policy and asks two things: that ``policy.supports_rtc()``
+    returns True, and that ``predict_action_chunk`` binds ``inference_delay`` and
+    ``prev_chunk_left_over``. Neither can be evaluated here:
+
+    * ``supports_rtc`` is a plain instance method on every policy in the fork
+      (not a classmethod), so there is nothing to call without building the
+      policy — and MolmoAct2's reads ``self.config``.
+    * Reaching the classes at all means importing ``lerobot.policies.factory``,
+      which costs ~2 s and pulls ``transformers`` into the API process on the
+      first RTC launch. Optional-extra policies would also raise ImportError on
+      an install without their extra, turning a capability question into a
+      crash.
+
+    So the table above is a hand-mirrored read of the fork's classes, verified
+    against ``supports_rtc_inference``'s two criteria at class level on the
+    pinned SHA (b968c0c01). Six types declare support — evo1, groot, molmoact2,
+    pi0, pi05, smolvla — and all six accept the RTC call shape; every other
+    registered type inherits ``PreTrainedPolicy.supports_rtc`` (``return False``).
+    Notably **pi0_fast does NOT support RTC** even though its siblings do.
+    Change the fork's pin, re-check this table (test_rollout.py has a drift
+    test that reads the fork's sources without importing them).
+
+    **MolmoAct2 is reported True on purpose, and it is the one approximation
+    here.** Its ``supports_rtc`` is ``self.config.inference_action_mode ==
+    "continuous"`` — a per-CHECKPOINT condition, not a per-architecture one, and
+    the field defaults to None. The class does implement RTC semantics, so this
+    answers the architecture question honestly and leaves the config-level
+    condition to the subprocess, which still raises for a discrete-mode
+    MolmoAct2 checkpoint. Erring the other way would refuse continuous-mode
+    checkpoints that RTC genuinely runs.
+    """
+    if policy_type in _RTC_CAPABLE_POLICY_TYPES:
+        return True
+    if policy_type in _KNOWN_POLICY_TYPES:
+        return False
+    return None
+
+
+# None of the four types below has a legitimate from-scratch
 # mode: each builds a pretrained backbone (a vision-language model for
 # smolvla, a PaliGemma+expert stack for pi0/pi05/pi0_fast) from a bare config
 # object with no unconditional download anywhere in modeling_<policy>.py —
@@ -2156,6 +2253,21 @@ def _flat_feature_dim(feat: object) -> int | None:
         return int(shape[0])
     except (TypeError, ValueError):
         return None
+
+
+def _positive_int_or_none(value: object) -> int | None:
+    """A checkpoint config's integer knob, or None when it can't be trusted.
+
+    Sibling of `_flat_feature_dim` for the scalar fields (`n_action_steps`,
+    `chunk_size`). Absent, non-integral or non-positive all answer None: every
+    policy config validates these itself at construction, so a bad value here
+    means a hand-edited or corrupt config.json, and the honest answer
+    downstream is "unknown" rather than a number someone derives a horizon
+    from. `bool` is rejected explicitly because it is an `int` subclass and
+    `True` would otherwise read as a horizon of 1."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
 
 
 def read_pretrained_config(pretrained_path: str) -> dict[str, Any] | None:
@@ -2863,6 +2975,22 @@ class QueueChangedError(Exception):
 
 class JobNotRunningError(Exception):
     """Raised when stop() is called on a non-running job."""
+
+
+class JobPublishInProgressError(Exception):
+    """Raised when delete() targets a run whose checkpoints the background Hub
+    publish (models.model_upload_manager) is uploading right now.
+
+    A publish reads the run's checkpoint dirs for minutes off the request
+    thread, so a delete that passes every other guard (the run IS terminal)
+    would rmtree the files out from under upload_folder mid-read — the upload
+    dies with an opaque OS/Hub error and its repo pin fails against a deleted
+    record. One guard here covers both delete surfaces, since POST
+    /models/delete's run branch reuses JobRegistry.delete."""
+
+    def __init__(self, job_id: str) -> None:
+        super().__init__(job_id)
+        self.job_id = job_id
 
 
 class JobSourceOfQueuedRunError(Exception):
@@ -3592,7 +3720,7 @@ class JobRegistry:
             config.policy_pretrained_path = hub_ref
 
         # Asked BEFORE the lock, and for the same reason `_drain_queue` phase 1
-        # asks before its own: `_robot_busy` reads seven feature modules whose
+        # asks before its own: `_robot_busy` reads eight feature modules whose
         # `training_is_active()` calls take THIS lock from inside their own
         # `_state_lock`. Reading them while holding it closes the cycle and
         # deadlocks. Never move this inside.
@@ -4850,6 +4978,39 @@ class JobRegistry:
         self._notify_change()
         return record
 
+    def set_hf_repo_id(self, job_id: str, repo_id: str) -> JobRecord:
+        """Record the Hub model repo a LOCAL run has been published to.
+
+        Unlike `rename` this is identity, not decoration. It is what makes a
+        SECOND publish land in the same repo as the first — models.
+        `upload_local_model` defaults its target to `record.hf_repo_id` — and
+        what the training dialog reads to render "View on Hub" and to offer
+        "add more checkpoints" instead of a fresh publish.
+
+        Cloud runs get theirs at submit time (see `start`); this is the
+        local-run equivalent, written after the first successful upload.
+        Idempotent: re-publishing to the same repo rewrites the same value."""
+        target = repo_id.strip()
+        if not target:
+            raise ValueError("Hub repo id cannot be empty.")
+        with self._lock:
+            record = self._records.get(job_id)
+            if record is None:
+                raise JobNotFoundError(job_id)
+            if record.hf_repo_id == target:
+                return record
+            record.hf_repo_id = target
+            # Zeroed before the write, then restamped after — the same derived-
+            # field protocol `rename`, `start` and `reorder_queue` follow, so a
+            # position a read stamped onto the live record never freezes into
+            # job.json. (Publish targets terminal runs, whose position is 0
+            # anyway — the convention holds so no caller has to prove that.)
+            record.queue_position = 0
+            self._persist(record, force=True)
+            self._annotate_queue(record, self._queue_positions(self._records))
+        self._notify_change()
+        return record
+
     def stop(self, job_id: str, expect_state: JobState | None = None) -> JobRecord:
         """Ask a running job to stop, and record that we asked.
 
@@ -5179,7 +5340,41 @@ class JobRegistry:
         return {
             "policy_type": policy_type,
             "image_features": image_features,
-            "requires_task": policy_type in _LANGUAGE_CONDITIONED_POLICY_TYPES,
+            "requires_task": policy_requires_task(policy_type),
+            # Whether this architecture can run the Real-Time Chunking engine,
+            # so the launch UI can offer the engine choice only where it works
+            # instead of letting the run die inside the subprocess with the arm
+            # already claimed. null = unknown type (a fork newer than our table)
+            # — the UI must treat that as "offer it", matching the server-side
+            # guard in rollout.handle_start_inference, which only refuses on a
+            # definite False.
+            "supports_rtc": (policy_type_supports_rtc(policy_type) if isinstance(policy_type, str) else None),
+            # Whether the two GPU-launch knobs apply to THIS checkpoint
+            # (S3.8f), so the remote panel can disable a select with a reason
+            # rather than send a value the launcher would drop. Both read off
+            # the same `cfg` every other field here comes from; the rules live
+            # in utils.system so the Lab, the route and the container cannot
+            # disagree about what a checkpoint supports.
+            "supports_model_dtype": policy_supports_model_dtype(cfg),
+            # And whether it has a step count to set at all — which
+            # `flow_steps_default` below CANNOT answer, because null there is
+            # both "no such knob" (ACT) and "the knob exists and this
+            # checkpoint saved nothing we can resolve" (a pi05 with a null
+            # `num_inference_steps`).
+            "supports_flow_steps": policy_flow_steps_field(cfg.get("type")) is not None,
+            # And whether extra camera VIEWS may be declared on it (S3.8g).
+            # Off a table rather than off key presence, because no config.json
+            # field says "this family's vision tower takes any number of
+            # pictures" — that is a fact about its processor, and
+            # `utils.system.VARIABLE_VIEW_POLICY_TYPES` is where it was written
+            # down after reading one.
+            "supports_extra_image_roles": policy_supports_extra_image_roles(cfg.get("type")),
+            # Null when there is no number to show — a policy with no such knob,
+            # or one that saved none and whose applying default this side cannot
+            # see. MolmoAct2 is NOT that case: it saves null and runs at 10, the
+            # pin's backbone default, which `policy_flow_steps_default` fills in.
+            # The client must read null as "no number to show", not "no default".
+            "flow_steps_default": policy_flow_steps_default(cfg),
             # Flat proprioceptive state / action widths. For an SO-101 arm this
             # is 6 (one per joint); a bimanual-trained checkpoint carries 12
             # (two arms). The inference modal compares this against the selected
@@ -5187,6 +5382,20 @@ class JobRegistry:
             # the user hits Start. None when the checkpoint omits the feature.
             "state_dim": _flat_feature_dim(input_features.get("observation.state")),
             "action_dim": _flat_feature_dim((cfg.get("output_features") or {}).get("action")),
+            # The checkpoint's own chunk geometry, straight off config.json.
+            # `n_action_steps` is how many steps of a predicted chunk the policy
+            # actually returns, so it is the CEILING on a remote-inference
+            # horizon: declare more and the two Portal peers disagree about the
+            # action-chunk shape, the fingerprint stops matching, and every
+            # packet is dropped in silence — a healthy-looking session with zero
+            # chunks. The default the panel prints (50) is a smolvla/pi0 number;
+            # MolmoAct2's published checkpoint is 30, which is exactly the case
+            # this field exists to stop the operator walking into. `chunk_size`
+            # is the width the policy predicts internally (>= n_action_steps),
+            # carried alongside so the two are readable together. Both null when
+            # the checkpoint omits them or saves a non-integer.
+            "n_action_steps": _positive_int_or_none(cfg.get("n_action_steps")),
+            "chunk_size": _positive_int_or_none(cfg.get("chunk_size")),
             # Raw lerobot robot_type string (e.g. "maker_follower"); the client
             # normalises it. None when it can't be established.
             "trained_on_robot_type": trained_on_robot_type,
@@ -5288,6 +5497,18 @@ class JobRegistry:
             )
 
     def delete(self, job_id: str) -> None:
+        # Refuse while the background Hub publish is reading this run's
+        # checkpoint dirs (lazy import: models imports from this module).
+        # Checked BEFORE our lock so the two locks are never held together —
+        # the publish worker takes this registry's lock (set_hf_repo_id)
+        # without holding the manager's. The unlocked read leaves a tiny
+        # start-after-check window, which is fine: a publish that starts after
+        # this point 404s on the deleted run instead of racing the rmtree.
+        from .models import model_upload_manager
+
+        publish = model_upload_manager.get_status()
+        if publish["state"] == "running" and publish["model_id"] == job_id:
+            raise JobPublishInProgressError(job_id)
         with self._lock:
             record = self._records.get(job_id)
             if record is None:
@@ -5987,13 +6208,13 @@ class JobRegistry:
 
         Local training is bounded by this machine's GPU/USB (the premise
         `_local_slot_busy` is built on), and teleoperation, recording,
-        inference, replay, calibration, auto-calibration and wiggle are all
-        mutually exclusive with each other for exactly that reason — each
-        checks the other six before starting (CLAUDE.md: "New features that
-        drive the robot must add the same reciprocal checks against every
-        existing one"). Training never joined that set, which was survivable
-        while a training could only begin from an explicit user submit: the
-        user was present and knew what else they had running.
+        inference, remote inference, replay, calibration, auto-calibration and
+        wiggle are all mutually exclusive with each other for exactly that
+        reason — each checks the other seven before starting (CLAUDE.md: "New
+        features that drive the robot must add the same reciprocal checks
+        against every existing one"). Training never joined that set, which was
+        survivable while a training could only begin from an explicit user
+        submit: the user was present and knew what else they had running.
 
         The queue removes that. `_drain_queue` starts a trainer from a WATCHDOG
         THREAD, at an arbitrary moment, with nobody at the keyboard — several GB
@@ -6006,7 +6227,7 @@ class JobRegistry:
         globals, this is an advisory "is now a good moment" check rather than a
         mutex, and the cost of a stale read is one second's delay.
 
-        Never raises. These seven modules pull in cv2, av and the lerobot robot
+        Never raises. These eight modules pull in cv2, av and the lerobot robot
         backends, none of which `jobs` depended on before the queue existed, and
         this runs as the FIRST statement of `_drain_queue` — so an ImportError
         here (a headless install, a half-installed optional extra, a broken cv2)
@@ -6025,6 +6246,7 @@ class JobRegistry:
                 auto_calibrate as _auto_calibrate,
                 calibrate as _calibrate,
                 record as _record,
+                remote_inference as _remote_inference,
                 replay as _replay,
                 rollout as _rollout,
                 teleoperate as _teleoperate,
@@ -6035,6 +6257,8 @@ class JobRegistry:
                 return "a recording session"
             if _rollout.inference_active:
                 return "an inference session"
+            if _remote_inference.remote_inference_is_active():
+                return "a remote inference session"
             if _teleoperate.teleoperation_active:
                 return "teleoperation"
             if _replay.replay_active:

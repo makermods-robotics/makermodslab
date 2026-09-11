@@ -14,6 +14,7 @@ import {
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import type { ArmType } from "@/hooks/useRobots";
+import { libraryQuery } from "@/lib/calibrationLibraryQuery";
 
 interface ImportCalibrationButtonProps {
   /** API device vocabulary: "teleop" (leader) or "robot" (follower). */
@@ -22,6 +23,9 @@ interface ImportCalibrationButtonProps {
    * keep separate directories, so a file imported for one arm type is
    * invisible to the other. */
   armType: ArmType;
+  /** Which leader library, for a multi-leader family's teleop side (see
+   * CalibrationLibrary). Omitted otherwise. */
+  leaderKind?: string;
   /** Called with the saved config name after a successful import. */
   onImported?: (name: string) => void;
   /**
@@ -42,6 +46,7 @@ interface ImportCalibrationButtonProps {
 const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
   device,
   armType,
+  leaderKind,
   onImported,
   pickRef,
 }) => {
@@ -91,7 +96,7 @@ const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
     setError(null);
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/api/v1/calibration-configs/${device}/upload?arm_type=${armType}`,
+        `${baseUrl}/api/v1/calibration-configs/${device}/upload${libraryQuery(armType, leaderKind)}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },

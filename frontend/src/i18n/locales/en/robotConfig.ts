@@ -19,11 +19,17 @@ export default {
     title: "Robot settings — {{name}}",
     srDescription:
       "Configure ports, calibration, cameras, and motor power for {{name}}.",
+    // Shown once at the top when no installed arm family answers to the
+    // record's arm_type. {{armType}} is the raw id — data, rendered verbatim.
+    armUnavailable:
+      'This robot\'s arm type "{{armType}}" is not installed. Install the extension that provides it, or delete this robot and create it again with an installed arm type — port detection and calibration are disabled until then.',
+    // The manifest (GET /api/v1/arms) has not answered; ArmsProvider retries.
+    armsNotLoaded:
+      "Arm types have not loaded from the server yet — retrying. Port detection and calibration are held until they do.",
     unsaved: "Unsaved changes",
-    // {{gap}} is the setup-gap predicate rendered from the `robot.setupGap.*`
-    // keys, so this line reads as one sentence in both languages.
-    savedWithGap: "Saved — but this robot {{gap}}",
-    allSaved: "All changes saved",
+    // The footer tooltip explains which setup step is missing.
+    savedWithGap: "Saved. Setup incomplete.",
+    allSaved: "Saved",
     quit: "Quit",
     save: "Save",
     saving: "Saving…",
@@ -72,6 +78,17 @@ export default {
     robot: "robot",
   },
 
+  // ---- Arm layout --------------------------------------------------------
+  // "What's plugged into this machine?" — the record's `arms` field. The
+  // VALUES ("both"/"follower"/"leader") are data; a leader-only record is a
+  // controller, not a robot, and the option says so.
+  layout: {
+    question: "What's plugged into this machine?",
+    both: "Leader and follower",
+    followerOnly: "Follower only — a robot station",
+    leaderOnly: "Leader only — a controller for a remote robot",
+  },
+
   // ---- 01 · Device -------------------------------------------------------
   device: {
     step: "Device",
@@ -82,6 +99,37 @@ export default {
     // Row headings on a bimanual robot, one per side.
     left: "Left",
     right: "Right",
+  },
+
+  // ---- Leader kind ---------------------------------------------------------
+  // Which of the family's leaders drives the robot; rendered only for a
+  // family whose manifest entry lists more than one (the Metal arm: its Star
+  // Arm 102, or a second gravity-compensated Metal arm; the Maker arm: the
+  // stock lever-gripper Star Arm 102, or one fitted with MakerMods' trigger
+  // gripper). The option VALUES
+  // are manifest ids sent as the record's `leader_kind` — data; only the
+  // per-id labels under optionFor are localized (a kind without an entry
+  // renders the manifest's own English label). The "unavailable" reason is
+  // server prose and renders as-is.
+  leaderKind: {
+    label: "Leader arm",
+    unavailable: "not installed",
+    energizedHint:
+      "This leader supports its own weight. Use Wiggle to find its port.",
+    optionFor: {
+      maker: {
+        star: "Star Arm 102 leader",
+        star_trigger: "Star Arm 102 leader (trigger gripper)",
+      },
+      metal: {
+        star: "Star Arm 102 leader",
+        metal: "Metal arm leader (gravity-compensated)",
+      },
+    },
+    toast: {
+      savedTitle: "Leader arm saved",
+      saveFailedTitle: "Could not change the leader arm",
+    },
   },
 
   slotCard: {
@@ -103,8 +151,8 @@ export default {
     clear: "Clear port",
     clearTitle: "Clear port — release it without assigning another",
     // aria-label and title are identical here, so they share one key.
-    rescan: "Rescan",
-    detect: "Detect",
+    rescan: "Refresh",
+    detect: "Detect by swing",
     detecting: "Watching…",
     detectTitle:
       "Identify by hand: swing the arm's base wide, both left and right",
@@ -112,20 +160,31 @@ export default {
       "Identify by hand — swing the arm's base wide to the left AND the right (10–15° past where it started, each way); the port that moves is assigned. Small wiggles won't register.",
     detectLive:
       "Swing the base wide, past where it started, both ways. Small or one-sided motion is ignored.",
-    // The Maker variants: its follower and leader answer different protocols
-    // (CAN vs UART), so detection asks each port what it is instead of asking
-    // the user to move something. Only a bimanual rig — two identical arms per
-    // side — still needs the gesture to tell left from right.
+    // The probe families' twin of detectLive: their follower and leader
+    // answer different protocols (CAN vs UART), so detection asks each port
+    // what it is instead of asking the user to move something. Only a
+    // bimanual rig — two identical arms per side — still needs the gesture
+    // to tell left from right.
     detectHelpMaker:
       "Detected automatically — the Maker arm's follower and leader answer different protocols, so no gesture is needed. On a bimanual rig, swing one arm's base left AND right to say which side it is.",
-    detectLiveMaker:
-      "Checking each port. If two arms answer, swing the base of the one you are assigning, both ways.",
-    // The Metal arm's twin of the two keys above — same probe-first flow
-    // (Damiao CAN follower vs UART leader), only the family name differs.
     detectHelpMetal:
       "Detected automatically — the Metal arm's follower and leader answer different protocols, so no gesture is needed. On a bimanual rig, swing one arm's base left AND right to say which side it is.",
-    detectLiveMetal:
-      "Checking each port. If two arms answer, swing the base of the one you are assigning, both ways.",
+    // Generic live text for ANY family whose follower answers a protocol
+    // probe (supports_port_probe in the arms manifest); detectLive above is
+    // the generic gesture text. The per-id entries in detectLiveFor override
+    // either for a family that wants its own wording.
+    detectLiveProbe:
+      "Checking each port. If multiple arms answer, select a port and use Swing for an unpowered leader or Wiggle for a powered arm.",
+    // Keyed by manifest id — the VALUES are data. An id without an entry
+    // falls back to detectLiveProbe / detectLive by its detection mechanism.
+    detectLiveFor: {
+      maker:
+        "Checking each port. If multiple arms answer, select a port and use Swing for an unpowered leader or Wiggle for a powered arm.",
+      metal:
+        "Checking each port. If multiple arms answer, select a port and use Swing for an unpowered leader or Wiggle for a powered arm.",
+    },
+    multipleHelp:
+      "Identify leaders by swinging their base left and right. For followers, select a port and press Wiggle to see which gripper moves. The gripper returns to its starting position.",
     wiggle: "Wiggle",
     wiggling: "Wiggling…",
     wiggleTitle: "Move the gripper on this port to see which arm it is",
@@ -140,7 +199,12 @@ export default {
     // describe — this only appears on a single-arm CAN robot.
     detectAuto: "Auto detect",
     detectTipAuto: "Probes each port. No gesture needed.",
-    wiggleTip: "Drives the gripper so you can see which arm answers.",
+    wiggleTip: "Moves the gripper, then returns it to its starting position.",
+    // Appended to a failed Detect when the server names the gripper wiggle
+    // as the identification of last resort (two Damiao arms on one rig:
+    // the probe cannot tell them apart and the gesture would energize them).
+    wiggleFallback:
+      "Use Wiggle on a port instead: it moves only that arm's gripper, so you can see which arm it is and assign the port by hand.",
     // The blank first row of every port dropdown, and what an empty slot's
     // trigger shows. Selecting it clears the port.
     noneAssigned: "No port",
@@ -196,6 +260,7 @@ export default {
     step: "Calibration",
     calibrateAll: "Calibrate all",
     calibrateAllTitle: "Select every detected arm for auto-calibration",
+    calibrateAllZeroTitle: "Set the zero pose for each detected arm",
     calibrateAllDisabledTitle: "No arms detected. Plug in an arm and rescan.",
     // aria-label and title are identical on both folder buttons.
     openLeaderFolder: "Open leader calibrations folder",
@@ -238,27 +303,65 @@ export default {
       stopping: "Stopping",
       unknown: "Unknown",
     },
-    // The CAN arms' zero-pose calibration. It has no range sweep — the arm's
-    // joint limits are fixed constants — so the whole flow is: torque off,
-    // pose the arm by hand, confirm. The two families' POSES are opposites on
-    // the gripper (Maker: fully open; Metal: closed), so each gets its own
-    // instructions key — showing one family's text to the other would zero
-    // the gripper at the wrong end of its travel. Wording mirrors the
-    // server's zero_pose_instructions() in makermodslab/zero_calibrate.py.
+    // The zero-pose calibration. It has no range sweep — the arm's joint
+    // limits are fixed constants — so the whole flow is: torque off, pose the
+    // arm by hand, confirm. Follower arm poses differ by family; both
+    // grippers are fully closed. The shared Star Arm
+    // 102 leader has one folded, closed-gripper pose on both rigs.
     zeroPose: {
-      instructions:
-        "Move the arm by hand to match the pose above: folded against the base, gripper fully open. Torque is off, so the arm moves freely.",
-      instructionsMetal:
-        "Move the arm by hand to match the pose above: standing upright, all joints at 0°, gripper closed. Torque is off, so the arm moves freely.",
+      sequence_one: "Set each arm's zero pose. {{count}} arm remaining.",
+      sequence_other: "Set each arm's zero pose. {{count}} arms remaining.",
+      cancelAll: "Cancel all",
+      poseCaption: "Match the pose shown above. Keep the gripper fully closed.",
+      // Keyed by manifest id, then side — the VALUES are data. These are
+      // per-id overrides of the manifest's own calibration.summary text
+      // (which the server's calibration_summary() writes, and which a family
+      // without an entry here renders as-is, in English) and of the first
+      // step's text while the wizard runs. Wording mirrors it.
+      instructionsFor: {
+        maker: {
+          leader:
+            "Move the Star Arm 102 leader by hand to match the pose above: folded against the base, gripper fully closed. Its joints are unpowered, so the arm moves freely.",
+          // The trigger-gripper Star leader (leader_kind "star_trigger"):
+          // same pose, but its gripper zero is the trigger's closed stop.
+          leader_star_trigger:
+            "Move the Star Arm 102 leader by hand to match the pose above: folded against the base, gripper trigger at its closed stop. Its joints are unpowered, so the arm moves freely.",
+          follower:
+            "Move the arm by hand to match the pose above: folded against the base, gripper fully closed. Torque is off, so the arm moves freely.",
+        },
+        metal: {
+          leader:
+            "Move the Star Arm 102 leader by hand to match the pose above: folded against the base, gripper fully closed. Its joints are unpowered, so the arm moves freely.",
+          // The Metal arm driven by a second Metal arm (leader_kind
+          // "metal"): the leader IS a Metal arm, so its zero pose is the
+          // follower's. Keyed `leader_<kind>`; the default leader keeps
+          // the bare `leader` key above.
+          leader_metal:
+            "Move the leader Metal arm by hand to match the pose above: standing upright, all joints at 0°, gripper fully closed. Torque is off, so the arm moves freely.",
+          follower:
+            "Move the arm by hand to match the pose above: standing upright, all joints at 0°, gripper fully closed. Torque is off, so the arm moves freely.",
+        },
+      },
+      // Caption on the reference-pose slot when a NON-default leader is
+      // being calibrated (keyed by manifest id, then leader kind): the photo
+      // shown is the family's follower photo, because that leader is the
+      // family's own arm.
+      leaderPoseImageFor: {
+        metal: {
+          metal: "Leader Metal arm zero pose: upright, gripper fully closed",
+        },
+      },
       liveAngles: "Live joint angles",
       start: "Set zero pose",
       confirm: "Set zero and save",
       saving: "Setting zero and saving the calibration…",
       // Caption on the reference-pose slot. The picture is what the user
-      // matches the real arm against, so each family names its own: the two
-      // zero poses are opposites at the gripper.
-      poseImage: "Zero pose: folded, gripper open",
-      poseImageMetal: "Zero pose: upright, gripper closed",
+      // matches the real arm against, so followers name their family-specific
+      // pose and the shared Star leader names its own.
+      poseImage: "Zero pose: folded, gripper fully closed",
+      poseImageLeader:
+        "Star Arm 102 leader zero pose: folded, gripper fully closed",
+      poseImageMetal: "Zero pose: upright, gripper fully closed",
     },
     cancel: "Cancel calibration",
     auto: "Auto-calibrate",
@@ -296,10 +399,22 @@ export default {
       "Each arm moves on its own to find its joint limits. Keep the area clear.",
     zeroNote:
       "Put the arm in the position shown above, then set zero. Torque stays off, so it moves freely.",
-    // Placeholder labels for media not shot yet.
+    // A family that calibrates through its extension's own served page
+    // (manifest calibration.kind "panel"). Shown in place of the calibrate
+    // controls until the panel is mounted here.
+    panel: {
+      notice:
+        "This arm is calibrated through its extension's own panel. It will appear here once the extension provides it.",
+    },
     videoAuto: "Auto-calibration demo",
     poseMiddle: "Start pose: middle position",
     poseAutoStart: "Start pose for auto-calibration",
+    // Captions under the two start-pose photos. They carry the one thing the
+    // picture cannot: that the arm has to be put there BEFORE Start.
+    restingPoseCaption:
+      "This is the SO-101's resting position — the pose auto-calibration starts from. Put the arm in it before you press Start.",
+    middlePoseCaption:
+      "Put the arm in this middle position — every joint near the centre of its range — before you press Start.",
     videoUnsupported: "Your browser does not support the video tag.",
     videoLink: "Click here to view the calibration video",
     toast: {
@@ -323,6 +438,13 @@ export default {
       stepFailedTitle: "Step Failed",
       stepFailedFallback: "Could not complete step",
       stepError: "Could not complete calibration step",
+      failedFallback: "Calibration failed. Try again.",
+      notResponding: "Arm not responding. Check power and cable.",
+      jointsNotResponding:
+        "No response from {{joints}}. Check power and wiring.",
+      disconnected: "Arm disconnected. Reconnect it and retry.",
+      portDenied: "Port access denied. Check permissions or close other apps.",
+      motorFault: "Motor reported a fault. Check the arm before retrying.",
     },
   },
 
@@ -393,6 +515,12 @@ export default {
   // ---- Advanced parameters (auto-calibration torque) ---------------------
   advanced: {
     title: "Advanced parameters",
+    holdingLabel: "Holding torque (N·m)",
+    holdingDefault: "Default: 0.5 N·m",
+    holdingHint: "Adjusts the sustained squeeze after gripping an object. Save applies live during teleoperation or recording and remembers the value. Both follower grippers use this setting on a bimanual robot. This is not an instantaneous torque ceiling.",
+    holdingDisabled: "Holding control is disabled. Choose a value or use the default, then Save to enable it with the session stopped.",
+    holdingApplied: "Holding torque applied and saved",
+    holdingSaved: "Holding torque saved for the next session",
     subtitle: "Auto-calibration torque",
     torqueLabel: "Auto-calibration torque",
     // "Torque_Limit" is the servo register name — never translated.

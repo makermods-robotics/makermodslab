@@ -31,8 +31,14 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
+      # frontend/public/media holds the calibration demo clips — deliberate,
+      # documented video assets (see that directory's README for the encode
+      # spec that keeps them small). The 1 MB guard is here to catch blobs
+      # committed by accident, and a video can never pass it, so the path is
+      # excluded rather than the limit raised for everything.
       - id: check-added-large-files
         args: ['--maxkb=1024']
+        exclude: '^frontend/public/media/'
       - id: debug-statements
       - id: check-merge-conflict
       - id: check-case-conflict

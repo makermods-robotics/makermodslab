@@ -12,8 +12,7 @@
  * i18next's `count`.
  */
 export default {
-  // Shared by DatasetPicker and ModelPicker: the two popovers render the same
-  // section headings and row chips, so one set of keys serves both.
+  // The dataset picker's section headings and row chips.
   picker: {
     // Product name — same in every language, keyed so both sections have one
     // uniform shape.
@@ -31,12 +30,29 @@ export default {
     empty:
       "No datasets yet. Use “Add dataset” to record, download, or import one.",
     deleteAria: "Delete {{repoId}}",
+    // <0> is the mono repo-id span; {{repoId}} is the typed Hub id.
+    useHub: "Use <0>{{repoId}}</0> from the Hub",
+    useHubHint: "Public dataset — training fetches it on demand.",
+    row: {
+      // Abbreviated episode count on a picker row. {{episodes}} rather than
+      // {{count}}: this is a compact badge with no plural form.
+      episodes: "{{episodes}} ep",
+      // Source marker for a Hub-only row. Product name — same in every
+      // language, keyed so the two markers have one uniform shape.
+      hub: "Hub",
+      // Compact badge: this dataset carries per-episode sampling weights.
+      weighted: "weighted",
+      weightedTitle:
+        "Carries per-episode sampling weights — some episodes are sampled more often during training",
+    },
   },
   modelPicker: {
     searchPlaceholder: "Search models…",
     loading: "Loading models…",
     empty: "No models yet. Use “Add model” to train, download, or import one.",
     deleteAria: "Delete {{name}}",
+    // Badge on a run that exited non-zero but left usable weights.
+    failedBadge: "failed run",
   },
   addDatasetFromHub: {
     title: "Add a dataset from Hugging Face",
@@ -84,9 +100,20 @@ export default {
     armLayout: "Arm layout",
     // Same, for the hardware-family radiogroup.
     armTypeLabel: "Arm type",
-    // The DISPLAY half of ARM_TYPE_OPTIONS. The submitted value ("so101" /
-    // "maker") is logic and stays in the component, untranslated — it is
-    // persisted verbatim into the robot record on disk.
+    // Shown under the (empty) card grid until the arms manifest answers.
+    armTypesLoading: "Loading arm types…",
+    // The manifest fetch failed; the provider keeps retrying. The raw error
+    // is appended by the component.
+    armTypesFailed:
+      "Could not load arm types from the server — retrying. Nothing can be created until it answers.",
+    // {{extension}} is the manifest's provided_by — an extension's name, data.
+    providedBy: "Provided by {{extension}}",
+    // The DISPLAY half of the arm-type cards, keyed by manifest id. The
+    // submitted value ("so101" / "maker" / …) is logic and stays in the
+    // component, untranslated — it is persisted verbatim into the robot
+    // record on disk. These are per-id OVERRIDES of the arms manifest's own
+    // label; a family without an entry shows the manifest's English label and
+    // no description.
     armTypes: {
       so101: {
         label: "SO-101",
@@ -430,6 +457,10 @@ export default {
       "Real-Time Chunking overlaps inference with motion, removing the pause between action chunks. It also changes how actions are generated — compare against Sync before trusting a result.",
     engineSyncHint:
       "One policy forward per control step. The arm pauses briefly between action chunks.",
+    // Shown under the picker when the selected checkpoint's architecture can't
+    // run RTC (the server refuses it), which also disables the option.
+    engineRtcUnavailable:
+      "Real-Time Chunking isn't available for this checkpoint's policy.",
     camerasSection: "Cameras",
     policyConfigLoading: "Reading policy config…",
     // {{message}} is the raw error text (backend or JS) — not ours to translate.

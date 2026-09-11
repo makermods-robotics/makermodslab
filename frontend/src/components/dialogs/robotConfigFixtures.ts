@@ -1,0 +1,143 @@
+import type { ArmFamilyInfo } from "@/lib/armsApi";
+export const SO101: ArmFamilyInfo = {
+  id: "so101",
+  label: "SO-101",
+  short_label: "SO-101",
+  provided_by: "builtin",
+  image_url: null,
+  joints_per_arm: 6,
+  calibration_name_suffix: "",
+  supports_bimanual: true,
+  calibration: { kind: "range_sweep", summary: null, panel_url: null },
+  telemetry_kind: "urdf",
+  capabilities: {
+    uses_feetech_bus: true,
+    supports_auto_calibration: true,
+    supports_dagger: true,
+    supports_port_probe: false,
+    motion_identify_energizes_follower: false,
+    supports_gripper_wiggle: false,
+  },
+  default_leader_kind: "default",
+  leader_options: [
+    {
+      id: "default",
+      label: "Leader",
+      available: true,
+      unavailable_reason: null,
+      energized: false,
+      calibration_summary: null,
+    },
+  ],
+  robot_types: ["so101_follower", "bi_so_follower"],
+  robot_type_markers: [
+    "so100",
+    "so101",
+    "so-100",
+    "so-101",
+    "so_follower",
+    "so_leader",
+  ],
+};
+
+export const MAKER: ArmFamilyInfo = {
+  id: "maker",
+  label: "Maker Arm v1",
+  short_label: "Maker",
+  provided_by: "builtin",
+  image_url: null,
+  joints_per_arm: 7,
+  calibration_name_suffix: "_maker",
+  supports_bimanual: true,
+  calibration: {
+    kind: "steps",
+    summary: {
+      leader: {
+        text: "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, gripper closed — then confirm.",
+        image_url: null,
+      },
+      follower: {
+        text: "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully closed — then confirm.",
+        image_url: null,
+      },
+    },
+    panel_url: null,
+  },
+  telemetry_kind: "degrees",
+  capabilities: {
+    uses_feetech_bus: false,
+    supports_auto_calibration: false,
+    supports_dagger: false,
+    supports_port_probe: true,
+    motion_identify_energizes_follower: false,
+    supports_gripper_wiggle: true,
+  },
+  default_leader_kind: "star",
+  leader_options: [
+    {
+      id: "star",
+      label: "Leader",
+      available: true,
+      unavailable_reason: null,
+      energized: false,
+      calibration_summary: null,
+    },
+  ],
+  robot_types: ["maker_follower", "bi_maker_follower"],
+  robot_type_markers: ["maker"],
+};
+
+export const METAL: ArmFamilyInfo = {
+  id: "metal",
+  label: "Metal Arm",
+  short_label: "Metal",
+  provided_by: "builtin",
+  image_url: null,
+  joints_per_arm: 7,
+  calibration_name_suffix: "_metal",
+  supports_bimanual: true,
+  calibration: {
+    kind: "steps",
+    summary: {
+      leader: {
+        text: "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, gripper closed — then confirm.",
+        image_url: null,
+      },
+      follower: {
+        text: "Move the arm by hand to its ZERO POSE — standing upright, all joints at 0 degrees, gripper closed — then confirm.",
+        image_url: null,
+      },
+    },
+    panel_url: null,
+  },
+  telemetry_kind: "degrees",
+  capabilities: {
+    uses_feetech_bus: false,
+    supports_auto_calibration: false,
+    supports_dagger: false,
+    supports_port_probe: true,
+    motion_identify_energizes_follower: true,
+    supports_gripper_wiggle: true,
+  },
+  default_leader_kind: "star",
+  leader_options: [
+    {
+      id: "star",
+      label: "Leader",
+      available: true,
+      unavailable_reason: null,
+      energized: false,
+      calibration_summary: { text: "Pose the leader", image_url: null },
+    },
+    {
+      id: "metal",
+      label: "Metal leader",
+      available: true,
+      unavailable_reason: null,
+      energized: true,
+      calibration_summary: { text: "Pose the leader", image_url: null },
+    },
+  ],
+  robot_types: ["metal_follower", "bi_metal_follower"],
+  robot_type_markers: ["metal"],
+};

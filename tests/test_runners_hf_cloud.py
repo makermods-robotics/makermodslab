@@ -130,12 +130,16 @@ def _spec_extras(spec: str) -> set[str]:
     return set(m.group("extras").split(","))
 
 
-def test_cloud_lerobot_spec_carries_the_pyproject_pinned_ref() -> None:
+def test_cloud_lerobot_spec_carries_the_pyproject_pinned_ref(monkeypatch: pytest.MonkeyPatch) -> None:
     """The container install spec must reference the exact ref pinned in
     pyproject.toml — never a hardcoded second copy, never :latest."""
     from makermodslab.runners.hf_cloud import cloud_lerobot_spec
+    from makermodslab.utils import system
 
     pin = _pyproject_lerobot_pin()
+    # Model metadata for this checkout without relying on the developer venv,
+    # which may be installed from another worktree or an older revision.
+    monkeypatch.setattr(system, "requires", lambda name: [pin])
     ref = pin.rsplit("@", 1)[1]  # the sha at the end of git+https://…@<sha>
     spec = cloud_lerobot_spec("act")
     assert ref in spec

@@ -229,6 +229,26 @@ def test_arm_count_mismatch_none_for_unrecognised_width() -> None:
     assert _arm_count_mismatch("bimanual", 7) is None
 
 
+def test_arm_count_mismatch_reads_the_arm_width_live_from_the_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A width table captured at import is stale for a family registered
+    later (an extension's), and against the SO-101's 6 a 9-dim checkpoint is
+    neither <= 6 nor a multiple of it — the guard would fall through the
+    odd-width escape on every run. Read the width off the family instead."""
+    from makermodslab.arms import registry
+    from makermodslab.rollout import _arm_count_mismatch
+    from tests.mocks import make_arm_family, scratch_registry
+
+    scratch_registry(monkeypatch)
+    registry.register(make_arm_family("nine", joints_per_arm=9))
+
+    assert _arm_count_mismatch("single", 9, "nine") is None
+    assert _arm_count_mismatch("bimanual", 18, "nine") is None
+    assert _arm_count_mismatch("bimanual", 9, "nine") is not None
+    assert _arm_count_mismatch("single", 18, "nine") is not None
+
+
 def test_detect_device_returns_cpu_when_neither_cuda_nor_mps(monkeypatch: pytest.MonkeyPatch) -> None:
     import torch
 
@@ -730,11 +750,14 @@ def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp
     cache — we only inspect the argv handed to Popen. The resolve stub takes the
     `report` kwarg the worker now passes for download progress."""
     from makermodslab import rollout
+    from makermodslab.arms import so101
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda cfg, arm_type="so101": cfg)
-    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    # The SO-101 follower preflights live in arms/so101.py (TB6a); rollout
+    # reaches them through family.preflight_ports.
+    monkeypatch.setattr(so101, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(so101, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(
         rollout, "_resolve_policy_path", lambda ref, report=None: str(tmp_path / "pretrained_model")
     )
@@ -1032,6 +1055,174 @@ def test_handle_start_inference_rejects_non_positive_ensemble_coeff() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Real-Time Chunking capability — the table, and the pre-flight guard that
+# refuses an rtc launch on an architecture that cannot run it. Both matter
+# because the fork only discovers this AFTER the policy is loaded and the arm
+# is claimed (lerobot/rollout/context.py, supports_rtc_inference).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("policy_type", "expected"),
+    [
+        # Declare supports_rtc() -> True in the pinned fork.
+        ("smolvla", True),
+        ("pi0", True),
+        ("pi05", True),
+        ("evo1", True),
+        ("groot", True),
+        # Per-CONFIG in the fork (inference_action_mode == "continuous"), so the
+        # architecture answer is True and the subprocess enforces the rest.
+        ("molmoact2", True),
+        # Inherit PreTrainedPolicy.supports_rtc -> False.
+        ("act", False),
+        ("diffusion", False),
+        ("tdmpc", False),
+        ("vqbet", False),
+        # The sibling that does NOT support it, unlike pi0/pi05.
+        ("pi0_fast", False),
+        # Not registered in the pinned fork: "not established", never "no".
+        ("some_future_policy", None),
+        ("", None),
+    ],
+)
+def test_policy_type_supports_rtc_decisions(policy_type: str, expected: bool | None) -> None:
+    from makermodslab.rollout import policy_type_supports_rtc
+
+    assert policy_type_supports_rtc(policy_type) is expected
+
+
+def test_rtc_table_matches_the_pinned_fork() -> None:
+    """Drift guard: the table is a hand-mirrored read of lerobot's policy
+    classes, so re-derive it from the fork's SOURCES on every run.
+
+    Reads the files rather than importing them — importing
+    lerobot.policies.factory costs ~2 s and pulls transformers, which is
+    exactly the cost policy_type_supports_rtc exists to avoid.
+    """
+    import re as _re
+
+    import lerobot.policies as _policies_pkg
+    from makermodslab.jobs import _KNOWN_POLICY_TYPES, _RTC_CAPABLE_POLICY_TYPES
+
+    root = Path(_policies_pkg.__file__).parent
+    registered: set[str] = set()
+    declares_rtc: set[str] = set()
+    for cfg in root.rglob("configuration_*.py"):
+        for name in _re.findall(r'@PreTrainedConfig\.register_subclass\("([^"]+)"\)', cfg.read_text()):
+            registered.add(name)
+            modeling = cfg.with_name(cfg.name.replace("configuration_", "modeling_", 1))
+            if modeling.is_file() and "def supports_rtc(" in modeling.read_text():
+                declares_rtc.add(name)
+
+    assert registered, f"no registered policy types found under {root}"
+    assert registered == set(_KNOWN_POLICY_TYPES)
+    assert declares_rtc == set(_RTC_CAPABLE_POLICY_TYPES)
+
+
+def _rtc_request(policy_ref: str = "user/repo@checkpoints/000050", **kwargs):
+    from makermodslab.rollout import InferenceRequest
+
+    return InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref=policy_ref,
+        inference_engine="rtc",
+        **kwargs,
+    )
+
+
+def test_handle_start_inference_refuses_rtc_on_an_act_checkpoint(monkeypatch) -> None:
+    """400 in the launch panel, before the model download and before any port
+    is opened — and the session slot is handed back."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "read_pretrained_policy_type", lambda ref: "act")
+    monkeypatch.setattr(
+        rollout.camera_preview_manager,
+        "stop_all",
+        lambda: pytest.fail("refused start must not disturb the camera previews"),
+    )
+    monkeypatch.setattr(
+        rollout.threading, "Thread", lambda *a, **k: pytest.fail("no startup worker may spawn")
+    )
+
+    result = rollout.handle_start_inference(_rtc_request())
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert result["message"] == (
+        "Real-Time Chunking isn't available for act checkpoints; use the standard (sync) engine."
+    )
+    assert rollout.inference_active is False
+
+
+def test_handle_start_inference_allows_rtc_on_a_supporting_checkpoint(monkeypatch) -> None:
+    """A smolvla checkpoint passes the RTC gate — proven by the request landing
+    on the NEXT guard (camera bindings with no robot record) instead."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "read_pretrained_policy_type", lambda ref: "smolvla")
+
+    result = rollout.handle_start_inference(_rtc_request(camera_bindings={"front": "wrist"}))
+
+    assert result["success"] is False
+    assert "Real-Time Chunking" not in result["message"]
+    assert "No robot selected" in result["message"]
+    assert rollout.inference_active is False
+
+
+def test_handle_start_inference_allows_rtc_on_an_unknown_policy_type(monkeypatch) -> None:
+    """A type newer than our table, and an unreadable config, both mean "not
+    established" — neither may refuse a run the subprocess would accept."""
+    from makermodslab import rollout
+
+    for policy_type in ("some_future_policy", None):
+        monkeypatch.setattr(rollout, "read_pretrained_policy_type", lambda ref, t=policy_type: t)
+        result = rollout.handle_start_inference(_rtc_request(camera_bindings={"front": "wrist"}))
+        assert "Real-Time Chunking" not in result["message"]
+        assert rollout.inference_active is False
+
+
+def test_handle_start_inference_reads_no_config_for_the_sync_engine(monkeypatch) -> None:
+    """sync runs on every architecture, so the gate must not cost a config read
+    (which is an hf_hub_download for a Hub ref) on the ordinary path."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(
+        rollout,
+        "read_pretrained_policy_type",
+        lambda ref: pytest.fail("sync must not read the checkpoint config"),
+    )
+    req = _rtc_request(camera_bindings={"front": "wrist"})
+    req.inference_engine = "sync"
+    result = rollout.handle_start_inference(req)
+    # Stopped by the NEXT guard (bindings with no robot record), not this one.
+    assert result["success"] is False
+    assert "No robot selected" in result["message"]
+
+
+def test_rtc_gate_asks_about_a_root_ref_by_its_bare_repo_id(monkeypatch) -> None:
+    """'user/repo@root' means the repo root IS the pretrained dir, which is
+    where read_pretrained_policy_type looks for a plain repo id. Passing the
+    suffixed ref through would fail the lookup and silently skip the guard."""
+    from makermodslab import rollout
+
+    seen: list[str] = []
+
+    def _record(ref: str) -> str:
+        seen.append(ref)
+        return "act"
+
+    monkeypatch.setattr(rollout, "read_pretrained_policy_type", _record)
+    result = rollout.handle_start_inference(_rtc_request(policy_ref="user/repo@root"))
+
+    assert seen == ["user/repo"]
+    assert result["status_code"] == 400
+    assert "Real-Time Chunking" in result["message"]
+
+
+# ---------------------------------------------------------------------------
 # handle_start_inference — the arm-count 409 guard (fires before any port opens)
 # ---------------------------------------------------------------------------
 
@@ -1165,6 +1356,7 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
     its stdout pump) run inline via _SyncThread and HOME is redirected so the log
     file lands in tmp."""
     from makermodslab import rollout
+    from makermodslab.arms import so101
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(rollout, "bimanual_base_id", lambda name: "dual_arm")
@@ -1173,8 +1365,10 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
         "stage_bimanual_follower_calibrations",
         lambda *a, **k: ("/staging/follower", "dual_arm"),
     )
-    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    # The SO-101 follower preflights live in arms/so101.py (TB6a); rollout
+    # reaches them through family.preflight_ports.
+    monkeypatch.setattr(so101, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(so101, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(
         rollout, "_resolve_policy_path", lambda ref, report=None: str(tmp_path / "pretrained_model")
     )
@@ -2815,10 +3009,13 @@ def test_eval_start_spawns_the_runner_with_stdin_left_open(monkeypatch, tmp_path
     """Eval mode gets ONE long-lived runner whose stdin is the command channel;
     the single-episode path still gets `lerobot-rollout` with stdin closed."""
     from makermodslab import rollout
+    from makermodslab.arms import so101
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    # The SO-101 follower preflights live in arms/so101.py (TB6a); rollout
+    # reaches them through family.preflight_ports.
+    monkeypatch.setattr(so101, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(so101, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda name, arm_type="so101": name)
     monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/local/model")
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
@@ -2873,10 +3070,13 @@ def test_single_episode_start_still_spawns_lerobot_rollout(monkeypatch, tmp_path
     """`eval_episodes == 1` is untouched by the redesign: same module, and stdin
     closed straight after the calibration seed."""
     from makermodslab import rollout
+    from makermodslab.arms import so101
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    # The SO-101 follower preflights live in arms/so101.py (TB6a); rollout
+    # reaches them through family.preflight_ports.
+    monkeypatch.setattr(so101, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(so101, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda name, arm_type="so101": name)
     monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/local/model")
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
@@ -3787,6 +3987,58 @@ def test_coaching_terminal_payload_keeps_the_dataset_and_tally(monkeypatch) -> N
     assert result["coaching"] is True
     assert result["corrections_saved"] == 4
     assert result["coaching_dataset"] == "rollout_shirt_fixes_20260818_120000"
+
+
+def test_coaching_finalise_invalidates_the_dataset_listing(monkeypatch) -> None:
+    """A coaching session leaves a corrections dataset on disk (or removes an
+    empty one). Either way the /datasets listing changed, so its cache must be
+    dropped — nothing on the coaching teardown path did this, so the corrections
+    dataset stayed invisible until the 45s TTL lapsed."""
+    import time
+
+    from makermodslab import datasets, rollout
+
+    for aborted in (False, True):
+        session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+        session.corrections_saved = 3
+        session.dataset_repo_id = "rollout_shirt_fixes_20260818_120000"
+        monkeypatch.setattr(rollout, "inference_active", True)
+        monkeypatch.setattr(rollout, "_coach_session", session)
+        monkeypatch.setattr(rollout, "_inference_meta", {})
+        with datasets._listing_cache_lock:
+            datasets._listing_cache = {"at": time.monotonic(), "value": [{"repo_id": "old/ds"}]}
+
+        with rollout._state_lock:
+            rollout._finalise_coaching_locked(0 if not aborted else None, session, aborted=aborted)
+
+        with datasets._listing_cache_lock:
+            assert datasets._listing_cache is None, f"aborted={aborted}"
+
+
+def test_coaching_finalise_leaves_the_listing_cache_alone_when_no_dataset_was_created(
+    monkeypatch,
+) -> None:
+    """A coaching session killed before lerobot wrote meta/info.json has no
+    dataset_repo_id — nothing landed on disk, so the listing cache must be left
+    intact rather than forcing a needless Hub re-fan-out."""
+    import time
+
+    from makermodslab import datasets, rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    # dataset_repo_id stays None — the runner never reported one.
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+    sentinel = {"at": time.monotonic(), "value": []}
+    with datasets._listing_cache_lock:
+        datasets._listing_cache = sentinel
+
+    with rollout._state_lock:
+        rollout._finalise_coaching_locked(None, session, aborted=True)
+
+    with datasets._listing_cache_lock:
+        assert datasets._listing_cache is sentinel
 
 
 def test_coaching_stop_reports_aborted_but_keeps_the_partial_tally(monkeypatch) -> None:
