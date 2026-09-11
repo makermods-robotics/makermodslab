@@ -27,6 +27,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from fastapi.testclient import TestClient
+from huggingface_hub.errors import EntryNotFoundError
 
 
 def _make_dataset(root: Path, repo_id: str, episodes: int = 1) -> None:
@@ -2011,21 +2012,32 @@ def _write_hub_meta(tmp_path: Path, payload: dict) -> Path:
     return p
 
 
-def _hub_download_stub(info_path: Path, meta_dir: Path | None = None):
+def _hub_download_stub(
+    info_path: Path,
+    meta_dir: Path | None = None,
+    task_error: BaseException | None = None,
+):
     """A `hf_hub_download` side_effect keyed on FILENAME.
 
     get_hub_dataset_info fetches meta/info.json and then meta/tasks.* (see
     _hub_task_strings), so a stub that returns one path for every filename would
     hand the task reader the info file and quietly prove nothing. `meta_dir` is
     where the task files live; omit it to model a repo that carries none, which
-    is how the Hub answers for a dataset with no task metadata."""
+    is how the Hub answers for a dataset with no task metadata.
+
+    A genuinely absent file raises `EntryNotFoundError`, exactly as the real
+    `hf_hub_download` does — _hub_task_strings tells that apart from a transport
+    failure. Pass `task_error` to raise something else (a connection reset, an
+    HTTP 5xx) for every meta/tasks.* probe instead."""
 
     def _download(repo_id, *, filename, repo_type):  # noqa: ARG001 — mirrors the real signature
         if filename == "meta/info.json":
             return str(info_path)
         if meta_dir is not None and (meta_dir / Path(filename).name).is_file():
             return str(meta_dir / Path(filename).name)
-        raise FileNotFoundError(filename)
+        if task_error is not None:
+            raise task_error
+        raise EntryNotFoundError(filename)
 
     return _download
 
@@ -2113,9 +2125,9 @@ def test_get_hub_dataset_info_reads_task_strings(tmp_path: Path) -> None:
 
 
 def test_get_hub_dataset_info_survives_a_task_file_failure(tmp_path: Path) -> None:
-    """A task-file miss costs a log line, not the summary. The episode counts,
-    fps and cameras are the load-bearing half of this response and must still
-    arrive when the task probe finds nothing."""
+    """A repo that carries no task file at all: the count of episodes, fps and
+    cameras are the load-bearing half of this response and must still arrive.
+    tasks is [] — the server looked and there is genuinely nothing to offer."""
     from makermodslab import datasets as ds
 
     _clear_hub_dataset_info_cache()
@@ -2130,6 +2142,72 @@ def test_get_hub_dataset_info_survives_a_task_file_failure(tmp_path: Path) -> No
     assert row is not None
     assert row["total_episodes"] == 7
     assert row["tasks"] == []
+
+
+def test_hub_task_strings_tells_absence_apart_from_a_transport_failure() -> None:
+    """[] means "looked, nothing there" (EntryNotFoundError on every layout);
+    None means "couldn't look" (a connection reset, an HTTP 5xx). The two must
+    not collapse — a client renders the first as "no task on this dataset" and
+    the second as "couldn't read it"."""
+    from makermodslab.datasets import _hub_task_strings
+
+    with patch(
+        "makermodslab.datasets.hf_hub_download",
+        side_effect=EntryNotFoundError("meta/tasks.parquet"),
+    ):
+        assert _hub_task_strings("alice/pick") == []
+
+    with patch(
+        "makermodslab.datasets.hf_hub_download",
+        side_effect=ConnectionError("[SSL: UNEXPECTED_EOF_WHILE_READING]"),
+    ):
+        assert _hub_task_strings("alice/pick") is None
+
+
+def test_get_hub_dataset_info_does_not_cache_a_task_transport_failure(tmp_path: Path) -> None:
+    """A blip fetching meta/tasks.* while the Hub is otherwise up used to be
+    frozen into the process-lifetime cache as tasks == [], so a cloud-trained
+    policy was told for the rest of the session that its dataset lists no task —
+    the exact false claim the task-lookup rework exists to stop making.
+
+    The row still returns (the episode counts are valid), carrying tasks: None
+    for "unknown", and is NOT cached, so the next request re-probes and recovers
+    the real strings once the Hub answers."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_dataset_info_cache()
+    meta = _write_hub_meta(tmp_path, {"total_episodes": 40, "total_frames": 1200, "fps": 30})
+    pq.write_table(
+        pa.table({"task_index": [0], "task": ["pick up the red block"]}),
+        tmp_path / "tasks.parquet",
+    )
+
+    with (
+        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
+        patch(
+            "makermodslab.datasets.hf_hub_download",
+            side_effect=_hub_download_stub(meta, task_error=ConnectionError("reset by peer")),
+        ),
+    ):
+        row = ds.get_hub_dataset_info("alice/pick")
+
+    assert row is not None
+    assert row["total_episodes"] == 40
+    assert row["tasks"] is None
+    with ds._HUB_DATASET_INFO_LOCK:
+        assert ds.resolve_hub_repo_id("alice/pick") not in ds._HUB_DATASET_INFO_CACHE
+
+    # Hub recovers: the very next call re-probes and gets the real strings.
+    with (
+        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
+        patch(
+            "makermodslab.datasets.hf_hub_download",
+            side_effect=_hub_download_stub(meta, meta_dir=tmp_path),
+        ),
+    ):
+        recovered = ds.get_hub_dataset_info("alice/pick")
+
+    assert recovered["tasks"] == [{"task": "pick up the red block", "num_episodes": None}]
 
 
 def test_get_hub_dataset_info_excludes_non_video_camera_features(tmp_path: Path) -> None:

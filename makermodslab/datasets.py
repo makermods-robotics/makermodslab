@@ -33,7 +33,7 @@ from huggingface_hub import (
     snapshot_download,
     try_to_load_from_cache,
 )
-from huggingface_hub.errors import HfHubHTTPError
+from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError, LocalEntryNotFoundError
 
 from .sampling import SAMPLING_WEIGHT_COLUMN
 from .utils.config import (
@@ -1562,8 +1562,11 @@ def get_episode_action_series(repo_id: str, episode_index: int) -> dict[str, Any
 # In-process cache of per-repo Hub dataset summaries (the /datasets/info hub
 # fallback), mirroring _HUB_STATUS_CACHE conventions: successful answers are
 # memoized for the process lifetime; the offline/error degrade is NEVER cached,
-# so connectivity returning is picked up on the next check. Invalidated when
-# the repo's content changes (upload / download-complete) or the row is hidden.
+# so connectivity returning is picked up on the next check. A row whose task
+# strings could not be read (tasks is None) counts as a partial failure and is
+# left out too — otherwise a blip freezes "no task" in for the process.
+# Invalidated when the repo's content changes (upload / download-complete) or
+# the row is hidden.
 _HUB_DATASET_INFO_CACHE: dict[str, dict[str, Any]] = {}
 _HUB_DATASET_INFO_LOCK = threading.Lock()
 
@@ -1587,13 +1590,16 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
     episode/frame counts, fps, robot type, and camera keys (from ``features``),
     plus ``meta/tasks.*`` for the task strings (see _hub_task_strings; their
     counts come back null, because those live in the many-file episode
-    metadata). Size-on-disk needs the full dataset, so it degrades to None;
+    metadata). ``tasks`` itself is null when that probe could not be made — a
+    blip, an HTTP 5xx — as opposed to ``[]`` for a dataset that genuinely lists
+    none. Size-on-disk needs the full dataset, so it degrades to None;
     ``source: "hub"`` tells the card which contract it got. This is a LAZY
     per-card fetch, deliberately not part of the /datasets listing.
 
     Degrade-not-crash: returns None offline or on any fetch/parse failure (the
-    card then falls back to the sparse "not downloaded" view); only successful
-    answers are cached (see _HUB_DATASET_INFO_CACHE).
+    card then falls back to the sparse "not downloaded" view). Only fully
+    successful answers are cached — a row with null ``tasks`` is returned but
+    not memoized, so the next request re-probes (see _HUB_DATASET_INFO_CACHE).
     """
     if hf_hub_offline():
         return None
@@ -1618,6 +1624,12 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
     features = info.get("features") or {}
     cameras = _video_camera_names(features)
 
+    # None here is "couldn't read the task file", distinct from [] ("read it,
+    # nothing there"). It rides through to the client as a null `tasks`, and it
+    # keeps this row OUT of the cache: a blip must self-heal on the next request,
+    # not persist as "no task" for the life of the process.
+    task_rows = _hub_task_strings(hub_repo_id)
+
     row: dict[str, Any] = {
         "repo_id": repo_id,
         "total_episodes": int(info.get("total_episodes") or 0),
@@ -1625,17 +1637,18 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
         "fps": info.get("fps"),
         "robot_type": info.get("robot_type"),
         "cameras": cameras,
-        "tasks": _hub_task_strings(hub_repo_id),
+        "tasks": task_rows,
         "size_bytes": None,
         "source": "hub",
     }
 
-    with _HUB_DATASET_INFO_LOCK:
-        _HUB_DATASET_INFO_CACHE[hub_repo_id] = dict(row)
+    if task_rows is not None:
+        with _HUB_DATASET_INFO_LOCK:
+            _HUB_DATASET_INFO_CACHE[hub_repo_id] = dict(row)
     return row
 
 
-def _hub_task_strings(hub_repo_id: str) -> list[dict[str, Any]]:
+def _hub_task_strings(hub_repo_id: str) -> list[dict[str, Any]] | None:
     """The `tasks` rows for a Hub dataset that isn't in the local cache.
 
     Task strings do NOT need the full dataset, which is what this function
@@ -1651,17 +1664,37 @@ def _hub_task_strings(hub_repo_id: str) -> list[dict[str, Any]]:
     front of every info card. "Unknown" is the honest answer here, and
     _count_task_episodes reports absent counts the same way.
 
-    Degrades to [] on any failure: a task-file miss must cost a log line, not
-    the whole summary. The caller memoizes the row, so this is paid once per
-    repo per process.
+    Three outcomes, and the caller must keep them apart:
+      * ``[{...}]`` — the strings, ordered by task_index.
+      * ``[]``      — the server looked and this dataset genuinely lists none
+                      (``EntryNotFoundError`` on BOTH layouts, or a file that
+                      downloaded but held nothing). Safe to memoize.
+      * ``None``    — the lookup could not be made: an HTTP 5xx, a killed TLS
+                      connection, ``LocalEntryNotFoundError`` from a link that
+                      dropped. NOT evidence the dataset has no task, so the
+                      caller must render it as "unknown" and must NOT cache it —
+                      the next request re-probes and recovers.
     """
     # v3.0 first, then the v2.x layout. A miss on the first is the normal way an
     # older dataset answers, so it must fall through rather than conclude.
     for filename in ("meta/tasks.parquet", "meta/tasks.jsonl"):
         try:
             path = hf_hub_download(hub_repo_id, filename=filename, repo_type="dataset")
-        except Exception:
+        except LocalEntryNotFoundError:
+            # A dropped link with nothing cached — reads as "entry not found"
+            # but is really "couldn't reach the Hub". Unknown, not absent.
+            logger.info("could not reach the Hub for %s task metadata", hub_repo_id)
+            return None
+        except EntryNotFoundError:
+            # This layout's file is genuinely not in the repo — the normal way
+            # the other layout (or a taskless dataset) answers. Keep looking.
             continue
+        except (HfHubHTTPError, httpx.HTTPError, OSError) as exc:
+            # Same transport/HTTP failure set the per-author listing degrades on
+            # (_HUB_LISTING_ERRORS). A blip here must not be frozen into the
+            # cache as "this dataset has no task".
+            logger.info("Hub task-metadata fetch for %s failed: %s", hub_repo_id, exc)
+            return None
         # _read_task_strings takes the meta DIR; the download lands at
         # <snapshot>/meta/<file>, so its parent is that dir. It swallows its own
         # read errors and answers [], which is why an empty result keeps looking

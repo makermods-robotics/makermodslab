@@ -1016,7 +1016,7 @@
         "type": "object"
       },
       "DatasetInfoResponse": {
-        "description": "datasets.py get_local_dataset_info / get_hub_dataset_info — both\nbranches carry every key. The hub summary carries task STRINGS (one small\nfile next to meta/info.json) with null counts, and degrades size_bytes to\nnull (the repo isn't on disk). fps is `int | float` because\nit passes through from meta/info.json — a whole-number fps must stay the\ninteger the file holds, not become 30.0 on the wire.",
+        "description": "datasets.py get_local_dataset_info / get_hub_dataset_info — both\nbranches carry every key. The hub summary carries task STRINGS (one small\nfile next to meta/info.json) with null counts, and degrades size_bytes to\nnull (the repo isn't on disk). fps is `int | float` because\nit passes through from meta/info.json — a whole-number fps must stay the\ninteger the file holds, not become 30.0 on the wire.\n\ntasks is null (not []) when the hub summary could not read the task file at\nall — a blip, an HTTP 5xx. [] is reserved for a dataset that genuinely\nlists no task. A client must render null as \"couldn't read\", never as \"no\ntask\", and must not cache it. get_local_dataset_info always sends a list.",
         "properties": {
           "cameras": {
             "items": {
@@ -1074,11 +1074,18 @@
             "type": "string"
           },
           "tasks": {
-            "items": {
-              "$ref": "#/components/schemas/DatasetTaskCount"
-            },
-            "title": "Tasks",
-            "type": "array"
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/DatasetTaskCount"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tasks"
           },
           "total_episodes": {
             "title": "Total Episodes",

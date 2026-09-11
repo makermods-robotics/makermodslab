@@ -102,7 +102,12 @@ class DatasetInfoResponse(BaseModel):
     file next to meta/info.json) with null counts, and degrades size_bytes to
     null (the repo isn't on disk). fps is `int | float` because
     it passes through from meta/info.json — a whole-number fps must stay the
-    integer the file holds, not become 30.0 on the wire."""
+    integer the file holds, not become 30.0 on the wire.
+
+    tasks is null (not []) when the hub summary could not read the task file at
+    all — a blip, an HTTP 5xx. [] is reserved for a dataset that genuinely
+    lists no task. A client must render null as "couldn't read", never as "no
+    task", and must not cache it. get_local_dataset_info always sends a list."""
 
     repo_id: str
     total_episodes: int
@@ -110,7 +115,7 @@ class DatasetInfoResponse(BaseModel):
     fps: int | float | None
     robot_type: str | None
     cameras: list[str]
-    tasks: list[DatasetTaskCount]
+    tasks: list[DatasetTaskCount] | None
     size_bytes: int | None
     source: Literal["local", "hub"]
 

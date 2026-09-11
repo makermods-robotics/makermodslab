@@ -72,6 +72,16 @@ describe("classifyTaskLookup", () => {
       reason: "unreachable",
     });
   });
+
+  it("treats a null hub task list as unknown, not as no-task", () => {
+    // The server sends tasks: null when it could not read the task file at all
+    // (a blip, an HTTP 5xx) — as opposed to [] for a dataset that genuinely
+    // lists none. Rendering null as "no task found" is the exact false claim
+    // this module exists to stop making.
+    expect(
+      classifyTaskLookup({ repo_id: "u/d", tasks: null } as unknown as DatasetInfo),
+    ).toEqual({ kind: "unknown", reason: "unreachable" });
+  });
 });
 
 describe("defaultTaskFrom", () => {

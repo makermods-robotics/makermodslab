@@ -1215,7 +1215,9 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
                 </Row>
               )}
 
-              {info.tasks.length > 0 && (
+              {/* null = the Hub summary couldn't read the task file; show
+                  nothing rather than a "0 tasks" the server never established. */}
+              {info.tasks && info.tasks.length > 0 && (
                 <Row label={t("landing.datasetInfo.rowTasks")}>
                   <TaskList tasks={info.tasks} />
                 </Row>

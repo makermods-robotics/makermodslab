@@ -105,8 +105,9 @@ export function rankDatasetTasks(tasks: DatasetTask[]): string[] {
  *
  * A 404 is a dataset that is not on this machine and not resolvable on the Hub
  * — deleted, renamed, or never downloaded. Anything else thrown is a transport
- * or server failure. Neither is "this dataset has no task", which is what the
- * old bare catch reported. */
+ * or server failure. `tasks: null` on a returned summary is the server saying
+ * it could not read the task file at all. None of these is "this dataset has
+ * no task", which is what the old bare catch reported. */
 export function classifyTaskLookup(info: DatasetInfo): TaskPrefillState;
 export function classifyTaskLookup(error: unknown, failed: true): TaskPrefillState;
 export function classifyTaskLookup(
@@ -118,7 +119,12 @@ export function classifyTaskLookup(
     return { kind: "unknown", reason: notFound ? "not_found" : "unreachable" };
   }
   const info = value as DatasetInfo;
-  const tasks = rankDatasetTasks(info.tasks ?? []);
+  // `tasks: null` (Hub summaries only) is "couldn't read the task file" — a
+  // blip, an HTTP 5xx — NOT "no task". The server did not establish anything,
+  // so the panel must ask rather than claim. `[]` still means the server
+  // looked and this dataset genuinely lists none.
+  if (info.tasks == null) return { kind: "unknown", reason: "unreachable" };
+  const tasks = rankDatasetTasks(info.tasks);
   // A Hub summary carries its task STRINGS but never its counts, so an empty
   // list there is a real "this dataset lists no task", same as local — the
   // server already tried. Nothing to special-case: `loaded` with no tasks is

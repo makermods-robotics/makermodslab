@@ -151,7 +151,11 @@ export interface DatasetInfo {
   fps: number | null;
   robot_type: string | null;
   cameras: string[];
-  tasks: DatasetTask[];
+  /** `null` (Hub summaries only) means the task file could not be read — a
+   * blip, an HTTP 5xx. `[]` is a dataset that genuinely lists no task. Render
+   * null as "couldn't read", never as "no task", and do not cache it. A local
+   * dataset always sends an array. */
+  tasks: DatasetTask[] | null;
   /** On-disk size for a local dataset; null for a Hub summary (not on disk). */
   size_bytes: number | null;
   /** Carries per-episode sampling weights. Local datasets only; absent means
