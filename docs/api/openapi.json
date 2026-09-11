@@ -653,7 +653,7 @@
         "type": "object"
       },
       "CheckpointPolicyConfigResponse": {
-        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature. trained_on_robot_type is the\nraw lerobot robot_type of the checkpoint's training dataset (recovered via\ntrain_config.json), null when it can't be established — the fine-tune\npanel compares it against the selected dataset's arm.\n\nsupports_rtc says whether this architecture can run the Real-Time Chunking\ninference engine; null means the policy type isn't one the server knows\n(a fork newer than jobs.policy_type_supports_rtc's table), which the client\nmust read as \"offer it and let the server decide\", not as \"no\". The route\ndeclares no exclude_none/exclude_unset, so the key is always present.\n\nn_action_steps / chunk_size are the checkpoint's chunk geometry, null when\nthe config omits them. n_action_steps is the CEILING on a remote-inference\nhorizon — a declared horizon above it makes the two Portal peers disagree\nabout the action-chunk shape, and every packet is then dropped in silence.",
+        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature. trained_on_robot_type is the\nraw lerobot robot_type of the checkpoint's training dataset (recovered via\ntrain_config.json), null when it can't be established — the fine-tune\npanel compares it against the selected dataset's arm.\n\nsupports_rtc says whether this architecture can run the Real-Time Chunking\ninference engine; null means the policy type isn't one the server knows\n(a fork newer than jobs.policy_type_supports_rtc's table), which the client\nmust read as \"offer it and let the server decide\", not as \"no\". The route\ndeclares no exclude_none/exclude_unset, so the key is always present.\n\nn_action_steps / chunk_size are the checkpoint's chunk geometry, null when\nthe config omits them. n_action_steps is the CEILING on a remote-inference\nhorizon — a declared horizon above it makes the two Portal peers disagree\nabout the action-chunk shape, and every packet is then dropped in silence.\n\ndataset_repo_id is the dataset the checkpoint was trained on, read from its\nown train_config.json — null when the lineage offers no real id (an\nimported flat model repo, or a record still carrying the \"(imported)\"\nplaceholder, which is never reported as a repo id). Clients should prefer\nit over the owning job record's config.dataset_repo_id: the record is a\nplaceholder for imports, and on a resume chain the tip's record does not\ndescribe a checkpoint owned by an ancestor.",
         "properties": {
           "action_dim": {
             "anyOf": [
@@ -676,6 +676,17 @@
               }
             ],
             "title": "Chunk Size"
+          },
+          "dataset_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Repo Id"
           },
           "flow_steps_default": {
             "anyOf": [
@@ -780,7 +791,8 @@
           "action_dim",
           "n_action_steps",
           "chunk_size",
-          "trained_on_robot_type"
+          "trained_on_robot_type",
+          "dataset_repo_id"
         ],
         "title": "CheckpointPolicyConfigResponse",
         "type": "object"
@@ -1004,7 +1016,7 @@
         "type": "object"
       },
       "DatasetInfoResponse": {
-        "description": "datasets.py get_local_dataset_info / get_hub_dataset_info — both\nbranches carry every key. The hub summary degrades tasks to [] and\nsize_bytes to null (the repo isn't on disk). fps is `int | float` because\nit passes through from meta/info.json — a whole-number fps must stay the\ninteger the file holds, not become 30.0 on the wire.",
+        "description": "datasets.py get_local_dataset_info / get_hub_dataset_info — both\nbranches carry every key. The hub summary carries task STRINGS (one small\nfile next to meta/info.json) with null counts, and degrades size_bytes to\nnull (the repo isn't on disk). fps is `int | float` because\nit passes through from meta/info.json — a whole-number fps must stay the\ninteger the file holds, not become 30.0 on the wire.\n\ntasks is null (not []) when the hub summary could not read the task file at\nall — a blip, an HTTP 5xx. [] is reserved for a dataset that genuinely\nlists no task. A client must render null as \"couldn't read\", never as \"no\ntask\", and must not cache it. get_local_dataset_info always sends a list.",
         "properties": {
           "cameras": {
             "items": {
@@ -1062,11 +1074,18 @@
             "type": "string"
           },
           "tasks": {
-            "items": {
-              "$ref": "#/components/schemas/DatasetTaskCount"
-            },
-            "title": "Tasks",
-            "type": "array"
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/DatasetTaskCount"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tasks"
           },
           "total_episodes": {
             "title": "Total Episodes",
@@ -1234,11 +1253,18 @@
         "type": "object"
       },
       "DatasetTaskCount": {
-        "description": "One entry of /datasets/info `tasks` (datasets.py get_local_dataset_info);\nnum_episodes is 0 when the per-episode count is unavailable.",
+        "description": "One entry of /datasets/info `tasks` (datasets.py get_local_dataset_info\n/ get_hub_dataset_info).\n\nnum_episodes is null when the count is UNKNOWN — episode metadata that\ncould not be read, or a Hub summary where the per-episode files were not\nfetched. It is 0 only for a task that really is used by no episode. The two\nwere previously indistinguishable, which let an unreadable file silently\ndecide which task a client ranked first; clients must not sort on null.",
         "properties": {
           "num_episodes": {
-            "title": "Num Episodes",
-            "type": "integer"
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Num Episodes"
           },
           "task": {
             "title": "Task",

@@ -512,8 +512,8 @@ const TrainingJobDialog: React.FC<{
                   <Button
                     onClick={() => {
                       // Land on the Deploy panel with this job + checkpoint
-                      // prefilled (DeployPanel consumes the prefill) instead
-                      // of stacking the legacy InferenceModal over the dialog.
+                      // prefilled (DeployPanel consumes the prefill) rather
+                      // than stacking another dialog over this one.
                       openStudio("deploy", {
                         deploy: {
                           source: "job",

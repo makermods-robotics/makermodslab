@@ -33,7 +33,7 @@ from huggingface_hub import (
     snapshot_download,
     try_to_load_from_cache,
 )
-from huggingface_hub.errors import HfHubHTTPError
+from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError, LocalEntryNotFoundError
 
 from .sampling import SAMPLING_WEIGHT_COLUMN
 from .utils.config import (
@@ -1010,32 +1010,51 @@ def _read_task_strings(meta_dir: Path) -> list[str]:
     return []
 
 
-def _count_task_episodes(meta_dir: Path) -> dict[str, int]:
-    """Episodes per task string, from the per-episode ``tasks`` column.
+def _count_task_episodes(meta_dir: Path) -> dict[str, int] | None:
+    """Episodes per task string, from the per-episode ``tasks`` column — or
+    None when the count cannot be established.
 
     Each episode lists the task strings it uses, and an episode counts once
     per distinct task. Read directly from the metadata files —
     v3.0 keeps episode rows in ``meta/episodes/chunk-*/file-*.parquet`` (only
     the ``tasks`` column is loaded, not the wide per-episode stats), v2.x in
     ``meta/episodes.jsonl`` — so the endpoint stays a cheap file read instead
-    of a full ``LeRobotDataset`` load. Unreadable/absent episode metadata
-    degrades to an empty dict (counts render as 0).
+    of a full ``LeRobotDataset`` load.
+
+    ALL-OR-NOTHING, deliberately. A partial count is worse than no count: the
+    caller ranks tasks by these numbers to decide which one to suggest, and on
+    a merged dataset the margins are thin enough (measured: 99 vs 100 episodes
+    between two near-identical task strings) that dropping one unreadable chunk
+    silently flips the winner while every number still looks plausible. So any
+    unreadable chunk, or any bad line in the jsonl, abandons the whole count and
+    returns None — "unknown", which the caller can say out loud — rather than a
+    confident-looking subtotal.
+
+    None is also the answer when neither layout yields anything, so the caller
+    can distinguish it from a real zero (a task listed in tasks.parquet that no
+    episode actually uses).
     """
     counts: dict[str, int] = {}
 
     episodes_dir = meta_dir / "episodes"
-    if episodes_dir.is_dir():
-        for parquet_path in sorted(episodes_dir.glob("**/*.parquet")):
+    parquet_paths = sorted(episodes_dir.glob("**/*.parquet")) if episodes_dir.is_dir() else []
+    if parquet_paths:
+        for parquet_path in parquet_paths:
             try:
                 table = pq.read_table(parquet_path, columns=["tasks"])
             except Exception as e:
+                # Not `continue`: see the all-or-nothing note above.
                 logger.warning(f"Could not read {parquet_path}: {e}")
-                continue
+                return None
             for episode_tasks in table.column("tasks").to_pylist():
                 for task in set(episode_tasks or []):
                     counts[str(task)] = counts.get(str(task), 0) + 1
         return counts
 
+    # Falls through when meta/episodes/ is absent OR holds no parquet at all —
+    # an empty directory is not evidence that this is the v3.0 layout, and
+    # returning from inside that branch used to make the v2.x path unreachable
+    # for any dataset that merely had the directory.
     jsonl_path = meta_dir / "episodes.jsonl"
     if jsonl_path.is_file():
         try:
@@ -1044,12 +1063,20 @@ def _count_task_episodes(meta_dir: Path) -> dict[str, int]:
                 if not line:
                     continue
                 obj = json.loads(line)
+                if not isinstance(obj, dict):
+                    # Valid JSON, wrong shape — a truncated write leaving a bare
+                    # `null`/number. Treated like any other bad line (below):
+                    # abandon the whole count rather than skip the row or, worse,
+                    # let obj.get raise AttributeError out through /datasets/info.
+                    raise ValueError(f"episode row is not an object: {line[:80]!r}")
                 for task in set(obj.get("tasks") or []):
                     counts[str(task)] = counts.get(str(task), 0) + 1
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, TypeError) as e:
             logger.warning(f"Could not read {jsonl_path}: {e}")
+            return None
+        return counts
 
-    return counts
+    return None
 
 
 def _dir_size_bytes(path: Path) -> int:
@@ -1101,9 +1128,12 @@ def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
     features = info.get("features") or {}
     cameras = [key[len(CAMERA_FEATURE_PREFIX) :] for key in features if key.startswith(CAMERA_FEATURE_PREFIX)]
 
+    # None counts propagate as null per task rather than collapsing to 0: the
+    # caller ranks by this, and "unknown" must not sort like "used by nothing".
     task_counts = _count_task_episodes(path / "meta")
     tasks = [
-        {"task": task, "num_episodes": task_counts.get(task, 0)} for task in _read_task_strings(path / "meta")
+        {"task": task, "num_episodes": None if task_counts is None else task_counts.get(task, 0)}
+        for task in _read_task_strings(path / "meta")
     ]
 
     return {
@@ -1538,8 +1568,11 @@ def get_episode_action_series(repo_id: str, episode_index: int) -> dict[str, Any
 # In-process cache of per-repo Hub dataset summaries (the /datasets/info hub
 # fallback), mirroring _HUB_STATUS_CACHE conventions: successful answers are
 # memoized for the process lifetime; the offline/error degrade is NEVER cached,
-# so connectivity returning is picked up on the next check. Invalidated when
-# the repo's content changes (upload / download-complete) or the row is hidden.
+# so connectivity returning is picked up on the next check. A row whose task
+# strings could not be read (tasks is None) counts as a partial failure and is
+# left out too — otherwise a blip freezes "no task" in for the process.
+# Invalidated when the repo's content changes (upload / download-complete) or
+# the row is hidden.
 _HUB_DATASET_INFO_CACHE: dict[str, dict[str, Any]] = {}
 _HUB_DATASET_INFO_LOCK = threading.Lock()
 
@@ -1560,14 +1593,19 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
     hub fallback (the /datasets/info route tries get_local_dataset_info first).
 
     Fetches just ``meta/info.json`` via hf_hub_download — a tiny file — for the
-    episode/frame counts, fps, robot type, and camera keys (from ``features``).
-    Task strings and size-on-disk need the full dataset, so they degrade to
-    empty/None; ``source: "hub"`` tells the card which contract it got. This is
-    a LAZY per-card fetch, deliberately not part of the /datasets listing.
+    episode/frame counts, fps, robot type, and camera keys (from ``features``),
+    plus ``meta/tasks.*`` for the task strings (see _hub_task_strings; their
+    counts come back null, because those live in the many-file episode
+    metadata). ``tasks`` itself is null when that probe could not be made — a
+    blip, an HTTP 5xx — as opposed to ``[]`` for a dataset that genuinely lists
+    none. Size-on-disk needs the full dataset, so it degrades to None;
+    ``source: "hub"`` tells the card which contract it got. This is a LAZY
+    per-card fetch, deliberately not part of the /datasets listing.
 
     Degrade-not-crash: returns None offline or on any fetch/parse failure (the
-    card then falls back to the sparse "not downloaded" view); only successful
-    answers are cached (see _HUB_DATASET_INFO_CACHE).
+    card then falls back to the sparse "not downloaded" view). Only fully
+    successful answers are cached — a row with null ``tasks`` is returned but
+    not memoized, so the next request re-probes (see _HUB_DATASET_INFO_CACHE).
     """
     if hf_hub_offline():
         return None
@@ -1592,6 +1630,12 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
     features = info.get("features") or {}
     cameras = _video_camera_names(features)
 
+    # None here is "couldn't read the task file", distinct from [] ("read it,
+    # nothing there"). It rides through to the client as a null `tasks`, and it
+    # keeps this row OUT of the cache: a blip must self-heal on the next request,
+    # not persist as "no task" for the life of the process.
+    task_rows = _hub_task_strings(hub_repo_id)
+
     row: dict[str, Any] = {
         "repo_id": repo_id,
         "total_episodes": int(info.get("total_episodes") or 0),
@@ -1599,14 +1643,75 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
         "fps": info.get("fps"),
         "robot_type": info.get("robot_type"),
         "cameras": cameras,
-        "tasks": [],
+        "tasks": task_rows,
         "size_bytes": None,
         "source": "hub",
     }
 
-    with _HUB_DATASET_INFO_LOCK:
-        _HUB_DATASET_INFO_CACHE[hub_repo_id] = dict(row)
+    if task_rows is not None:
+        with _HUB_DATASET_INFO_LOCK:
+            _HUB_DATASET_INFO_CACHE[hub_repo_id] = dict(row)
     return row
+
+
+def _hub_task_strings(hub_repo_id: str) -> list[dict[str, Any]] | None:
+    """The `tasks` rows for a Hub dataset that isn't in the local cache.
+
+    Task strings do NOT need the full dataset, which is what this function
+    exists to correct: they live in one small file next to the meta/info.json
+    the caller has already downloaded — ``meta/tasks.parquet`` on v3.0,
+    ``meta/tasks.jsonl`` on v2.x — so a cloud-trained policy can offer the
+    sentence it was trained on instead of claiming its dataset has none.
+
+    Counts are deliberately `None`, not 0. Episode counts live in
+    ``meta/episodes/**`` — many files, fetched only when someone actually opens
+    the dataset viewer (_ensure_hub_episodes_root) — and pulling that fan-out
+    behind this synchronous GET would put a repo listing plus N downloads in
+    front of every info card. "Unknown" is the honest answer here, and
+    _count_task_episodes reports absent counts the same way.
+
+    Three outcomes, and the caller must keep them apart:
+      * ``[{...}]`` — the strings, ordered by task_index.
+      * ``[]``      — the server looked and this dataset genuinely lists none
+                      (``EntryNotFoundError`` on BOTH layouts, or a file that
+                      downloaded but held nothing). Safe to memoize.
+      * ``None``    — the lookup could not be made: an HTTP 5xx, a killed TLS
+                      connection, ``LocalEntryNotFoundError`` from a link that
+                      dropped. NOT evidence the dataset has no task, so the
+                      caller must render it as "unknown" and must NOT cache it —
+                      the next request re-probes and recovers.
+    """
+    # v3.0 first, then the v2.x layout. A miss on the first is the normal way an
+    # older dataset answers, so it must fall through rather than conclude.
+    for filename in ("meta/tasks.parquet", "meta/tasks.jsonl"):
+        try:
+            path = hf_hub_download(hub_repo_id, filename=filename, repo_type="dataset")
+        except LocalEntryNotFoundError:
+            # A dropped link with nothing cached — reads as "entry not found"
+            # but is really "couldn't reach the Hub". Unknown, not absent.
+            logger.info("could not reach the Hub for %s task metadata", hub_repo_id)
+            return None
+        except EntryNotFoundError:
+            # This layout's file is genuinely not in the repo — the normal way
+            # the other layout (or a taskless dataset) answers. Keep looking.
+            continue
+        except (HfHubHTTPError, httpx.HTTPError, OSError) as exc:
+            # Same transport/HTTP failure set the per-author listing degrades on
+            # (_HUB_LISTING_ERRORS). A blip here must not be frozen into the
+            # cache as "this dataset has no task".
+            logger.info("Hub task-metadata fetch for %s failed: %s", hub_repo_id, exc)
+            return None
+        # _read_task_strings takes the meta DIR; the download lands at
+        # <snapshot>/meta/<file>, so its parent is that dir. It swallows its own
+        # read errors and answers [], which is why an empty result keeps looking
+        # instead of concluding — a downloaded-but-unparsable file must not
+        # shadow the other layout.
+        strings = _read_task_strings(Path(path).parent)
+        if strings:
+            return [{"task": task, "num_episodes": None} for task in strings]
+
+    logger.info("no task metadata on the Hub for %s", hub_repo_id)
+    return []
 
 
 def is_dataset_private(repo_id: str) -> bool | None:
