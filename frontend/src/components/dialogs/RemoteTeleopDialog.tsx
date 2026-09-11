@@ -1,6 +1,7 @@
+import { ReleaseActionButton, RobotActionButton } from "@/components/ui/robot-action-button";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Home, Loader2, Power, RefreshCw, VideoOff } from "lucide-react";
+import { Loader2, RefreshCw, VideoOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ToastAction } from "@/components/ui/toast";
 import UrdfViewer from "@/components/UrdfViewer";
@@ -490,43 +491,35 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
         <RobotLayoutChip arms={robot?.arms} />
         {live ? (
           <div className="ml-auto flex items-center gap-1.5">
-            <Button
+            <RobotActionButton
+              action="remote_home"
+              busy={commanding === "home"}
               size="sm"
-              variant="secondary"
               title={t("dialogs.remoteTeleop.homeHint")}
               disabled={!canHome || commanding !== null || finished !== null}
               onClick={handleHome}
               className="gap-1.5"
             >
-              {commanding === "home" ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Home className="h-3.5 w-3.5" />
-              )}
               {t("dialogs.remoteTeleop.home")}
-            </Button>
-            <Button
+            </RobotActionButton>
+            <RobotActionButton
+              action="remote_teleoperation"
+              busy={commanding === "engage"}
               size="sm"
-              variant="secondary"
               title={t("dialogs.remoteTeleop.engageHint")}
               disabled={!canEngage || commanding !== null || finished !== null}
               onClick={handleEngage}
               className="gap-1.5"
             >
-              {commanding === "engage" ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Power className="h-3.5 w-3.5" />
-              )}
               {t("dialogs.remoteTeleop.engage")}
-            </Button>
-            <Button
+            </RobotActionButton>
+            <ReleaseActionButton
+              action="stop"
               size="sm"
               onClick={handleStop}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               {t("dialogs.remoteTeleop.stop")}
-            </Button>
+            </ReleaseActionButton>
           </div>
         ) : (
           <Button
@@ -583,7 +576,9 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
             )}
           </div>
           <div className="flex justify-end">
-            <Button
+            <RobotActionButton
+              action="remote_teleoperation"
+              busy={starting}
               size="sm"
               disabled={
                 !robot || !station || stationMismatch || stationSeated || starting
@@ -591,14 +586,11 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
               onClick={handleStart}
             >
               {starting ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  {t("dialogs.remoteTeleop.starting")}
-                </>
+                t("dialogs.remoteTeleop.starting")
               ) : (
                 t("dialogs.remoteTeleop.start")
               )}
-            </Button>
+            </RobotActionButton>
           </div>
         </div>
       ) : (

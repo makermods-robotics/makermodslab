@@ -72,6 +72,7 @@ export default {
     renameAria: "重命名模型",
     openHubJob: "打开 Hub 任务页面",
     viewOnHub: "在 Hub 上查看",
+    viewRun: "查看运行",
   },
   rename: {
     title: "重命名模型",

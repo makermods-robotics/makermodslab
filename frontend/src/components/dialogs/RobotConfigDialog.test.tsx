@@ -1,3 +1,4 @@
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { MAKER, METAL, SO101 } from "./robotConfigFixtures";
 import {
   fireEvent,
@@ -133,7 +134,7 @@ describe("advanced holding torque", () => {
       }
       return original?.(url, options);
     });
-    render(<RobotConfigDialog open robotName="test" onOpenChange={() => {}} />);
+    render(<TooltipProvider><RobotConfigDialog open robotName="test" onOpenChange={() => {}} /></TooltipProvider>);
   }
 
   it("starts collapsed at 0.5 Nm and saves only the edited holding torque", async () => {
@@ -180,7 +181,7 @@ describe("advanced holding torque", () => {
 });
 
 async function openAll() {
-  render(<RobotConfigDialog open robotName="test" onOpenChange={() => {}} />);
+  render(<TooltipProvider><RobotConfigDialog open robotName="test" onOpenChange={() => {}} /></TooltipProvider>);
   const button = await screen.findByRole("button", { name: "Calibrate all" });
   await waitFor(() => expect(button).toBeEnabled());
   fireEvent.click(button);
@@ -196,6 +197,16 @@ async function startAndSave() {
 }
 
 describe("zero-pose calibration", () => {
+  it("describes cancel as disconnecting without a return motion", async () => {
+    await openAll();
+    fireEvent.click(await screen.findByRole("button", { name: "Set zero pose" }));
+    const cancel = await screen.findByRole("button", { name: "Cancel calibration" });
+    fireEvent.focus(cancel);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Cancels calibration and disconnects the arm without returning it to its start pose.",
+    );
+  });
+
   it("keeps the live joint grid in place when subsequent samples arrive in a different order", async () => {
     const positions = {
       wrist_roll: 5.7,

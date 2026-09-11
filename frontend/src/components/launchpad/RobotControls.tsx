@@ -1,7 +1,8 @@
 import React, { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Gamepad2, Radio, RadioTower, Loader2 } from "lucide-react";
+import { Radio, RadioTower, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { RobotActionButton } from "@/components/ui/robot-action-button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import TeleopDialog from "@/components/dialogs/TeleopDialog";
 import HostingDialog from "@/components/dialogs/HostingDialog";
@@ -225,13 +226,27 @@ const RobotControls: React.FC<RobotControlsProps> = ({ onOpenSettings, onCreateR
         </Tooltip>
       )}
 
-      {arms === "both" && actionButton(
-        t("robot.corner.teleop"),
-        <Gamepad2 className="h-3.5 w-3.5" />,
-        teleopStarting,
-        teleopDisabledReason,
-        () => selectedRecord && handleTeleop(selectedRecord),
-        null,
+      {arms === "both" && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span>
+              <RobotActionButton
+                action="teleoperation"
+                size="sm"
+                className="h-7 gap-1.5 rounded-full px-2.5 [&_svg]:size-3.5"
+                disabled={!!teleopDisabledReason || teleopStarting}
+                busy={teleopStarting}
+                onClick={() => selectedRecord && handleTeleop(selectedRecord)}
+                tooltipSide="bottom"
+              >
+                {t("robot.corner.teleop")}
+              </RobotActionButton>
+            </span>
+          </TooltipTrigger>
+          {teleopDisabledReason && (
+            <TooltipContent side="bottom">{teleopDisabledReason}</TooltipContent>
+          )}
+        </Tooltip>
       )}
       {arms !== "follower" && actionButton(
         t("robot.corner.drive"),

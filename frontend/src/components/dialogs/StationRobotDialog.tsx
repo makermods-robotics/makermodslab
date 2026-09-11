@@ -1,3 +1,4 @@
+import { ReleaseActionButton, RobotActionButton } from "@/components/ui/robot-action-button";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Loader2, Plus, Settings } from "lucide-react";
@@ -259,21 +260,19 @@ const StationRobotDialog: React.FC<StationRobotDialogProps> = ({
         )}
 
         <DialogFooter className="gap-2 sm:justify-between">
-          <Button
+          <ReleaseActionButton
+            action="stop"
+            busy={submitting === "stop"}
             type="button"
-            variant="outline"
             disabled={current === null || submitting !== null}
             onClick={() => apply(null)}
           >
             {submitting === "stop" ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                {t("dialogs.stationRobot.applying")}
-              </>
+              t("dialogs.stationRobot.applying")
             ) : (
               t("dialogs.stationRobot.stopHosting")
             )}
-          </Button>
+          </ReleaseActionButton>
           <div className="flex gap-2">
             <Button
               type="button"
@@ -282,20 +281,19 @@ const StationRobotDialog: React.FC<StationRobotDialogProps> = ({
             >
               {t("common.cancel")}
             </Button>
-            <Button
+            <RobotActionButton
+              action="hosting"
+              busy={submitting === "host"}
               type="button"
               disabled={!canHost || submitting !== null}
               onClick={() => picked !== null && apply(picked)}
             >
               {submitting === "host" ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  {t("dialogs.stationRobot.applying")}
-                </>
+                t("dialogs.stationRobot.applying")
               ) : (
                 t("dialogs.stationRobot.host")
               )}
-            </Button>
+            </RobotActionButton>
           </div>
         </DialogFooter>
       </DialogContent>

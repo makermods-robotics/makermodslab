@@ -1,3 +1,4 @@
+import { ReleaseActionButton } from "@/components/ui/robot-action-button";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -370,12 +371,16 @@ const HostingDialog: React.FC<HostingDialogProps> = ({
             {t("dialogs.hosting.changeRobot")}
           </Button>
         )}
-        <Button size="sm" onClick={stopHosting}
+        <ReleaseActionButton
+          action={releasing ? "release_now" : "stop"}
+          busy={stopping}
+          size="sm"
+          onClick={stopHosting}
           disabled={stopping || (station?.station_mode ? !station.robot : !active || pressesRef.current >= 2)}
-          className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+        >
           {stopping ? t("dialogs.stationRobot.applying") : releasing
             ? t("dialogs.hosting.releaseNow") : t("dialogs.stationRobot.stopHosting")}
-        </Button>
+        </ReleaseActionButton>
       </div>
     </div>
   );

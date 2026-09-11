@@ -1,7 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Loader2, Square, TriangleAlert } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { TriangleAlert } from "lucide-react";
+import {
+  ReleaseActionButton,
+  RobotActionButton,
+} from "@/components/ui/robot-action-button";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useRobots } from "@/hooks/useRobots";
@@ -208,10 +211,15 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
   if (!active) {
     return (
       <div className="flex items-center gap-3 rounded-md border border-border bg-muted/40 p-3">
-        <Button onClick={handleStart} disabled={starting} size="sm" className="gap-2">
-          {starting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+        <RobotActionButton
+          action="replay"
+          onClick={handleStart}
+          disabled={starting}
+          busy={starting}
+          size="sm"
+        >
           {t("dialogs.replay.start")}
-        </Button>
+        </RobotActionButton>
         <p className="flex items-center gap-1 text-[11px] text-muted-foreground">
           <TriangleAlert className="h-3 w-3 shrink-0" />
           {t("dialogs.replay.movesArmWarning", { robot: selectedRecord.name })}
@@ -229,10 +237,15 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
         {/* During the stopping phase the arm is returning to its start pose;
             a second press asks the server to release it now (the same
             two-press contract as teleoperation). */}
-        <Button onClick={handleStop} disabled={stopping} size="sm" variant="destructive" className="gap-2">
-          <Square className="h-3 w-3" />
+        <ReleaseActionButton
+          action={status?.phase === "stopping" ? "release_now" : "stop"}
+          onClick={handleStop}
+          disabled={stopping}
+          busy={stopping}
+          size="sm"
+        >
           {status?.phase === "stopping" ? t("dialogs.replay.releaseNow") : t("dialogs.replay.stop")}
-        </Button>
+        </ReleaseActionButton>
       </div>
       {Object.keys(liveJoints).length > 0 ? (
         <div className="grid grid-cols-3 gap-x-3 gap-y-1 font-mono text-[10.5px] text-muted-foreground">

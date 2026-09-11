@@ -1,3 +1,4 @@
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 
@@ -115,7 +116,7 @@ const taskCalls = () => mocks.fetch.mock.calls.filter(([url]) =>
 describe("task before recording", () => {
   it("starts normally without a task prompt when per-episode tasks are off", async () => {
     status = { ...status, current_phase: "recording" };
-    render(<RecordingSessionDialog config={{ ...CONFIG, per_episode_task: false, single_task: "sort socks" }} onExit={vi.fn()} />);
+    render(<TooltipProvider><RecordingSessionDialog config={{ ...CONFIG, per_episode_task: false, single_task: "sort socks" }} onExit={vi.fn()} /></TooltipProvider>);
     await waitFor(() => expect(mocks.startSession).toHaveBeenCalledOnce());
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     expect(taskCalls()).toHaveLength(0);
@@ -123,7 +124,7 @@ describe("task before recording", () => {
 
   it("shows the first task immediately and allows cancel without starting hardware", () => {
     const onExit = vi.fn();
-    render(<RecordingSessionDialog config={CONFIG} onExit={onExit} />);
+    render(<TooltipProvider><RecordingSessionDialog config={CONFIG} onExit={onExit} /></TooltipProvider>);
     expect(screen.getByRole("textbox")).toHaveValue("");
     expect(mocks.startSession).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -132,7 +133,7 @@ describe("task before recording", () => {
   });
 
   it("starts the session and submits the first task with one Space", async () => {
-    render(<RecordingSessionDialog config={CONFIG} onExit={vi.fn()} />);
+    render(<TooltipProvider><RecordingSessionDialog config={CONFIG} onExit={vi.fn()} /></TooltipProvider>);
     submitFirstTask();
     await waitFor(() => expect(taskCalls()).toHaveLength(1));
     expect(mocks.startSession).toHaveBeenCalledOnce();
@@ -145,7 +146,7 @@ describe("task before recording", () => {
   });
 
   it("Space ends capture, then asks for the next task until Space starts it", async () => {
-    render(<RecordingSessionDialog config={CONFIG} onExit={vi.fn()} />);
+    render(<TooltipProvider><RecordingSessionDialog config={CONFIG} onExit={vi.fn()} /></TooltipProvider>);
     submitFirstTask();
     await screen.findByRole("button", { name: /^done/i }, { timeout: 2500 });
     fireEvent.keyDown(window, { key: " " });

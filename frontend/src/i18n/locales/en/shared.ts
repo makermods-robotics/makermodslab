@@ -24,6 +24,31 @@ export default {
       remote_teleoperation: "remote teleoperation",
     },
   },
+  // Tooltips for the shared hardware affordances (RobotActionButton /
+  // ReleaseActionButton). One line per action; which action carries which
+  // treatment is decided in lib/robotActions.ts, whose keys are the backend's
+  // session-kind enum values — data, matched on and never translated.
+  robotAction: {
+    tooltip: {
+      hosting: "Makes this arm available to a remote operator, who can engage and move it.",
+      remote_teleoperation: "Connects to the remote arm and lets the leader drive it.",
+      remote_inference: "Lets a policy running remotely drive this robot arm.",
+      remote_home: "Returns the remote arm to its rest pose and releases torque.",
+      teleoperation:
+        "Moves the robot arm: the follower mirrors the leader while this runs.",
+      recording:
+        "Moves the robot arm while it records episodes into a dataset.",
+      inference: "Moves the robot arm: the trained policy drives it.",
+      replay: "Moves the robot arm through a recorded episode.",
+      calibration: "Takes control of the robot arm to calibrate it.",
+      auto_calibration:
+        "Drives the robot arm under torque against its joint limits.",
+      wiggle: "Moves the gripper so you can see which arm is on this port.",
+      stop: "Returns the arm to its start pose, then releases torque.",
+      cancelCalibration: "Cancels calibration and disconnects the arm without returning it to its start pose.",
+      releaseNow: "Skips the return and releases torque immediately.",
+    },
+  },
   update: {
     title: "MakerMods Lab update available",
     behind_one: "{{count}} commit behind",

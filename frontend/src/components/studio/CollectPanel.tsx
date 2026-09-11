@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next";
 import { Check, GitMerge, RefreshCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { RobotActionButton } from "@/components/ui/robot-action-button";
 import {
   Collapsible,
   CollapsibleContent,
@@ -337,14 +338,14 @@ const CollectPanel: React.FC = () => {
           in the column is bottom-pinned any more: everything top-packs and the
           column scrolls when it overflows. Disabled until the robot is ready
           and the required parameters are filled in. */}
-      <Button
+      <RobotActionButton
+        action="recording"
         onClick={handleStartRecording}
         disabled={!canStart}
         className="w-full gap-2"
       >
-        <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
         {t("studio.collect.start")}
-      </Button>
+      </RobotActionButton>
 
       {/* Dataset library — the user's own datasets. LibrarySection's own
           stretch now stands (no mt-0 override): the opener and Start row

@@ -10,12 +10,12 @@ import {
   AlertTriangle,
   ChevronsUpDown,
   Loader2,
-  Play,
   // No VideoOff (the rework dropped CameraThumbnail for SessionCameraList) and
   // no Square: a live run's Stop lives in the session dialog (local) or in the
   // Remote tab's status panel, never beside Start.
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { RobotActionButton } from "@/components/ui/robot-action-button";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
@@ -2503,16 +2503,13 @@ const DeployPanel: React.FC = () => {
           No Stop beside it — see the note at `selectedSkillLabel` for why the
           panel's own stop was dropped rather than kept. ------------------ */}
       <div className="flex flex-col gap-2">
-        <Button
+        <RobotActionButton
+          action={runMode === "remote" ? "remote_inference" : "inference"}
+          busy={submitting || checkingExtra}
           onClick={() => void handleStart(runMode)}
           disabled={!canStartAnyMode || startBlockedKey !== null}
           className="w-full"
         >
-          {submitting || checkingExtra ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Play className="h-4 w-4" />
-          )}
           {checkingExtra
             ? t("studio.deploy.actions.checking")
             : submitting
@@ -2526,7 +2523,7 @@ const DeployPanel: React.FC = () => {
                       episodes: evalEpisodes,
                     })
                   : t("studio.deploy.actions.start")}
-        </Button>
+        </RobotActionButton>
         {/* The refusal. When it is the transport's, the PROBE's own sentence
             stands in for the generic one: it names which of the five things
             between here and a running GPU is the one to fix, which the generic

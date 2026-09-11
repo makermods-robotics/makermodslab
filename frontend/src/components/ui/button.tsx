@@ -12,6 +12,13 @@ const buttonVariants = cva(
         default: "bg-primary text-primary-foreground hover:bg-primary/90",
         destructive:
           "bg-destructive text-destructive-foreground hover:bg-destructive/90",
+        // "This button drives the robot arm." One amber treatment, shared by
+        // every energizing control — see lib/robotActions.ts for which
+        // actions carry it, and prefer RobotActionButton (which pins the
+        // icon and the tooltip) over reaching for the variant directly. The
+        // border is transparent at rest so the 1px never shifts layout.
+        robot:
+          "border border-transparent bg-robot text-robot-foreground hover:bg-robot/85 hover:border-robot-border",
         outline:
           "border border-input bg-background hover:bg-accent hover:text-accent-foreground",
         secondary:

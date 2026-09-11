@@ -1,8 +1,9 @@
+import { ReleaseActionButton } from "@/components/ui/robot-action-button";
 import { rtcTimingBudget } from "./rtcTimingBudget";
 import React, { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DEFAULT_GPU } from "@/hooks/useGpuLauncher";
-import { AlertTriangle, GraduationCap, Square } from "lucide-react";
+import { AlertTriangle, GraduationCap } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import LogPanel from "@/components/LogPanel";
@@ -583,15 +584,15 @@ const RemoteSessionBody: React.FC<{
           </Button>
         </div>
       ) : (
-        <Button
+        <ReleaseActionButton
+          action="stop"
+          busy={stopping}
           onClick={onStop}
           disabled={stopping}
-          variant="destructive"
           className="w-full py-6 text-lg font-semibold disabled:opacity-50"
         >
-          <Square className="mr-2 h-5 w-5" />
           {stopping ? t("inference.button.stopping") : t("inference.button.stop")}
-        </Button>
+        </ReleaseActionButton>
       )}
 
       {phase ? (
