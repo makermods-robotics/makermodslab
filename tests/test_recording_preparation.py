@@ -13,8 +13,10 @@
 # limitations under the License.
 """Readiness/lifecycle seams with fake codecs and workers; no thread starts."""
 
+import gc
 import queue
 import threading
+import weakref
 from fractions import Fraction
 from types import SimpleNamespace
 
@@ -113,7 +115,7 @@ def test_invalid_shape_creates_no_artifact(encoder, tmp_path):
     assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize("layout", ["hwc", "chw", "strided", "float_hwc", "float_chw", "depth"])
+@pytest.mark.parametrize("layout", ["hwc", "chw", "strided", "float_hwc", "float_chw", "depth", "queued_hwc"])
 def test_worker_opens_actual_context_before_dequeue_without_dummy_frames(monkeypatch, tmp_path, layout):
     # Real RGB PyAV conversion with a fake output stream; no encoding or thread.
     depth = layout == "depth"
@@ -150,6 +152,7 @@ def test_worker_opens_actual_context_before_dequeue_without_dummy_frames(monkeyp
         config.get_codec_options = lambda *a, **k: {}
     q = queue.Queue()
     expected = []
+    queued_buffers = []
     for offset in (0, 19):
         rgb = (np.arange(8 * 10 * 3).reshape(8, 10, 3) + offset).astype(np.uint8)
         expected.append(rgb)
@@ -157,7 +160,7 @@ def test_worker_opens_actual_context_before_dequeue_without_dummy_frames(monkeyp
         if layout.startswith("float"):
             frame = rgb.astype(np.float32) / 255
         if layout.endswith("chw"):
-            frame = frame.transpose(2, 0, 1)
+            frame = frame.transpose(2, 0, 1).copy()
         elif layout == "strided":
             backing = np.zeros((8, 20, 3), dtype=np.uint8)
             backing[:, ::2] = rgb
@@ -165,7 +168,28 @@ def test_worker_opens_actual_context_before_dequeue_without_dummy_frames(monkeyp
             assert not frame.flags.c_contiguous
         elif depth:
             frame = np.full((8, 10), offset, np.uint16)
-        q.put(frame)
+        if layout == "queued_hwc":
+            original = SimpleNamespace(
+                fps=30,
+                _rgb_encoder=config,
+                _depth_encoder=object(),
+                queue_maxsize=4,
+                _encoder_threads=2,
+            )
+            encoder = prep.PreparedStreamingVideoEncoder(original)
+            encoder._episode_active = True
+            encoder._threads["camera"] = SimpleNamespace(is_alive=lambda: True)
+            encoder._frame_queues["camera"] = q
+            encoder.feed_frame("camera", frame)  # Company's real protective copy.
+            queued = q.queue[-1]
+            assert not np.shares_memory(queued, frame)
+            queued_buffers.append((weakref.ref(queued), queued.ctypes.data))
+            expected[-1] = rgb.copy()
+            frame[:] = 0  # Reusing the producer buffer cannot change queued RGB.
+            del queued
+            encoder._episode_active = False  # No background worker was started.
+        else:
+            q.put(frame)
     q.put(None)
     original_get = q.get
 
@@ -193,6 +217,11 @@ def test_worker_opens_actual_context_before_dequeue_without_dummy_frames(monkeyp
         for frame, rgb in zip(encoded, expected, strict=True):
             assert frame.format.name == "rgb24"
             np.testing.assert_array_equal(frame.to_ndarray(format="rgb24"), rgb)
+    if layout == "queued_hwc":
+        gc.collect()
+        for video_frame, (backing, address) in zip(encoded, queued_buffers, strict=True):
+            assert backing() is not None  # Fake encoder retains AV frames after run().
+            assert video_frame.planes[0].buffer_ptr == address
     status, stats = result.get_nowait()
     assert status == "ok"
     assert stats["count"].item() == 160  # Exactly two real 8x10 frames.
@@ -276,3 +305,70 @@ def test_real_dataset_writer_keeps_frame0_camera_action_alignment(encoder, tmp_p
     for key in keys:
         np.testing.assert_array_equal(encoder._frame_queues[key].get_nowait(), real[key])
     encoder.cancel_episode()
+
+
+def test_rgb_frame_shares_storage_and_keeps_numpy_alive():
+    array = np.full((8, 10, 3), 47, dtype=np.uint8)
+    backing = weakref.ref(array)
+    frame = prep._rgb_video_frame(array)
+    assert frame.planes[0].buffer_ptr == array.ctypes.data
+    array[0, 0] = [5, 11, 23]
+    np.testing.assert_array_equal(frame.to_ndarray(format="rgb24")[0, 0], [5, 11, 23])
+    del array
+    gc.collect()
+    assert backing() is not None
+    np.testing.assert_array_equal(frame.to_ndarray(format="rgb24")[0, 0], [5, 11, 23])
+    del frame
+    gc.collect()
+    assert backing() is None
+
+
+@pytest.mark.parametrize("layout", ["strided", "chw_transposed", "negative_stride"])
+def test_rgb_frame_falls_back_for_unpacked_layout(monkeypatch, layout):
+    array = np.arange(8 * 10 * 3, dtype=np.uint8).reshape(8, 10, 3)
+    if layout == "strided":
+        array = array[:, ::2]
+    elif layout == "chw_transposed":
+        array = array.transpose(2, 0, 1).copy().transpose(1, 2, 0)
+    else:
+        array = array[::-1]
+    assert not array.flags.c_contiguous
+    real_from_ndarray = prep.av.VideoFrame.from_ndarray
+
+    def reject_buffer(*args, **kwargs):
+        raise AssertionError("Unpacked layout must use copying constructor")
+
+    monkeypatch.setattr(
+        prep.av,
+        "VideoFrame",
+        SimpleNamespace(
+            from_numpy_buffer=reject_buffer,
+            from_ndarray=real_from_ndarray,
+        ),
+    )
+    frame = prep._rgb_video_frame(array)
+    np.testing.assert_array_equal(frame.to_ndarray(format="rgb24"), array)
+    assert frame.planes[0].buffer_ptr != array.ctypes.data
+
+
+def test_rgb_frame_supports_pyav_without_buffer_api(monkeypatch):
+    array = np.full((8, 10, 3), 29, np.uint8)
+    monkeypatch.setattr(
+        prep.av,
+        "VideoFrame",
+        SimpleNamespace(
+            from_ndarray=prep.av.VideoFrame.from_ndarray,
+        ),
+    )
+    frame = prep._rgb_video_frame(array)
+    np.testing.assert_array_equal(frame.to_ndarray(format="rgb24"), array)
+    assert frame.planes[0].buffer_ptr != array.ctypes.data
+
+
+def test_rgb_frame_does_not_hide_buffer_constructor_errors(monkeypatch):
+    def fail(*args, **kwargs):
+        raise MemoryError("allocation failed")
+
+    monkeypatch.setattr(prep.av, "VideoFrame", SimpleNamespace(from_numpy_buffer=fail))
+    with pytest.raises(MemoryError, match="allocation failed"):
+        prep._rgb_video_frame(np.zeros((8, 10, 3), np.uint8))

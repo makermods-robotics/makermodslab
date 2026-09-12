@@ -50,6 +50,28 @@ def image_dimensions(image):
     return int(shape[1]), int(shape[0])
 
 
+def _rgb_video_frame(frame_data):
+    """Wrap a worker-owned RGB buffer when PyAV supports its packed layout.
+
+    feed_frame already copies producer buffers. PyAV retains this array through
+    VideoFrame._np_buffer; FFmpeg's avcodec_send_frame owns a reference or copies
+    non-reference-counted input before returning, including delayed encoders.
+    This skips only RGB frame construction's copy, not codec/reformat copies.
+    """
+    from_buffer = getattr(av.VideoFrame, "from_numpy_buffer", None)
+    if (
+        from_buffer is not None
+        and isinstance(frame_data, np.ndarray)
+        and frame_data.dtype == np.uint8
+        and frame_data.ndim == 3
+        and frame_data.shape[2] == 3
+        and frame_data.flags.c_contiguous
+        and frame_data.strides == (frame_data.shape[1] * 3, 3, 1)
+    ):
+        return from_buffer(frame_data, format="rgb24")
+    return av.VideoFrame.from_ndarray(frame_data, format="rgb24")
+
+
 class _PreparedCameraEncoder(_CameraEncoderThread):
     def __init__(self, *, dimensions, **kwargs):
         super().__init__(**kwargs)
@@ -95,7 +117,7 @@ class _PreparedCameraEncoder(_CameraEncoderThread):
                 if image_dimensions(frame_data) != self.dimensions:
                     raise ValueError("Camera dimensions changed after episode preparation")
                 if not self.is_depth:
-                    video_frame = av.VideoFrame.from_ndarray(frame_data, format="rgb24")
+                    video_frame = _rgb_video_frame(frame_data)
                 else:
                     video_frame = quantize_depth(
                         frame_data,
