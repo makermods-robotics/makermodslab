@@ -1,0 +1,81 @@
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Runs the makermodslab-sdk suite (sdk/tests) — modeled on tests.yml.
+#
+# DELIBERATELY path-filtered to sdk/**: backend PRs land freely and the SDK
+# catches up progressively (its parity ratchets then name the drift on the
+# next SDK-touching change). The suite still needs the full server installed:
+# its e2e tests run the SDK against the real FastAPI app in-process, and the
+# parity tests import the server's request models.
+name: SDK Tests
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+      - staging
+    paths:
+      - "sdk/**"
+      - ".github/workflows/sdk_tests.yml"
+  push:
+    branches:
+      - main
+      - staging
+    paths:
+      - "sdk/**"
+      - ".github/workflows/sdk_tests.yml"
+
+env:
+  PYTHON_VERSION: "3.12"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: SDK Pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+          lfs: true
+
+      # lerobot is a transitive dep of the SERVER (which the SDK suite imports
+      # for its in-process e2e harness) and needs these native libs at
+      # install / import time. List taken from tests.yml.
+      - name: Install apt dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y build-essential git \
+          curl libglib2.0-0 libegl1-mesa-dev ffmpeg \
+          libusb-1.0-0-dev speech-dispatcher libgeos-dev portaudio19-dev
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install MakerMods Lab + SDK
+        run: |
+          pip install -e ".[test]"
+          pip install -e "./sdk[realtime]"
+
+      - name: Run SDK pytest
+        run: pytest sdk/tests -vv --maxfail=10
