@@ -378,8 +378,14 @@ def _probe_sync(ports: list[str], arm_type: str = "maker") -> dict:
         if port.startswith("gs_usb:"):
             from .gs_usb_transport import probe_maker
 
+            # The gs_usb probe is a RobStride fault query, so it can only find a
+            # follower of a family whose probe protocol is RobStride (the Maker
+            # arm today); a Damiao follower on such an adapter stays unknown.
+            speaks_robstride = (
+                arm_registry.get(normalize_arm_type(arm_type)).follower_probe_protocol == "robstride"
+            )
             try:
-                found_usb = normalize_arm_type(arm_type) == "maker" and probe_maker(port)
+                found_usb = speaks_robstride and probe_maker(port)
             except Exception as exc:
                 logger.debug("gs_usb motor probe failed for %s: %s", port, exc)
                 found_usb = False
