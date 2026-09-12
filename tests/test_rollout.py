@@ -787,7 +787,7 @@ def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp
     cmd = captured["cmd"]
     assert "--return_to_initial_position=true" in cmd
     # Sanity: the core rollout invocation is intact around our pinned flag.
-    assert "lerobot.scripts.lerobot_rollout" in cmd
+    assert "makermodslab.maker_rollout" in cmd
     assert "--strategy.type=base" in cmd
 
 
@@ -979,7 +979,7 @@ def test_build_rollout_cmd_wraps_robot_args_with_shared_flags() -> None:
 
     robot_args = ["--robot.type=so101_follower", "--robot.port=/dev/ttyUSB0"]
     cmd = _build_rollout_cmd(_stub_request(), "/local/pretrained_model", robot_args)
-    assert "lerobot.scripts.lerobot_rollout" in cmd
+    assert "makermodslab.maker_rollout" in cmd
     assert "--strategy.type=base" in cmd
     assert "--policy.path=/local/pretrained_model" in cmd
     assert "--robot.type=so101_follower" in cmd
@@ -2998,7 +2998,7 @@ def test_eval_runner_and_rollout_argv_share_every_flag() -> None:
     rollout_cmd = _build_rollout_cmd(request, *args)
     runner_cmd = _build_eval_runner_cmd(request, *args)
 
-    assert rollout_cmd[1:3] == ["-m", "lerobot.scripts.lerobot_rollout"]
+    assert rollout_cmd[1:3] == ["-m", "makermodslab.maker_rollout"]
     assert runner_cmd[1:3] == ["-m", "makermodslab.eval_runner"]
     assert rollout_cmd[3:] == runner_cmd[3:]
     assert "--return_to_initial_position=true" in runner_cmd
@@ -3115,7 +3115,7 @@ def test_single_episode_start_still_spawns_lerobot_rollout(monkeypatch, tmp_path
     monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
 
     assert rollout.handle_start_inference(_eval_request(1))["success"] is True
-    assert captured["cmd"][1:3] == ["-m", "lerobot.scripts.lerobot_rollout"]
+    assert captured["cmd"][1:3] == ["-m", "makermodslab.maker_rollout"]
     assert captured["stdin"].closed is True
     assert rollout._eval_session is None
 

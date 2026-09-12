@@ -2210,7 +2210,7 @@ def _build_rollout_cmd(request: InferenceRequest, policy_path: str, robot_args: 
     return [
         sys.executable,
         "-m",
-        "lerobot.scripts.lerobot_rollout",
+        "makermodslab.maker_rollout",
         *_rollout_cli_args(request, policy_path, robot_args),
     ]
 

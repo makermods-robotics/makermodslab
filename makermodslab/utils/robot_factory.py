@@ -80,6 +80,7 @@ from lerobot.teleoperators.rebot_102_leader.config_rebot_102_leader_metal import
 from lerobot.teleoperators.so_leader import SO101LeaderConfig  # noqa: F401
 
 from ..arms import MAKER, METAL, registry as arm_registry
+from ..maker_can import install as _install_maker_can
 from .config import (
     bimanual_base_id,
     normalize_arm_type,
@@ -90,6 +91,8 @@ from .config import (
     stage_bimanual_follower_calibrations,
     stage_bimanual_leader_calibrations,
 )
+
+_install_maker_can()
 
 
 def request_arm_type(request) -> str:

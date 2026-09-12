@@ -384,7 +384,7 @@ const DeviceSlotCell = ({
             return (
               <SelectItem key={p} value={p}>
                 <span className="flex items-center gap-2 font-mono text-xs">
-                  {p}
+                  {p.startsWith("gs_usb:") ? `gs_usb · ${p.slice(7)}` : p}
                   {/* Naming the holder beats a bare "in use": on a bimanual
                       rig there are three other slots it could be, and picking
                       this port takes it off whichever one is named. */}
@@ -1339,7 +1339,11 @@ const RobotConfigWindow = ({
           releasedLabel: conflictingField
             ? portFieldLabel(conflictingField)
             : null,
-          swapPort: conflictingField && currentPort ? currentPort : null,
+          swapPort:
+            conflictingField && currentPort &&
+            !(currentPort.startsWith("gs_usb:") && conflictingField.includes("leader"))
+              ? currentPort
+              : null,
         });
       } else {
         toast({
@@ -1449,7 +1453,10 @@ const RobotConfigWindow = ({
         targetLabel: portFieldLabel(field),
         releasedField: conflictingField,
         releasedLabel: portFieldLabel(conflictingField),
-        swapPort: currentPort || null,
+        swapPort:
+          currentPort.startsWith("gs_usb:") && conflictingField.includes("leader")
+            ? null
+            : currentPort || null,
       });
       return;
     }
@@ -3306,7 +3313,10 @@ const RobotConfigWindow = ({
                         port={draftPort(slot.portField)}
                         portDetected={slotPortDetected(slot)}
                         configured={!!(robot?.[slot.cfgField] as string)}
-                        availablePorts={availablePorts}
+                        availablePorts={availablePorts.filter(
+                          (p) => !p.startsWith("gs_usb:") ||
+                            (armType === "maker" && slot.device === "robot"),
+                        )}
                         heldByLabel={(p) => {
                           const holder = portFields.find(
                             (f) => f !== slot.portField && draftPort(f) === p,
