@@ -49,6 +49,7 @@ __all__ = [
     "AvailablePortsResponse",
     "CameraInfo",
     "ExtraStatus",
+    "WandbCredentialsStatus",
     "HealthCapabilities",
     "HealthResponse",
     "HfAuthStatusResponse",
@@ -360,3 +361,10 @@ class ArmFamiliesResponse(BaseModel):
     default family first."""
 
     arms: list[ArmFamilyInfo]
+
+
+class WandbCredentialsStatus(BaseModel):
+    """Public credential availability; never contains the API key."""
+
+    available: bool
+    login_hint: str

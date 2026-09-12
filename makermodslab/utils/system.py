@@ -54,16 +54,13 @@ def open_folder_in_file_browser(path: str) -> None:
         raise OSError(f"Opening a folder is not supported on this platform: {system!r}")
 
 
-# accelerate and wandb are only ever consumed by training SUBPROCESSES (fresh
-# processes that see new installs immediately) — nothing needs them imported
+# accelerate is only ever consumed by training SUBPROCESSES (fresh
+# processes that see new installs immediately) — nothing needs it imported
 # into this server process. So availability is probed live per request via
 # ``_extra_available`` (mirroring ``handle_get_policy_extra``), never cached at
 # import. A just-installed package becomes available without a server restart.
 TRAINING_PROBE_MODULE: str = "accelerate"
 TRAINING_INSTALL_HINT: str = "pip install accelerate"
-
-WANDB_PROBE_MODULE: str = "wandb"
-WANDB_INSTALL_HINT: str = "pip install wandb"
 
 
 def _extra_available(module: str) -> bool:
@@ -233,7 +230,6 @@ class InstallManager:
 
 
 training_install_manager = InstallManager("accelerate")
-wandb_install_manager = InstallManager("wandb")
 # The LiveKit Portal lerobot plugins (remote teleoperation / inference) —
 # the packages of pyproject's `remote` extra, installed BY NAME. Not
 # `makermodslab[remote]`: a bare package name makes uv treat the lerobot git
@@ -286,21 +282,6 @@ def handle_install_remote_extra() -> dict[str, Any]:
 
 def handle_install_remote_extra_status() -> dict[str, Any]:
     return remote_install_manager.get_status()
-
-
-def handle_get_wandb_extra() -> dict[str, Any]:
-    return {
-        "available": _extra_available(WANDB_PROBE_MODULE),
-        "install_hint": WANDB_INSTALL_HINT,
-    }
-
-
-def handle_install_wandb_extra() -> dict[str, Any]:
-    return wandb_install_manager.start()
-
-
-def handle_install_wandb_extra_status() -> dict[str, Any]:
-    return wandb_install_manager.get_status()
 
 
 # --------------------------------------------------------------------------- #
@@ -742,9 +723,9 @@ def install_in_progress() -> str | None:
 
     A restart guard: re-exec would orphan the pip subprocess mid-write and
     leave a half-installed site-packages, so the restart route refuses while
-    any install (training/wandb/policy extras) is running.
+    any install (training/policy extras) is running.
     """
-    managers = [training_install_manager, wandb_install_manager, *_policy_install_managers.values()]
+    managers = [training_install_manager, *_policy_install_managers.values()]
     for mgr in managers:
         if mgr.state == "installing":
             return mgr.package

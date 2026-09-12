@@ -185,6 +185,13 @@ from .rollout import (
     handle_stop_episode,
     handle_stop_inference,
 )
+
+# Training is now job-based; see app/jobs.py.
+from .runners.hf_cloud import (
+    WANDB_KEY_MISSING_MESSAGE,
+    handle_get_wandb_credentials,
+    resolve_wandb_api_key,
+)
 from .schemas.datasets import (
     DatasetHubSettingsResponse,
     DatasetHubStatusResponse,
@@ -283,6 +290,7 @@ from .schemas.system import (
     SupplyVoltageResponse,
     UpdateResult,
     UpdateStatus,
+    WandbCredentialsStatus,
 )
 from .sessions import (
     handle_coaching_command_for_session,
@@ -302,9 +310,7 @@ from .teleoperate import (
     handle_teleoperation_status,
     stop_and_wait as stop_teleoperation_and_wait,
 )
-
-# Training is now job-based; see app/jobs.py.
-from .train import TrainingRequest
+from .train import TrainingRequest, wandb_requires_online_credentials
 from .update import handle_run_update, handle_update_check
 from .utils.config import (
     HOME_IS_OVERRIDDEN,
@@ -352,15 +358,12 @@ from .utils.system import (
     handle_get_policy_extra,
     handle_get_remote_extra,
     handle_get_training_extra,
-    handle_get_wandb_extra,
     handle_install_policy_extra,
     handle_install_policy_extra_status,
     handle_install_remote_extra,
     handle_install_remote_extra_status,
     handle_install_training_extra,
     handle_install_training_extra_status,
-    handle_install_wandb_extra,
-    handle_install_wandb_extra_status,
     install_in_progress,
     open_folder_in_file_browser,
     probe_gpu,
@@ -2803,6 +2806,28 @@ async def create_training_job(req: Request):
                     "fetch it, or record/obtain the dataset locally first."
                 ),
             )
+
+    # W&B credentials, the FAST half (MT40). Online logging needs a key on
+    # its execution host. A LAN peer validates its own key; a cloud job gets
+    # ours forwarded as a job secret, and a local trainer is a subprocess that
+    # can't prompt for a login. Refuse here, before anything is uploaded,
+    # submitted or spawned.
+    #
+    # Fast half only, and for the same reason as the resume-steps guard above:
+    # it reads the REQUEST's `wandb_enable`, which on a resume is not the
+    # authority — JobRegistry.start overwrites it with the parent run's value
+    # (a continuation always re-opens the parent's W&B run). So resumes are
+    # skipped here and re-asked there, once the inherited value is known; that
+    # check is the authority and raises ValueError -> the 400 below.
+    if (
+        runner != "lan_node"
+        and not cfg.resume
+        and wandb_requires_online_credentials(cfg)
+        and not resolve_wandb_api_key()
+    ):
+        logger.warning("Rejecting run: W&B enabled but no API key resolvable on this host.")
+        raise HTTPException(status_code=400, detail=WANDB_KEY_MISSING_MESSAGE)
+
     try:
         # Off the event loop: start()'s remote preflight makes real network
         # calls (hub status, the emptiness probe, lan_node peer verification),
@@ -4022,22 +4047,19 @@ def install_training_extra_status():
     return handle_install_training_extra_status()
 
 
-@router.get("/system/wandb-extra", response_model=ExtraStatus, tags=["system"])
-def get_wandb_extra():
-    """Return whether the `wandb` package is importable in this MakerMods Lab process."""
-    return handle_get_wandb_extra()
+@v1_router.get("/system/wandb-credentials", response_model=WandbCredentialsStatus, tags=["system"])
+def get_wandb_credentials():
+    """Whether a Weights & Biases API key is resolvable on this host.
 
+    Powers the training form's W&B preflight: the Start button reflects a
+    missing key BEFORE the click, rather than the launch 400ing on it. There
+    is deliberately no install endpoint beside this one — wandb the package is
+    a transitive dependency of the pinned lerobot, so the only thing that can
+    actually be missing is the credential.
 
-@router.post("/system/wandb-extra/install", response_model=InstallStartResponse, tags=["system"])
-def install_wandb_extra():
-    """Spawn `pip install wandb` as a background subprocess. No-op if already running."""
-    return handle_install_wandb_extra()
-
-
-@router.get("/system/wandb-extra/install-status", response_model=InstallStatusResponse, tags=["system"])
-def install_wandb_extra_status():
-    """Return current wandb install state plus any pending log lines (drained on read)."""
-    return handle_install_wandb_extra_status()
+    Returns `{"available": bool, "login_hint": str}` and never the key itself.
+    """
+    return handle_get_wandb_credentials()
 
 
 @router.get("/system/policy-extra/{policy_type}", response_model=PolicyExtraStatus, tags=["system"])

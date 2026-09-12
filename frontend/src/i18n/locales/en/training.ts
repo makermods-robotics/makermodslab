@@ -255,6 +255,7 @@ export default {
     runNameHint: "Optional — shown on the job card and searchable.",
     wandbEnable: "Log to Weights & Biases",
     wandbProject: "W&B project name",
+    wandbEntityHint: "Your W&B username, or a team you belong to. Leave blank to use your default entity.",
     wandbEntity: "W&B entity (optional)",
     wandbNotes: "W&B notes (optional)",
     wandbNotesPlaceholder: "Training run notes...",

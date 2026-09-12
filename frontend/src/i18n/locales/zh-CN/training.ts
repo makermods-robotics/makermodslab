@@ -194,6 +194,7 @@ export default {
     runNameHint: "可选 —— 会显示在任务卡片上，并可被搜索。",
     wandbEnable: "记录到 Weights & Biases",
     wandbProject: "W&B 项目名称",
+    wandbEntityHint: "你的 W&B 用户名或你所属的团队；留空以使用默认实体。",
     wandbEntity: "W&B 实体（可选）",
     wandbNotes: "W&B 备注（可选）",
     wandbNotesPlaceholder: "本次训练的备注…",

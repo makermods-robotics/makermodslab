@@ -140,8 +140,6 @@ LEGACY_ROUTES: frozenset[str] = frozenset(
         "GET /system/training-extra",
         "GET /system/training-extra/install-status",
         "GET /system/update-check",
-        "GET /system/wandb-extra",
-        "GET /system/wandb-extra/install-status",
         "GET /teleoperation-status",
         "GET /upload-status",
         "POST /calibration-configs/{device_type}/upload",
@@ -195,7 +193,6 @@ LEGACY_ROUTES: frozenset[str] = frozenset(
         "POST /system/policy-extra/{policy_type}/install",
         "POST /system/training-extra/install",
         "POST /system/update",
-        "POST /system/wandb-extra/install",
         "POST /upload-dataset",
         "POST /wiggle",
         "WS /ws/joint-data",
@@ -221,6 +218,7 @@ def test_no_new_routes_outside_api_v1():
 # checks every entry actually exists so retired surface can't linger.
 V1_ONLY_ROUTES: frozenset[str] = frozenset(
     [
+        "GET /api/v1/system/wandb-credentials",
         # Live Metal gripper effort-controller status.
         "GET /api/v1/robots/{name}/gripper-status",
         "GET /api/v1/recording-preview/{camera_name}",

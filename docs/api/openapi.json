@@ -7760,7 +7760,7 @@
             "type": "boolean"
           },
           "wandb_disable_artifact": {
-            "default": false,
+            "default": true,
             "title": "Wandb Disable Artifact",
             "type": "boolean"
           },
@@ -8083,6 +8083,25 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "WandbCredentialsStatus": {
+        "description": "Public credential availability; never contains the API key.",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "login_hint": {
+            "title": "Login Hint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "available",
+          "login_hint"
+        ],
+        "title": "WandbCredentialsStatus",
         "type": "object"
       },
       "WiggleRequest": {
@@ -14048,67 +14067,23 @@
         ]
       }
     },
-    "/api/v1/system/wandb-extra": {
+    "/api/v1/system/wandb-credentials": {
       "get": {
-        "description": "Return whether the `wandb` package is importable in this MakerMods Lab process.",
-        "operationId": "get_wandb_extra",
+        "description": "Whether a Weights & Biases API key is resolvable on this host.\n\nPowers the training form's W&B preflight: the Start button reflects a\nmissing key BEFORE the click, rather than the launch 400ing on it. There\nis deliberately no install endpoint beside this one — wandb the package is\na transitive dependency of the pinned lerobot, so the only thing that can\nactually be missing is the credential.\n\nReturns `{\"available\": bool, \"login_hint\": str}` and never the key itself.",
+        "operationId": "get_wandb_credentials",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ExtraStatus"
+                  "$ref": "#/components/schemas/WandbCredentialsStatus"
                 }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Get Wandb Extra",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/system/wandb-extra/install": {
-      "post": {
-        "description": "Spawn `pip install wandb` as a background subprocess. No-op if already running.",
-        "operationId": "install_wandb_extra",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/InstallStartResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Install Wandb Extra",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/system/wandb-extra/install-status": {
-      "get": {
-        "description": "Return current wandb install state plus any pending log lines (drained on read).",
-        "operationId": "install_wandb_extra_status",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/InstallStatusResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Install Wandb Extra Status",
+        "summary": "Get Wandb Credentials",
         "tags": [
           "system"
         ]
@@ -18057,72 +18032,6 @@
           }
         },
         "summary": "Update Check",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/system/wandb-extra": {
-      "get": {
-        "description": "Return whether the `wandb` package is importable in this MakerMods Lab process.",
-        "operationId": "get_wandb_extra_system_wandb_extra_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ExtraStatus"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Wandb Extra",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/system/wandb-extra/install": {
-      "post": {
-        "description": "Spawn `pip install wandb` as a background subprocess. No-op if already running.",
-        "operationId": "install_wandb_extra_system_wandb_extra_install_post",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/InstallStartResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Install Wandb Extra",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/system/wandb-extra/install-status": {
-      "get": {
-        "description": "Return current wandb install state plus any pending log lines (drained on read).",
-        "operationId": "install_wandb_extra_status_system_wandb_extra_install_status_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/InstallStatusResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Install Wandb Extra Status",
         "tags": [
           "system"
         ]
