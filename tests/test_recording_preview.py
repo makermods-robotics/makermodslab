@@ -151,7 +151,10 @@ def test_concurrent_viewers_share_encode_without_blocking_publish(monkeypatch):
         assert entered.wait(2)
         second = pool.submit(preview.jpeg, "wrist")
         # Control publication can proceed while HTTP encoding is in flight.
-        assert pool.submit(preview.publish, {}).result(timeout=2) is False
+        now[0] += 0.2
+        pending_frame = preview._cameras["wrist"]["frame"]
+        assert pool.submit(preview.publish, {"wrist": np.ones((8, 8, 3), np.uint8)}).result(timeout=2)
+        assert preview._cameras["wrist"]["frame"] is pending_frame
         release.set()
         assert first.result(timeout=2) == second.result(timeout=2) == b"shared"
     assert preview.jpeg("wrist") == b"shared"
@@ -185,15 +188,63 @@ def test_stop_restart_discards_inflight_jpeg(monkeypatch):
     assert preview.jpeg("wrist") is None
 
 
-def test_failed_encode_releases_single_flight_lock(monkeypatch):
+@pytest.mark.parametrize("failure", [None, RuntimeError("codec unavailable")])
+def test_failed_encode_releases_single_flight_lock(monkeypatch, failure):
+    now = [1.0]
+    monkeypatch.setattr(previews.time, "monotonic", lambda: now[0])
     preview = previews.RecordingPreview()
     preview.start()
     preview.jpeg("wrist")
     preview.publish({"wrist": np.zeros((8, 8, 3), np.uint8)})
-    encode = Mock(side_effect=[RuntimeError("codec unavailable"), b"recovered"])
+    encode = Mock(side_effect=[failure, b"recovered"])
     monkeypatch.setattr(preview, "_encode", encode)
-    with pytest.raises(RuntimeError, match="codec unavailable"):
-        preview.jpeg("wrist")
+    if failure is None:
+        assert preview.jpeg("wrist") is None
+    else:
+        with pytest.raises(RuntimeError, match="codec unavailable"):
+            preview.jpeg("wrist")
+    assert preview.jpeg("wrist") is None  # Failed raw snapshot was discarded.
+    now[0] += 0.2
+    preview.publish({"wrist": np.ones((8, 8, 3), np.uint8)})
     with ThreadPoolExecutor(max_workers=1) as pool:
         assert pool.submit(preview.jpeg, "wrist").result(timeout=2) == b"recovered"
     assert encode.call_count == 2
+
+
+def test_pending_snapshot_is_copied_once_until_consumed_per_camera(monkeypatch):
+    now = [1.0]
+    monkeypatch.setattr(previews.time, "monotonic", lambda: now[0])
+    preview = previews.RecordingPreview()
+    preview.start()
+    copies = []
+
+    class TrackedFrame(np.ndarray):
+        def copy(self):
+            copies.append(int(self[0, 0, 0]))
+            return super().copy()
+
+    source = np.full((8, 8, 3), 7, np.uint8).view(TrackedFrame)
+    preview.jpeg("left")
+    preview.jpeg("right")
+    preview.publish({"left": source, "right": source})
+    source[:] = 19  # Producer reuse must not alter either pending snapshot.
+    for _ in range(4):
+        now[0] += 0.2
+        assert preview.publish({"left": source, "right": source})  # Joint ticks continue.
+    assert copies == [7, 7]
+    pixels = []
+
+    def encode(frame):
+        pixels.append(int(frame[0, 0, 0]))
+        return bytes([pixels[-1]])
+
+    monkeypatch.setattr(preview, "_encode", encode)
+    assert preview.jpeg("left") == bytes([7])
+    assert preview.jpeg("left") == bytes([7])
+    assert pixels == [7]  # Shared cached result, no second encode.
+    now[0] += 0.2
+    preview.publish({"left": source, "right": source})
+    assert copies == [7, 7, 19]  # Right's unconsumed frame is still retained.
+    assert preview.jpeg("right") == bytes([7])
+    assert preview.jpeg("left") == bytes([19])
+    assert pixels == [7, 7, 19]

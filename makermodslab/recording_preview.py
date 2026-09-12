@@ -53,6 +53,10 @@ class RecordingPreview:
                 return False
             self._last_sample = now
             for name, camera in self._cameras.items():
+                # Keep one snapshot until HTTP encoding consumes it. Replacing
+                # pending frames would copy pixels no viewer ever sees.
+                if camera["frame"] is not None:
+                    continue
                 frame = observation.get(name)
                 camera["frame"] = (
                     frame.copy()
@@ -84,12 +88,21 @@ class RecordingPreview:
                 frame = camera["frame"]
             if frame is None:
                 return None
-            encoded = self._encode(frame)
+            try:
+                encoded = self._encode(frame)
+            except Exception:
+                # Drop a failed snapshot so a later sample can recover. Keep
+                # the error visible and let the per-camera lock release.
+                with self._lock:
+                    if camera["frame"] is frame:
+                        camera["frame"] = None
+                raise
             with self._lock:
                 if self._cameras.get(camera_name) is not camera:
                     return None
                 if camera["frame"] is frame:
                     camera["jpeg"] = encoded
+                    camera["frame"] = None  # Also free the slot if encoding returned None.
             return encoded
 
     @staticmethod
