@@ -2130,6 +2130,8 @@ def _run_record_session(
     record_loop_side_effect=None,
     connect_side_effect=None,
     teleop=None,
+    processors=None,
+    inspect_record_call=None,
 ):
     """Drive record_with_web_events with every lerobot dependency mocked so no
     real hardware, dataset, or record_loop runs. Returns the spy call log for
@@ -2164,7 +2166,7 @@ def _run_record_session(
         "lerobot.teleoperators.make_teleoperator_from_config", lambda cfg: teleop, raising=False
     )
     monkeypatch.setattr(
-        "lerobot.processor.make_default_processors", lambda: (None, None, None), raising=False
+        "lerobot.processor.make_default_processors", lambda: processors or (None, None, None), raising=False
     )
     monkeypatch.setattr(
         "lerobot.utils.feature_utils.hw_to_dataset_features", lambda *a, **k: {}, raising=False
@@ -2172,6 +2174,8 @@ def _run_record_session(
     monkeypatch.setattr("lerobot.utils.utils.log_say", lambda *a, **k: None, raising=False)
 
     def _fake_record_loop(*args, **kwargs):
+        if inspect_record_call is not None:
+            inspect_record_call(kwargs)
         if raise_in_loop:
             raise RuntimeError("bus died mid-episode")
         events = kwargs.get("events")
@@ -2217,6 +2221,8 @@ def _run_record_session(
             connect_side_effect(next(connect_attempts))
 
         robot.connect = _connect  # type: ignore[attr-defined]
+    if not hasattr(robot, "get_observation"):
+        robot.get_observation = lambda: {}  # type: ignore[attr-defined]
     robot.name = "so101"  # type: ignore[attr-defined]
     robot.cameras = {}  # type: ignore[attr-defined]
     robot.action_features = {}  # type: ignore[attr-defined]
@@ -4207,3 +4213,54 @@ def test_task_workflow_prepares_only_after_description_and_before_timer(monkeypa
     )
     assert calls == (["task", "prepare", "capture"] if prepare_result else ["task", "prepare"])
     assert dataset.save_episode.call_count == int(prepare_result)
+
+
+@pytest.mark.parametrize("raise_in_loop", [False, True])
+def test_record_session_keeps_default_processors_and_readonly_tap(
+    monkeypatch, tmp_lerobot_home, raise_in_loop
+):
+    from unittest.mock import Mock
+
+    import numpy as np
+
+    from lerobot.processor import make_default_processors
+    from makermodslab import record
+
+    monkeypatch.setattr(
+        "makermodslab.utils.robot_factory.setup_calibration_files",
+        lambda *args, **kwargs: ("leader", "follower"),
+    )
+    processors = make_default_processors()
+    robot = _RecRobot(_RecReturnBus())
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+    image.flags.writeable = False
+    observation = {"wrist": image}
+    original_read = Mock(return_value=observation)
+    robot.get_observation = original_read
+    publish = Mock()
+    monkeypatch.setattr(record, "observation_tap", lambda *args: publish)
+    calls = []
+
+    def inspect(kwargs):
+        calls.append(kwargs)
+        assert kwargs["teleop_action_processor"] is processors[0]
+        assert kwargs["robot_action_processor"] is processors[1]
+        assert kwargs["robot_observation_processor"] is processors[2]
+        # The ACTUAL Lab recording entrypoint must pass the untouched default
+        # pipeline, preserving eligibility for dependency ownership checks.
+        assert kwargs["robot"].get_observation() is observation
+        assert processors[2](observation)["wrist"] is image
+        np.testing.assert_array_equal(image, 0)
+
+    _, _, error, _ = _run_record_session(
+        monkeypatch,
+        robot,
+        processors=processors,
+        inspect_record_call=inspect,
+        raise_in_loop=raise_in_loop,
+    )
+    assert bool(error) == raise_in_loop
+    assert len(calls) == 1
+    publish.assert_called_once_with(observation)
+    original_read.assert_called_once_with()
+    assert robot.get_observation is original_read
