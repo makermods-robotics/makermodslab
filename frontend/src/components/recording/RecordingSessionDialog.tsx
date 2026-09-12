@@ -728,8 +728,14 @@ const RecordingSessionDialog: React.FC<{
 
   // Leave the frozen outcome banner for the launchpad handoff — same `recorded`
   // payload the auto-exit builds, on the user's own click. The handoff banner
-  // handles the zero-saved case (discarded_empty → "nothing was saved").
-  const continueToUpload = useCallback(() => {
+  // handles the zero-saved case (discarded_empty → "nothing was saved"). For
+  // an errored/warned session this is now the ONLY path off the ended screen
+  // when something was saved: it opens the dataset viewer in Finalize mode
+  // (CollectPanel), where keeping vs. discarding is a per-episode checkbox
+  // choice instead of a blind "keep everything" / "discard everything"
+  // fork — deleting every episode there falls back to deleting the whole
+  // dataset, so nothing is lost by dropping the old dedicated discard button.
+  const reviewAndFinalize = useCallback(() => {
     if (!backendStatus) return;
     onExitRef.current({
       repo_id:
@@ -738,26 +744,6 @@ const RecordingSessionDialog: React.FC<{
       discarded_empty: backendStatus.discarded_empty || false,
     });
   }, [backendStatus, recordingConfig]);
-
-  // "Discard & exit" from an ENDED failed/warning session that kept episodes on
-  // disk: the session is already over (no active-session stop to issue), so
-  // delete the dataset directory outright, then close.
-  const discardAndExit = useCallback(async () => {
-    const repoId =
-      backendStatus?.dataset_repo_id || recordingConfig?.dataset_repo_id;
-    if (repoId) {
-      try {
-        await fetchWithHeaders(`${baseUrl}/api/v1/delete-dataset`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dataset_repo_id: repoId }),
-        });
-      } catch {
-        /* best-effort — we're leaving regardless */
-      }
-    }
-    onExitRef.current();
-  }, [backendStatus, recordingConfig, baseUrl, fetchWithHeaders]);
 
   // Re-record is keyboard-driven on DELETE (and Backspace, for keyboards/
   // muscle memory where Delete sends Backspace — explicit user request; the
@@ -1198,34 +1184,20 @@ const RecordingSessionDialog: React.FC<{
                       </pre>
                     )}
                     <div className="mt-4 flex flex-col gap-2">
-                      {/* Keep the saved episodes — hidden when nothing was saved
-                          (discarded_empty) since there's no dataset to upload. */}
-                      {keptSomething && (
-                        <Button
-                          onClick={continueToUpload}
-                          className="w-full font-semibold"
-                        >
-                          {t("recording.session.button.keepEpisodes")}
-                        </Button>
-                      )}
-                      {/* Discard the kept episodes and leave (quit path from an
-                          already-ended session). Only when there's something to
-                          discard. */}
-                      {keptSomething && (
-                        <Button
-                          onClick={discardAndExit}
-                          variant="outline"
-                          className="w-full border-red-500/50 text-red-600 dark:text-red-300 hover:bg-red-500/10"
-                        >
-                          {t("recording.session.button.discardExit")}
-                        </Button>
-                      )}
+                      {/* The only path off this screen. When something was
+                          saved, this opens the Finalize review, where
+                          keep/delete is a per-episode choice instead of a
+                          blind all-or-nothing fork. When nothing was saved
+                          (discarded_empty), the SAME handler's payload takes
+                          this straight to the empty-handoff banner instead —
+                          there's nothing to review. */}
                       <Button
-                        onClick={() => onExitRef.current()}
-                        variant="ghost"
-                        className="w-full text-muted-foreground hover:text-foreground hover:bg-muted"
+                        onClick={reviewAndFinalize}
+                        className="w-full font-semibold"
                       >
-                        {t("recording.session.button.backHome")}
+                        {keptSomething
+                          ? t("recording.session.button.reviewAndFinalize")
+                          : t("recording.session.button.continue")}
                       </Button>
                     </div>
                   </div>

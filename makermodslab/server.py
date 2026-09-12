@@ -203,6 +203,7 @@ from .schemas.datasets import (
     DeleteDatasetResponse,
     DownloadStartResponse,
     DownloadStatusResponse,
+    EpisodeDeleteResponse,
     EpisodeJointSeriesResponse,
     EpisodeSummary,
     ExcludedEpisodesResponse,
@@ -2070,6 +2071,25 @@ def datasets_rename(body: DatasetRenameBody):
     try:
         result = dataset_browser.rename_local_dataset(body.repo_id, body.new_name)
     except dataset_browser.DatasetRenameError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+    return {"success": True, **result}
+
+
+class EpisodeDeleteBody(BaseModel):
+    dataset_repo_id: str
+    episode_indices: list[int]
+
+
+@v1_router.post("/datasets/episode-delete", response_model=EpisodeDeleteResponse, tags=["datasets"])
+def datasets_episode_delete(body: EpisodeDeleteBody):
+    """Permanently delete one or more episodes from a local dataset (no
+    trash/undo — see delete_local_episodes). Deleting every remaining episode
+    removes the whole dataset instead (`whole_dataset_deleted: true`), since
+    lerobot refuses to produce a zero-episode dataset. Refuses (409) if the
+    dataset is being recorded, merged, uploaded, or trained on locally."""
+    try:
+        result = dataset_browser.delete_local_episodes(body.dataset_repo_id, body.episode_indices)
+    except dataset_browser.DatasetEpisodeDeleteError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from exc
     return {"success": True, **result}
 

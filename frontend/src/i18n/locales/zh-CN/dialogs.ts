@@ -36,6 +36,21 @@ export default {
     curateSaveFailedTitle: "无法保存回合选择",
     curateSaveFailedBody: "改动未保存 — 请重试。",
     finishCuratingFirst: "请先完成回合挑选",
+    deleteEpisodeAria: "删除第 {{index}} 回合",
+    deleteEpisodeTitle: "删除第 {{index}} 回合？",
+    deleteEpisodeDescription: "这会从数据集中永久移除该回合，无法撤销。",
+    deleteEpisodeDescriptionOnHub:
+      "这只会从本地副本中永久移除该回合，无法撤销 —— Hub 上的副本会保留所有回合，直到你再次上传。",
+    deleteEpisodeConfirm: "删除回合",
+    deleteEpisodeFailedTitle: "无法删除回合",
+    deleteEpisodeFailedBody: "未做任何改动 —— 请重试。",
+    deleteDatasetFailedTitle: "无法删除数据集",
+    deleteDatasetFailedBody: "未做任何改动 —— 请重试。",
+    finalizeDescription: "回顾这次录制 —— 取消勾选不想保留的回合，然后完成录制。",
+    finalize: "完成录制",
+    keepEpisodeAria: "保留第 {{index}} 回合",
+    finalizeFailedTitle: "无法完成录制",
+    finalizeFailedBody: "未上传任何内容 —— 请重试。",
   },
 
   jointChart: {

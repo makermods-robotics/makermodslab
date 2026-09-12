@@ -19,6 +19,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -37,8 +38,10 @@ from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError, LocalEntr
 
 from .sampling import SAMPLING_WEIGHT_COLUMN
 from .utils.config import (
+    get_excluded_episodes,
     get_hidden_datasets,
     get_saved_custom_datasets,
+    set_excluded_episodes,
     validate_dataset_name,
     validate_dataset_repo_id,
     with_makermodslab_tag,
@@ -2125,6 +2128,124 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
 
     logger.info("Renamed dataset directory %s -> %s (hub: %s)", src, dst, hub_state)
     return {"repo_id": new_repo_id, "hub": hub_state}
+
+
+class DatasetEpisodeDeleteError(Exception):
+    """Raised by delete_local_episodes when the delete can't proceed. `status`
+    is the HTTP status the route should return; `message` is the user-facing
+    reason."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+_EPISODE_DELETE_TMP_PREFIX = "_makermodslab_episode_delete_tmp"
+
+
+def delete_local_episodes(repo_id: str, episode_indices: list[int]) -> dict[str, Any]:
+    """Permanently delete one or more episodes from a local dataset.
+
+    Deleting SOME (but not all) episodes rewrites the dataset via lerobot's
+    ``delete_episodes`` (which re-encodes any video chunk that mixes kept and
+    deleted episodes) into a temporary directory inside the cache root, then
+    swaps it into place — mirroring how merge.py's own dataset-rewrite helpers
+    work a copy before ever touching the original. Deleting EVERY remaining
+    episode instead removes the whole directory: lerobot's ``delete_episodes``
+    refuses to produce a zero-episode dataset, and there is nothing left to
+    keep anyway. The two outcomes are reported distinctly via
+    ``whole_dataset_deleted`` so a caller (Finalize's "delete everything" path)
+    knows there is nothing left to review.
+
+    No trash/undo — this is permanent, matching ``handle_delete_dataset``.
+
+    Raises DatasetEpisodeDeleteError (with an HTTP status + message) on: a
+    malformed repo_id, a target outside the cache root, a missing dataset, an
+    empty or out-of-range index list, the dataset being actively used
+    (recording / merge / upload / local training), or a rewrite failure.
+    """
+    ok, reason = validate_dataset_repo_id(repo_id)
+    if not ok:
+        raise DatasetEpisodeDeleteError(400, reason)
+
+    root = _lerobot_cache_root().resolve()
+    try:
+        target = (root / repo_id).resolve()
+    except OSError:
+        raise DatasetEpisodeDeleteError(400, "Invalid dataset path") from None
+    if target == root or root not in target.parents:
+        raise DatasetEpisodeDeleteError(400, "Invalid dataset path")
+    if not _is_dataset_dir(target):
+        raise DatasetEpisodeDeleteError(404, f"Dataset '{repo_id}' not found in the local cache")
+
+    try:
+        info = json.loads((target / "meta" / "info.json").read_text())
+    except (OSError, ValueError) as exc:
+        raise DatasetEpisodeDeleteError(500, f"Couldn't read dataset metadata: {exc}") from exc
+    total_episodes = info.get("total_episodes")
+    if not isinstance(total_episodes, int) or total_episodes <= 0:
+        raise DatasetEpisodeDeleteError(500, "Dataset metadata has no episode count")
+
+    indices = sorted(set(episode_indices))
+    if not indices:
+        raise DatasetEpisodeDeleteError(400, "No episodes to delete")
+    if indices[0] < 0 or indices[-1] >= total_episodes:
+        raise DatasetEpisodeDeleteError(400, f"Invalid episode indices: {episode_indices}")
+
+    in_use = _dataset_in_use(repo_id)
+    if in_use is not None:
+        raise DatasetEpisodeDeleteError(409, in_use)
+
+    if len(indices) >= total_episodes:
+        # Nothing would be left to keep — remove the whole directory instead
+        # of asking lerobot to produce a dataset with zero episodes.
+        try:
+            shutil.rmtree(target)
+        except Exception as exc:
+            raise DatasetEpisodeDeleteError(500, f"Failed to delete dataset: {exc}") from exc
+        invalidate_dataset_listing_cache()
+        invalidate_hub_status(repo_id)
+        set_excluded_episodes(repo_id, [])
+        logger.info("Deleted whole dataset %s (every remaining episode was selected)", target)
+        return {"whole_dataset_deleted": True}
+
+    # lazy imports: dataset_tools pulls in the dataset-writing stack, and
+    # paying for it on every server start to serve a rarely-used feature would
+    # be pure cost (same reasoning as push_dataset_to_hub above and merge.py's
+    # _strip_features).
+    from lerobot.datasets import LeRobotDataset
+    from lerobot.datasets.dataset_tools import delete_episodes
+
+    tmp_repo_id = f"{_EPISODE_DELETE_TMP_PREFIX}_{uuid.uuid4().hex}"
+    tmp_root = root / tmp_repo_id
+    try:
+        video_backend = None if torchcodec_loads() else "pyav"
+        dataset = LeRobotDataset(repo_id, root=target, video_backend=video_backend)
+        delete_episodes(dataset, indices, output_dir=str(tmp_root), repo_id=tmp_repo_id)
+        shutil.rmtree(target)
+        tmp_root.rename(target)
+    except Exception as exc:
+        if tmp_root.exists():
+            shutil.rmtree(tmp_root, ignore_errors=True)
+        logger.error("Failed to delete episodes %s from %s: %s", indices, target, exc)
+        raise DatasetEpisodeDeleteError(500, f"Failed to delete episodes: {exc}") from exc
+
+    # lerobot renumbers surviving episodes to stay contiguous from 0 (the same
+    # mapping it builds internally), but excluded_episodes.json is OUR OWN side
+    # file — its rewrite never touches it. Left unmapped, a stale index would
+    # silently exclude the wrong episode (or one that no longer exists) after
+    # this delete. An index that was itself just deleted has nothing to map to
+    # and is dropped.
+    episodes_to_keep = [i for i in range(total_episodes) if i not in set(indices)]
+    episode_mapping = {old: new for new, old in enumerate(episodes_to_keep)}
+    old_excluded = get_excluded_episodes(repo_id)
+    new_excluded = [episode_mapping[i] for i in old_excluded if i in episode_mapping]
+    set_excluded_episodes(repo_id, new_excluded)
+
+    invalidate_dataset_listing_cache()
+    logger.info("Deleted episodes %s from %s", indices, target)
+    return {"whole_dataset_deleted": False}
 
 
 def list_user_datasets() -> list[dict[str, Any]]:
