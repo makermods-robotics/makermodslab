@@ -344,3 +344,34 @@ describe("zero-pose calibration", () => {
     expect(screen.getByRole("button", { name: "Calibrate all" })).toBeEnabled();
   });
 });
+
+
+describe("leader port detection with a gs_usb follower attached", () => {
+  it.each([0, 1])("uses leader device for swing button %s despite follower setup selection", async (index) => {
+    mode = "bimanual";
+    const original = mocks.fetch.getMockImplementation();
+    mocks.fetch.mockImplementation(async (url: string, options?: RequestInit) => {
+      if (url.endsWith("/maker/identify-arm")) {
+        return { ok: true, json: async () => ({ success: false, message: "Mock: no motion" }) };
+      }
+      const response = await original?.(url, options);
+      if (url.includes("/robots/")) {
+        const data = await response.json();
+        // A calibrated leader makes initial setup select the follower.
+        data.robot.leader_config = "leader.json";
+        return { ok: true, json: async () => data };
+      }
+      if (url.endsWith("/available-ports")) {
+        return { ok: true, json: async () => ({ ports: ["leader", "right-leader", "gs_usb:A"] }) };
+      }
+      return response;
+    });
+    render(<RobotConfigDialog open robotName="test" onOpenChange={() => {}} />);
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Detect by swing" })).toHaveLength(2));
+    fireEvent.click(screen.getAllByRole("button", { name: "Detect by swing" })[index]);
+    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledWith(
+      "http://test/api/v1/maker/identify-arm",
+      expect.objectContaining({ body: JSON.stringify({ device_type: "teleop", arm_type: "maker" }) }),
+    ));
+  });
+});
