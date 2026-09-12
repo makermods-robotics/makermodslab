@@ -8,11 +8,11 @@ applies to teleoperation, recording, and remote leader sessions, including biman
 
 The trigger gripper measured on September 10, 2026 had these encoder readings:
 
-| Position | Encoder angle |
-| --- | --- |
-| Closed stop | 0.0° |
-| Far stop | -186.8° |
-| Closed-to-far travel | -186.8° |
+| Position             | Encoder angle |
+| -------------------- | ------------- |
+| Closed stop          | 0.0°          |
+| Far stop             | -186.8°       |
+| Closed-to-far travel | -186.8°       |
 
 Each endpoint was stable across two runs (0.1° spread). The readings measure travel, not
 a permanent offset: zero calibration makes the closed stop 0°. The trigger turns the
