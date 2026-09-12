@@ -104,15 +104,14 @@ export default {
   // ---- Leader kind ---------------------------------------------------------
   // Which of the family's leaders drives the robot; rendered only for a
   // family whose manifest entry lists more than one (the Metal arm: its Star
-  // Arm 102, or a second gravity-compensated Metal arm; the Maker arm: the
-  // stock lever-gripper Star Arm 102, or one fitted with MakerMods' trigger
-  // gripper). The option VALUES
+  // Arm 102, or a second gravity-compensated Metal arm). The option VALUES
   // are manifest ids sent as the record's `leader_kind` — data; only the
   // per-id labels under optionFor are localized (a kind without an entry
   // renders the manifest's own English label). The "unavailable" reason is
   // server prose and renders as-is.
   leaderKind: {
     verticalHint: "41.2° of grip travel maps to full Metal gripper opening. Calibrate the leader with the gripper fully closed.",
+    triggerHint: "The first half of the trigger pull (93.4°) maps to full Maker gripper opening; the rest of the pull holds it open. Calibrate the leader with the trigger at its closed stop.",
     label: "Leader arm",
     unavailable: "not installed",
     energizedHint:
@@ -120,7 +119,7 @@ export default {
     optionFor: {
       maker: {
         star: "Star Arm 102 leader",
-        star_trigger: "Star Arm 102 leader (trigger gripper)",
+        star_trigger: "Star arm trigger grip",
       },
       metal: {
         star_vertical: "Star arm vertical grip",
@@ -324,10 +323,6 @@ export default {
         maker: {
           leader:
             "Move the Star Arm 102 leader by hand to match the pose above: folded against the base, gripper fully closed. Its joints are unpowered, so the arm moves freely.",
-          // The trigger-gripper Star leader (leader_kind "star_trigger"):
-          // same pose, but its gripper zero is the trigger's closed stop.
-          leader_star_trigger:
-            "Move the Star Arm 102 leader by hand to match the pose above: folded against the base, gripper trigger at its closed stop. Its joints are unpowered, so the arm moves freely.",
           follower:
             "Move the arm by hand to match the pose above: folded against the base, gripper fully closed. Torque is off, so the arm moves freely.",
         },

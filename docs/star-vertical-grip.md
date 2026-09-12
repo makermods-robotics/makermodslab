@@ -8,11 +8,11 @@ to teleoperation, recording, and remote leader sessions, including bimanual rigs
 
 The vertical gripper measured on September 10, 2026 had these encoder readings:
 
-| Position | Encoder angle |
-| --- | --- |
-| Fully closed | -17.2° |
-| Fully open | 24.0° |
-| Closed-to-open travel | 41.2° |
+| Position              | Encoder angle |
+| --------------------- | ------------- |
+| Fully closed          | -17.2°        |
+| Fully open            | 24.0°         |
+| Closed-to-open travel | 41.2°         |
 
 Each endpoint was stable across ten readings. The readings measure travel, not a
 permanent offset: zero calibration makes the closed position 0°. The profile maps

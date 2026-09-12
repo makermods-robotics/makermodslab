@@ -79,9 +79,10 @@ def leader_missing(monkeypatch: pytest.MonkeyPatch):
 # ---------------------------------------------------------------------------
 
 
-def test_the_can_families_offer_a_second_leader_and_the_so101_does_not() -> None:
+def test_only_the_metal_family_offers_a_second_leader() -> None:
     assert [o.id for o in SO101.leader_options()] == ["so101"]
-    # Maker retains its trigger grip; Metal also offers the vertical grip.
+    # Maker's second kind is the Star leader with the trigger grip; Metal's are its
+    # own arm and the Star leader with the vertical grip (star_gripper.py).
     assert [o.id for o in MAKER.leader_options()] == ["star", "star_trigger"]
     assert [o.id for o in METAL.leader_options()] == ["star", "metal", "star_vertical"]
     assert METAL.leader_options()[0] == LeaderOption(id="star", label="Star Arm 102 leader")

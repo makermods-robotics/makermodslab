@@ -61,7 +61,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .base import ArmFamily, CalibrationUI, LeaderOption, leader_kwargs
+from .base import ArmFamily, CalibrationUI, LeaderOption
 
 logger = logging.getLogger(__name__)
 
@@ -397,19 +397,7 @@ class CanArmFamily(ArmFamily):
         return self._device_classes().follower(port=port, id=config_id)
 
     def single_leader_config(self, port: str, config_id: str, leader_kind: str | None = None):
-        # The config names its library outright (as the bimanual staging
-        # configs always have): for a kind whose library is not the one
-        # lerobot derives from the class name (the Maker trigger leader
-        # shares its class with the lever leader) the default would read and
-        # write the wrong directory.
-        return self._device_classes(leader_kind).teleop(
-            port=port, id=config_id, calibration_dir=Path(self._leader_library(leader_kind))
-        )
-
-    def _leader_library(self, leader_kind: str | None) -> str:
-        """This family's leader library for ``leader_kind`` (the keyword goes
-        only to a family that offers a choice, per leader_kwargs)."""
-        return self.leader_calibration_dir(**leader_kwargs(self, leader_kind))
+        return self._device_classes(leader_kind).teleop(port=port, id=config_id)
 
     def capture_rest_poses(self, robot: Any, *, include_gripper: bool = False) -> list[tuple[Any, dict]]:
         # Degrees by bare motor name, one entry per drivable sub-arm (the
@@ -499,7 +487,6 @@ class CanArmFamily(ArmFamily):
         teleop_config = cls.teleop(
             port=request.leader_port,
             id=leader_id,
-            calibration_dir=Path(self._leader_library(self._request_leader_kind(request))),
         )
 
         return robot_config, teleop_config

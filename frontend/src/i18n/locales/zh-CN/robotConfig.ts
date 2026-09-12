@@ -84,6 +84,7 @@ export default {
   // ---- 主控臂类型 ----------------------------------------------------------
   leaderKind: {
     verticalHint: "41.2° 的夹爪行程对应 Metal 夹爪完全张开。校准主控臂时请完全闭合夹爪。",
+    triggerHint: "扳机前半程（93.4°）对应 Maker 夹爪完全张开，后半程保持张开。校准主控臂时请将扳机置于闭合挡位。",
     label: "主控臂",
     unavailable: "未安装",
     energizedHint:
@@ -91,7 +92,7 @@ export default {
     optionFor: {
       maker: {
         star: "Star Arm 102 主控臂",
-        star_trigger: "Star Arm 102 主控臂（扳机式夹爪）",
+        star_trigger: "Star 机械臂扳机夹爪",
       },
       metal: {
         star_vertical: "Star 机械臂竖直夹爪",
@@ -243,8 +244,6 @@ export default {
         maker: {
           leader:
             "用手将 Star Arm 102 主控臂摆成上图的姿态：折叠贴近底座，夹爪闭合。关节未通电，可以自由移动。",
-          leader_star_trigger:
-            "用手将 Star Arm 102 主控臂摆成上图的姿态：折叠贴近底座，夹爪扳机处于闭合挡位。关节未通电，可以自由移动。",
           follower:
             "用手把机械臂摆成上图的姿态：折叠贴近底座，夹爪完全闭合。扭矩已关闭，可以自由移动。",
         },
