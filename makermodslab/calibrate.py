@@ -38,10 +38,13 @@ from lerobot.teleoperators import (
     make_teleoperator_from_config,
 )
 from lerobot.utils.utils import init_logging
+from makermodslab.maker_can import install as _install_maker_can
 
 from .api_errors import ErrorCode
 from .session_events import notify_session_changed
 from .utils.config import calibration_dir_for_device, save_robot_record
+
+_install_maker_can()
 
 logger = logging.getLogger(__name__)
 

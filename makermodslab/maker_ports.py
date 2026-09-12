@@ -55,7 +55,10 @@ import logging
 import time
 
 from .arms import registry as arm_registry
+from .maker_can import install as _install_maker_can
 from .utils.config import find_available_ports, normalize_arm_type
+
+_install_maker_can()
 
 logger = logging.getLogger(__name__)
 
@@ -372,6 +375,16 @@ def _probe_sync(ports: list[str], arm_type: str = "maker") -> dict:
 
     openers = _openers_for(arm_type)
     for port in ports:
+        if port.startswith("gs_usb:"):
+            from .gs_usb_transport import probe_maker
+
+            try:
+                found_usb = normalize_arm_type(arm_type) == "maker" and probe_maker(port)
+            except Exception as exc:
+                logger.debug("gs_usb motor probe failed for %s: %s", port, exc)
+                found_usb = False
+            (follower_ports if found_usb else unknown).append(port)
+            continue
         found = None
         for device_type in ("teleop", "robot"):
             opener, releaser, _ = openers[device_type]
@@ -588,6 +601,14 @@ async def identify_maker_arm_by_motion(
             leader_kind,
         )
     candidates = _candidate_ports(ports)
+    if device_type == "teleop":
+        candidates = [port for port in candidates if not port.startswith("gs_usb:")]
+    if any(port.startswith("gs_usb:") for port in candidates):
+        return {
+            "success": False,
+            "message": "Hand-motion port detection is unavailable for gs_usb. Select the adapter by its USB serial, or connect one follower adapter at a time and use Detect.",
+            "skipped": candidates,
+        }
     if not candidates:
         return {
             "success": False,
