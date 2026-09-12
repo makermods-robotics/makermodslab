@@ -72,6 +72,18 @@ def _metal_leader_available() -> bool:
 
 
 class MetalFamily(CanArmFamily):
+    recording_realign_speed_deg_s = 60.0
+    recording_home_speed_deg_s = 400.0 * 360.0 / 4096.0
+
+    # Zero is upright: final teardown still returns to the captured resting pose.
+    def hold_recording_home(self, targets):
+        # The pinned follower smooths target velocity across MIT commands.
+        # Clear that history so the last held frame has zero velocity, while
+        # retaining configured gains and the already-reached home position.
+        for device, pose in targets:
+            device._reset_velocity_feedforward()
+            device.send_action({f"{motor}.pos": value for motor, value in pose.items()})
+
     id = "metal"
     supports_gripper_effort_control = True
     label = "Metal Arm"

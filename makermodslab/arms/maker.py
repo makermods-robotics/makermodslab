@@ -48,6 +48,11 @@ _TRIGGER_LEADER_ZERO_POSE = (
 
 
 class MakerFamily(CanArmFamily):
+    recording_realign_speed_deg_s = 60.0
+    # Match SO-101's 400 steps/s nominal angular rate (4096 steps/revolution).
+    # https://www.waveshare.com/wiki/ST3215_Servo
+    recording_home_speed_deg_s = 400.0 * 360.0 / 4096.0
+    recording_home_is_rest_pose = True
     id = "maker"
     label = "Maker Arm v1"
     short_label = "Maker"

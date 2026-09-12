@@ -302,6 +302,17 @@ class ArmFamily(ABC):
     # first-action ease and return-to-rest path.
     supports_remote_inference: bool = False
 
+    # CAN recording catch-up only; teardown retains its own gentle return rate.
+    recording_realign_speed_deg_s: float = 30.0
+    # None keeps ordinary leader-controlled reset phases.
+    recording_home_speed_deg_s: float | None = None
+    # Upright zero poses must not replace the captured torque-off resting pose.
+    recording_home_is_rest_pose: bool = False
+
+    def hold_recording_home(self, targets):
+        """Finalize a completed follower-only home return before no-send reset."""
+        return None
+
     # --- calibration procedure ----------------------------------------------
     # One of CALIBRATION_KINDS; the registry checks the kind's prerequisites.
     calibration_kind: str
