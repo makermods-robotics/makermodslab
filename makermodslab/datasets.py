@@ -38,8 +38,10 @@ from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError, LocalEntr
 
 from .sampling import SAMPLING_WEIGHT_COLUMN
 from .utils.config import (
+    get_excluded_episodes,
     get_hidden_datasets,
     get_saved_custom_datasets,
+    set_excluded_episodes,
     validate_dataset_name,
     validate_dataset_repo_id,
     with_makermodslab_tag,
@@ -2204,6 +2206,7 @@ def delete_local_episodes(repo_id: str, episode_indices: list[int]) -> dict[str,
             raise DatasetEpisodeDeleteError(500, f"Failed to delete dataset: {exc}") from exc
         invalidate_dataset_listing_cache()
         invalidate_hub_status(repo_id)
+        set_excluded_episodes(repo_id, [])
         logger.info("Deleted whole dataset %s (every remaining episode was selected)", target)
         return {"whole_dataset_deleted": True}
 
@@ -2227,6 +2230,18 @@ def delete_local_episodes(repo_id: str, episode_indices: list[int]) -> dict[str,
             shutil.rmtree(tmp_root, ignore_errors=True)
         logger.error("Failed to delete episodes %s from %s: %s", indices, target, exc)
         raise DatasetEpisodeDeleteError(500, f"Failed to delete episodes: {exc}") from exc
+
+    # lerobot renumbers surviving episodes to stay contiguous from 0 (the same
+    # mapping it builds internally), but excluded_episodes.json is OUR OWN side
+    # file — its rewrite never touches it. Left unmapped, a stale index would
+    # silently exclude the wrong episode (or one that no longer exists) after
+    # this delete. An index that was itself just deleted has nothing to map to
+    # and is dropped.
+    episodes_to_keep = [i for i in range(total_episodes) if i not in set(indices)]
+    episode_mapping = {old: new for new, old in enumerate(episodes_to_keep)}
+    old_excluded = get_excluded_episodes(repo_id)
+    new_excluded = [episode_mapping[i] for i in old_excluded if i in episode_mapping]
+    set_excluded_episodes(repo_id, new_excluded)
 
     invalidate_dataset_listing_cache()
     logger.info("Deleted episodes %s from %s", indices, target)

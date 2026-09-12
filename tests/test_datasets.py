@@ -1009,6 +1009,75 @@ def test_delete_episodes_cleans_up_the_temp_dir_on_rewrite_failure(
     assert leftovers == []
 
 
+def test_delete_episodes_remaps_excluded_episodes_after_a_partial_delete(
+    tmp_lerobot_home: Path, excluded_episodes_file: Path
+) -> None:
+    """lerobot renumbers surviving episodes to stay contiguous from 0, but the
+    training-curation exclusion list (excluded_episodes.json) is OUR OWN side
+    file — lerobot's rewrite never touches it, so a stale index would silently
+    exclude the wrong episode (or one that no longer exists) after a delete."""
+    from makermodslab.datasets import delete_local_episodes
+    from makermodslab.utils.config import get_excluded_episodes, set_excluded_episodes
+
+    _make_dataset(tmp_lerobot_home, "makermods/ds", episodes=5)
+    set_excluded_episodes("makermods/ds", [2, 4])
+
+    def fake_delete_episodes(dataset, episode_indices, output_dir=None, repo_id=None):
+        out = Path(output_dir)
+        (out / "meta").mkdir(parents=True)
+        (out / "meta" / "info.json").write_text(json.dumps({"total_episodes": 4}))
+        return MagicMock()
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=MagicMock()),
+        patch("lerobot.datasets.dataset_tools.delete_episodes", side_effect=fake_delete_episodes),
+    ):
+        delete_local_episodes("makermods/ds", [1])
+
+    # Surviving episodes 0,2,3,4 renumber to 0,1,2,3 — excluded {2,4} -> {1,3}.
+    assert get_excluded_episodes("makermods/ds") == [1, 3]
+
+
+def test_delete_episodes_drops_excluded_indices_that_were_themselves_deleted(
+    tmp_lerobot_home: Path, excluded_episodes_file: Path
+) -> None:
+    from makermodslab.datasets import delete_local_episodes
+    from makermodslab.utils.config import get_excluded_episodes, set_excluded_episodes
+
+    _make_dataset(tmp_lerobot_home, "makermods/ds", episodes=3)
+    set_excluded_episodes("makermods/ds", [1, 2])
+
+    def fake_delete_episodes(dataset, episode_indices, output_dir=None, repo_id=None):
+        out = Path(output_dir)
+        (out / "meta").mkdir(parents=True)
+        (out / "meta" / "info.json").write_text(json.dumps({"total_episodes": 2}))
+        return MagicMock()
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=MagicMock()),
+        patch("lerobot.datasets.dataset_tools.delete_episodes", side_effect=fake_delete_episodes),
+    ):
+        # Delete episode 1, which was itself excluded — nothing left to map it to.
+        delete_local_episodes("makermods/ds", [1])
+
+    # Episode 2 (still excluded) renumbers to 1; the deleted episode 1 just drops.
+    assert get_excluded_episodes("makermods/ds") == [1]
+
+
+def test_delete_episodes_clears_excluded_episodes_on_whole_dataset_delete(
+    tmp_lerobot_home: Path, excluded_episodes_file: Path
+) -> None:
+    from makermodslab.datasets import delete_local_episodes
+    from makermodslab.utils.config import get_excluded_episodes, set_excluded_episodes
+
+    _make_dataset(tmp_lerobot_home, "makermods/ds", episodes=2)
+    set_excluded_episodes("makermods/ds", [1])
+
+    delete_local_episodes("makermods/ds", [0, 1])
+
+    assert get_excluded_episodes("makermods/ds") == []
+
+
 def test_delete_episodes_endpoint_deletes_selected_indices(
     client: TestClient, tmp_lerobot_home: Path
 ) -> None:
