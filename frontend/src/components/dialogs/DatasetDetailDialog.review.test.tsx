@@ -114,6 +114,33 @@ describe("per-episode delete", () => {
     await waitFor(() => expect(mocks.listEpisodes).toHaveBeenCalledTimes(2));
   });
 
+  it("refreshes the outer library on exit after a partial delete, even though the dataset survives", async () => {
+    mocks.listEpisodes.mockResolvedValue([episode(0), episode(1)]);
+    mocks.deleteEpisodes.mockResolvedValue({ success: true, whole_dataset_deleted: false });
+    const { onDeleted } = setup();
+
+    await screen.findByText("Episode 1");
+    fireEvent.click(screen.getByRole("button", { name: /delete episode 1/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^delete episode$/i }));
+    await waitFor(() => expect(mocks.deleteEpisodes).toHaveBeenCalled());
+
+    // Nothing yet — the outer library only needs to know once the viewer
+    // actually closes, not on every single delete while still browsing.
+    expect(onDeleted).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onDeleted).toHaveBeenCalled();
+  });
+
+  it("does not refresh the outer library on exit when nothing was deleted", async () => {
+    mocks.listEpisodes.mockResolvedValue([episode(0), episode(1)]);
+    const { onDeleted } = setup();
+
+    await screen.findByText("Episode 1");
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onDeleted).not.toHaveBeenCalled();
+  });
+
   it("warns that the Hub copy is untouched when the dataset is also on the Hub", async () => {
     mocks.listEpisodes.mockResolvedValue([episode(0), episode(1)]);
     setup({ item: { ...LOCAL_ITEM, source: "both" } });

@@ -691,6 +691,25 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   const [datasetDeleteConfirm, setDatasetDeleteConfirm] = useState(false);
   const [deletingDataset, setDeletingDataset] = useState(false);
 
+  // Whether a delete happened while this dataset was open for browsing (set
+  // by confirmDeleteEpisode's PARTIAL-delete branch — the whole-dataset paths
+  // already call onDeleted immediately themselves, since they close the
+  // dialog on the spot). A partial delete only refetches the episode list
+  // INSIDE this dialog (reloadKey) — the caller's own list (episode count,
+  // or the dataset's continued existence) is stale until the viewer actually
+  // closes, so onDeleted fires then instead of on every single delete.
+  const hadDeletionRef = useRef(false);
+  useEffect(() => {
+    hadDeletionRef.current = false;
+  }, [repoId]);
+  const handleOpenChange = (next: boolean) => {
+    if (!next && hadDeletionRef.current) {
+      hadDeletionRef.current = false;
+      onDeleted?.();
+    }
+    onOpenChange(next);
+  };
+
   useEffect(() => {
     if (!repoId || !open) return;
     const controller = new AbortController();
@@ -823,6 +842,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
         onOpenChange(false);
         onDeleted?.();
       } else {
+        hadDeletionRef.current = true;
         setReloadKey((k) => k + 1);
       }
     } catch {
@@ -878,7 +898,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
 
   return (
     <>
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         hideClose={!!finalize}
         onEscapeKeyDown={finalize ? (e) => e.preventDefault() : undefined}
