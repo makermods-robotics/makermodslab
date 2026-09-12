@@ -143,7 +143,7 @@ def test_handle_start_replay_blocked_while_previous_worker_still_alive(monkeypat
     assert "still" in result["message"].lower()
 
 
-def test_handle_start_replay_rejects_bimanual_robot(monkeypatch, tmp_path) -> None:
+def test_handle_start_replay_rejects_bimanual_with_single_slot(monkeypatch, tmp_path) -> None:
     from makermodslab.replay import handle_start_replay
 
     monkeypatch.setattr(

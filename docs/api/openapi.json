@@ -6179,8 +6179,27 @@
             "title": "Follower Port",
             "type": "string"
           },
+          "mode": {
+            "default": "single",
+            "enum": [
+              "single",
+              "bimanual"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
           "repo_id": {
             "title": "Repo Id",
+            "type": "string"
+          },
+          "right_follower_config": {
+            "default": "",
+            "title": "Right Follower Config",
+            "type": "string"
+          },
+          "right_follower_port": {
+            "default": "",
+            "title": "Right Follower Port",
             "type": "string"
           },
           "robot_name": {

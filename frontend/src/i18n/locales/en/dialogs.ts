@@ -93,6 +93,7 @@ export default {
     start: "Replay on hardware",
     // {{robot}} is the robot's own name — data.
     movesArmWarning: "Moves {{robot}}'s arm — make sure the area is clear.",
+    movesArmsWarning: "Moves both arms of {{robot}} — make sure the area is clear.",
     stop: "Stop",
     // Second press while the arm returns to its start pose.
     releaseNow: "Release now",

@@ -58,6 +58,7 @@ export default {
     noRobot: "请选择一台已连接从臂的机械臂，才能在硬件上回放该回合。",
     start: "在硬件上回放",
     movesArmWarning: "将移动 {{robot}} 的机械臂 — 请确保周围区域无障碍物。",
+    movesArmsWarning: "将移动 {{robot}} 的双臂 — 请确保周围区域无障碍物。",
     stop: "停止",
     releaseNow: "立即释放",
     toast: {
