@@ -20,6 +20,7 @@ import asyncio
 import json as _json
 import os
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -3720,6 +3721,23 @@ def _gated_snapshot(tmp_path, *, started: threading.Event, release: threading.Ev
     return _download
 
 
+def _progress_driving_snapshot(tmp_path, *, started: threading.Event):
+    """A snapshot_download that actually feeds its tqdm_class chunk by chunk, so
+    a `should_cancel` predicate can abort it mid-flight (like the real one)."""
+    seen: dict = {}
+    inner = _fake_snapshot(tmp_path, seen)
+
+    def _download(**kwargs):
+        started.set()
+        bar = kwargs["tqdm_class"](unit="B", unit_scale=True, total=10_000)
+        for _ in range(1_000):
+            bar.update(10)  # raises DownloadCancelled once the predicate flips
+            time.sleep(0.005)
+        return inner(**kwargs)  # only reached if the stop never lands
+
+    return _download
+
+
 def _fake_local_runner(monkeypatch):
     from unittest.mock import MagicMock
 
@@ -3806,9 +3824,12 @@ def test_local_finetune_download_failure_fails_the_record(monkeypatch, tmp_path)
 
 
 def test_stop_during_the_download_is_interrupted(monkeypatch, tmp_path) -> None:
-    """Stop must work while the base checkpoint is downloading. huggingface_hub
-    can't be aborted mid-flight, so the cancel takes effect when the download
-    returns — before the trainer is spawned — and reads as a deliberate stop."""
+    """Stop must work while the base checkpoint is downloading. This gated
+    snapshot never touches the progress hook, so it models the race where the
+    abort signal misses: the cancel then takes effect when the download returns
+    — before the trainer is spawned — and reads as a deliberate stop. (The
+    common case, where the hook aborts the transfer mid-flight, is
+    test_stop_aborts_the_base_checkpoint_download_mid_flight.)"""
     from makermodslab.jobs import _PREPARE_STOPPED_MESSAGE, JobRegistry, JobTarget
 
     started, release = threading.Event(), threading.Event()
@@ -3837,6 +3858,36 @@ def test_stop_during_the_download_is_interrupted(monkeypatch, tmp_path) -> None:
     assert "exited with code" not in (final.error_message or "")
     assert final.exit_code is None
     # The stop is honoured by NOT starting the trainer we were about to start.
+    assert fake_runner.start.call_count == 0
+    assert record.id not in reg._runners
+
+
+def test_stop_aborts_the_base_checkpoint_download_mid_flight(monkeypatch, tmp_path) -> None:
+    """The common case: Stop while bytes are moving feeds the download's
+    progress hook, which raises DownloadCancelled on the next chunk. No wait for
+    the transfer to finish — the job settles `interrupted` and no trainer runs."""
+    from makermodslab.jobs import _PREPARE_STOPPED_MESSAGE, JobRegistry, JobTarget
+
+    started = threading.Event()
+    _patch_hub_for_finetune(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download", _progress_driving_snapshot(tmp_path, started=started)
+    )
+
+    reg = JobRegistry(tmp_path / "root")
+    source = _cloud_finetune_source(reg)
+    fake_runner = _fake_local_runner(monkeypatch)
+
+    record = reg.start(_hub_finetune_request(source.id), JobTarget(runner="local"))
+    assert started.wait(timeout=10), "the download never started"
+
+    reg.stop(record.id)
+    _join_prepare(reg, record.id)
+
+    final = reg.get(record.id)
+    assert final.state == "interrupted"
+    assert final.error_message == _PREPARE_STOPPED_MESSAGE
+    assert final.exit_code is None
     assert fake_runner.start.call_count == 0
     assert record.id not in reg._runners
 
@@ -3901,6 +3952,33 @@ def test_download_progress_logs_are_readable_not_per_chunk() -> None:
     assert 10 <= len(lines) <= 40
     assert lines[1] == "Downloading base checkpoint 012000 — 6% (74 MB / 1.2 GB)"
     assert "1.2 GB / 1.2 GB" in lines[-1]
+
+
+def test_snapshot_progress_tqdm_aborts_the_download_when_cancel_goes_true() -> None:
+    """`should_cancel` rides the progress hook: once it returns True the next
+    chunk callback raises DownloadCancelled, which unwinds snapshot_download
+    instead of letting it finish in the background."""
+    import pytest
+
+    from makermodslab.jobs import DownloadCancelled, make_snapshot_progress_tqdm
+
+    cancel = threading.Event()
+    tqdm_class = make_snapshot_progress_tqdm(lambda done, total: None, should_cancel=cancel.is_set)
+    bar = tqdm_class(unit="B", unit_scale=True, total=1_000)
+
+    bar.update(100)  # bytes still moving, no cancel yet — fine
+    bar.refresh()
+
+    cancel.set()
+    with pytest.raises(DownloadCancelled):
+        bar.update(100)
+    with pytest.raises(DownloadCancelled):
+        bar.refresh()
+
+    # No predicate → the hook never raises, whatever a flag says.
+    plain = make_snapshot_progress_tqdm(lambda done, total: None)(unit="B", total=1_000)
+    plain.update(100)
+    plain.refresh()
 
 
 def test_an_unknown_finetune_source_still_refuses_before_any_record(monkeypatch, tmp_path) -> None:

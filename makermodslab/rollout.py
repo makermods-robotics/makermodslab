@@ -107,6 +107,7 @@ from .eval_protocol import (
     parse_event,
 )
 from .jobs import (
+    DownloadCancelled,
     download_hub_checkpoint_ref,
     make_snapshot_progress_tqdm,
     policy_type_supports_rtc,
@@ -268,6 +269,11 @@ class InferenceRequest(BaseModel):
 inference_active: bool = False
 _inference_proc: subprocess.Popen | None = None
 _inference_started_at: float | None = None
+# When the rollout's main loop started — set by `_pump_stdout` on
+# `_ROLLOUT_START_MARKER`. Feeds the elapsed-time readout, and doubles as the
+# single-run "is the child able to act on a stop yet?" signal (its
+# `_runner_ready` equivalent): before this, a plain `lerobot-rollout` cannot
+# honour a SIGTERM. See `handle_stop_inference`'s single-run branch.
 _inference_rollout_started_at: float | None = None
 # True once the CURRENT long-lived runner (eval or coaching) has reported READY,
 # which is the event that says it has finished connecting and is reading its
@@ -1690,7 +1696,11 @@ def _local_store_policy_path(repo_id: str, step_dir: str | None) -> str | None:
     return str(resolved)
 
 
-def _resolve_policy_path(policy_ref: str, report: Callable[[int, int | None], None] | None = None) -> str:
+def _resolve_policy_path(
+    policy_ref: str,
+    report: Callable[[int, int | None], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> str:
     """Turn a checkpoints API ref into a local path that lerobot accepts.
 
     Local refs are already absolute paths to a pretrained_model dir.
@@ -1723,8 +1733,11 @@ def _resolve_policy_path(policy_ref: str, report: Callable[[int, int | None], No
 
     When ``report`` is given, snapshot_download streams byte progress through it
     (see make_snapshot_progress_tqdm) so the inference page can show a real
-    download bar. Local refs — on disk or in the models store — never download,
-    so they never report and never flip the phase."""
+    download bar. ``should_cancel`` rides the same hook: polled per chunk, and
+    the first True aborts the download in flight with ``DownloadCancelled``
+    (bytes so far stay cached for a resume). Local refs — on disk or in the
+    models store — never download, so they never report, never flip the phase,
+    and never check for cancellation."""
     if Path(policy_ref).is_dir():
         # A local checkpoint — nothing to fetch, so no downloading_model phase.
         return policy_ref
@@ -1754,7 +1767,9 @@ def _resolve_policy_path(policy_ref: str, report: Callable[[int, int | None], No
         return local
 
     _set_phase(PHASE_DOWNLOADING_MODEL)
-    tqdm_class = make_snapshot_progress_tqdm(report) if report is not None else None
+    tqdm_class = (
+        make_snapshot_progress_tqdm(report, should_cancel=should_cancel) if report is not None else None
+    )
     return download_hub_checkpoint_ref(policy_ref, tqdm_class=tqdm_class)
 
 
@@ -2876,12 +2891,12 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
     the UI lands on the inference page while the (possibly multi-minute) Hub
     download runs there with a progress bar. Ordered download → preflight → spawn
     so a stop pressed DURING the download never opens the serial bus or spawns a
-    subprocess ("no robot touched"). snapshot_download can't be interrupted
-    mid-flight, so a stop during the download abandons this worker: the download
-    finishes into the HF cache (cached for next time) and the worker bails at the
-    next cancel check without preflighting or spawning. Terminal download/
-    preflight failures flow through _fail_startup into the shared outcome/error/
-    hint status machinery."""
+    subprocess ("no robot touched"). A stop during the download is fed to
+    snapshot_download's progress hook (see _resolve_policy_path's should_cancel),
+    which aborts the transfer within a chunk and raises DownloadCancelled — the
+    bytes so far stay cached for a resume, and this worker returns without
+    preflighting or spawning. Terminal download/preflight failures flow through
+    _fail_startup into the shared outcome/error/hint status machinery."""
     global _inference_proc, _inference_rollout_started_at, _inference_meta, _last_log_path
     global _runner_ready
 
@@ -2889,12 +2904,22 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
     #    meta; a local dir returns instantly (no downloading_model phase, no
     #    robot touched yet).
     try:
-        policy_path = _resolve_policy_path(request.policy_ref, report=_report_download_progress)
+        policy_path = _resolve_policy_path(
+            request.policy_ref,
+            report=_report_download_progress,
+            should_cancel=cancel_event.is_set,
+        )
+    except DownloadCancelled:
+        # Stop landed mid-download and aborted it. handle_stop_inference already
+        # took the state idle (there was no subprocess); just stop here.
+        logger.info("Inference model download cancelled (stop requested)")
+        return
     except Exception as exc:
         logger.exception("Inference model download failed")
         _fail_startup(f"Failed to download the model: {exc}")
         return
-    # Stop during the download → abandon (stop already set the state idle).
+    # A stop that raced past the last progress callback (or a local ref, which
+    # never checks) still abandons here — stop already set the state idle.
     if cancel_event.is_set():
         logger.info("Inference startup abandoned during model download (stop requested)")
         return
@@ -3830,6 +3855,15 @@ def handle_stop_inference() -> dict[str, Any]:
         # Read under the lock with everything else so the answer cannot change
         # between here and the escalation.
         runner_listening = _runner_ready
+        # The single-run counterpart of `_runner_ready`: a plain `lerobot-rollout`
+        # has no command pipe and no READY event, but it prints
+        # `_ROLLOUT_START_MARKER` the instant `build_rollout_context` is done —
+        # which is exactly when its signal handler's `shutdown_event` starts
+        # being polled (by the strategy loop). Before that line the child
+        # provably cannot act on a SIGTERM: `ProcessSignalHandler` only sets the
+        # event, and the policy load / `robot.connect()` / camera opens never
+        # read it. `_pump_stdout` sets this timestamp on that marker.
+        rollout_setup_complete = _inference_rollout_started_at is not None
         # Surface the stop as its own phase so a status poll racing the
         # terminate/wait below sees "stopping" rather than a stale "running".
         if _inference_meta:
@@ -3877,8 +3911,19 @@ def handle_stop_inference() -> dict[str, Any]:
         # reports no episode end for it.
         _quit_runner(proc, listening=runner_listening)
     else:
+        # Plain single run. Once setup is done a SIGTERM is honoured — the
+        # strategy loop sees `shutdown_event` and breaks, then
+        # `strategy.teardown` eases the follower home and disconnects — so the
+        # full grace is worth waiting. Before then it is dead weight: the same
+        # reasoning `_quit_runner(listening=False)` spells out for the runners.
+        # Waiting the default five seconds there is five seconds of the arm
+        # connecting and homing after Stop was pressed, so cut it to the
+        # pre-READY budget and let the SIGKILL escalation do the rest.
         try:
-            _terminate_tree(proc)
+            if rollout_setup_complete:
+                _terminate_tree(proc)
+            else:
+                _terminate_tree(proc, timeout=_PRE_READY_TERMINATE_TIMEOUT_S)
         except Exception as exc:
             logger.exception("Stop inference: %s", exc)
 
