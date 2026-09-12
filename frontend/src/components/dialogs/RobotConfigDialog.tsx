@@ -3214,6 +3214,11 @@ const RobotConfigWindow = ({
                     {leaderChoice.unavailable_reason}
                   </p>
                 )}
+                {leaderKind === "star_vertical" && (
+                  <p className="basis-full text-xs text-muted-foreground">
+                    {t("robotConfig.leaderKind.verticalHint")}
+                  </p>
+                )}
                 {leaderEnergized && (
                   <p className="basis-full text-xs text-muted-foreground">
                     {t("robotConfig.leaderKind.energizedHint")}

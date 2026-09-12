@@ -81,10 +81,9 @@ def leader_missing(monkeypatch: pytest.MonkeyPatch):
 
 def test_the_can_families_offer_a_second_leader_and_the_so101_does_not() -> None:
     assert [o.id for o in SO101.leader_options()] == ["so101"]
-    # The Maker arm's second kind is the SAME Star leader with the trigger
-    # gripper (test_maker_trigger_leader.py); the Metal arm's is its own arm.
+    # Maker retains its trigger grip; Metal also offers the vertical grip.
     assert [o.id for o in MAKER.leader_options()] == ["star", "star_trigger"]
-    assert [o.id for o in METAL.leader_options()] == ["star", "metal"]
+    assert [o.id for o in METAL.leader_options()] == ["star", "metal", "star_vertical"]
     assert METAL.leader_options()[0] == LeaderOption(id="star", label="Star Arm 102 leader")
     assert METAL.leader_option("metal").energized is True
     assert METAL.leader_holds_torque("star") is False
@@ -122,7 +121,7 @@ def test_manifest_publishes_the_options_with_availability(client, leader_missing
     arms = {a["id"]: a for a in client.get("/api/v1/arms").json()["arms"]}
     metal = arms["metal"]
     assert metal["default_leader_kind"] == "star"
-    assert [o["id"] for o in metal["leader_options"]] == ["star", "metal"]
+    assert [o["id"] for o in metal["leader_options"]] == ["star", "metal", "star_vertical"]
     option = metal["leader_options"][1]
     assert option["available"] is False
     assert "pip install" in option["unavailable_reason"]

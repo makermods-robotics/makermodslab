@@ -112,6 +112,7 @@ export default {
   // renders the manifest's own English label). The "unavailable" reason is
   // server prose and renders as-is.
   leaderKind: {
+    verticalHint: "41.2° of grip travel maps to full Metal gripper opening. Calibrate the leader with the gripper fully closed.",
     label: "Leader arm",
     unavailable: "not installed",
     energizedHint:
@@ -122,6 +123,7 @@ export default {
         star_trigger: "Star Arm 102 leader (trigger gripper)",
       },
       metal: {
+        star_vertical: "Star arm vertical grip",
         star: "Star Arm 102 leader",
         metal: "Metal arm leader (gravity-compensated)",
       },

@@ -83,6 +83,7 @@ export default {
 
   // ---- 主控臂类型 ----------------------------------------------------------
   leaderKind: {
+    verticalHint: "41.2° 的夹爪行程对应 Metal 夹爪完全张开。校准主控臂时请完全闭合夹爪。",
     label: "主控臂",
     unavailable: "未安装",
     energizedHint:
@@ -93,6 +94,7 @@ export default {
         star_trigger: "Star Arm 102 主控臂（扳机式夹爪）",
       },
       metal: {
+        star_vertical: "Star 机械臂竖直夹爪",
         star: "Star Arm 102 主控臂",
         metal: "Metal 机械臂主控臂（重力补偿）",
       },

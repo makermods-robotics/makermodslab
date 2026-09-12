@@ -106,6 +106,8 @@ class MetalFamily(CanArmFamily):
     supports_gripper_wiggle = True
 
     def leader_options(self) -> tuple[LeaderOption, ...]:
+        from ..star_gripper import STAR_VERTICAL_LEADER_KIND
+
         available = _metal_leader_available()
         return (
             LeaderOption(id=STAR_LEADER_KIND, label="Star Arm 102 leader"),
@@ -116,9 +118,14 @@ class MetalFamily(CanArmFamily):
                 unavailable_reason=None if available else METAL_LEADER_UNAVAILABLE,
                 energized=True,
             ),
+            LeaderOption(id=STAR_VERTICAL_LEADER_KIND, label="Star arm vertical grip"),
         )
 
     def leader_calibration_dir(self, leader_kind: str | None = None) -> str:
+        from ..star_gripper import STAR_VERTICAL_LEADER_KIND, vertical_calibration_dir
+
+        if leader_kind == STAR_VERTICAL_LEADER_KIND:
+            return vertical_calibration_dir()
         # The Metal leader is its own lerobot class (metal_leader), so lerobot
         # derives a directory of its own for it; the Star leader keeps the
         # library shared with the Maker arm.
@@ -153,6 +160,18 @@ class MetalFamily(CanArmFamily):
         from lerobot.teleoperators.rebot_102_leader.config_rebot_102_leader_metal import (
             RebotArm102LeaderMetalTeleopConfig,
         )
+
+        from ..star_gripper import STAR_VERTICAL_LEADER_KIND, vertical_sub_config, vertical_teleop_config
+
+        if leader_kind == STAR_VERTICAL_LEADER_KIND:
+            return CanDeviceClasses(
+                follower=MetalFollowerConfig,
+                follower_base=MetalFollowerConfigBase,
+                bi_follower=BiMetalFollowerConfig,
+                teleop=vertical_teleop_config,
+                leader_sub=vertical_sub_config,
+                bi_teleop=BiRebot102LeaderConfig,
+            )
 
         return CanDeviceClasses(
             follower=MetalFollowerConfig,

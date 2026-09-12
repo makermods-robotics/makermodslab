@@ -2244,10 +2244,6 @@ def record_with_web_events(
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
     publish_preview = observation_tap(robot, family)
 
-    def process_observation(observation):
-        publish_preview(observation)
-        return robot_observation_processor(observation)
-
     action_features = hw_to_dataset_features(robot.action_features, "action", cfg.dataset.video)
     obs_features = hw_to_dataset_features(robot.observation_features, "observation", cfg.dataset.video)
     dataset_features = {**action_features, **obs_features}
@@ -2537,6 +2533,16 @@ def record_with_web_events(
         return bool(web_events.get("stop_recording") or _release_now.is_set())
 
     prepare_alignment = partial(realign, require_settled=True)
+    original_get_observation = robot.get_observation
+
+    def get_observation_with_preview(*args, **kwargs):
+        observation = original_get_observation(*args, **kwargs)
+        publish_preview(observation)
+        return observation
+
+    # Preserve the actual default processor pipeline for LeRobot's ownership
+    # checks. This tap observes the already-read buffers without mutating them.
+    robot.get_observation = get_observation_with_preview
     try:
         prepared_encoder = install_episode_preparation(dataset)
         per_episode_task = getattr(recording_config, "per_episode_task", False)
@@ -2549,7 +2555,7 @@ def record_with_web_events(
                     fps=cfg.dataset.fps,
                     teleop_action_processor=teleop_action_processor,
                     robot_action_processor=robot_action_processor,
-                    robot_observation_processor=process_observation,
+                    robot_observation_processor=robot_observation_processor,
                     teleop=teleop,
                     dataset=dataset,
                     control_time_s=cfg.dataset.episode_time_s,
@@ -2568,9 +2574,9 @@ def record_with_web_events(
                     prepared_encoder,
                     prepare_alignment,
                     cancelled,
-                    observation_processor=process_observation,
+                    observation_processor=robot_observation_processor,
                 ),
-                lambda: publish_preview(robot.get_observation()),
+                lambda: robot.get_observation(),
             )
         while not per_episode_task and saved_episodes < cfg.dataset.num_episodes:
             _set_phase("preparing")
@@ -2581,7 +2587,7 @@ def record_with_web_events(
                 prepared_encoder,
                 prepare_alignment,
                 cancelled,
-                observation_processor=process_observation,
+                observation_processor=robot_observation_processor,
             ):
                 break
             # RECORDING PHASE - with dataset (matches original record.py exactly)
@@ -2612,7 +2618,7 @@ def record_with_web_events(
                 fps=cfg.dataset.fps,
                 teleop_action_processor=teleop_action_processor,
                 robot_action_processor=robot_action_processor,
-                robot_observation_processor=process_observation,
+                robot_observation_processor=robot_observation_processor,
                 teleop=teleop,
                 dataset=dataset,
                 control_time_s=cfg.dataset.episode_time_s,
@@ -2705,7 +2711,6 @@ def record_with_web_events(
                     robot_action_processor=robot_action_processor,
                     control_time_s=cfg.dataset.reset_time_s,
                     realign=realign,
-                    observation_callback=publish_preview,
                 )
 
                 # The loop may have exited (e.g. via exit_early/stop) while
@@ -2790,7 +2795,6 @@ def record_with_web_events(
                     robot_action_processor=robot_action_processor,
                     control_time_s=cfg.dataset.reset_time_s,
                     realign=realign,
-                    observation_callback=publish_preview,
                 )
 
                 # The loop may have exited (e.g. via exit_early/stop) while
@@ -2822,6 +2826,7 @@ def record_with_web_events(
         ended_normally = True
 
     finally:
+        robot.get_observation = original_get_observation
         try:
             if ended_normally and not _release_now.is_set():
                 # User-initiated stop / planned session end: no timed hold — the
