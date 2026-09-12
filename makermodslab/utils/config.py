@@ -789,7 +789,9 @@ def find_available_ports():
         #   Linux:  /dev/ttyUSB*        /dev/ttyACM*
         patterns = ("tty.usbmodem*", "tty.usbserial*", "ttyUSB*", "ttyACM*")
         ports = [str(path) for pattern in patterns for path in Path("/dev").glob(pattern)]
-    return sorted(ports)
+    from makermodslab.gs_usb_transport import available_gs_usb_ports
+
+    return sorted(ports + available_gs_usb_ports())
 
 
 def get_saved_robot_port(robot_type: RobotSide) -> str | None:
