@@ -75,6 +75,7 @@ type Phase = "preparing" | "recording" | "naming" | "resetting" | "completed";
 interface BackendStatus {
   recording_active: boolean;
   current_phase: string;
+  preparation_message?: string | null;
   // Only meaningful while current_phase === "reconnecting_robot" — which
   // connect attempt is about to be retried, out of connect_retry_max.
   connect_retry_attempt?: number;
@@ -892,7 +893,7 @@ const RecordingSessionDialog: React.FC<{
     if (raw === "stopping") return t("recording.session.status.stopping");
     if (raw === "error") return t("recording.session.status.error");
     if (currentPhase === "preparing")
-      return t("recording.session.status.preparing");
+      return backendStatus?.preparation_message || t("recording.session.status.preparing");
     return t("recording.session.status.complete");
   };
 
