@@ -71,6 +71,11 @@ export default {
     deleteEpisodeTitle: "Delete episode {{index}}?",
     deleteEpisodeDescription:
       "This permanently removes this episode from the dataset. You can't undo this.",
+    // Shown instead of the plain description above when the dataset also has
+    // a Hub copy — episode delete is local-only (see delete_local_episodes),
+    // so the Hub copy keeps every episode until a manual re-upload.
+    deleteEpisodeDescriptionOnHub:
+      "This permanently removes this episode from the local copy. You can't undo this — the copy on the Hub keeps every episode until you upload again.",
     deleteEpisodeConfirm: "Delete episode",
     deleteEpisodeFailedTitle: "Couldn't delete episode",
     deleteEpisodeFailedBody: "Nothing was changed — try again.",

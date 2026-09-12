@@ -536,6 +536,10 @@ const CollectPanel: React.FC = () => {
             ? { onFinalize: handleFinalize, onDiscarded: handleDiscardFinalize }
             : undefined
         }
+        // A delete (an episode down to zero, or the whole dataset) removes a
+        // directory this panel's own library is still showing — without
+        // this, the now-gone dataset stays visible as a stale card.
+        onDeleted={refresh}
       />
 
       {/* The live recording session — a modal dialog over the studio instead

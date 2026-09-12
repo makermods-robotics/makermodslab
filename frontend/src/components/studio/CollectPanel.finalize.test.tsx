@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   fetch: vi.fn(),
   toast: vi.fn(),
   uploadDataset: vi.fn(async () => ({ started: true, repo_id: "x", message: "" })),
+  refreshDatasets: vi.fn(),
 }));
 
 vi.mock("@/contexts/ApiContext", () => ({
@@ -31,7 +32,7 @@ vi.mock("@/hooks/useRobots", () => ({
   }),
 }));
 vi.mock("@/hooks/useDatasets", () => ({
-  useDatasets: () => ({ datasets: [], loading: false, refresh: vi.fn() }),
+  useDatasets: () => ({ datasets: [], loading: false, refresh: mocks.refreshDatasets }),
 }));
 vi.mock("@/hooks/useSelectedDataset", () => ({
   useSelectedDataset: () => ({ selectedDataset: null, setSelectedDataset: vi.fn() }),
@@ -83,10 +84,12 @@ vi.mock("@/components/dialogs/DatasetDetailDialog", () => ({
     open,
     repoId,
     finalize,
+    onDeleted,
   }: {
     open: boolean;
     repoId: string | null;
     finalize?: { onFinalize: () => void; onDiscarded: () => void };
+    onDeleted?: () => void;
   }) =>
     open ? (
       <div>
@@ -101,6 +104,11 @@ vi.mock("@/components/dialogs/DatasetDetailDialog", () => ({
               do-discard
             </button>
           </>
+        )}
+        {onDeleted && (
+          <button type="button" onClick={onDeleted}>
+            do-delete
+          </button>
         )}
       </div>
     ) : null,
@@ -186,6 +194,16 @@ describe("a session that saved episodes", () => {
     );
     expect(screen.queryByText(/handoff:/)).not.toBeInTheDocument();
     expect(mocks.uploadDataset).not.toHaveBeenCalled();
+  });
+
+  // Regression: the dataset viewer's onDeleted callback used to go
+  // nowhere from this panel, so a dataset removed mid-review (an episode
+  // deleted down to zero, or the whole dataset) stayed visible as a stale
+  // card in the panel's own library until something unrelated refetched it.
+  it("refreshes the library when the dataset is deleted out from under the viewer", async () => {
+    await startAndEndSession(/end-session-with-episodes/i);
+    fireEvent.click(await screen.findByRole("button", { name: /do-delete/i }));
+    expect(mocks.refreshDatasets).toHaveBeenCalled();
   });
 });
 

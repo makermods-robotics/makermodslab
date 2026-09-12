@@ -114,6 +114,24 @@ describe("per-episode delete", () => {
     await waitFor(() => expect(mocks.listEpisodes).toHaveBeenCalledTimes(2));
   });
 
+  it("warns that the Hub copy is untouched when the dataset is also on the Hub", async () => {
+    mocks.listEpisodes.mockResolvedValue([episode(0), episode(1)]);
+    setup({ item: { ...LOCAL_ITEM, source: "both" } });
+
+    await screen.findByText("Episode 1");
+    fireEvent.click(screen.getByRole("button", { name: /delete episode 1/i }));
+    expect(screen.getByText(/hub/i)).toBeInTheDocument();
+  });
+
+  it("says nothing about the Hub for a local-only dataset", async () => {
+    mocks.listEpisodes.mockResolvedValue([episode(0), episode(1)]);
+    setup({ item: LOCAL_ITEM });
+
+    await screen.findByText("Episode 1");
+    fireEvent.click(screen.getByRole("button", { name: /delete episode 1/i }));
+    expect(screen.queryByText(/hub/i)).not.toBeInTheDocument();
+  });
+
   it("is not offered while curating episodes for training", async () => {
     mocks.listEpisodes.mockResolvedValue([episode(0)]);
     setup();

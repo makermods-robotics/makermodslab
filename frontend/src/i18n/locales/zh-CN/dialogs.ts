@@ -39,6 +39,8 @@ export default {
     deleteEpisodeAria: "删除第 {{index}} 回合",
     deleteEpisodeTitle: "删除第 {{index}} 回合？",
     deleteEpisodeDescription: "这会从数据集中永久移除该回合，无法撤销。",
+    deleteEpisodeDescriptionOnHub:
+      "这只会从本地副本中永久移除该回合，无法撤销 —— Hub 上的副本会保留所有回合，直到你再次上传。",
     deleteEpisodeConfirm: "删除回合",
     deleteEpisodeFailedTitle: "无法删除回合",
     deleteEpisodeFailedBody: "未做任何改动 —— 请重试。",

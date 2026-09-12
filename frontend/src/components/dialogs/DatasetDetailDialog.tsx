@@ -1167,7 +1167,9 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
               })}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {t("dialogs.datasetDetail.deleteEpisodeDescription")}
+              {item?.source === "both"
+                ? t("dialogs.datasetDetail.deleteEpisodeDescriptionOnHub")
+                : t("dialogs.datasetDetail.deleteEpisodeDescription")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
