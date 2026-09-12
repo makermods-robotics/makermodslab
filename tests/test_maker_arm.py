@@ -234,7 +234,8 @@ def _no_staging(monkeypatch: pytest.MonkeyPatch):
     """Skip the on-disk calibration staging — this is a config-shape test."""
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower, arm_type="so101": (leader, follower),
+        # The Maker arm offers two leader kinds, so it now hears leader_kind.
+        lambda leader, follower, arm_type="so101", **kw: (leader, follower),
     )
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.stage_bimanual_calibrations",

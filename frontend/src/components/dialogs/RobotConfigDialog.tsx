@@ -3218,6 +3218,11 @@ const RobotConfigWindow = ({
                     {t("robotConfig.leaderKind.verticalHint")}
                   </p>
                 )}
+                {leaderKind === "star_trigger" && (
+                  <p className="basis-full text-xs text-muted-foreground">
+                    {t("robotConfig.leaderKind.triggerHint")}
+                  </p>
+                )}
                 {leaderEnergized && (
                   <p className="basis-full text-xs text-muted-foreground">
                     {t("robotConfig.leaderKind.energizedHint")}

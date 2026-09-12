@@ -17,11 +17,20 @@ See can_common for everything shared with the Metal arm. Maker-specific:
 the RobStride motor stores its zero internally and exposes no register
 equivalent to Feetech's Homing_Offset (nothing to fingerprint), and the
 fork registers a dedicated bimanual leader type (bi_rebot_102_leader_maker).
+
+Two leader kinds, one physical leader. Kind "star" (the default) is the stock
+Star Arm 102 with its gripper lever. Kind "star_trigger" is the same arm fitted
+with MakerMods' trigger grip: the preset is the stock Maker one with the gripper
+scale replaced by the measured trigger travel, built in star_gripper.py the way
+the Metal arm's vertical grip is, so the mechanism never moves the lerobot pin.
+Neither kind is energized, so every leader-side hook treats them alike; the kind
+picks the preset and the calibration library.
 """
 
 from __future__ import annotations
 
-from .can_common import CanArmFamily, CanDeviceClasses
+from .base import LeaderOption
+from .can_common import STAR_LEADER_KIND, CanArmFamily, CanDeviceClasses
 from .urdf import maker_joint_positions
 
 
@@ -57,6 +66,21 @@ class MakerFamily(CanArmFamily):
     follower_probe_protocol = "robstride"
     motion_identify_energizes_follower = False
 
+    def leader_options(self) -> tuple[LeaderOption, ...]:
+        from ..star_gripper import STAR_TRIGGER_LEADER_KIND
+
+        return (
+            LeaderOption(id=STAR_LEADER_KIND, label="Star Arm 102 leader"),
+            LeaderOption(id=STAR_TRIGGER_LEADER_KIND, label="Star arm trigger grip"),
+        )
+
+    def leader_calibration_dir(self, leader_kind: str | None = None) -> str:
+        from ..star_gripper import STAR_TRIGGER_LEADER_KIND, trigger_calibration_dir
+
+        if leader_kind == STAR_TRIGGER_LEADER_KIND:
+            return trigger_calibration_dir()
+        return super().leader_calibration_dir()
+
     def gripper_bus(self, port: str):
         from lerobot.motors.robstride import RobstrideMotorsBus
         from lerobot.robots.maker_follower.maker_follower import MOTOR_MODELS
@@ -71,6 +95,18 @@ class MakerFamily(CanArmFamily):
         from lerobot.teleoperators.rebot_102_leader.config_rebot_102_leader_maker import (
             RebotArm102LeaderMakerTeleopConfig,
         )
+
+        from ..star_gripper import STAR_TRIGGER_LEADER_KIND, trigger_sub_config, trigger_teleop_config
+
+        if leader_kind == STAR_TRIGGER_LEADER_KIND:
+            return CanDeviceClasses(
+                follower=MakerFollowerConfig,
+                follower_base=MakerFollowerConfigBase,
+                bi_follower=BiMakerFollowerConfig,
+                teleop=trigger_teleop_config,
+                leader_sub=trigger_sub_config,
+                bi_teleop=BiRebot102LeaderMakerConfig,
+            )
 
         return CanDeviceClasses(
             follower=MakerFollowerConfig,

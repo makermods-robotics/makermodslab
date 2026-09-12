@@ -371,7 +371,11 @@ describe("leader port detection with a gs_usb follower attached", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Detect by swing" })[index]);
     await waitFor(() => expect(mocks.fetch).toHaveBeenCalledWith(
       "http://test/api/v1/maker/identify-arm",
-      expect.objectContaining({ body: JSON.stringify({ device_type: "teleop", arm_type: "maker" }) }),
+      // The Maker arm offers two leader kinds (lever and trigger grip), so the
+      // gesture request names the record's kind, the default here.
+      expect.objectContaining({
+        body: JSON.stringify({ device_type: "teleop", arm_type: "maker", leader_kind: "star" }),
+      }),
     ));
   });
 });
