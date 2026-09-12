@@ -53,6 +53,8 @@ as subprocess CLI args, not as config objects, so it does not use this
 module — the follower-only asymmetry lives there, not here.
 """
 
+from types import SimpleNamespace
+
 # Eager, deliberately: every device config class the three families build is
 # imported HERE at module import (server.py imports this module through
 # teleoperate/record), so a missing or broken CAN extra — `maker`, `damiao`,
@@ -136,6 +138,19 @@ def build_single_configs(request, cameras=None):
     return family.build_single_configs(request, cameras, leader_config_name, follower_config_name)
 
 
+def _with_unused_ports(request, side: str):
+    """Adapt a one-sided remote request to the family's paired builder.
+
+    The discarded config still needs port fields, but it is never connected.
+    Keep the actual request and its API schema unchanged, and preserve every
+    supplied field, including the selected side's ports and leader kind.
+    """
+    fields = dict(vars(request))
+    for prefix in ("", "right_"):
+        fields.setdefault(f"{prefix}{side}_port", "")
+    return SimpleNamespace(**fields)
+
+
 def build_follower_config(request, cameras=None):
     """Build only the follower side for a hosted robot station.
 
@@ -143,6 +158,7 @@ def build_follower_config(request, cameras=None):
     never instantiated. This keeps construction and leader-kind rules in the
     arm registry while staging only the follower calibration files.
     """
+    request = _with_unused_ports(request, "leader")
     arm_type = request_arm_type(request)
     family = arm_registry.get(arm_type)
     if getattr(request, "mode", "single") == "bimanual":
@@ -169,6 +185,7 @@ def build_follower_config(request, cameras=None):
 
 def build_leader_config(request):
     """Build only the leader side for a remote controller."""
+    request = _with_unused_ports(request, "follower")
     arm_type = request_arm_type(request)
     family = arm_registry.get(arm_type)
     if getattr(request, "mode", "single") == "bimanual":
