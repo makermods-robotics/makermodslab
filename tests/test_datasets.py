@@ -967,15 +967,15 @@ def test_delete_episodes_partial_delete_swaps_the_rewritten_copy_into_place(
 
     with (
         patch("lerobot.datasets.LeRobotDataset", return_value=MagicMock()) as ds_cls,
-        patch("lerobot.datasets.dataset_tools.delete_episodes", side_effect=fake_delete_episodes) as fake_delete,
+        patch(
+            "lerobot.datasets.dataset_tools.delete_episodes", side_effect=fake_delete_episodes
+        ) as fake_delete,
     ):
         result = delete_local_episodes("makermods/ds", [1])
 
     assert result == {"whole_dataset_deleted": False}
     ds_cls.assert_called_once()
-    called_indices = fake_delete.call_args.kwargs.get(
-        "episode_indices"
-    ) or fake_delete.call_args[0][1]
+    called_indices = fake_delete.call_args.kwargs.get("episode_indices") or fake_delete.call_args[0][1]
     assert list(called_indices) == [1]
     info = json.loads((tmp_lerobot_home / "makermods" / "ds" / "meta" / "info.json").read_text())
     assert info["total_episodes"] == 2
@@ -998,9 +998,9 @@ def test_delete_episodes_cleans_up_the_temp_dir_on_rewrite_failure(
     with (
         patch("lerobot.datasets.LeRobotDataset", return_value=MagicMock()),
         patch("lerobot.datasets.dataset_tools.delete_episodes", side_effect=RuntimeError("boom")),
+        pytest.raises(DatasetEpisodeDeleteError) as exc,
     ):
-        with pytest.raises(DatasetEpisodeDeleteError) as exc:
-            delete_local_episodes("makermods/ds", [1])
+        delete_local_episodes("makermods/ds", [1])
 
     assert exc.value.status == 500
     # The original dataset is untouched, and no orphaned temp dir survives.
