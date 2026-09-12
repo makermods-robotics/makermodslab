@@ -1437,7 +1437,9 @@ const RobotConfigWindow = ({
     field: keyof RobotRecord = portField,
   ) => {
     const conflictingField = robot
-      ? portFields.find((f) => f !== field && draftPort(f) === nextPort)
+      ? portFields.find(
+          (f) => f !== field && nextPort !== "" && draftPort(f) === nextPort,
+        )
       : undefined;
     if (conflictingField) {
       const currentPort = draftPort(field);

@@ -49,3 +49,10 @@ if (typeof globalThis.ResizeObserver === "undefined") {
   }
   globalThis.ResizeObserver = ResizeObserverStub;
 }
+
+// jsdom has no layout engine, so Element.scrollIntoView is absent. Radix
+// Select calls it on the highlighted item as soon as its listbox mounts, so
+// any test that opens one throws before it can click an option.
+if (typeof Element.prototype.scrollIntoView === "undefined") {
+  Element.prototype.scrollIntoView = () => {};
+}
