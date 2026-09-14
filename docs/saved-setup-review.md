@@ -36,7 +36,7 @@ library separation as the selected family:
 - Metal leader: `teleoperators/metal_leader/NAME.json`.
 - Star leader using the Metal preset: `teleoperators/rebot_102_leader/NAME.json`.
 
-The selected family/factory source and `pyproject.toml` dependency pin are
+The selected family/factory source, staging's CAN transport helpers, and `pyproject.toml` dependency pin are
 copied too. A Maker preset is never substituted for Metal simply because
 the Star calibration directory is shared. Source commit is supplied by the
 operator; source bytes are included so local edits can also be compared.

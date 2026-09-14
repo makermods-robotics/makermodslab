@@ -43,6 +43,8 @@ SOURCE_FILES = (
     "makermodslab/arms/metal.py",
     "makermodslab/arms/can_common.py",
     "makermodslab/arms/registry.py",
+    "makermodslab/maker_can.py",
+    "makermodslab/gs_usb_transport.py",
     "pyproject.toml",
 )
 
