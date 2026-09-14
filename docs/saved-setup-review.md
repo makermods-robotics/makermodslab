@@ -5,6 +5,44 @@ files before interpreting a later run. The optional exporter below produces
 copies for human review or RLSOK's saved-configuration comparison workflow.
 RLSOK is not required to export or inspect the files.
 
+## Use the native-record review command
+
+With RLSOK's saved-setup CLI installed, this wrapper exports the selected native
+record/calibrations and creates the observation in one step:
+
+```sh
+python makermodslab/scripts/review_saved_setup.py \
+  --record /path/to/copied/robots/my-metal.json \
+  --calibration-root /path/to/copied/calibration \
+  --source-commit YOUR_CHECKOUT_FULL_40_CHARACTER_COMMIT \
+  --capture-only --output setup-01
+```
+
+Read `setup-01/record.json`, the selected calibration copies and observation.
+Only then create your own baseline:
+
+```sh
+rlsok profile approve-setup --observation setup-01/observation.json \
+  --actor YOUR_NAME --output approved-01.json
+```
+
+For the next saved configuration, run the same wrapper with
+`--baseline approved-01.json --output setup-02` in place of `--capture-only`.
+It leaves the old baseline untouched, captures the new selected native files,
+and writes `setup-02/review/report.json` and `report.md`. For an offline change
+example, use a separate copy of the record/calibration directories and alter
+one selected calibration value in that copy only. The changed report identifies
+the selected calibration file and value path. Never use that deliberately
+changed copy in a robot session.
+
+The wrapper invokes the installed `rlsok` executable with argument arrays and
+never a shell command. `--rlsok /path/to/rlsok` selects an explicit executable.
+Exit 0 means a capture or unchanged comparison completed, 1 means review is
+required, and 2 means the workflow failed. It never creates approval
+automatically. It does not add a runtime interception gate or prove bench use.
+
+## Export without running RLSOK
+
 Run the script directly using Python 3.12; it uses only the standard library:
 
 ```sh
