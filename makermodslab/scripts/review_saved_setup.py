@@ -21,10 +21,16 @@ def main():
     parser.add_argument('--source-commit', required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--rlsok', default='rlsok', help='Installed rlsok executable; no shell command')
+    parser.add_argument('--node', help='Explicit Node executable, paired with --rlsok-cli (also works on Windows)')
+    parser.add_argument('--rlsok-cli', type=Path, help='Installed RLSOK dist/apps/cli/rlsok.js, paired with --node')
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--capture-only', action='store_true', help='Prepare an observation for manual review')
     mode.add_argument('--baseline', type=Path, help='Previously approved baseline; never refreshed here')
     args = parser.parse_args()
+    if bool(args.node) != bool(args.rlsok_cli):
+        parser.error('--node and --rlsok-cli must be supplied together')
+    if args.node and args.rlsok != 'rlsok':
+        parser.error('Select --rlsok or --node with --rlsok-cli, not both')
     if args.output.exists():
         parser.error('Output already exists; choose a new directory')
     if args.baseline is not None and not args.baseline.is_file():
@@ -34,7 +40,8 @@ def main():
     observation = args.output / 'observation.json'
 
     def rlsok(*arguments):
-        return subprocess.run([args.rlsok, 'profile', *map(str, arguments)],
+        executable = [args.node, str(args.rlsok_cli)] if args.node else [args.rlsok]
+        return subprocess.run([*executable, 'profile', *map(str, arguments)],
                               check=False, timeout=60, shell=False).returncode
 
     status = rlsok('capture-setup', '--manifest', args.output / 'manifest.json', '--output', observation)

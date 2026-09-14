@@ -18,7 +18,7 @@ python makermodslab/scripts/review_saved_setup.py \
   --capture-only --output setup-01
 ```
 
-Read `setup-01/record.json`, the selected calibration copies and observation.
+Read `setup-01/record.json`, `selection.json`, the selected calibration copies and observation.
 Only then create your own baseline:
 
 ```sh
@@ -37,6 +37,9 @@ changed copy in a robot session.
 
 The wrapper invokes the installed `rlsok` executable with argument arrays and
 never a shell command. `--rlsok /path/to/rlsok` selects an explicit executable.
+Alternatively, including on Windows, use `--node /path/to/node` together with
+`--rlsok-cli /path/to/installed/rlsok/dist/apps/cli/rlsok.js`. This avoids a shell
+wrapper. Both paths must refer to the locally installed tools.
 Exit 0 means a capture or unchanged comparison completed, 1 means review is
 required, and 2 means the workflow failed. It never creates approval
 automatically. It does not add a runtime interception gate or prove bench use.
@@ -61,11 +64,12 @@ or upload anything. In particular, a Metal bus handshake must not be treated
 as an inert identification read.
 
 The copied record must explicitly contain `arm_type: metal`, `mode`
-(`single`/`bimanual`), `arms` (`leader`/`follower`/`both`), `leader_kind`
-(`star`/`metal`), `name`, and a `cameras` array (empty is valid). For older
-records, review and save a copy with explicit fields rather than letting this
-exporter infer runtime defaults. Other arm families or leader variants are
-refused in this initial exporter.
+(`single`/`bimanual`), `arms` (`leader`/`follower`/`both`), `name`, and a `cameras`
+array (empty is valid). `leader_kind` accepts `star`, `metal` and
+`star_vertical`. Empty/missing leader kind follows the application's Star
+default, explicitly recorded as `application_default` in `selection.json`;
+the copied original record is never rewritten. Other absent mode/family
+fields and unknown explicit variants are refused.
 
 Only the calibration files assigned to active slots are read, with the same
 library separation as the selected family:
@@ -73,6 +77,12 @@ library separation as the selected family:
 - Metal follower: `robots/metal_follower/NAME.json`.
 - Metal leader: `teleoperators/metal_leader/NAME.json`.
 - Star leader using the Metal preset: `teleoperators/rebot_102_leader/NAME.json`.
+- Vertical Star leader: `teleoperators/rebot_102_leader_vertical/NAME.json`.
+
+`selection.json` lists each active role, port, exact calibration library/name,
+copied filename and calibration keys. It describes saved assignments, not a
+discovered physical identity. Formatting-only calibration edits do not become
+semantic changes through a duplicated byte digest in this selection file.
 
 The selected family/factory source, staging's CAN transport helpers, and `pyproject.toml` dependency pin are
 copied too. A Maker preset is never substituted for Metal simply because
@@ -89,7 +99,7 @@ the error.
 
 ## Optional RLSOK comparison
 
-Using RLSOK's `1.5.0-shadow.10` saved-setup workflow:
+Using RLSOK's `1.5.0-shadow.12` saved-setup workflow:
 
 ```sh
 rlsok profile capture-setup --manifest setup-01/manifest.json --output observation-01.json
@@ -115,5 +125,5 @@ cannot identify which physical arm is attached. This tool does not install a
 runtime gate, approve motion, demonstrate bench compatibility, or establish a
 successful robot trial. It leaves all existing session controls unchanged.
 
-See [RLSOK's saved-setup guide](https://github.com/realitywarden/rlsok/blob/v1.5.0-shadow.10/docs/saved-setup-review.md)
+See [RLSOK's saved-setup guide](https://github.com/realitywarden/rlsok/blob/v1.5.0-shadow.12/docs/saved-setup-review.md)
 for optional identity resolution and the precise comparison scope.

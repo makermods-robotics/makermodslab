@@ -21,8 +21,9 @@ MakerModsLab/LeRobot, opens hardware, starts a session or contacts RLSOK.
 
 Output is an optional RLSOK saved-configuration manifest, not execution
 authorization. The files can also be reviewed without RLSOK. Only explicit
-Metal records with a Star or Metal leader are supported initially; unknown or
-implicit variants are refused instead of guessed.
+Metal records with a Star, vertical Star or Metal leader are supported. An
+empty/missing leader_kind uses the application's Star default, recorded in
+selection.json; unknown explicit variants are refused.
 """
 
 from __future__ import annotations
@@ -43,6 +44,8 @@ SOURCE_FILES = (
     "makermodslab/arms/metal.py",
     "makermodslab/arms/can_common.py",
     "makermodslab/arms/registry.py",
+    "makermodslab/arms/base.py",
+    "makermodslab/star_gripper.py",
     "makermodslab/maker_can.py",
     "makermodslab/gs_usb_transport.py",
     "pyproject.toml",
@@ -111,7 +114,8 @@ def export_saved_setup(
     _choice(record, "arm_type", {"metal"})
     mode = _choice(record, "mode", {"single", "bimanual"})
     arms = _choice(record, "arms", {"leader", "follower", "both"})
-    leader_kind = _choice(record, "leader_kind", {"star", "metal"})
+    default_leader = "leader_kind" not in record or record["leader_kind"] == ""
+    leader_kind = "star" if default_leader else _choice(record, "leader_kind", {"star", "metal", "star_vertical"})
     robot_name = _string(record, "name")
     if not isinstance(record.get("cameras"), list):
         raise ValueError("Explicit cameras array required (an empty array is valid)")
@@ -127,6 +131,7 @@ def export_saved_setup(
     copies = {"record.json": record_bytes}
     ports: set[str] = set()
     assignments: set[Path] = set()
+    slots = []
     for prefix in (("", "right_") if mode == "bimanual" else ("",)):
         for side in (("leader", "follower") if arms == "both" else (arms,)):
             slot = prefix + side
@@ -140,17 +145,29 @@ def export_saved_setup(
             if side == "follower":
                 relative = Path("robots") / "metal_follower" / (name + ".json")
             else:
-                library = "metal_leader" if leader_kind == "metal" else "rebot_102_leader"
+                library = {"metal": "metal_leader", "star": "rebot_102_leader",
+                           "star_vertical": "rebot_102_leader_vertical"}[leader_kind]
                 relative = Path("teleoperators") / library / (name + ".json")
             selected = calibration_root / relative
             if selected in assignments:
                 raise ValueError("Two active slots share the same selected calibration")
             assignments.add(selected)
             data = _bytes(selected)
-            _object(data, slot + " calibration")
+            calibration = _object(data, slot + " calibration")
             filename = slot + "-calibration.json"
             copies[filename] = data
             files.append({"id": slot + "_calibration", "path": filename, "format": "json"})
+            slots.append({"role": slot, "port": port, "calibrationLibrary": relative.parent.as_posix(),
+                          "calibrationName": name + ".json", "copiedFile": filename,
+                          "calibrationKeys": sorted(calibration)})
+
+    # Explicit mapping suitable for review without reading the whole factory.
+    # These are selected file assignments, not discovered device identities.
+    selection = {"armType": "metal", "mode": mode, "arms": arms,
+                 "leaderKind": leader_kind, "leaderKindResolution": "application_default" if default_leader else "explicit_record", "slots": slots,
+                 "identityEvidence": "saved record only; no physical unit identity verified"}
+    copies["selection.json"] = (json.dumps(selection, indent=2, allow_nan=False) + "\n").encode("utf8")
+    files.append({"id": "selection", "path": "selection.json", "format": "json"})
 
     for index, relative_source in enumerate(SOURCE_FILES):
         filename = f"source-{index}.txt"
