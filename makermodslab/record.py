@@ -37,7 +37,7 @@ from .arm_capabilities import require_known_arm_type
 from .arm_identity import ArmIdentityError
 from .arms import registry as arm_registry
 from .bus_retry import BUS_SYNC_READ_RETRIES as _BUS_SYNC_READ_RETRIES  # noqa: F401
-from .camera_preview import camera_preview_manager
+from .camera_preview import DEFAULT_FOURCC, camera_preview_manager
 from .datasets import (
     _lerobot_cache_root,
     invalidate_dataset_listing_cache,
@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 # from the UI. MJPG is ~10x smaller and lets the full rig stream. macOS already
 # negotiates MJPEG, so this only changes Linux behavior. An explicit per-camera
 # fourcc (e.g. a deliberate YUYV choice from the UI) still wins.
-_DEFAULT_FOURCC = "MJPG"
+_DEFAULT_FOURCC = DEFAULT_FOURCC  # one default, shared with the live preview
 
 # --- Motor bus read retries ----------------------------------------------------
 # Moved to makermodslab/bus_retry.py so the two subprocess runners (eval and

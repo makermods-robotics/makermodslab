@@ -17,6 +17,15 @@ class UsbRaw:
         self.controls = []
         self.reads = deque()
         self.read_timeouts = []
+        self.kernel_driver_active = False
+        self.detached = []
+
+    def is_kernel_driver_active(self, interface):
+        return self.kernel_driver_active
+
+    def detach_kernel_driver(self, interface):
+        self.detached.append(interface)
+        self.kernel_driver_active = False
 
     def write(self, endpoint, data, timeout):
         self.writes.append((endpoint, data, timeout))
@@ -103,6 +112,27 @@ def test_gs_partial_send_failure_and_failed_start_cleanup(gs_device, monkeypatch
     with pytest.raises(OSError):
         ids.BoundedGsUsb(device, 1000000, 0.3)
     assert disposed == [raw, raw]
+
+
+def test_gs_detaches_linux_kernel_driver_before_claim(gs_device, monkeypatch):
+    import usb.util
+
+    device, raw, _ = gs_device
+    order = []
+    monkeypatch.setattr(raw, "detach_kernel_driver", lambda i: order.append(("detach", i)))
+    monkeypatch.setattr(usb.util, "claim_interface", lambda dev, i: order.append(("claim", i)))
+    monkeypatch.setattr(ids.sys, "platform", "linux")
+    raw.kernel_driver_active = True
+    ids.BoundedGsUsb(device, 1000000, 0.3).shutdown()
+    assert order == [("detach", 0), ("claim", 0)]
+
+    # Nothing to detach when the kernel driver is unbound, and never off Linux.
+    for platform, active in (("linux", False), ("darwin", True)):
+        order.clear()
+        monkeypatch.setattr(ids.sys, "platform", platform)
+        raw.kernel_driver_active = active
+        ids.BoundedGsUsb(device, 1000000, 0.3).shutdown()
+        assert order == [("claim", 0)]
 
 
 def test_gs_rejects_fd_flag_with_short_payload(gs_device):

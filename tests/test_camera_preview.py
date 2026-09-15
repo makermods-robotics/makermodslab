@@ -138,9 +138,10 @@ def test_two_clients_share_one_capture_last_release_frees_it(
 def test_preview_requests_thumbnail_resolution_before_first_read(
     fake_captures: list[FakeVideoCapture],
 ) -> None:
-    """The open path must ask for PREVIEW_WIDTH x PREVIEW_HEIGHT before a frame
-    is read: cv2 otherwise keeps the camera's default (1080p on the rig's USB
-    cameras) and its USB bandwidth reservation starves a third camera."""
+    """The open path must ask for the MJPG pixel format, then PREVIEW_WIDTH x
+    PREVIEW_HEIGHT, before a frame is read: cv2 otherwise negotiates raw YUYV (or
+    the camera's 1080p default) and its USB bandwidth reservation starves a
+    third camera. The fourcc goes first because V4L2 renegotiates size per format."""
     manager = CameraPreviewManager()
     gen = manager.open_stream(0)
     next(gen)
@@ -148,6 +149,7 @@ def test_preview_requests_thumbnail_resolution_before_first_read(
 
     cap = fake_captures[0]
     assert cap.props == [
+        (camera_preview.cv2.CAP_PROP_FOURCC, camera_preview.cv2.VideoWriter_fourcc(*"MJPG")),
         (camera_preview.cv2.CAP_PROP_FRAME_WIDTH, camera_preview.PREVIEW_WIDTH),
         (camera_preview.cv2.CAP_PROP_FRAME_HEIGHT, camera_preview.PREVIEW_HEIGHT),
     ]
