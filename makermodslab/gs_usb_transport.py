@@ -90,7 +90,12 @@ class BoundedGsUsb(can.BusABC):
     by index. Upstream GsUsb.read also swallows all USB errors. Avoid all three.
     Sources: https://python-can.readthedocs.io/en/stable/interfaces/gs_usb.html
     https://github.com/jxltom/gs_usb/blob/master/gs_usb/gs_usb.py
-    No USB reset, automatic kernel detach, threads or index-based discovery.
+    No USB reset, threads or index-based discovery. On Linux the kernel's own
+    gs_usb driver binds the adapter as a SocketCAN netdev (again after any
+    re-enumeration), and claiming the interface then fails with EBUSY — which
+    turns a torque-release reopen into "Resource busy". So the selected
+    adapter, and only it, is detached from that driver before the claim, and
+    left detached on shutdown so the next reopen cannot race a rebind.
     """
 
     def __init__(self, device, bitrate=1_000_000, timeout=0.1):
@@ -108,6 +113,8 @@ class BoundedGsUsb(can.BusABC):
         self.started = False
         self.raw.default_timeout = self.milliseconds(timeout)
         try:
+            if sys.platform.startswith("linux") and self.raw.is_kernel_driver_active(0):
+                self.raw.detach_kernel_driver(0)
             usb.util.claim_interface(self.raw, 0)
             self.claimed = True
             timing = can.BitTiming.from_sample_point(
