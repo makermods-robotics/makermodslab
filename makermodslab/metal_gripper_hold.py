@@ -13,12 +13,15 @@ from .metal_gripper import WATCHDOG_TICKS, GripperSafetyError, MetalGripperBus
 
 
 class HoldingController:
-    """All positions/velocities here are radians; positive position opens Metal."""
+    """Radians throughout; closing direction is -1 for Metal, +1 for Maker."""
 
-    def __init__(self, torque_nm: float, limits_rad: tuple[float, float]):
+    def __init__(self, torque_nm: float, limits_rad: tuple[float, float], *, closing_direction=-1):
         self.torque_nm = validate_gripper_hold_torque(torque_nm)
         if self.torque_nm is None:
             raise ValueError("Holding controller requires a torque")
+        if closing_direction not in (-1, 1):
+            raise ValueError("Closing direction must be -1 or +1")
+        self.closing_direction = closing_direction
         self.limits = limits_rad
         self.holding = False
         self.last_command = None
@@ -38,8 +41,8 @@ class HoldingController:
         while self.history and self.history[0][0] < now - 0.1:
             self.history.popleft()
         # Signed closing effort avoids treating opening acceleration as a grasp.
-        closing_effort = -sum(e for _, e in self.history) / len(self.history)
-        opening = goal > position + math.radians(0.25)
+        closing_effort = self.closing_direction * sum(e for _, e in self.history) / len(self.history)
+        opening = self.closing_direction * (goal - position) < -math.radians(0.25)
         if self.holding:
             # Target relaxation initially reduces effort below its final value.
             # Require sustained loss of contact so it cannot oscillate between
@@ -54,7 +57,7 @@ class HoldingController:
                 self.holding = False
                 self.contact_started = None
                 self.low_effort_since = None
-        elif goal < position and closing_effort > 0.5 and abs(velocity) < 0.3:
+        elif self.closing_direction * (goal - position) > 0 and closing_effort > 0.5 and abs(velocity) < 0.3:
             if self.contact_started is None:
                 self.contact_started = now
             # Require 100 ms of contact evidence, not one acceleration sample.
@@ -65,15 +68,15 @@ class HoldingController:
 
         if self.holding:
             # q_raw = q_last + s * (target_effort - measured_effort) / Kp;
-            # Metal closes toward smaller angles, so s=-1.
-            raw = self.last_command - (self.torque_nm - abs(effort)) / kp
+            raw = self.last_command + self.closing_direction * (self.torque_nm - abs(effort)) / kp
             # Time-based smoothing avoids dependence on recording/teleop rate:
             # alpha=0.1 at a 20 ms update. Normal movement has no such filter.
             alpha = 1.0 - math.exp(-min(dt, 0.05) / 0.19)
             self.filtered += alpha * (raw - self.filtered)
             # Never close beyond the leader request; prevent integrator windup
             # at joint bounds by storing the actual bounded command.
-            command = min(self.limits[1], max(goal, self.limits[0], self.filtered))
+            bounded = max(goal, self.filtered) if self.closing_direction < 0 else min(goal, self.filtered)
+            command = min(self.limits[1], max(self.limits[0], bounded))
             self.filtered = command
         else:
             command = goal

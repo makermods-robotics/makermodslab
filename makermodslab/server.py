@@ -5159,7 +5159,7 @@ def upsert_robot(name: str, data: dict, create: bool = False):
             if "gripper_hold_torque_nm" in body:
                 validate_gripper_hold_torque(body["gripper_hold_torque_nm"])
                 if not supports_gripper_effort_control(merged.get("arm_type")):
-                    raise ValueError("Holding torque is supported only for Metal followers")
+                    raise ValueError("Holding torque is supported only for Metal and Maker followers")
             if (
                 merged.get("gripper_current_limit_a") is not None
                 and merged.get("gripper_hold_torque_nm") is not None
@@ -5169,7 +5169,7 @@ def upsert_robot(name: str, data: dict, create: bool = False):
             return JSONResponse(status_code=400, content={"status": "error", "message": str(exc)})
 
     if "gripper_current_limit_a" in body:
-        from .gripper_settings import validate_gripper_current
+        from .gripper_settings import supports_gripper_current_control, validate_gripper_current
 
         try:
             if not existing and not create:
@@ -5177,7 +5177,7 @@ def upsert_robot(name: str, data: dict, create: bool = False):
                     status_code=404, content={"status": "error", "message": "Robot not found"}
                 )
             validate_gripper_current(body["gripper_current_limit_a"])
-            if not supports_gripper_effort_control(body.get("arm_type") or existing.get("arm_type")):
+            if not supports_gripper_current_control(body.get("arm_type") or existing.get("arm_type")):
                 raise ValueError("Gripper current limiting is supported only for Metal followers")
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"status": "error", "message": str(exc)})

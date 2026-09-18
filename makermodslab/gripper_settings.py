@@ -1,4 +1,4 @@
-"""Settings for the local Metal gripper current-limit experiment."""
+"""Settings for local Maker/Metal holding and Metal current limiting."""
 
 import math
 
@@ -19,8 +19,17 @@ def supports_gripper_effort_control(arm_type: str) -> bool:
         return False
 
 
+def supports_gripper_current_control(arm_type: str) -> bool:
+    from .arms import registry
+
+    try:
+        return registry.get(arm_type).supports_gripper_current_control
+    except registry.UnknownArmType:
+        return False
+
+
 def default_gripper_hold_torque(arm_type: str, current_limit: object = None) -> float | None:
-    """Default only Metal followers without an explicitly selected current mode."""
+    """Default supported followers without an explicitly selected current mode."""
     if supports_gripper_effort_control(arm_type) and current_limit is None:
         return DEFAULT_GRIPPER_HOLD_TORQUE_NM
     return None

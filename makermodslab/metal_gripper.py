@@ -402,15 +402,16 @@ class MetalGripperBus:
 
 
 def install_metal_gripper(robot: Any, robot_name: str) -> None:
-    """Attach to Metal FOLLOWERS only; invoked before connect by both sessions."""
+    """Compatibility entry point for Maker/Metal follower session adapters."""
     from .utils.config import get_robot_record
 
     record = get_robot_record(robot_name) if robot_name else None
     limit = validate_gripper_current((record or {}).get("gripper_current_limit_a"))
     from .gripper_settings import DEFAULT_GRIPPER_HOLD_TORQUE_NM, validate_gripper_hold_torque
+    from .maker_gripper_hold import MakerHoldingBus
     from .metal_gripper_hold import MetalHoldingBus
 
-    # Unnamed legacy teleop/record requests also use the Metal default. An
+    # Unnamed legacy teleop/record requests also use the shared holding default. An
     # existing record's explicit null remains an opt-out.
     holding = validate_gripper_hold_torque(
         record.get("gripper_hold_torque_nm") if record is not None else DEFAULT_GRIPPER_HOLD_TORQUE_NM
@@ -419,7 +420,16 @@ def install_metal_gripper(robot: Any, robot_name: str) -> None:
         raise GripperSafetyError("Choose holding torque or current limiting, not both")
     arms = [getattr(robot, "left_arm", None), getattr(robot, "right_arm", None)]
     for arm in [a for a in arms if a is not None] or [robot]:
-        if getattr(arm.config, "type", "") != "metal_follower":
+        arm_type = getattr(arm.config, "type", "")
+        if arm_type not in ("metal_follower", "maker_follower"):
+            continue
+        if arm_type == "maker_follower":
+            if limit is not None:
+                raise GripperSafetyError("Current limiting is supported only for Metal followers")
+            if isinstance(arm.bus, MetalGripperBus):
+                raise RuntimeError("Maker gripper adapter is already installed")
+            if holding is not None:
+                arm.bus = MakerHoldingBus(arm, robot_name, holding)
             continue
         if isinstance(arm.bus, MetalGripperBus):
             raise RuntimeError("Metal gripper adapter is already installed")

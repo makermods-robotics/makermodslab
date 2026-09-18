@@ -54,7 +54,7 @@ export interface RobotRecord {
   // default 38 = the vendored script's stock 380). Sessions (teleop/record/
   // policy runs) use stock LeRobot torque and ignore this value.
   motor_power: number;
-  /** Metal gripper holding effort; absent defaults to 0.5 N·m, null opts out. */
+  /** Maker/Metal gripper holding effort; absent defaults to 0.5 N·m, null opts out. */
   gripper_hold_torque_nm?: number | null;
   /** Alternative mode-4 current limiter, mutually exclusive with holding torque. */
   gripper_current_limit_a?: number | null;
