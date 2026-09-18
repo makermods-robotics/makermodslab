@@ -379,6 +379,7 @@ class ArmFamily(ABC):
     supports_gripper_wiggle: bool = False
     # Opt-in for the local MIT holding / mode-4 gripper adapters.
     supports_gripper_effort_control: bool = False
+    supports_gripper_current_control: bool = False
 
     def leader_options(self) -> tuple[LeaderOption, ...]:
         """The leader arms this family can be driven by, default FIRST.

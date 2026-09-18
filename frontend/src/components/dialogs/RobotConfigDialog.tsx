@@ -2151,7 +2151,7 @@ const RobotConfigWindow = ({
     [portDraft, robot],
   );
   const motorDirty = !!robot && motorPercent !== robot.motor_power;
-  const holdingDirty = !!robot && armType === "metal" && holdingDraft !== savedHoldingTorque;
+  const holdingDirty = !!robot && (armType === "metal" || armType === "maker") && holdingDraft !== savedHoldingTorque;
   const holdingValid = holdingDraft === null || (Number.isFinite(holdingDraft) && holdingDraft >= 0.1 && holdingDraft <= 2);
   const armsDirty = !!robot && draftArms !== (robot.arms ?? "both");
   const isDirty = camerasDirty || portsDirty || motorDirty || armsDirty || holdingDirty;
@@ -3681,7 +3681,7 @@ const RobotConfigWindow = ({
               )}
             </section>
           )}
-          {robot && armType === "metal" && showFollower && (
+          {robot && (armType === "metal" || armType === "maker") && showFollower && (
             <Collapsible key={robotName} className="group py-5">
               <CollapsibleTrigger className="flex w-full items-center justify-between text-sm font-semibold text-foreground">
                 {t("robotConfig.advanced.title")}

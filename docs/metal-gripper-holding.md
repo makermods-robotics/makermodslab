@@ -18,7 +18,8 @@ The saved field is `gripper_hold_torque_nm`. New Metal records, old records miss
 the field, and unnamed Metal teleoperation/recording requests use the default.
 Explicit values, including `null` to opt out, are preserved. An explicitly selected
 `gripper_current_limit_a` selects the alternative mode-4 experiment; both settings
-cannot be enabled together. Other robot families do not receive this default.
+cannot be enabled together. Maker followers also default to holding control; see [Maker gripper holding](maker-gripper-holding.md).
+Other robot families do not receive this default.
 
 `POST /api/v1/robots/{name}` accepts the setting. To switch an idle robot from
 current limiting to holding torque, send:

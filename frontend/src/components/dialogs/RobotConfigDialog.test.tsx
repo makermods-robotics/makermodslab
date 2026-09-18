@@ -119,9 +119,9 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("advanced holding torque", () => {
-  function openMetal(holdTorque: number | null | undefined = undefined, currentLimit: number | null = null) {
+  function openMetal(holdTorque: number | null | undefined = undefined, currentLimit: number | null = null, armType = "metal") {
     const record = {
-      name: "test", mode: "single", arm_type: "metal", arms: "both", cameras: [],
+      name: "test", mode: "single", arm_type: armType, arms: "both", cameras: [],
       motor_power: 38, gripper_hold_torque_nm: holdTorque, gripper_current_limit_a: currentLimit,
       leader_port: "leader", follower_port: "follower",
     };
@@ -136,8 +136,8 @@ describe("advanced holding torque", () => {
     render(<RobotConfigDialog open robotName="test" onOpenChange={() => {}} />);
   }
 
-  it("starts collapsed at 0.5 Nm and saves only the edited holding torque", async () => {
-    openMetal();
+  it.each(["metal", "maker"])("%s starts collapsed at 0.5 Nm and saves only the edited holding torque", async (armType) => {
+    openMetal(undefined, null, armType);
     const advanced = await screen.findByRole("button", { name: "Advanced parameters" });
     expect(advanced).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("slider", { name: "Holding torque (N·m)" })).not.toBeInTheDocument();

@@ -2147,6 +2147,10 @@ def _run_record_session(
     `raise_in_loop` makes record_loop raise (the error path)."""
     import makermodslab.record as record
 
+    # This helper isolates recording lifecycle with a partial fake robot.
+    # Real Maker/Metal bus installation is covered by the holding tests.
+    monkeypatch.setattr("makermodslab.metal_gripper.install_metal_gripper", lambda *a, **k: None)
+
     if teleop is None or alignment_side_effect is not None:
         monkeypatch.setattr(
             record, "_realign_follower_to_leader", alignment_side_effect or (lambda *a, **k: True)

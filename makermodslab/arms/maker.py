@@ -46,6 +46,7 @@ class MakerFamily(CanArmFamily):
     indefinite_label = "a Maker arm"
 
     supports_gripper_wiggle = True
+    supports_gripper_effort_control = True
 
     follower_zero_pose = "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully closed — then confirm."
 
