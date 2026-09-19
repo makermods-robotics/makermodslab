@@ -205,6 +205,22 @@ def test_maker_closing_command_is_capped_on_the_wire(rig):
         assert cap - 500 / 4095 * error <= effort <= cap
 
 
+def test_feedback_refresh_preserves_scaled_closing_command_after_jaws_move(rig):
+    robot, bus, device = rig
+    robot.connect(calibrate=False)
+    robot.config.startup_sync_speed_deg = None
+    with bus._lock:
+        robot.send_action({"gripper.pos": -5.0})
+        closing = mit_commands(device)[-1]
+        # The jaws have advanced past the old full-gain equivalent target.
+        device.positions[7] = -10.0
+        bus.read("Present_Position", "gripper")
+        refresh = mit_commands(device)[-1]
+        effort = kp_of(refresh) * math.radians(target(refresh) - device.positions[7])
+        assert 0 <= effort <= bus.controller.closing_cap_nm
+        assert bytes(refresh.data) == bytes(closing.data)
+
+
 def kd(msg):
     return (msg.data[5] << 4 | msg.data[6] >> 4) / 4095 * 5
 
@@ -381,6 +397,19 @@ def test_legacy_firmware_still_trips_on_silent_gripper(rig):
         with pytest.raises((grip.GripperSafetyError, ConnectionError)):
             bus.write("Goal_Position", "gripper", -20)
         assert bus._error and not bus._enabled
+
+
+def test_reconnect_redetects_firmware_and_arms_available_watchdog(rig):
+    robot, bus, device = rig
+    device.legacy = True
+    robot.connect(calibrate=False)
+    robot.disconnect()
+    device.legacy = False
+    robot.connect(calibrate=False)
+    assert not bus._legacy_firmware
+    assert device.registers[CAN_TIMEOUT_INDEX] == WATCHDOG_TICKS
+    robot.disconnect()
+    assert device.registers[CAN_TIMEOUT_INDEX] == 0
 
 
 def test_parameter_reply_without_mode_is_not_legacy(rig):

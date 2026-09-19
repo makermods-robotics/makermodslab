@@ -2,8 +2,8 @@
 
 For Metal this is not a hard instantaneous torque/current limit: only closing
 contact changes the position command. Maker also caps the closing lead on
-every update (``cap_closing_torque``). Motor Kp/Kd remain fixed. No thermal
-derating.
+every update (``cap_closing_torque``), scaling Kp/Kd during free closing.
+Metal keeps fixed gains. No thermal derating.
 """
 
 import math
@@ -124,7 +124,7 @@ class HoldingController:
                     # Aim at the real goal with Kp scaled so Kp x error == cap:
                     # no per-command lead, so free closing is not rate-limited,
                     # and the error only shrinks while the jaws close. Holding
-                    # and _refresh work from the full-gain equivalent target.
+                    # regulation works from the full-gain equivalent target.
                     self.closing_capped = True
                     self.kp_scale = lead / error
                     command = equivalent

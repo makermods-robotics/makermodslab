@@ -1,7 +1,8 @@
 """RobStride 00 holding for local Maker followers using standard-frame MIT.
 
-Requires RS00 firmware with MIT parameter access (0.0.3.27+) and packed
-operating-status feedback. Protocol: RS00 manual, sections 6.1 and 6.17-18.
+Uses MIT parameter access and packed status on RS00 firmware 0.0.3.27+.
+Older firmware falls back to acknowledged commands without a CAN watchdog.
+Protocol: RS00 manual, sections 6.1 and 6.17-18.
 No fault clears, zero changes, protocol switches, or flash writes.
 """
 
@@ -46,6 +47,7 @@ class MakerHoldingBus(MetalHoldingBus):
         self._feedback_motor_id = self._base._get_motor_recv_id("gripper")
         self._legacy_firmware = False
         self._legacy_enabled = False
+        self._last_mit_target = None
         self.controller = HoldingController(
             hold_torque_nm,
             tuple(map(math.radians, self.joint_limits)),
@@ -135,20 +137,29 @@ class MakerHoldingBus(MetalHoldingBus):
             self._legacy_enabled = command == 0xFC
         self._state(self._query(self._motor_id, bytes([255] * 7 + [command]), self._is_state))
 
+    def _send_mit(self, kp, kd, goal, velocity, ff):
+        super()._send_mit(kp, kd, goal, velocity, ff)
+        self._last_mit_target = (kp, kd, goal)
+
     def _refresh(self):
-        # Repeat the last bounded target to get state without the upstream
-        # driver's CLEAR_FAULT poll. Never replay the leader's full closure.
-        target = self.controller.last_command
-        goal = self._goal if target is None else math.degrees(target)
-        self._send_mit(
-            self.kp if self._enabled else 0.0, self._command_kd() if self._enabled else 0.0, goal, 0.0, 0.0
-        )
+        # Keep the last transmitted target AND gains while asking for feedback.
+        # Restoring full Kp at the old equivalent target can jerk the jaws open
+        # after they advance past that target between feedback samples.
+        if self._enabled and self._last_mit_target is not None:
+            kp, kd, goal = self._last_mit_target
+        else:
+            kp, kd, goal = 0.0, 0.0, self._goal
+        self._send_mit(kp, kd, goal, 0.0, 0.0)
 
     def connect(self, handshake=True):
         with self._lock:
             self._base.connect(handshake=False)
             if not handshake:
                 return  # Failure cleanup opens only to disable.
+            self._legacy_firmware = False
+            self._legacy_enabled = False
+            self._original_timeout = None
+            self._last_mit_target = None
             try:
                 self._simple(0xFD)
                 if self._status != 0:
