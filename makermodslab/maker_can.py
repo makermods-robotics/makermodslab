@@ -16,8 +16,43 @@
 from functools import wraps
 
 
+def _install_gripper_open_limit():
+    """Narrow the Maker gripper's open end without editing the pinned driver.
+
+    Every gripper path (follower clamp, holding controller, wiggle, remote CAN)
+    reads ``config.joint_limits["gripper"]``, so bounding it at construction
+    covers them all. The bimanual sub-arm base has no ``__post_init__``, hence
+    wrapping ``__init__``.
+    """
+    from lerobot.robots.maker_follower import MakerFollowerConfig, MakerFollowerConfigBase
+
+    from .gripper_settings import MAKER_GRIPPER_OPEN_LIMIT_DEG
+
+    for cls in (MakerFollowerConfigBase, MakerFollowerConfig):
+        original = cls.__init__
+        if getattr(original, "_makermodslab_gripper_limit", False):
+            continue
+
+        def make(original):
+            @wraps(original)
+            def init(self, *args, **kwargs):
+                original(self, *args, **kwargs)
+                low, high = self.joint_limits["gripper"]
+                self.joint_limits = {
+                    **self.joint_limits,
+                    "gripper": (max(low, MAKER_GRIPPER_OPEN_LIMIT_DEG), high),
+                }
+
+            init._makermodslab_gripper_limit = True
+            return init
+
+        cls.__init__ = make(original)
+
+
 def install():
     from lerobot.motors.robstride import RobstrideMotorsBus
+
+    _install_gripper_open_limit()
 
     original = RobstrideMotorsBus.connect
     if getattr(original, "_makermodslab_gs_usb", False):

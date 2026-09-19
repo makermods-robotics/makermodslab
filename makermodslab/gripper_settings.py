@@ -8,6 +8,12 @@ MAX_GRIPPER_CURRENT_A = 2.0
 GRIPPER_STOP_C = 55.0
 GRIPPER_RESTART_C = 45.0
 DEFAULT_GRIPPER_HOLD_TORQUE_NM = 0.5
+# Widest Maker gripper opening, in calibrated degrees. The Maker closes toward
+# increasing angles, so this raises the lower bound of the pinned driver's
+# (-120.1, -2.5) gripper limit. Both grippers re-zeroed fully closed on
+# 2026-09-18; fully open then measured right -99.2, left -101.7. This keeps
+# the vendor's ~3 deg backoff from the narrower (right) jaw's stop.
+MAKER_GRIPPER_OPEN_LIMIT_DEG = -96.0
 
 
 def supports_gripper_effort_control(arm_type: str) -> bool:

@@ -4495,3 +4495,67 @@ def test_metal_episode_home_preserves_follower_and_energized_leader_teardown(
     assert all(reset["hold_position"] is True for reset in resets)
     for leader in leaders:
         leader.send_action.assert_not_called()
+
+
+class _FakeThread:
+    def __init__(self, alive: bool) -> None:
+        self._alive = alive
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+
+class _FakeCamera:
+    def __init__(self, alive: bool, connect_failures: int = 0) -> None:
+        self.thread = _FakeThread(alive)
+        self.connect_failures = connect_failures
+        self.connects = 0
+        self.disconnects = 0
+
+    def disconnect(self) -> None:
+        self.disconnects += 1
+        self.thread = None
+
+    def connect(self) -> None:
+        self.connects += 1
+        if self.connects <= self.connect_failures:
+            raise ConnectionError("Failed to open OpenCVCamera(0)")
+        self.thread = _FakeThread(True)
+
+
+def test_recover_dead_cameras_reconnects_only_dead_readers() -> None:
+    from types import SimpleNamespace
+
+    from makermodslab.record import _recover_dead_cameras
+
+    dead, alive = _FakeCamera(alive=False, connect_failures=2), _FakeCamera(alive=True)
+    robot = SimpleNamespace(cameras={"left_top": dead, "right_top": alive})
+    sleeps: list[float] = []
+
+    assert _recover_dead_cameras(robot, sleep=sleeps.append) == ["left_top"]
+    assert dead.connects == 3 and dead.thread.is_alive()
+    assert len(sleeps) == 2
+    assert alive.connects == 0 and alive.disconnects == 0
+
+
+def test_recover_dead_cameras_is_a_noop_when_all_readers_alive() -> None:
+    from types import SimpleNamespace
+
+    from makermodslab.record import _recover_dead_cameras
+
+    robot = SimpleNamespace(cameras={"top": _FakeCamera(alive=True)})
+    assert _recover_dead_cameras(robot, sleep=lambda _s: None) == []
+    assert _recover_dead_cameras(SimpleNamespace(), sleep=lambda _s: None) == []
+
+
+def test_recover_dead_cameras_raises_when_camera_never_returns() -> None:
+    from types import SimpleNamespace
+
+    import pytest
+
+    from makermodslab.record import _CAMERA_RECOVERY_ATTEMPTS, _recover_dead_cameras
+
+    cam = _FakeCamera(alive=False, connect_failures=_CAMERA_RECOVERY_ATTEMPTS)
+    with pytest.raises(ConnectionError):
+        _recover_dead_cameras(SimpleNamespace(cameras={"top": cam}), sleep=lambda _s: None)
+    assert cam.connects == _CAMERA_RECOVERY_ATTEMPTS

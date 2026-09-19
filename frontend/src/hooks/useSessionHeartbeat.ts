@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useApi } from "@/contexts/ApiContext";
+import { ApiError } from "@/lib/apiClient";
 import { heartbeatSession } from "@/lib/sessionApi";
 
 /**
@@ -10,13 +11,25 @@ import { heartbeatSession } from "@/lib/sessionApi";
  * false. The interval (~20s) gives three attempts inside the server's default
  * 60s lease, so one dropped request never costs the session.
  *
- * A failed heartbeat is deliberately NON-FATAL: log and keep trying. A
- * transient network blip must not kill the flow's UX — the server is the
- * authority, and if the lease really did expire the flow's own status poll
- * shows the safety stop. (A 404/409 here most often just means the session
- * ended a beat before we did.)
+ * A failed heartbeat is deliberately NON-FATAL to the flow: a transient
+ * network blip must not kill the flow's UX — the server is the authority, and
+ * if the lease really did expire the flow's own status poll shows the safety
+ * stop. But a coded refusal that says the session is gone for good (the id is
+ * stale, the lease expired, or it isn't ours) stops the BEATING: no later
+ * heartbeat can succeed, and a dialog left open across a server restart would
+ * otherwise POST a dead id every 20s forever.
  */
 export const HEARTBEAT_INTERVAL_MS = 20_000;
+
+const TERMINAL_HEARTBEAT_CODES = new Set([
+  "session.not_found",
+  "session.lease_expired",
+  "session.not_owner",
+]);
+
+function isTerminalHeartbeatError(e: unknown): boolean {
+  return e instanceof ApiError && e.code !== null && TERMINAL_HEARTBEAT_CODES.has(e.code);
+}
 
 export function useSessionHeartbeat(
   sessionId: string | null,
@@ -32,9 +45,13 @@ export function useSessionHeartbeat(
       try {
         await heartbeatSession(baseUrl, fetchWithHeaders, sessionId, owner);
       } catch (e) {
-        if (!cancelled) {
-          console.warn(`Session heartbeat for ${sessionId} failed:`, e);
+        if (cancelled) return;
+        if (isTerminalHeartbeatError(e)) {
+          console.warn(`Session ${sessionId} is gone; stopping its heartbeat:`, e);
+          clearInterval(id);
+          return;
         }
+        console.warn(`Session heartbeat for ${sessionId} failed:`, e);
       }
     };
     // No immediate beat: creating (or renewing) the lease already set the

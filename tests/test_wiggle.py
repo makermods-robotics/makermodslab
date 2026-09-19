@@ -301,7 +301,7 @@ def test_feetech_wiggle_returns_before_disconnect(monkeypatch, current, fail_jog
 
 
 @pytest.mark.parametrize(
-    "family,current", [("maker", -120.1), ("maker", -2.5), ("metal", 0.0), ("metal", 100.0)]
+    "family,current", [("maker", -96.0), ("maker", -2.5), ("metal", 0.0), ("metal", 100.0)]
 )
 @pytest.mark.parametrize("fail_jog", [False, True])
 def test_can_wiggle_only_drives_gripper_and_returns(monkeypatch, family, current, fail_jog):
