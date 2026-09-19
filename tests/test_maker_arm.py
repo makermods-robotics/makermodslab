@@ -266,8 +266,16 @@ def test_the_maker_leader_preset_carries_the_maker_joint_mapping(_no_staging) ->
     _, teleop = build_single_configs(_Req())
     limits = MakerFollowerConfig(port="/x").joint_limits
 
-    # joint_ranges is MakerFollowerConfig.joint_limits, rounded to ints.
+    # joint_ranges is MakerFollowerConfig.joint_limits, rounded to ints, except the
+    # gripper: makermodslab narrows only the follower's open end, so the leader keeps
+    # the vendor's range and the follower clamps.
+    from makermodslab.gripper_settings import MAKER_GRIPPER_OPEN_LIMIT_DEG
+
     for joint, (low, high) in limits.items():
+        if joint == "gripper":
+            assert (low, high) == (MAKER_GRIPPER_OPEN_LIMIT_DEG, -2.5)
+            assert teleop.joint_ranges[joint] == [-120, -2]
+            continue
         assert teleop.joint_ranges[joint] == [int(low), int(high)]
 
 
@@ -826,6 +834,30 @@ def test_action_targets_of_a_single_arm_are_the_bare_action() -> None:
     )
 
     assert targets == [(robot, {"shoulder_pan": 3.0})]
+
+
+def test_action_targets_are_clamped_to_the_followers_soft_limits() -> None:
+    """A leader gripper opened past the follower's open limit must not become
+    an alignment target the follower's send_action will never command: the
+    arm stalls at the limit and recording preparation fails as stopped short."""
+    from types import SimpleNamespace
+
+    from makermodslab.maker_rest_pose import maker_targets_from_action
+
+    left = SimpleNamespace(config=SimpleNamespace(joint_limits={"gripper": (-96.0, -2.5)}))
+    right = SimpleNamespace(config=SimpleNamespace(joint_limits={"gripper": (-96.0, -2.5)}))
+    robot = SimpleNamespace(left_arm=left, right_arm=right)
+
+    targets = maker_targets_from_action(
+        robot,
+        {"left_gripper.pos": -109.6, "left_shoulder_pan.pos": 7.0, "right_gripper.pos": 0.0},
+        include_gripper=True,
+    )
+
+    assert targets == [
+        (left, {"gripper": -96.0, "shoulder_pan": 7.0}),
+        (right, {"gripper": -2.5}),
+    ]
 
 
 def test_action_targets_pair_device_for_device_with_maker_follower_arms() -> None:

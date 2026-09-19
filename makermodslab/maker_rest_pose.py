@@ -248,6 +248,12 @@ def maker_targets_from_action(
     operator's to command: they span ~118 deg, so leaving them out means the
     first passthrough tick snaps them across that whole range — the exact
     lurch this machinery exists to prevent.
+
+    Targets are clamped to each arm's soft ``joint_limits``, exactly as
+    ``MakerFollower.send_action`` clamps every command. A leader can reach
+    past a follower limit (the Maker gripper opens beyond its narrowed open
+    limit); unclamped, the follower stalls at the limit and the alignment
+    reports it as stopped short of a pose it may never be sent to.
     """
     left = getattr(robot, "left_arm", None)
     right = getattr(robot, "right_arm", None)
@@ -256,6 +262,7 @@ def maker_targets_from_action(
 
     targets: list[tuple[object, dict[str, float]]] = []
     for device, prefix in sides:
+        limits = getattr(getattr(device, "config", None), "joint_limits", None) or {}
         pose: dict[str, float] = {}
         for key, value in action.items():
             if prefix and not key.startswith(prefix):
@@ -266,6 +273,9 @@ def maker_targets_from_action(
             if motor == "gripper" and not include_gripper:
                 continue
             pose[motor] = float(value)
+            if motor in limits:
+                low, high = limits[motor]
+                pose[motor] = max(low, min(high, pose[motor]))
         targets.append((device, pose))
     return targets
 
