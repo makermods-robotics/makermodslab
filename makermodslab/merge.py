@@ -55,6 +55,7 @@ import logging
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -771,11 +772,89 @@ def _describe_weights(sources: list[str], weights: list[int] | None) -> str:
     return ", ".join(f"{repo_id} x{weight}" for repo_id, weight in zip(sources, weights, strict=True))
 
 
+# A merge is aborted as stuck when its subprocess shows no progress for this
+# long. "Progress" is a line of output OR growth of the output directory:
+# aggregate_datasets prints only one line per SOURCE dataset (and the
+# drop-feature rewrite prints nothing at all until it returns), so a large
+# healthy merge can be silent on stdout for a long time while it is visibly
+# writing files. The threshold is generous because the watchdog is the
+# unattended fallback — an operator who can see a merge is wedged has the
+# Cancel button — and a false trip deletes the run's output. The watchdog also
+# survives the browser being closed: nobody has to be watching for a jammed
+# merge to clear on its own.
+MERGE_STUCK_AFTER_S = 1800
+MERGE_WATCHDOG_INTERVAL_S = 30
+_MERGE_STUCK_MESSAGE = (
+    f"The merge made no progress for {MERGE_STUCK_AFTER_S // 60} minutes and was stopped — it looked stuck."
+)
+
+
+def _output_progress_signature(output_root: Path | None) -> tuple[int, int] | None:
+    """(file count, total bytes) under the merge's output directory — the
+    watchdog treats a change as forward progress. None when there is nothing
+    to look at yet."""
+    if output_root is None:
+        return None
+    try:
+        if not output_root.exists():
+            return None
+        count = 0
+        total = 0
+        for path in output_root.rglob("*"):
+            try:
+                if path.is_file():
+                    count += 1
+                    total += path.stat().st_size
+            except OSError:
+                continue
+        return (count, total)
+    except OSError:
+        return None
+
+
+def _signal_process_group(proc: subprocess.Popen, signum: int) -> bool:
+    """Signal the merge subprocess's whole group. False when that isn't possible
+    (no pid, no process groups, a test stand-in, or our own group), so the
+    caller falls back to signalling the lone process."""
+    try:
+        pgid = os.getpgid(proc.pid)
+        if pgid == os.getpgid(0):
+            return False
+        os.killpg(pgid, signum)
+        return True
+    except Exception:
+        return False
+
+
+def _terminate_tree(proc: subprocess.Popen, timeout: float = 5.0) -> None:
+    """Stop the merge subprocess and any workers it forked, SIGTERM then SIGKILL.
+
+    Spawned with ``start_new_session=True``, the subprocess leads its own process
+    group, so one ``killpg`` takes the tree down. Degrades to signalling the lone
+    process wherever the group route is unavailable (non-posix, test doubles)."""
+    for signum, fallback in ((signal.SIGTERM, "terminate"), (signal.SIGKILL, "kill")):
+        with contextlib.suppress(Exception):
+            if proc.poll() is not None:
+                return
+        if not _signal_process_group(proc, signum):
+            with contextlib.suppress(Exception):
+                getattr(proc, fallback)()
+        try:
+            proc.wait(timeout=timeout)
+            return
+        except subprocess.TimeoutExpired:
+            logger.warning("Merge subprocess did not exit %.0fs after %s", timeout, fallback)
+        except Exception:
+            return
+    with contextlib.suppress(Exception):
+        proc.wait(timeout=timeout)
+
+
 class MergeManager:
     """Runs one dataset merge at a time as a tracked subprocess."""
 
     def __init__(self) -> None:
-        self.state: str = "idle"  # "idle" | "running" | "done" | "error"
+        self.state: str = "idle"  # "idle" | "running" | "done" | "error" | "cancelled"
         self.error: str | None = None
         self.output_repo_id: str | None = None
         self.process: subprocess.Popen | None = None
@@ -783,7 +862,20 @@ class MergeManager:
         self.log_path: str | None = None
         self._log_handle: Any = None
         self._thread: threading.Thread | None = None
+        self._watchdog: threading.Thread | None = None
         self._lock = threading.Lock()
+        # Set once a merge is spawned; the cancel path and the stall watchdog
+        # read them. `_now` is swapped for a fake clock in tests.
+        self._output_root: Path | None = None
+        self._last_output_at: float = 0.0
+        self._last_output_signature: tuple[int, int] | None = None
+        # True from a cancel/stuck verdict until its kill + cleanup finished —
+        # `start()` refuses meanwhile, so a retry can't write into a directory
+        # the previous run's rmtree is still walking.
+        self._cancelling: bool = False
+        self._now = time.monotonic
+        self._stuck_after: float = MERGE_STUCK_AFTER_S
+        self._watchdog_interval: float = MERGE_WATCHDOG_INTERVAL_S
 
     def start(self, request: MergeRequest) -> dict[str, Any]:
         # Validate the weights against the RAW source list, before blanks are
@@ -810,6 +902,11 @@ class MergeManager:
         with self._lock:
             if self.state == "running":
                 return {"started": False, "message": "A merge is already in progress"}
+            if self._cancelling:
+                return {
+                    "started": False,
+                    "message": "The previous merge is still being cleaned up. Try again in a moment.",
+                }
             if len(sources) < 2:
                 return {"started": False, "message": "Select at least two datasets to merge"}
             if len(set(sources)) != len(sources):
@@ -876,6 +973,13 @@ class MergeManager:
             self.state = "running"
             self.error = None
             self.output_repo_id = output
+            # Bind these under the same lock as the state flip, so state ==
+            # "running" always implies they belong to THIS run — a cancel that
+            # races the spawn can't clean up a previous merge's output.
+            self._output_root = _lerobot_cache_root() / output
+            self._last_output_at = self._now()
+            self._last_output_signature = None
+            self._cancelling = False
             self._drain_queue()
             self._close_log()
             self.log_path = None
@@ -895,6 +999,9 @@ class MergeManager:
                 stderr=subprocess.STDOUT,
                 universal_newlines=True,
                 bufsize=1,
+                # Its own process group, so cancel/watchdog can killpg the whole
+                # tree should the child ever spawn helpers (ffmpeg, workers).
+                start_new_session=True,
             )
         except Exception as exc:
             logger.exception("Failed to spawn merge subprocess")
@@ -905,7 +1012,71 @@ class MergeManager:
 
         self._thread = threading.Thread(target=self._monitor, daemon=True)
         self._thread.start()
+        self._watchdog = threading.Thread(target=self._watch_for_stall, daemon=True)
+        self._watchdog.start()
         return {"started": True, "message": "Merge started"}
+
+    def cancel(self) -> dict[str, Any]:
+        """Stop a running merge on the operator's request. Best-effort cleanup of
+        the partial output — `start()` proved it didn't pre-exist, so anything
+        there is this run's residue."""
+        with self._lock:
+            if self.state != "running":
+                return {"cancelled": False, "message": "No merge is running."}
+            proc = self.process
+            output_root = self._output_root
+            self._cancelling = True
+            self.state = "cancelled"
+            self.error = None
+        self._kill_and_cleanup(proc, output_root)
+        logger.info("Merge cancelled by request")
+        return {"cancelled": True, "message": "Merge cancelled."}
+
+    def _kill_and_cleanup(self, proc: subprocess.Popen | None, output_root: Path | None) -> None:
+        """Stop the child and reclaim its partial output, then release the
+        `_cancelling` guard so `start()` accepts the next merge."""
+        try:
+            if proc is not None:
+                _terminate_tree(proc)
+            if output_root is not None:
+                with contextlib.suppress(Exception):
+                    _cleanup_partial_output(output_root)
+            self._close_log()
+        finally:
+            with self._lock:
+                self._cancelling = False
+
+    def _watchdog_tick(self) -> bool:
+        """One stall check. Returns True when the watch should stop — the merge
+        already ended, or this call just declared it stuck and killed it."""
+        with self._lock:
+            if self.state != "running":
+                return True
+            proc = self.process
+            if proc is None or proc.poll() is not None:
+                return False
+            # A silent child that is still growing its output is working, not
+            # stuck — the copy phase prints once per source dataset.
+            signature = _output_progress_signature(self._output_root)
+            if signature != self._last_output_signature:
+                # The first observation is the baseline, not progress.
+                if self._last_output_signature is not None:
+                    self._last_output_at = self._now()
+                self._last_output_signature = signature
+            if self._now() - self._last_output_at <= self._stuck_after:
+                return False
+            # Commit the verdict under the lock so `_monitor`'s exit is a no-op.
+            self._cancelling = True
+            self.state = "error"
+            self.error = _MERGE_STUCK_MESSAGE
+            output_root = self._output_root
+        logger.warning("Merge watchdog: %s", _MERGE_STUCK_MESSAGE)
+        self._kill_and_cleanup(proc, output_root)
+        return True
+
+    def _watch_for_stall(self) -> None:
+        while not self._watchdog_tick():
+            time.sleep(self._watchdog_interval)
 
     def get_status(self) -> dict[str, Any]:
         logs: list[dict[str, Any]] = []
@@ -934,6 +1105,10 @@ class MergeManager:
         return_code = self.process.returncode
         self._close_log()
         with self._lock:
+            if self.state != "running":
+                # cancel() or the stall watchdog already recorded a terminal
+                # verdict; a SIGTERM/SIGKILL return code must not clobber it.
+                return
             if return_code == 0:
                 self.state = "done"
                 self.error = None
@@ -942,6 +1117,9 @@ class MergeManager:
                 self.error = f"Merge exited with code {return_code}"
 
     def _enqueue(self, message: str) -> None:
+        # Every line is forward progress — reset the stall clock the watchdog
+        # reads (monotonic, so a wall-clock jump can't fake a stall or hide one).
+        self._last_output_at = self._now()
         # Tee to the persistent log file first (best-effort) so a failure's
         # cause survives even after the in-memory queue is drained/capped.
         if self._log_handle is not None:
@@ -990,6 +1168,10 @@ def handle_start_merge(request: MergeRequest) -> dict[str, Any]:
 
 def handle_merge_status() -> dict[str, Any]:
     return merge_manager.get_status()
+
+
+def handle_merge_cancel() -> dict[str, Any]:
+    return merge_manager.cancel()
 
 
 def _source_for_path(text: str, source_repo_ids: list[str], cache_root: Path) -> tuple[str, str] | None:

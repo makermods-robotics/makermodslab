@@ -79,6 +79,7 @@ from lerobot.rollout import (
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.process import ProcessSignalHandler
 from lerobot.utils.utils import init_logging
+from makermodslab.maker_can import install as _install_maker_can
 
 # Imported for its SIDE EFFECT: a non-zero sync_read retry default for this
 # process. Without it a single dropped serial reply — routine when arm
@@ -99,6 +100,8 @@ from .eval_protocol import (
     format_event,
 )
 from .log_exceptions import restore_traceback_rendering
+
+_install_maker_can()
 
 logger = logging.getLogger(__name__)
 

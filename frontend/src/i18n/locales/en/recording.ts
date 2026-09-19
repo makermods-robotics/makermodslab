@@ -123,9 +123,11 @@ export default {
       pause: "Pause",
       resume: "Resume",
       rerecord: "Re-record",
-      keepEpisodes: "Keep episodes & continue",
-      discardExit: "Discard & exit",
-      backHome: "Back to home",
+      // Shown on the ended-with-issue screen: opens the Finalize review when
+      // something was saved (keep/discard becomes a per-episode checkbox
+      // choice there), or just continues on when nothing was.
+      reviewAndFinalize: "Review & finalize",
+      continue: "Continue",
       saveEpisodeTask: "Start recording",
     },
     // The blocking card shown before each episode while resetting the environment

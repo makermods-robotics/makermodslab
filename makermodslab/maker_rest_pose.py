@@ -248,6 +248,12 @@ def maker_targets_from_action(
     operator's to command: they span ~118 deg, so leaving them out means the
     first passthrough tick snaps them across that whole range — the exact
     lurch this machinery exists to prevent.
+
+    Targets are clamped to each arm's soft ``joint_limits``, exactly as
+    ``MakerFollower.send_action`` clamps every command. A leader can reach
+    past a follower limit (the Maker gripper opens beyond its narrowed open
+    limit); unclamped, the follower stalls at the limit and the alignment
+    reports it as stopped short of a pose it may never be sent to.
     """
     left = getattr(robot, "left_arm", None)
     right = getattr(robot, "right_arm", None)
@@ -256,6 +262,7 @@ def maker_targets_from_action(
 
     targets: list[tuple[object, dict[str, float]]] = []
     for device, prefix in sides:
+        limits = getattr(getattr(device, "config", None), "joint_limits", None) or {}
         pose: dict[str, float] = {}
         for key, value in action.items():
             if prefix and not key.startswith(prefix):
@@ -266,6 +273,9 @@ def maker_targets_from_action(
             if motor == "gripper" and not include_gripper:
                 continue
             pose[motor] = float(value)
+            if motor in limits:
+                low, high = limits[motor]
+                pose[motor] = max(low, min(high, pose[motor]))
         targets.append((device, pose))
     return targets
 
@@ -284,6 +294,7 @@ def return_maker_to_pose(
     ceiling_s: float = MAKER_RETURN_CEILING_S,
     target_label: str = "its start pose",
     target_fn: Callable[[], dict[str, float] | None] | None = None,
+    ensure_target: bool = False,
 ) -> tuple[bool, str]:
     """Walk a Maker arm back to ``pose`` at a bounded rate, then confirm it landed.
 
@@ -302,6 +313,10 @@ def return_maker_to_pose(
     fixed at the first tick. ``pose`` is then only the first target. Without it
     the motion is the original up-front interpolation, unchanged — every
     teardown caller stays on that path.
+
+    ``ensure_target`` also commands a short ramp when feedback already lies
+    within tolerance. Episode home uses this to replace a pending old goal
+    before entering a holding reset; feedback proximity alone is not a hold.
 
     Never raises: this runs on teardown paths where the caller's next move is
     to release torque regardless, and an exception here would skip that. A
@@ -325,7 +340,7 @@ def return_maker_to_pose(
         return False, "no-pose"
 
     max_delta = max(abs(start[m] - v) for m, v in targets.items())
-    if max_delta <= MAKER_RETURN_TOLERANCE_DEG:
+    if max_delta <= MAKER_RETURN_TOLERANCE_DEG and not ensure_target:
         # Already there. A live ``target_fn`` changes nothing here: this move
         # exists to close an accumulated GAP, and with no gap to close the
         # caller's ordinary passthrough tracks the leader from the next tick
@@ -595,6 +610,8 @@ def return_maker_arms_to_rest(
     abort_event: threading.Event | None = None,
     target_label: str = "its start pose",
     target_fns: list[Callable[[], dict[str, float] | None] | None] | None = None,
+    speed_deg_s: float = MAKER_RETURN_SPEED_DEG_S,
+    ensure_target: bool = False,
 ) -> list[tuple[bool, str]]:
     """Return every captured Maker arm concurrently, then wait for all of them.
 
@@ -614,6 +631,9 @@ def return_maker_arms_to_rest(
     keeps following its leader until both sides converge. Its verdict describes
     the group and is repeated for each arm. Fixed teardown targets retain the
     independent threaded returns below.
+
+    Recording can select a family-specific ``speed_deg_s``. Stop callers omit
+    it and retain the default gentle return rate.
     """
     if not rest_poses:
         return []
@@ -632,6 +652,8 @@ def return_maker_arms_to_rest(
                 abort_event=abort_event,
                 target_label=target_label,
                 target_fn=_fn_for(0),
+                speed_deg_s=speed_deg_s,
+                ensure_target=ensure_target,
             )
         ]
 
@@ -649,6 +671,8 @@ def return_maker_arms_to_rest(
             label="follower arms",
             target_label=target_label,
             target_fn=group.target,
+            speed_deg_s=speed_deg_s,
+            ensure_target=ensure_target,
         )
         return [verdict] * len(rest_poses)
 
@@ -662,6 +686,8 @@ def return_maker_arms_to_rest(
             label=f"Maker follower arm {index + 1}",
             target_label=target_label,
             target_fn=_fn_for(index),
+            speed_deg_s=speed_deg_s,
+            ensure_target=ensure_target,
         )
 
     threads = [

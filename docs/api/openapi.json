@@ -653,7 +653,7 @@
         "type": "object"
       },
       "CheckpointPolicyConfigResponse": {
-        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature. trained_on_robot_type is the\nraw lerobot robot_type of the checkpoint's training dataset (recovered via\ntrain_config.json), null when it can't be established — the fine-tune\npanel compares it against the selected dataset's arm.\n\nsupports_rtc says whether this architecture can run the Real-Time Chunking\ninference engine; null means the policy type isn't one the server knows\n(a fork newer than jobs.policy_type_supports_rtc's table), which the client\nmust read as \"offer it and let the server decide\", not as \"no\". The route\ndeclares no exclude_none/exclude_unset, so the key is always present.\n\nn_action_steps / chunk_size are the checkpoint's chunk geometry, null when\nthe config omits them. n_action_steps is the CEILING on a remote-inference\nhorizon — a declared horizon above it makes the two Portal peers disagree\nabout the action-chunk shape, and every packet is then dropped in silence.",
+        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature. trained_on_robot_type is the\nraw lerobot robot_type of the checkpoint's training dataset (recovered via\ntrain_config.json), null when it can't be established — the fine-tune\npanel compares it against the selected dataset's arm.\n\nsupports_rtc says whether this architecture can run the Real-Time Chunking\ninference engine; null means the policy type isn't one the server knows\n(a fork newer than jobs.policy_type_supports_rtc's table), which the client\nmust read as \"offer it and let the server decide\", not as \"no\". The route\ndeclares no exclude_none/exclude_unset, so the key is always present.\n\nn_action_steps / chunk_size are the checkpoint's chunk geometry, null when\nthe config omits them. n_action_steps is the CEILING on a remote-inference\nhorizon — a declared horizon above it makes the two Portal peers disagree\nabout the action-chunk shape, and every packet is then dropped in silence.\n\ndataset_repo_id is the dataset the checkpoint was trained on, read from its\nown train_config.json — null when the lineage offers no real id (an\nimported flat model repo, or a record still carrying the \"(imported)\"\nplaceholder, which is never reported as a repo id). Clients should prefer\nit over the owning job record's config.dataset_repo_id: the record is a\nplaceholder for imports, and on a resume chain the tip's record does not\ndescribe a checkpoint owned by an ancestor.",
         "properties": {
           "action_dim": {
             "anyOf": [
@@ -676,6 +676,17 @@
               }
             ],
             "title": "Chunk Size"
+          },
+          "dataset_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Repo Id"
           },
           "flow_steps_default": {
             "anyOf": [
@@ -780,7 +791,8 @@
           "action_dim",
           "n_action_steps",
           "chunk_size",
-          "trained_on_robot_type"
+          "trained_on_robot_type",
+          "dataset_repo_id"
         ],
         "title": "CheckpointPolicyConfigResponse",
         "type": "object"
@@ -1004,7 +1016,7 @@
         "type": "object"
       },
       "DatasetInfoResponse": {
-        "description": "datasets.py get_local_dataset_info / get_hub_dataset_info — both\nbranches carry every key. The hub summary degrades tasks to [] and\nsize_bytes to null (the repo isn't on disk). fps is `int | float` because\nit passes through from meta/info.json — a whole-number fps must stay the\ninteger the file holds, not become 30.0 on the wire.",
+        "description": "datasets.py get_local_dataset_info / get_hub_dataset_info — both\nbranches carry every key. The hub summary carries task STRINGS (one small\nfile next to meta/info.json) with null counts, and degrades size_bytes to\nnull (the repo isn't on disk). fps is `int | float` because\nit passes through from meta/info.json — a whole-number fps must stay the\ninteger the file holds, not become 30.0 on the wire.\n\ntasks is null (not []) when the hub summary could not read the task file at\nall — a blip, an HTTP 5xx. [] is reserved for a dataset that genuinely\nlists no task. A client must render null as \"couldn't read\", never as \"no\ntask\", and must not cache it. get_local_dataset_info always sends a list.",
         "properties": {
           "cameras": {
             "items": {
@@ -1062,11 +1074,18 @@
             "type": "string"
           },
           "tasks": {
-            "items": {
-              "$ref": "#/components/schemas/DatasetTaskCount"
-            },
-            "title": "Tasks",
-            "type": "array"
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/DatasetTaskCount"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tasks"
           },
           "total_episodes": {
             "title": "Total Episodes",
@@ -1234,11 +1253,18 @@
         "type": "object"
       },
       "DatasetTaskCount": {
-        "description": "One entry of /datasets/info `tasks` (datasets.py get_local_dataset_info);\nnum_episodes is 0 when the per-episode count is unavailable.",
+        "description": "One entry of /datasets/info `tasks` (datasets.py get_local_dataset_info\n/ get_hub_dataset_info).\n\nnum_episodes is null when the count is UNKNOWN — episode metadata that\ncould not be read, or a Hub summary where the per-episode files were not\nfetched. It is 0 only for a task that really is used by no episode. The two\nwere previously indistinguishable, which let an unreadable file silently\ndecide which task a client ranked first; clients must not sort on null.",
         "properties": {
           "num_episodes": {
-            "title": "Num Episodes",
-            "type": "integer"
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Num Episodes"
           },
           "task": {
             "title": "Task",
@@ -1434,6 +1460,46 @@
           "reason"
         ],
         "title": "EndedSessionInfo",
+        "type": "object"
+      },
+      "EpisodeDeleteBody": {
+        "properties": {
+          "dataset_repo_id": {
+            "title": "Dataset Repo Id",
+            "type": "string"
+          },
+          "episode_indices": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Episode Indices",
+            "type": "array"
+          }
+        },
+        "required": [
+          "dataset_repo_id",
+          "episode_indices"
+        ],
+        "title": "EpisodeDeleteBody",
+        "type": "object"
+      },
+      "EpisodeDeleteResponse": {
+        "description": "server.py datasets_episode_delete: {\"success\": True,\n**delete_local_episodes()}. `whole_dataset_deleted` is True when every\nremaining episode was selected — there's nothing left to keep, so the\nwhole directory was removed instead of rewritten (see\ndelete_local_episodes).",
+        "properties": {
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          },
+          "whole_dataset_deleted": {
+            "title": "Whole Dataset Deleted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "whole_dataset_deleted"
+        ],
+        "title": "EpisodeDeleteResponse",
         "type": "object"
       },
       "EpisodeJointSeriesResponse": {
@@ -3942,6 +4008,25 @@
         "title": "MakerProbePortsResponse",
         "type": "object"
       },
+      "MergeCancelResponse": {
+        "description": "merge.py MergeManager.cancel — `cancelled` is False (with the reason in\n`message`) when no merge was running to stop.",
+        "properties": {
+          "cancelled": {
+            "title": "Cancelled",
+            "type": "boolean"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cancelled",
+          "message"
+        ],
+        "title": "MergeCancelResponse",
+        "type": "object"
+      },
       "MergeLogEntry": {
         "description": "One drained line of the merge subprocess log (merge.py _enqueue).",
         "properties": {
@@ -4084,7 +4169,8 @@
               "idle",
               "running",
               "done",
-              "error"
+              "error",
+              "cancelled"
             ],
             "title": "State",
             "type": "string"
@@ -6153,8 +6239,27 @@
             "title": "Follower Port",
             "type": "string"
           },
+          "mode": {
+            "default": "single",
+            "enum": [
+              "single",
+              "bimanual"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
           "repo_id": {
             "title": "Repo Id",
+            "type": "string"
+          },
+          "right_follower_config": {
+            "default": "",
+            "title": "Right Follower Config",
+            "type": "string"
+          },
+          "right_follower_port": {
+            "default": "",
+            "title": "Right Follower Port",
             "type": "string"
           },
           "robot_name": {
@@ -7734,7 +7839,7 @@
             "type": "boolean"
           },
           "wandb_disable_artifact": {
-            "default": false,
+            "default": true,
             "title": "Wandb Disable Artifact",
             "type": "boolean"
           },
@@ -8057,6 +8162,25 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "WandbCredentialsStatus": {
+        "description": "Public credential availability; never contains the API key.",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "login_hint": {
+            "title": "Login Hint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "available",
+          "login_hint"
+        ],
+        "title": "WandbCredentialsStatus",
         "type": "object"
       },
       "WiggleRequest": {
@@ -9084,6 +9208,48 @@
         ]
       }
     },
+    "/api/v1/datasets/episode-delete": {
+      "post": {
+        "description": "Permanently delete one or more episodes from a local dataset (no\ntrash/undo — see delete_local_episodes). Deleting every remaining episode\nremoves the whole dataset instead (`whole_dataset_deleted: true`), since\nlerobot refuses to produce a zero-episode dataset. Refuses (409) if the\ndataset is being recorded, merged, uploaded, or trained on locally.",
+        "operationId": "datasets_episode_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EpisodeDeleteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EpisodeDeleteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Episode Delete",
+        "tags": [
+          "datasets"
+        ]
+      }
+    },
     "/api/v1/datasets/episode-joints": {
       "get": {
         "description": "Per-frame timestamp + joint (observation.state) values for one episode,\nfor the dataset viewer's joint-position chart.",
@@ -9617,9 +9783,31 @@
         ]
       }
     },
+    "/api/v1/datasets/merge/cancel": {
+      "post": {
+        "description": "Stop the running merge (SIGTERM -> SIGKILL) and reclaim its partial output.\n\nA no-op when nothing is running. A stalled merge is also stopped on its own\nafter 10 minutes of no output — see merge.MERGE_STUCK_AFTER_S.",
+        "operationId": "datasets_merge_cancel",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergeCancelResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Datasets Merge Cancel",
+        "tags": [
+          "datasets"
+        ]
+      }
+    },
     "/api/v1/datasets/merge/status": {
       "get": {
-        "description": "Current merge state + drained log lines (idle | running | done | error).",
+        "description": "Current merge state + drained log lines (idle | running | done | error | cancelled).",
         "operationId": "datasets_merge_status",
         "responses": {
           "200": {
@@ -14022,67 +14210,23 @@
         ]
       }
     },
-    "/api/v1/system/wandb-extra": {
+    "/api/v1/system/wandb-credentials": {
       "get": {
-        "description": "Return whether the `wandb` package is importable in this MakerMods Lab process.",
-        "operationId": "get_wandb_extra",
+        "description": "Whether a Weights & Biases API key is resolvable on this host.\n\nPowers the training form's W&B preflight: the Start button reflects a\nmissing key BEFORE the click, rather than the launch 400ing on it. There\nis deliberately no install endpoint beside this one — wandb the package is\na transitive dependency of the pinned lerobot, so the only thing that can\nactually be missing is the credential.\n\nReturns `{\"available\": bool, \"login_hint\": str}` and never the key itself.",
+        "operationId": "get_wandb_credentials",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ExtraStatus"
+                  "$ref": "#/components/schemas/WandbCredentialsStatus"
                 }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Get Wandb Extra",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/system/wandb-extra/install": {
-      "post": {
-        "description": "Spawn `pip install wandb` as a background subprocess. No-op if already running.",
-        "operationId": "install_wandb_extra",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/InstallStartResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Install Wandb Extra",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/api/v1/system/wandb-extra/install-status": {
-      "get": {
-        "description": "Return current wandb install state plus any pending log lines (drained on read).",
-        "operationId": "install_wandb_extra_status",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/InstallStatusResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Install Wandb Extra Status",
+        "summary": "Get Wandb Credentials",
         "tags": [
           "system"
         ]
@@ -15422,7 +15566,7 @@
     },
     "/datasets/merge/status": {
       "get": {
-        "description": "Current merge state + drained log lines (idle | running | done | error).",
+        "description": "Current merge state + drained log lines (idle | running | done | error | cancelled).",
         "operationId": "datasets_merge_status_datasets_merge_status_get",
         "responses": {
           "200": {
@@ -18031,72 +18175,6 @@
           }
         },
         "summary": "Update Check",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/system/wandb-extra": {
-      "get": {
-        "description": "Return whether the `wandb` package is importable in this MakerMods Lab process.",
-        "operationId": "get_wandb_extra_system_wandb_extra_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ExtraStatus"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Wandb Extra",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/system/wandb-extra/install": {
-      "post": {
-        "description": "Spawn `pip install wandb` as a background subprocess. No-op if already running.",
-        "operationId": "install_wandb_extra_system_wandb_extra_install_post",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/InstallStartResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Install Wandb Extra",
-        "tags": [
-          "system"
-        ]
-      }
-    },
-    "/system/wandb-extra/install-status": {
-      "get": {
-        "description": "Return current wandb install state plus any pending log lines (drained on read).",
-        "operationId": "install_wandb_extra_status_system_wandb_extra_install_status_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/InstallStatusResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Install Wandb Extra Status",
         "tags": [
           "system"
         ]

@@ -190,6 +190,16 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
   };
 
   const active = status?.replay_active === true;
+  const jointEntries = Object.entries(liveJoints);
+  const hasSides = jointEntries.some(([name]) => /^(left|right)_/.test(name));
+  const jointGroups = hasSides
+    ? (["left", "right"] as const).map((side) => ({
+        label: t(side === "left" ? "shared.visualizer.leftArm" : "shared.visualizer.rightArm"),
+        entries: jointEntries
+          .filter(([name]) => name.startsWith(`${side}_`))
+          .map(([name, value]) => [name.slice(side.length + 1), value] as const),
+      }))
+    : [{ label: "", entries: jointEntries }];
 
   if (!selectedRecord || !selectedRecord.follower_ready) {
     return (
@@ -214,7 +224,7 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
         </Button>
         <p className="flex items-center gap-1 text-[11px] text-muted-foreground">
           <TriangleAlert className="h-3 w-3 shrink-0" />
-          {t("dialogs.replay.movesArmWarning", { robot: selectedRecord.name })}
+          {t(selectedRecord.mode === "bimanual" ? "dialogs.replay.movesArmsWarning" : "dialogs.replay.movesArmWarning", { robot: selectedRecord.name })}
         </p>
       </div>
     );
@@ -234,16 +244,19 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
           {status?.phase === "stopping" ? t("dialogs.replay.releaseNow") : t("dialogs.replay.stop")}
         </Button>
       </div>
-      {Object.keys(liveJoints).length > 0 ? (
-        <div className="grid grid-cols-3 gap-x-3 gap-y-1 font-mono text-[10.5px] text-muted-foreground">
-          {Object.entries(liveJoints).map(([name, value]) => (
-            <div key={name} className="flex justify-between">
-              <span>{name.replace(/\.pos$/, "")}</span>
-              <span className="tabular-nums text-foreground">{value.toFixed(1)}</span>
-            </div>
-          ))}
-        </div>
-      ) : null}
+      {jointGroups.filter(({ entries }) => entries.length > 0).map(({ label, entries }) => (
+        <section key={label} aria-label={label || undefined}>
+          {label ? <h4 className="mb-1 text-xs font-medium">{label}</h4> : null}
+          <div className="grid grid-cols-3 gap-x-3 gap-y-1 font-mono text-[10.5px] text-muted-foreground">
+            {entries.map(([name, value]) => (
+              <div key={name} className="flex justify-between">
+                <span>{name.replace(/\.pos$/, "")}</span>
+                <span className="tabular-nums text-foreground">{value.toFixed(1)}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
     </div>
   );
 };

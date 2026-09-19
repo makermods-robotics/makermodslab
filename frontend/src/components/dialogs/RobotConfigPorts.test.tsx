@@ -141,6 +141,45 @@ describe("Star to Metal port controls", () => {
     },
   );
 
+  it("lets a second arm be set to no port without a switch prompt", async () => {
+    request.mockImplementation(async (url: string) => {
+      let data: object = {
+        active: false,
+        arms: [],
+        logs: [],
+        calibration_active: false,
+        status: "idle",
+      };
+      if (url === "/api/v1/robots/bench") {
+        data = {
+          robot: {
+            name: "bench",
+            arm_type: "metal",
+            mode: "single",
+            leader_kind: "star",
+            leader_port: "",
+            follower_port: "f1",
+            cameras: [],
+          },
+        };
+      } else if (url.endsWith("available-ports")) {
+        data = { ports: ["f1", "f2"] };
+      }
+      return new Response(JSON.stringify(data));
+    });
+    render(<RobotConfigDialog open robotName="bench" onOpenChange={vi.fn()} />);
+    const follower = await screen.findByRole("combobox", {
+      name: "Port for Follower",
+    });
+    await waitFor(() => expect(follower).toHaveTextContent("f1"));
+
+    fireEvent.click(follower);
+    fireEvent.click(await screen.findByRole("option", { name: "No port" }));
+
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(follower).toHaveTextContent("No port"));
+  });
+
   it("removes both auto controls if multiple arms answer", async () => {
     await setup("single", true);
     fireEvent.click(screen.getAllByRole("button", { name: "Auto detect" })[0]);

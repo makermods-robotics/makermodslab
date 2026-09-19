@@ -35,16 +35,12 @@ logger = logging.getLogger(__name__)
 TARGET_FPS = 15.0
 JPEG_QUALITY = 70
 
-# Capture resolution requested before the first read. Without a request cv2
-# takes the camera's DEFAULT format — 1920x1080 on the rig's KD-USB cameras —
-# and the UVC driver reserves isochronous bandwidth for that format's packet
-# size whether or not the (already MJPEG) frames fill it. Two 1080p
-# reservations exhaust one USB 2 hub, so a three-camera bimanual rig's third
-# preview opened but never delivered a frame (measured 2026-09-02: 25/25/0 fps
-# at default vs 30/30/30 fps at 640x480 on the same hub). A thumbnail needs no
-# more than the recorder's own 640x480; the camera's frame RATE is left alone
-# because `_frames` already paces clients to TARGET_FPS, and a camera-side cap
-# only slowed the first frame in testing.
+# Request both pixel format and thumbnail size before the first read: raw YUYV
+# or a large default resolution can exhaust a shared USB hub's bandwidth.
+# MJPG matches the recording default. Set fourcc before size because V4L2
+# renegotiates dimensions per format. Leave camera FPS alone; `_frames` paces
+# clients to TARGET_FPS.
+DEFAULT_FOURCC = "MJPG"
 PREVIEW_WIDTH = 640
 PREVIEW_HEIGHT = 480
 
@@ -195,9 +191,10 @@ class CameraPreviewManager:
                             f"Camera {index} could not be opened — it may be unplugged or in use "
                             "by another application."
                         )
-                    # Request the thumbnail size BEFORE the first read (see
-                    # PREVIEW_WIDTH): the format negotiated here is what the
-                    # USB bandwidth reservation is sized for.
+                    # Request the pixel format and thumbnail size BEFORE the
+                    # first read (see DEFAULT_FOURCC): the format negotiated
+                    # here is what the USB bandwidth reservation is sized for.
+                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*DEFAULT_FOURCC))
                     cap.set(cv2.CAP_PROP_FRAME_WIDTH, PREVIEW_WIDTH)
                     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, PREVIEW_HEIGHT)
                     entry.cap = cap

@@ -65,6 +65,41 @@ export default {
     curateSaveFailedBody: "Your changes weren't saved — try again.",
     // title on the disabled Train button while curation is still open.
     finishCuratingFirst: "Finish selecting episodes first",
+    // Per-episode delete (permanent — no trash/undo). Icon-only row action,
+    // hidden while curating or finalizing (see finalize.* below).
+    deleteEpisodeAria: "Delete episode {{index}}",
+    deleteEpisodeTitle: "Delete episode {{index}}?",
+    deleteEpisodeDescription:
+      "This permanently removes this episode from the dataset. You can't undo this.",
+    // Shown instead of the plain description above when the dataset also has
+    // a Hub copy — episode delete is local-only (see delete_local_episodes),
+    // so the Hub copy keeps every episode until a manual re-upload.
+    deleteEpisodeDescriptionOnHub:
+      "This permanently removes this episode from the local copy. You can't undo this — the copy on the Hub keeps every episode until you upload again.",
+    deleteEpisodeConfirm: "Delete episode",
+    deleteEpisodeFailedTitle: "Couldn't delete episode",
+    deleteEpisodeFailedBody: "Nothing was changed — try again.",
+    deleteDatasetFailedTitle: "Couldn't delete dataset",
+    deleteDatasetFailedBody: "Nothing was changed — try again.",
+    // Post-recording Finalize review (CollectPanel opens the viewer in this
+    // mode right after a session ends, clean finish or error alike). Every
+    // episode starts checked (kept); unchecking one marks it for deletion
+    // when Finalize is clicked — nothing is deleted until then.
+    finalizeDescription:
+      "Review your recording — uncheck any episodes you don't want to keep, then finalize.",
+    finalize: "Finalize",
+    keepEpisodeAria: "Keep episode {{index}}",
+    finalizeFailedTitle: "Couldn't finalize the recording",
+    finalizeFailedBody: "Nothing was uploaded — try again.",
+    // The way out of Finalize that deletes nothing. Always offered — the
+    // dialog can't be dismissed, and a reload would drop the pending Hub push.
+    keepAllAndClose: "Keep all episodes and close",
+    // The episode list failed to load. The backend's own message renders
+    // beside this heading, untranslated like every server string.
+    episodesLoadFailedTitle: "Couldn't load the episode list",
+    episodesRetry: "Try again",
+    finalizeUnavailable:
+      "Finalizing needs the episode list. Try loading it again, or keep all episodes and close.",
   },
 
   jointChart: {
@@ -93,6 +128,7 @@ export default {
     start: "Replay on hardware",
     // {{robot}} is the robot's own name — data.
     movesArmWarning: "Moves {{robot}}'s arm — make sure the area is clear.",
+    movesArmsWarning: "Moves both arms of {{robot}} — make sure the area is clear.",
     stop: "Stop",
     // Second press while the arm returns to its start pose.
     releaseNow: "Release now",

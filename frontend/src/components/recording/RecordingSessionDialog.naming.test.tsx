@@ -77,7 +77,7 @@ const jsonResponse = (body: unknown) => ({
   json: async () => body,
 });
 
-let status = structuredClone(namingStatus);
+let status: typeof namingStatus & { preparation_message?: string } = structuredClone(namingStatus);
 
 beforeEach(() => {
   status = structuredClone(namingStatus);
@@ -113,6 +113,19 @@ const taskCalls = () => mocks.fetch.mock.calls.filter(([url]) =>
 );
 
 describe("task before recording", () => {
+  it("shows alignment progress and does not offer episode start", async () => {
+    status = {
+      ...status,
+      current_phase: "preparing",
+      preparation_message: "Aligning followers before recording…",
+      available_controls: { ...status.available_controls, submit_episode_task: false },
+    };
+    render(<RecordingSessionDialog config={{ ...CONFIG, per_episode_task: false }} onExit={vi.fn()} />);
+    expect(await screen.findByText(status.preparation_message!)).toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(taskCalls()).toHaveLength(0);
+  });
+
   it("starts normally without a task prompt when per-episode tasks are off", async () => {
     status = { ...status, current_phase: "recording" };
     render(<RecordingSessionDialog config={{ ...CONFIG, per_episode_task: false, single_task: "sort socks" }} onExit={vi.fn()} />);

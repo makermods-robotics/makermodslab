@@ -37,7 +37,7 @@ from .arm_capabilities import require_known_arm_type
 from .arm_identity import ArmIdentityError
 from .arms import registry as arm_registry
 from .bus_retry import BUS_SYNC_READ_RETRIES as _BUS_SYNC_READ_RETRIES  # noqa: F401
-from .camera_preview import camera_preview_manager
+from .camera_preview import DEFAULT_FOURCC, camera_preview_manager
 from .datasets import (
     _lerobot_cache_root,
     invalidate_dataset_listing_cache,
@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 # from the UI. MJPG is ~10x smaller and lets the full rig stream. macOS already
 # negotiates MJPEG, so this only changes Linux behavior. An explicit per-camera
 # fourcc (e.g. a deliberate YUYV choice from the UI) still wins.
-_DEFAULT_FOURCC = "MJPG"
+_DEFAULT_FOURCC = DEFAULT_FOURCC  # one default, shared with the live preview
 
 # --- Motor bus read retries ----------------------------------------------------
 # Moved to makermodslab/bus_retry.py so the two subprocess runners (eval and
@@ -193,6 +193,7 @@ saved_episodes = 0  # Track how many episodes have been saved
 # "resetting", "completed".
 current_phase = "preparing"
 phase_start_time = None  # Track when current phase started
+preparation_message: str | None = None
 # The task string a per-episode-task session should PREFILL the next naming
 # prompt with — the previous episode's task, or `single_task` before the first
 # one is named. Seeded in handle_start_recording, advanced on every submit
@@ -208,7 +209,8 @@ def _set_phase(phase: str) -> None:
     /recording-status rather than trusting the hint, so this changes no
     behavior. Phase transitions go through here; the flag claim/release sites
     emit their own hints where the active flag actually flips."""
-    global current_phase
+    global current_phase, preparation_message
+    preparation_message = None
     current_phase = phase
     notify_session_changed("recording", recording_active, phase=phase)
 
@@ -559,6 +561,46 @@ def _is_transient_camera_error(msg: str) -> bool:
             "timed out waiting for frame",
         )
     )
+
+
+# A USB camera that drops off the bus mid-session (a flaky cable or hub
+# re-enumerating it, seen 2026-09-18 on a KD-USB camera) usually comes back on
+# the same /dev/video node within ~0.5 s. Its background reader dies with it,
+# and every later read raises "read thread is not running", so without a
+# reconnect one blip ends the whole recording session.
+_CAMERA_RECOVERY_ATTEMPTS = 5
+_CAMERA_RECOVERY_DELAY_S = 1.0
+
+
+def _recover_dead_cameras(robot, sleep: Callable[[float], None] = time.sleep) -> list[str]:
+    """Reconnect every camera on `robot` whose background reader has died.
+
+    Returns the names reconnected (empty when every reader is alive, so the
+    caller's original error is not a dead camera and should propagate).
+    Raises the last connect error when a camera does not come back.
+    """
+    dead = {
+        name: cam
+        for name, cam in (getattr(robot, "cameras", None) or {}).items()
+        if hasattr(cam, "thread") and (cam.thread is None or not cam.thread.is_alive())
+    }
+    for name, cam in dead.items():
+        logger.warning("📷 CAMERA RECOVERY: %s (%s) stopped delivering frames; reconnecting", name, cam)
+        for attempt in range(1, _CAMERA_RECOVERY_ATTEMPTS + 1):
+            try:
+                cam.disconnect()
+            except Exception:
+                logger.debug("Camera %s disconnect before reconnect failed", name, exc_info=True)
+            try:
+                cam.connect()
+                logger.warning("📷 CAMERA RECOVERY: %s reconnected (attempt %d)", name, attempt)
+                break
+            except Exception as e:
+                if attempt == _CAMERA_RECOVERY_ATTEMPTS:
+                    logger.error("📷 CAMERA RECOVERY: %s did not come back: %s", name, e)
+                    raise
+                sleep(_CAMERA_RECOVERY_DELAY_S)
+    return list(dead)
 
 
 def create_record_config(request: RecordingRequest, cameras: dict | None = None) -> RecordConfig:
@@ -1270,6 +1312,7 @@ def handle_recording_status() -> dict[str, Any]:
     status = {
         "recording_active": recording_active,
         "current_phase": current_phase,  # "preparing", "recording", "resetting", "completed"
+        "preparation_message": preparation_message if current_phase == "preparing" else None,
         # Only meaningful while current_phase == "reconnecting_robot": which
         # connect attempt is about to be retried, out of _CONNECT_ATTEMPTS.
         "connect_retry_attempt": connect_retry_attempt,
@@ -1857,7 +1900,7 @@ def _realign_follower_to_leader(
     abort_event=None,
     require_settled: bool = False,
 ) -> bool:
-    """Walk a CAN follower to the leader's CURRENT pose at a bounded rate.
+    """Align a follower to the leader at a bounded rate before passthrough.
 
     Recording has two mid-session gaps where the follower stops tracking the
     leader while the operator is free to move it: a pause (the reset loop
@@ -1931,6 +1974,7 @@ def _realign_follower_to_leader(
         targets,
         abort_event=abort_event,
         target_label="the leader's pose",
+        speed_deg_s=arm_registry.get(arm_type).recording_realign_speed_deg_s,
         # One fn per arm, each closed over its own device. The bimanual chase
         # drives both sides until they converge together.
         target_fns=[partial(source.for_device, device) for device, _pose in targets],
@@ -1974,6 +2018,7 @@ def _reset_loop_with_pause(
     control_time_s: float,
     realign: Callable[[], bool | None] | None = None,
     observation_callback=None,
+    hold_position: bool = False,
 ) -> None:
     """Reset-phase tick loop: same per-tick shape as lerobot's record_loop
     (lerobot.scripts.lerobot_record.record_loop) called with dataset=None —
@@ -1981,6 +2026,9 @@ def _reset_loop_with_pause(
     but additionally checks events["paused"] every tick, which record_loop has
     no primitive for and which can't be added without patching that vendored
     dependency.
+
+    ``hold_position`` keeps the completed zero return in place: observations
+    still refresh, but no leader actions or re-alignment are sent during reset.
 
     While paused: skips the leader-to-follower step entirely (the follower
     holds its last commanded position and ignores the leader — "freeze
@@ -2023,7 +2071,7 @@ def _reset_loop_with_pause(
     # Armed at entry: the phase is REACHED across a discontinuity — the episode
     # save (seconds of file I/O) or a re-record decision — during which the
     # follower held its last commanded pose while the leader was free to move.
-    realign_pending = True
+    realign_pending = not hold_position
 
     def _spent() -> float:
         """Active reset time spent so far, published for the status endpoint.
@@ -2058,7 +2106,7 @@ def _reset_loop_with_pause(
                 # Resuming reopens the same gap that entering the phase did: frozen
                 # passthrough is exactly the operator repositioning the leader while
                 # the follower holds still.
-                realign_pending = True
+                realign_pending = not hold_position
                 precise_sleep(control_interval)
                 # Paused time isn't spent from control_time_s: push the reference
                 # point forward by the tick we just spent paused.
@@ -2099,6 +2147,10 @@ def _reset_loop_with_pause(
                 obs = robot.get_observation()
                 if observation_callback is not None:
                     observation_callback(obs)
+                if hold_position:
+                    precise_sleep(max(control_interval - (time.perf_counter() - start_loop_t), 0.0))
+                    timestamp = _spent()
+                    continue
                 act = teleop.get_action()
                 act_processed_teleop = teleop_action_processor((act, obs))
                 robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
@@ -2122,6 +2174,7 @@ def _record_task_episodes(
     capture: Callable[[str], None],
     prepare: Callable[[], bool],
     preview: Callable[[], None],
+    finish_episode: Callable[[], bool] | None = None,
 ) -> None:
     """Manually gated episodes. Hold the completed buffer until Next or Done
     so Re-record can discard it without deleting an already saved episode.
@@ -2185,8 +2238,18 @@ def _record_task_episodes(
         if events.get("stop_recording"):
             dataset.clear_episode_buffer()
             return
-        # Preserve the existing timeout policy: unfinished takes are discarded.
-        if events.get("rerecord_episode") or not events.get("_exit_early_triggered"):
+        if finish_episode is not None and not finish_episode():
+            # Preserve a completed take when home cannot finish. Cleanup still
+            # uses the graceful stop path, and no next capture can start.
+            if not discard_requested and not events.get("rerecord_episode"):
+                dataset.save_episode()
+                saved_episodes += 1
+            else:
+                dataset.clear_episode_buffer()
+            return
+        # Duration completion, like manual completion, leaves a pending take
+        # for the naming gate. Only an explicit re-record discards it.
+        if events.get("rerecord_episode"):
             dataset.clear_episode_buffer()
             continue
         pending = True
@@ -2243,10 +2306,6 @@ def record_with_web_events(
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
     publish_preview = observation_tap(robot, family)
-
-    def process_observation(observation):
-        publish_preview(observation)
-        return robot_observation_processor(observation)
 
     action_features = hw_to_dataset_features(robot.action_features, "action", cfg.dataset.video)
     obs_features = hw_to_dataset_features(robot.observation_features, "observation", cfg.dataset.video)
@@ -2502,8 +2561,8 @@ def record_with_web_events(
     rest_poses = family.capture_rest_poses(robot)
     # An energized leader (the Metal leader) is captured and returned with
     # the followers; every other leader contributes nothing here.
-    if teleop is not None:
-        rest_poses += family.capture_leader_rest_poses(teleop)
+    leader_rest_poses = family.capture_leader_rest_poses(teleop) if teleop is not None else []
+    rest_poses += leader_rest_poses
 
     # Rate-bounded catch-up for the reset phase's two discontinuities (entering
     # it across the episode-save gap, and resuming from a pause). Built once and
@@ -2536,7 +2595,67 @@ def record_with_web_events(
     def cancelled():
         return bool(web_events.get("stop_recording") or _release_now.is_set())
 
-    prepare_alignment = partial(realign, require_settled=True)
+    def finish_episode():
+        if family.recording_home_speed_deg_s is None:
+            return True
+        from .recording_home import return_recording_home
+
+        _set_phase("preparing")
+        set_preparation_message("Returning followers to zero…")
+        arrived, home_targets = return_recording_home(
+            robot, family.recording_home_speed_deg_s, cancelled, hold=family.hold_recording_home
+        )
+        if arrived and family.recording_home_is_rest_pose:
+            # Maker's folded zero is also its resting pose. Preserve any
+            # energized leader's captured return independently. Metal's zero
+            # is upright, so it keeps ALL captured teardown targets instead.
+            rest_poses[:] = home_targets + leader_rest_poses
+        return arrived
+
+    def set_preparation_message(message):
+        global preparation_message
+        preparation_message = message
+
+    def prepare_alignment():
+        if cancelled():
+            return False
+        if not family.uses_feetech_bus:
+            set_preparation_message("Aligning followers before recording…")
+        try:
+            aligned = realign(require_settled=True)
+        except RuntimeError:
+            logger.exception("Follower preparation did not settle; ending recording gracefully")
+            return False
+        return aligned and not cancelled()
+
+    def prepare_episode():
+        # Align to the current leader pose after camera/codec preparation.
+        # The leader need not be at zero; failed alignment still blocks capture.
+        return prepare_recording_episode(
+            robot,
+            dataset,
+            prepared_encoder,
+            prepare_alignment,
+            cancelled,
+            observation_processor=robot_observation_processor,
+        )
+
+    original_get_observation = robot.get_observation
+
+    def get_observation_with_preview(*args, **kwargs):
+        try:
+            observation = original_get_observation(*args, **kwargs)
+        except Exception:
+            # Only a dead camera reader is recovered; anything else propagates.
+            if not _recover_dead_cameras(robot):
+                raise
+            observation = original_get_observation(*args, **kwargs)
+        publish_preview(observation)
+        return observation
+
+    # Preserve the actual default processor pipeline for LeRobot's ownership
+    # checks. This tap observes the already-read buffers without mutating them.
+    robot.get_observation = get_observation_with_preview
     try:
         prepared_encoder = install_episode_preparation(dataset)
         per_episode_task = getattr(recording_config, "per_episode_task", False)
@@ -2549,7 +2668,7 @@ def record_with_web_events(
                     fps=cfg.dataset.fps,
                     teleop_action_processor=teleop_action_processor,
                     robot_action_processor=robot_action_processor,
-                    robot_observation_processor=process_observation,
+                    robot_observation_processor=robot_observation_processor,
                     teleop=teleop,
                     dataset=dataset,
                     control_time_s=cfg.dataset.episode_time_s,
@@ -2562,27 +2681,14 @@ def record_with_web_events(
                 dataset,
                 web_events,
                 capture_task,
-                lambda: prepare_recording_episode(
-                    robot,
-                    dataset,
-                    prepared_encoder,
-                    prepare_alignment,
-                    cancelled,
-                    observation_processor=process_observation,
-                ),
-                lambda: publish_preview(robot.get_observation()),
+                prepare_episode,
+                lambda: robot.get_observation(),
+                finish_episode=finish_episode,
             )
         while not per_episode_task and saved_episodes < cfg.dataset.num_episodes:
             _set_phase("preparing")
             phase_start_time = None
-            if not prepare_recording_episode(
-                robot,
-                dataset,
-                prepared_encoder,
-                prepare_alignment,
-                cancelled,
-                observation_processor=process_observation,
-            ):
+            if not prepare_episode():
                 break
             # RECORDING PHASE - with dataset (matches original record.py exactly)
             _set_phase("recording")
@@ -2612,7 +2718,7 @@ def record_with_web_events(
                 fps=cfg.dataset.fps,
                 teleop_action_processor=teleop_action_processor,
                 robot_action_processor=robot_action_processor,
-                robot_observation_processor=process_observation,
+                robot_observation_processor=robot_observation_processor,
                 teleop=teleop,
                 dataset=dataset,
                 control_time_s=cfg.dataset.episode_time_s,
@@ -2653,13 +2759,11 @@ def record_with_web_events(
                 )
                 # Reset our tracking flag
                 web_events["_exit_early_triggered"] = False
-            else:
-                # Recording completed due to timeout - trigger re-record behavior
-                logger.info("⏰ RECORDING PHASE COMPLETED DUE TO TIMEOUT - triggering re-record")
-                print(
-                    f"⏰ STATUS CHANGE: Recording timeout reached for episode {current_episode} - re-recording"
-                )
-                web_events["rerecord_episode"] = True
+            elif not web_events["rerecord_episode"]:
+                # Reaching the configured duration completes this episode.
+                # Only an explicit re-record request discards the take below.
+                logger.info("⏰ RECORDING PHASE COMPLETED DUE TO TIMEOUT - proceeding to save episode")
+                print(f"⏰ STATUS CHANGE: Recording duration reached for episode {current_episode} - saving")
 
             # Handle rerecord logic first (before saving)
             if web_events["rerecord_episode"]:
@@ -2670,6 +2774,9 @@ def record_with_web_events(
                 web_events["rerecord_episode"] = False
                 web_events["exit_early"] = False
                 dataset.clear_episode_buffer()
+
+                if not finish_episode():
+                    break
 
                 # Go through reset phase before re-recording (don't increment episode counters)
                 # RESET PHASE - without dataset (matches original record.py exactly)
@@ -2705,7 +2812,7 @@ def record_with_web_events(
                     robot_action_processor=robot_action_processor,
                     control_time_s=cfg.dataset.reset_time_s,
                     realign=realign,
-                    observation_callback=publish_preview,
+                    hold_position=family.recording_home_speed_deg_s is not None,
                 )
 
                 # The loop may have exited (e.g. via exit_early/stop) while
@@ -2744,6 +2851,9 @@ def record_with_web_events(
             # Increment episode counters after successful save
             saved_episodes += 1
             current_episode += 1
+
+            if not finish_episode():
+                break
 
             # Check if we should stop recording
             if web_events["stop_recording"]:
@@ -2790,7 +2900,7 @@ def record_with_web_events(
                     robot_action_processor=robot_action_processor,
                     control_time_s=cfg.dataset.reset_time_s,
                     realign=realign,
-                    observation_callback=publish_preview,
+                    hold_position=family.recording_home_speed_deg_s is not None,
                 )
 
                 # The loop may have exited (e.g. via exit_early/stop) while
@@ -2817,11 +2927,19 @@ def record_with_web_events(
         # Recording completed
         _set_phase("completed")
         phase_start_time = None
-        print("🏁 STATUS CHANGE: Recording session completed - all episodes finished")
+        if saved_episodes >= cfg.dataset.num_episodes:
+            print("🏁 STATUS CHANGE: Recording session completed - all episodes finished")
+        else:
+            logger.info(
+                "Recording session ended with %d of %d requested episodes saved",
+                saved_episodes,
+                cfg.dataset.num_episodes,
+            )
         log_say("Stop recording", cfg.play_sounds, blocking=True)
         ended_normally = True
 
     finally:
+        robot.get_observation = original_get_observation
         try:
             if ended_normally and not _release_now.is_set():
                 # User-initiated stop / planned session end: no timed hold — the

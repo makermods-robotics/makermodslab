@@ -468,6 +468,44 @@ def test_busy_refusal_from_a_raced_start_maps_to_held(client, tmp_lerobot_home, 
     assert body["details"]["holder"]["kind"] == "recording"
 
 
+def test_releasing_refusal_passes_through_not_flattened_to_held(
+    client, tmp_lerobot_home, monkeypatch
+) -> None:
+    """`robot.busy.releasing` — the previous session of this kind is still
+    winding down (an uninterruptible model download, an arm preflight) — must
+    NOT become a `session.held` with a null holder. There is no other session
+    to name or stop; the feature's own "try again shortly" message and code
+    pass straight through."""
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr(
+        "makermodslab.rollout.handle_start_inference",
+        _fake_start(
+            "inference",
+            captured,
+            {
+                "success": False,
+                "status_code": 409,
+                "message": "The previous session is still shutting down. Try again in a few seconds.",
+                "code": ErrorCode.ROBOT_BUSY_RELEASING,
+            },
+        ),
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "inference",
+            "robot": "bench",
+            "options": {"policy_ref": "alice/act-pick", "task": "pick"},
+        },
+    )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["code"] == "robot.busy.releasing"
+    assert "shutting down" in body["detail"]
+    assert (body.get("details") or {}).get("holder") is None
+
+
 def test_non_busy_refusal_passes_through(client, tmp_lerobot_home, monkeypatch) -> None:
     _make_robot()
     captured: list = []

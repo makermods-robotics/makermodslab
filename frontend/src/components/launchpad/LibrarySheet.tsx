@@ -95,6 +95,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
   const [tab, setTab] = useState<Tab>("policies");
   const [mergeOpen, setMergeOpen] = useState(false);
   const [detailRepo, setDetailRepo] = useState<string | null>(null);
+  const [detailItem, setDetailItem] = useState<DatasetItem | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [managePolicy, setManagePolicy] = useState<ModelItem | null>(null);
   const [manageOpen, setManageOpen] = useState(false);
@@ -217,6 +218,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
 
   const openDatasetDetail = (d: DatasetItem) => {
     setDetailRepo(d.repo_id);
+    setDetailItem(d);
     setDetailOpen(true);
   };
 
@@ -447,11 +449,18 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
 
       <DatasetDetailDialog
         repoId={detailRepo}
+        item={detailItem ?? undefined}
         open={detailOpen}
         onOpenChange={setDetailOpen}
         // The sheet sits above the studio overlay — close it when a dataset
         // action opens a studio panel, or the panel appears "behind" it.
         onStudioAction={() => onOpenChange(false)}
+        // A delete (an episode down to zero, or the whole dataset via the
+        // info card) removes a directory this list is still showing — without
+        // this, the now-gone dataset stays visible as a stale card until some
+        // unrelated action happens to refetch, and reopening it looks
+        // (misleadingly) like an empty dataset rather than a deleted one.
+        onDeleted={refreshDatasets}
       />
 
       <PolicyManageDialog

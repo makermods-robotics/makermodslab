@@ -59,37 +59,30 @@ describe("the handoff banner", () => {
   });
 });
 
-// These two are the reason the banner is rendered unconditionally in the
+// This is the reason the banner is rendered unconditionally in the
 // always-mounted Collect panel rather than only when someone is looking at it.
-// They used to run because a finished session NAVIGATED to the Launchpad,
+// It used to run because a finished session NAVIGATED to the Launchpad,
 // mounting the banner there; the studio now stays open, so nothing else would
-// trigger them.
-describe("the side effects that used to ride on the navigation home", () => {
-  // Each case needs its OWN repo id: the auto-push is guarded by a
-  // module-level set of already-pushed ids, so reusing one here would report a
-  // missing upload that the guard had merely deduplicated.
+// trigger it.
+describe("the side effect that used to ride on the navigation home", () => {
   it("preselects the fresh dataset so Train opens onto it", () => {
     setup({ repo_id: "makermods/preselect", saved_episodes: 5 });
     expect(setSelectedDataset).toHaveBeenCalledWith("makermods/preselect");
   });
+});
 
-  it("kicks off the Hub push for a namespaced repo", () => {
+// The automatic first Hub push moved to CollectPanel's Finalize action (fired
+// once, before this banner ever mounts) — this component only re-attaches to
+// whatever useDatasetUpload finds already running, via its own mount-time
+// poll. It must never start a second, independent push itself, regardless of
+// the repo id shape.
+describe("the Hub push", () => {
+  it("is never started from this banner", () => {
     setup({ repo_id: "makermods/autopush", saved_episodes: 5 });
-    expect(start).toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
   });
 
-  // That guard is itself load-bearing — a remount must not fire a second,
-  // redundant upload of the same dataset.
-  it("does not push the same dataset twice", () => {
-    setup({ repo_id: "makermods/pushed_once", saved_episodes: 5 });
-    expect(start).toHaveBeenCalledTimes(1);
-    setup({ repo_id: "makermods/pushed_once", saved_episodes: 5 });
-    expect(start).toHaveBeenCalledTimes(1);
-  });
-
-  // A repo id with no namespace means the user wasn't logged in at record
-  // time, so a push could only 401.
-  it("stays manual when the repo has no namespace", () => {
+  it("stays manual for a repo with no namespace too", () => {
     setup({ repo_id: "sock_sort", saved_episodes: 5 });
     expect(start).not.toHaveBeenCalled();
   });

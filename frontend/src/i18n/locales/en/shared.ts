@@ -11,6 +11,9 @@ export default {
   sessionBusy: {
     message: "The robot is busy — {{activity}} is running. Stop it first.",
     generic: "The robot is busy with another session. Stop it first.",
+    // robot.busy.releasing: the previous session was stopped and is still
+    // finishing (an uninterruptible model download, an arm preflight).
+    releasing: "Still finishing the last session — try again in a moment.",
     activity: {
       teleoperation: "teleoperation",
       recording: "a recording session",

@@ -146,6 +146,7 @@ from lerobot.robots import (  # noqa: F401
     so_follower,
 )
 from lerobot.utils.import_utils import register_third_party_plugins
+from makermodslab.maker_can import install as _install_maker_can
 
 from ..drtc_protocol import (
     EVENT_BYE,
@@ -183,6 +184,8 @@ from ._session_glue import (
     shielded,
 )
 from ._sync_player import AdaptiveBlockPlayer
+
+_install_maker_can()
 
 # Register any third-party robot/camera plugins (entry points) BEFORE draccus
 # parses `--robot.type`. Built-in so100/so101 register on import above.

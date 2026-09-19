@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import logging
 import socket
-import threading
 import types
 
 import pytest
@@ -52,16 +51,18 @@ def test_wait_for_port_returns_false_when_port_never_opens(
 ) -> None:
     """Patch sleep so we don't actually block for `timeout` seconds — the
     function's whole loop body is fast otherwise."""
-    from makermodslab.scripts.makermodslab import _wait_for_port
+    from makermodslab.scripts import makermodslab as launcher
 
-    monkeypatch.setattr("makermodslab.scripts.makermodslab.time.sleep", lambda _s: None)
+    # Replace only the launcher's clock; time.sleep is otherwise shared with
+    # every background worker still running in the test process.
+    monkeypatch.setattr(launcher, "time", types.SimpleNamespace(sleep=lambda _s: None))
     # Pick an ephemeral port from the OS, then close it so it's not bound.
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     probe.bind(("127.0.0.1", 0))
     port = probe.getsockname()[1]
     probe.close()
 
-    assert _wait_for_port(port, timeout=2) is False
+    assert launcher._wait_for_port(port, timeout=2) is False
 
 
 def test_wait_for_port_returns_true_immediately_for_already_open_port(
@@ -69,18 +70,16 @@ def test_wait_for_port_returns_true_immediately_for_already_open_port(
 ) -> None:
     """Sanity check that the success path doesn't sleep at all — guards
     against accidentally adding a leading delay."""
-    from makermodslab.scripts.makermodslab import _wait_for_port
+    from makermodslab.scripts import makermodslab as launcher
 
     sleep_calls = []
-    monkeypatch.setattr("makermodslab.scripts.makermodslab.time.sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(launcher, "time", types.SimpleNamespace(sleep=sleep_calls.append))
 
     server, port = _bind_listener()
-    # Drain any incoming connection so the listener stays healthy.
-    accept_thread = threading.Thread(target=lambda: server.accept() if server else None, daemon=True)
-    accept_thread.start()
-
+    # One connection fits in the listen backlog; no accept worker is needed.
+    # An unjoined worker races socket.close() and subsequent socket mocks.
     try:
-        assert _wait_for_port(port, timeout=5) is True
+        assert launcher._wait_for_port(port, timeout=5) is True
         assert sleep_calls == []
     finally:
         server.close()

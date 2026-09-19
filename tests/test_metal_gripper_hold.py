@@ -272,8 +272,8 @@ def test_installed_in_recording_before_connect(monkeypatch, tmp_lerobot_home):
         )
 
 
-@pytest.mark.parametrize("family,expected", [("metal", 0.5), ("maker", None), ("so101", None)])
-def test_new_robot_default_is_metal_only(client, tmp_lerobot_home, family, expected):
+@pytest.mark.parametrize("family,expected", [("metal", 0.5), ("maker", 0.5), ("so101", None)])
+def test_new_robot_default_is_supported_families_only(client, tmp_lerobot_home, family, expected):
     response = client.post("/robots/default?create=true", json={"arm_type": family})
     assert response.status_code == 200
     assert response.json()["robot"]["gripper_hold_torque_nm"] == expected

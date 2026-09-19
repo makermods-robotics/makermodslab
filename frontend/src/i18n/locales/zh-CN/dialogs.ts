@@ -36,6 +36,26 @@ export default {
     curateSaveFailedTitle: "无法保存回合选择",
     curateSaveFailedBody: "改动未保存 — 请重试。",
     finishCuratingFirst: "请先完成回合挑选",
+    deleteEpisodeAria: "删除第 {{index}} 回合",
+    deleteEpisodeTitle: "删除第 {{index}} 回合？",
+    deleteEpisodeDescription: "这会从数据集中永久移除该回合，无法撤销。",
+    deleteEpisodeDescriptionOnHub:
+      "这只会从本地副本中永久移除该回合，无法撤销 —— Hub 上的副本会保留所有回合，直到你再次上传。",
+    deleteEpisodeConfirm: "删除回合",
+    deleteEpisodeFailedTitle: "无法删除回合",
+    deleteEpisodeFailedBody: "未做任何改动 —— 请重试。",
+    deleteDatasetFailedTitle: "无法删除数据集",
+    deleteDatasetFailedBody: "未做任何改动 —— 请重试。",
+    finalizeDescription: "回顾这次录制 —— 取消勾选不想保留的回合，然后完成录制。",
+    finalize: "完成录制",
+    keepEpisodeAria: "保留第 {{index}} 回合",
+    finalizeFailedTitle: "无法完成录制",
+    finalizeFailedBody: "未上传任何内容 —— 请重试。",
+    keepAllAndClose: "保留所有回合并关闭",
+    episodesLoadFailedTitle: "无法加载回合列表",
+    episodesRetry: "重试",
+    finalizeUnavailable:
+      "完成录制需要回合列表。请重新加载，或保留所有回合并关闭。",
   },
 
   jointChart: {
@@ -58,6 +78,7 @@ export default {
     noRobot: "请选择一台已连接从臂的机械臂，才能在硬件上回放该回合。",
     start: "在硬件上回放",
     movesArmWarning: "将移动 {{robot}} 的机械臂 — 请确保周围区域无障碍物。",
+    movesArmsWarning: "将移动 {{robot}} 的双臂 — 请确保周围区域无障碍物。",
     stop: "停止",
     releaseNow: "立即释放",
     toast: {

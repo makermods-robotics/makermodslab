@@ -140,8 +140,6 @@ LEGACY_ROUTES: frozenset[str] = frozenset(
         "GET /system/training-extra",
         "GET /system/training-extra/install-status",
         "GET /system/update-check",
-        "GET /system/wandb-extra",
-        "GET /system/wandb-extra/install-status",
         "GET /teleoperation-status",
         "GET /upload-status",
         "POST /calibration-configs/{device_type}/upload",
@@ -195,7 +193,6 @@ LEGACY_ROUTES: frozenset[str] = frozenset(
         "POST /system/policy-extra/{policy_type}/install",
         "POST /system/training-extra/install",
         "POST /system/update",
-        "POST /system/wandb-extra/install",
         "POST /upload-dataset",
         "POST /wiggle",
         "WS /ws/joint-data",
@@ -221,6 +218,7 @@ def test_no_new_routes_outside_api_v1():
 # checks every entry actually exists so retired surface can't linger.
 V1_ONLY_ROUTES: frozenset[str] = frozenset(
     [
+        "GET /api/v1/system/wandb-credentials",
         # Live Metal gripper effort-controller status.
         "GET /api/v1/robots/{name}/gripper-status",
         "GET /api/v1/recording-preview/{camera_name}",
@@ -315,6 +313,10 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         "POST /api/v1/jobs/queue/reorder",
         # Skills: the deployable projection of the /models build (PR #94).
         "GET /api/v1/skills",
+        # Cancel a running dataset merge (SIGTERM -> SIGKILL + partial cleanup).
+        # Born versioned; POST /datasets/merge{,/status} keep their flat mirror
+        # only because they predate the freeze.
+        "POST /api/v1/datasets/merge/cancel",
         # Sessions: identity + server-side robot resolution (sessions.py).
         "GET /api/v1/sessions/current",
         "POST /api/v1/sessions",
@@ -324,6 +326,10 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # run is launched with. Read/replace only — never deletes an episode.
         "GET /api/v1/datasets/excluded-episodes",
         "PUT /api/v1/datasets/excluded-episodes",
+        # Episode/whole-dataset deletion from the dataset viewer and the
+        # post-recording Finalize review. No trash/undo; no flat mirror — born
+        # after the flat surface was frozen.
+        "POST /api/v1/datasets/episode-delete",
         # Remote inference (DRTC): read-only status + transport, plus the one
         # mutation that clears the local-SFU override. Start/stop ride
         # POST /api/v1/sessions and /sessions/{id}/stop — no new verbs. No flat

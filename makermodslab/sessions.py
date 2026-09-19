@@ -645,6 +645,9 @@ def _build_replay_request(record: dict, opts: ReplayOptions):
         episode_index=opts.episode_index,
         follower_port=record["follower_port"],
         follower_config=record["follower_config"],
+        mode=record.get("mode", "single"),
+        right_follower_port=record.get("right_follower_port") or "",
+        right_follower_config=record.get("right_follower_config") or "",
         robot_name=record["name"],
         arm_type=record["arm_type"],
         skip_identity_check=opts.skip_identity_check,
@@ -1015,10 +1018,25 @@ def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict
     if not result.get("success", False):
         message = result.get("message", f"Failed to start {kind}")
         code = str(result.get("code") or "")
+        if code == ErrorCode.ROBOT_BUSY_RELEASING:
+            # NOT "another session holds the hardware". The previous session of
+            # this same kind was already stopped; its startup or teardown worker
+            # is still unwinding — a Hub download that can't be interrupted, an
+            # arm preflight, a rest-return — and nothing new has claimed the
+            # bus. Routing this through `_raise_held` mints a `session.held`
+            # with a null holder (no session is tracked), which every client
+            # renders as "The robot is busy with another session. Stop it
+            # first." — an instruction with no referent, when the honest answer
+            # is "it's finishing the last one, try again in a moment". Pass the
+            # feature's own message straight through under its own code.
+            raise ApiError(
+                status_code=result.get("status_code", 409),
+                detail=message,
+                code=ErrorCode.ROBOT_BUSY_RELEASING,
+            )
         if code.startswith("robot.busy."):
-            # Raced another start past the gate above. The discriminant names
-            # the holder except for `releasing`, where the tracker may still
-            # know which session is winding down.
+            # Raced another start past the gate above — the discriminant is a
+            # live session kind, so it names the holder directly.
             discriminant = code.rsplit(".", 1)[-1]
             if discriminant in session_events.SESSION_KINDS:
                 holder = discriminant

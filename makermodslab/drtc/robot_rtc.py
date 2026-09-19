@@ -116,6 +116,7 @@ from lerobot.robots import (  # noqa: F401
     so_follower,
 )
 from lerobot.utils.import_utils import register_third_party_plugins
+from makermodslab.maker_can import install as _install_maker_can
 
 from ..drtc_protocol import (
     EVENT_BYE,
@@ -166,6 +167,8 @@ from ._session_glue import (
     say,
     shielded,
 )
+
+_install_maker_can()
 
 register_third_party_plugins()
 

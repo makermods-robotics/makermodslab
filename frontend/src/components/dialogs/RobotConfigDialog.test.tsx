@@ -119,9 +119,9 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("advanced holding torque", () => {
-  function openMetal(holdTorque: number | null | undefined = undefined, currentLimit: number | null = null) {
+  function openMetal(holdTorque: number | null | undefined = undefined, currentLimit: number | null = null, armType = "metal") {
     const record = {
-      name: "test", mode: "single", arm_type: "metal", arms: "both", cameras: [],
+      name: "test", mode: "single", arm_type: armType, arms: "both", cameras: [],
       motor_power: 38, gripper_hold_torque_nm: holdTorque, gripper_current_limit_a: currentLimit,
       leader_port: "leader", follower_port: "follower",
     };
@@ -136,8 +136,8 @@ describe("advanced holding torque", () => {
     render(<RobotConfigDialog open robotName="test" onOpenChange={() => {}} />);
   }
 
-  it("starts collapsed at 0.5 Nm and saves only the edited holding torque", async () => {
-    openMetal();
+  it.each(["metal", "maker"])("%s starts collapsed at 0.5 Nm and saves only the edited holding torque", async (armType) => {
+    openMetal(undefined, null, armType);
     const advanced = await screen.findByRole("button", { name: "Advanced parameters" });
     expect(advanced).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("slider", { name: "Holding torque (N·m)" })).not.toBeInTheDocument();
@@ -342,5 +342,40 @@ describe("zero-pose calibration", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Cancel all" }));
     expect(mocks.start).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Calibrate all" })).toBeEnabled();
+  });
+});
+
+
+describe("leader port detection with a gs_usb follower attached", () => {
+  it.each([0, 1])("uses leader device for swing button %s despite follower setup selection", async (index) => {
+    mode = "bimanual";
+    const original = mocks.fetch.getMockImplementation();
+    mocks.fetch.mockImplementation(async (url: string, options?: RequestInit) => {
+      if (url.endsWith("/maker/identify-arm")) {
+        return { ok: true, json: async () => ({ success: false, message: "Mock: no motion" }) };
+      }
+      const response = await original?.(url, options);
+      if (url.includes("/robots/")) {
+        const data = await response.json();
+        // A calibrated leader makes initial setup select the follower.
+        data.robot.leader_config = "leader.json";
+        return { ok: true, json: async () => data };
+      }
+      if (url.endsWith("/available-ports")) {
+        return { ok: true, json: async () => ({ ports: ["leader", "right-leader", "gs_usb:A"] }) };
+      }
+      return response;
+    });
+    render(<RobotConfigDialog open robotName="test" onOpenChange={() => {}} />);
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Detect by swing" })).toHaveLength(2));
+    fireEvent.click(screen.getAllByRole("button", { name: "Detect by swing" })[index]);
+    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledWith(
+      "http://test/api/v1/maker/identify-arm",
+      // The Maker arm offers two leader kinds (lever and trigger grip), so the
+      // gesture request names the record's kind, the default here.
+      expect.objectContaining({
+        body: JSON.stringify({ device_type: "teleop", arm_type: "maker", leader_kind: "star" }),
+      }),
+    ));
   });
 });

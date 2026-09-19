@@ -87,9 +87,8 @@ export default {
       pause: "暂停",
       resume: "继续",
       rerecord: "重录",
-      keepEpisodes: "保留回合并继续",
-      discardExit: "丢弃并退出",
-      backHome: "返回首页",
+      reviewAndFinalize: "回顾并完成录制",
+      continue: "继续",
       saveEpisodeTask: "开始录制回合",
     },
     naming: {

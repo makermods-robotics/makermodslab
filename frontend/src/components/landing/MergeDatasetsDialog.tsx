@@ -47,6 +47,7 @@ import {
   DatasetItem,
   MAX_SOURCE_WEIGHT,
   MergeStatus,
+  cancelDatasetMerge,
   getDatasetInfo,
   getDatasetMergeStatus,
   startDatasetMerge,
@@ -111,6 +112,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
   const [output, setOutput] = useState("");
   const [status, setStatus] = useState<MergeStatus | null>(null);
   const [starting, setStarting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   // Set when the merge is one confirmation away: the sources are identical
   // apart from a column we're willing to drop (see MergeStartResult).
@@ -145,6 +147,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
     setOutput(initialOutput ?? "");
     setStartError(null);
     setPendingWarnings(null);
+    setCancelling(false);
     notifiedDone.current = false;
     getDatasetMergeStatus(baseUrl, fetchWithHeaders)
       .then((s) => setStatus(s.state === "running" ? s : null))
@@ -470,6 +473,23 @@ const MergeDatasetsDialog: React.FC<Props> = ({
 
   const handleMerge = (dropFeatures: string[] = []) => doMerge(false, dropFeatures);
 
+  // Stop a running merge on the operator's request. The backend SIGTERMs the
+  // subprocess and reclaims its partial output; the poll would also settle to
+  // "cancelled" on its own, but reflect it now so the dialog doesn't lag.
+  const handleCancel = async () => {
+    setCancelling(true);
+    try {
+      const res = await cancelDatasetMerge(baseUrl, fetchWithHeaders);
+      if (res.cancelled) {
+        setStatus((prev) => (prev ? { ...prev, state: "cancelled" } : prev));
+      }
+    } catch {
+      // Best-effort — the next poll still catches a backend-side stop.
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   const state = status?.state ?? "idle";
 
   return (
@@ -786,6 +806,11 @@ const MergeDatasetsDialog: React.FC<Props> = ({
                     components={[<code key="0" className="text-ok" />]}
                   />
                 </>
+              ) : state === "cancelled" ? (
+                <>
+                  <XCircle className="w-4 h-4 text-muted-foreground" />{" "}
+                  {t("landing.mergeDatasets.cancelled")}
+                </>
               ) : (
                 <>
                   <XCircle className="w-4 h-4 text-destructive" />{" "}
@@ -804,7 +829,19 @@ const MergeDatasetsDialog: React.FC<Props> = ({
             {status?.error ? (
               <p className="text-sm text-destructive">{status.error}</p>
             ) : null}
-            <div className="flex justify-end">
+            <div className="flex justify-end gap-2">
+              {state === "running" && (
+                <Button
+                  variant="outline"
+                  disabled={cancelling}
+                  className="text-destructive hover:text-destructive"
+                  onClick={handleCancel}
+                >
+                  {cancelling
+                    ? t("landing.mergeDatasets.cancelling")
+                    : t("landing.mergeDatasets.cancel")}
+                </Button>
+              )}
               <Button
                 variant="outline"
                 onClick={() => onOpenChange(false)}

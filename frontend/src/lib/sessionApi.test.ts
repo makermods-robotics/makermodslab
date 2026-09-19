@@ -134,4 +134,17 @@ describe("formatSessionHeld", () => {
       formatSessionHeld(t, new ApiError("x failed", 409, "busy", null))
     ).toBeNull();
   });
+
+  it("renders robot.busy.releasing as a 'try again' line, not 'stop the other session'", () => {
+    const releasing = new ApiError(
+      "Start session failed: releasing",
+      409,
+      "The previous session is still shutting down. Try again in a few seconds.",
+      "robot.busy.releasing",
+      null
+    );
+    expect(formatSessionHeld(t, releasing)).toBe(
+      "Still finishing the last session — try again in a moment."
+    );
+  });
 });

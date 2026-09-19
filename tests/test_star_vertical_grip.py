@@ -24,7 +24,7 @@ def test_vertical_profile_changes_only_gripper_and_keeps_regular_star():
 @pytest.mark.parametrize(
     "angle,target", [(0, 0), (20.6, 57.5), (41.2, 115), (-5, 0), (46, 115), (401.2, 115)]
 )
-def test_real_driver_maps_zeroed_encoder_travel_and_clips(angle, target):
+def test_real_driver_maps_zeroed_encoder_travel_and_clips(angle, target, tmp_lerobot_home):
     config = METAL.single_leader_config("fake", "vertical-test", "star_vertical")
     leader = make_teleoperator_from_config(config)
     leader.bus = SimpleNamespace(close=lambda: None)
