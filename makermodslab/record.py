@@ -563,6 +563,46 @@ def _is_transient_camera_error(msg: str) -> bool:
     )
 
 
+# A USB camera that drops off the bus mid-session (a flaky cable or hub
+# re-enumerating it, seen 2026-09-18 on a KD-USB camera) usually comes back on
+# the same /dev/video node within ~0.5 s. Its background reader dies with it,
+# and every later read raises "read thread is not running", so without a
+# reconnect one blip ends the whole recording session.
+_CAMERA_RECOVERY_ATTEMPTS = 5
+_CAMERA_RECOVERY_DELAY_S = 1.0
+
+
+def _recover_dead_cameras(robot, sleep: Callable[[float], None] = time.sleep) -> list[str]:
+    """Reconnect every camera on `robot` whose background reader has died.
+
+    Returns the names reconnected (empty when every reader is alive, so the
+    caller's original error is not a dead camera and should propagate).
+    Raises the last connect error when a camera does not come back.
+    """
+    dead = {
+        name: cam
+        for name, cam in (getattr(robot, "cameras", None) or {}).items()
+        if hasattr(cam, "thread") and (cam.thread is None or not cam.thread.is_alive())
+    }
+    for name, cam in dead.items():
+        logger.warning("📷 CAMERA RECOVERY: %s (%s) stopped delivering frames; reconnecting", name, cam)
+        for attempt in range(1, _CAMERA_RECOVERY_ATTEMPTS + 1):
+            try:
+                cam.disconnect()
+            except Exception:
+                logger.debug("Camera %s disconnect before reconnect failed", name, exc_info=True)
+            try:
+                cam.connect()
+                logger.warning("📷 CAMERA RECOVERY: %s reconnected (attempt %d)", name, attempt)
+                break
+            except Exception as e:
+                if attempt == _CAMERA_RECOVERY_ATTEMPTS:
+                    logger.error("📷 CAMERA RECOVERY: %s did not come back: %s", name, e)
+                    raise
+                sleep(_CAMERA_RECOVERY_DELAY_S)
+    return list(dead)
+
+
 def create_record_config(request: RecordingRequest, cameras: dict | None = None) -> RecordConfig:
     """Create a RecordConfig from the recording request.
 
@@ -2603,7 +2643,13 @@ def record_with_web_events(
     original_get_observation = robot.get_observation
 
     def get_observation_with_preview(*args, **kwargs):
-        observation = original_get_observation(*args, **kwargs)
+        try:
+            observation = original_get_observation(*args, **kwargs)
+        except Exception:
+            # Only a dead camera reader is recovered; anything else propagates.
+            if not _recover_dead_cameras(robot):
+                raise
+            observation = original_get_observation(*args, **kwargs)
         publish_preview(observation)
         return observation
 
