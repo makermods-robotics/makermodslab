@@ -1,7 +1,9 @@
 """MIT gripper holding-effort regulation, inspired by YAM's target correction.
 
-This is not a hard instantaneous torque/current limit. Only closing contact
-changes the position command; motor Kp/Kd remain fixed. No thermal derating.
+For Metal this is not a hard instantaneous torque/current limit: only closing
+contact changes the position command. Maker also caps the closing lead on
+every update (``cap_closing_torque``). Motor Kp/Kd remain fixed. No thermal
+derating.
 """
 
 import math
@@ -11,19 +13,42 @@ from collections import deque
 from .gripper_settings import GRIPPER_RESTART_C, validate_gripper_hold_torque
 from .metal_gripper import WATCHDOG_TICKS, GripperSafetyError, MetalGripperBus
 
+#: Kd while capped closing drives free jaws. Damping only subtracts from the
+#: closing effort, so a lower value speeds closing without raising the ceiling
+#: (Kp x error) even at impact; at 0.02 it costs ~0.24 N.m at 700 deg/s.
+#: Holding, opening and settling within the cap's lead keep full Kd.
+CAPPED_CLOSING_KD = 0.02
+
 
 class HoldingController:
     """Radians throughout; closing direction is -1 for Metal, +1 for Maker."""
 
-    def __init__(self, torque_nm: float, limits_rad: tuple[float, float], *, closing_direction=-1):
+    def __init__(
+        self,
+        torque_nm: float,
+        limits_rad: tuple[float, float],
+        *,
+        closing_direction=-1,
+        cap_closing_torque=False,
+    ):
         self.torque_nm = validate_gripper_hold_torque(torque_nm)
         if self.torque_nm is None:
             raise ValueError("Holding controller requires a torque")
         if closing_direction not in (-1, 1):
             raise ValueError("Closing direction must be -1 or +1")
         self.closing_direction = closing_direction
+        # Contact detection alone lets a compliant object that keeps creeping
+        # be squeezed at full Kp x error (13.5 N.m measured on a Maker RS00)
+        # before holding engages. The cap bounds the closing lead every update.
+        self.cap_closing_torque = cap_closing_torque
         self.limits = limits_rad
         self.holding = False
+        #: True when the last command was limited by the closing cap (free
+        #: closing, not holding): the bus may then use CAPPED_CLOSING_KD.
+        self.closing_capped = False
+        #: Fraction of Kp for the command ``update`` returned (< 1 only while
+        #: closing_capped). ``last_command`` is the full-gain equivalent.
+        self.kp_scale = 1.0
         self.last_command = None
         self.filtered = None
         self.history = deque()
@@ -81,8 +106,36 @@ class HoldingController:
         else:
             command = goal
             self.filtered = position
+        self.closing_capped = False
+        self.kp_scale = 1.0
+        sent = command
+        if self.cap_closing_torque:
+            lead = self.closing_cap_nm / kp
+            error = self.closing_direction * (command - position)
+            if error > lead:
+                # Kp x lead at the jaws, the same closing effort either way.
+                equivalent = min(
+                    self.limits[1], max(self.limits[0], position + self.closing_direction * lead)
+                )
+                if self.holding:
+                    command = sent = equivalent
+                    self.filtered = command
+                else:
+                    # Aim at the real goal with Kp scaled so Kp x error == cap:
+                    # no per-command lead, so free closing is not rate-limited,
+                    # and the error only shrinks while the jaws close. Holding
+                    # and _refresh work from the full-gain equivalent target.
+                    self.closing_capped = True
+                    self.kp_scale = lead / error
+                    command = equivalent
         self.last_command = command
-        return command
+        return sent
+
+    @property
+    def closing_cap_nm(self) -> float:
+        """Closing-effort ceiling: room above the hold target for contact
+        detection (``closing_effort > 0.5``) and regulation, never peak torque."""
+        return max(1.0, 2.0 * self.torque_nm)
 
 
 class MetalHoldingBus(MetalGripperBus):
@@ -183,7 +236,13 @@ class MetalHoldingBus(MetalGripperBus):
         paused = now - self._last_action > 0.1
         velocity = 0.0 if self.controller.holding or paused else self._velocity
         ff = 0.0 if self.controller.holding or paused else self._feedforward
-        self._send_mit(self.kp, self.kd, math.degrees(target), velocity, ff)
+        self._send_mit(self._command_kp(), self._command_kd(), math.degrees(target), velocity, ff)
+
+    def _command_kp(self):
+        return self.kp * self.controller.kp_scale
+
+    def _command_kd(self):
+        return min(self.kd, CAPPED_CLOSING_KD) if self.controller.closing_capped else self.kd
 
     def _hold(self):
         # Runs even during recording pauses; normal action writes use this same

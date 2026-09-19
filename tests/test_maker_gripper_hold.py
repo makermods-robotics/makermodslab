@@ -30,6 +30,8 @@ class Device:
         self.drop = False
         self.ignore_stop = False
         self.closed = False
+        # Pre-0.0.3.27 RS00 firmware: no MIT parameter access, no packed mode bits.
+        self.legacy = False
 
     def state(self, motor):
         def encode(value, maximum, bits):
@@ -40,7 +42,9 @@ class Device:
         v = encode(0, 33, 12)
         torque = encode(self.effort if motor == 7 else 0, 14, 12)
         temp = int(self.temperature * 10)
-        status = (0x80 if motor in self.enabled else 0) | (self.flags if motor == 7 else 0)
+        status = (0x80 if motor in self.enabled and not self.legacy else 0) | (
+            self.flags if motor == 7 else 0
+        )
         return can.Message(
             arbitration_id=0xFD,
             is_extended_id=False,
@@ -60,6 +64,8 @@ class Device:
         self.messages.append(msg)
         mid, payload = msg.arbitration_id, bytes(msg.data)
         if mid & 0x700 in (0x300, 0x400):
+            if self.legacy:
+                return
             index = struct.unpack("<H", payload[:2])[0]
             if mid & 0x700 == 0x400:
                 self.registers[index] = struct.unpack("<I", payload[4:])[0]
@@ -124,6 +130,111 @@ def test_maker_closing_effort_converges_and_opening_releases(rate, torque):
     assert not controller.holding
 
 
+def _squeeze_soft_object(controller, *, contact=-1.2, stiffness=20.0, steps=200, kp=20.0, creep=True):
+    """Leader fully closed onto a compliant object: jaws close freely until
+    contact, then sink in proportionally to effort (the 14:28 grasp shape).
+    Effort is what the MIT law applies: scaled Kp x (sent target - jaws)."""
+    position, effort, efforts = -1.6, 0.0, []
+    goal = controller.limits[1]
+    for i in range(steps):
+        free = position < contact
+        velocity = 0.4 if free else (0.35 if creep else 0.0)
+        sent = controller.update(goal, position, velocity, effort, kp, i * 0.02)
+        effort = max(-14.0, min(14.0, kp * controller.kp_scale * (sent - position)))
+        efforts.append(effort)
+        if position < contact:
+            position = min(sent, position + 0.02 * math.radians(60))
+        else:
+            position = min(sent, contact + max(effort, 0.0) / stiffness)
+    return position, efforts
+
+
+def test_maker_cap_bounds_squeeze_of_creeping_object():
+    capped = HoldingController(0.5, (-1.7, -0.04), closing_direction=1, cap_closing_torque=True)
+    _, efforts = _squeeze_soft_object(capped)
+    assert max(efforts) <= capped.closing_cap_nm + 1e-6 == 1.0 + 1e-6
+    # No full-torque reversal when holding engages.
+    assert min(efforts) > -1.0
+    uncapped = HoldingController(0.5, (-1.7, -0.04), closing_direction=1)
+    _, efforts = _squeeze_soft_object(uncapped)
+    assert max(efforts) > 5  # the pre-cap behaviour this guards against
+
+
+def test_maker_cap_then_holding_settles_near_hold_torque():
+    c = HoldingController(0.5, (-1.7, -0.04), closing_direction=1, cap_closing_torque=True)
+    # A firm object: stiffness well above Kp keeps the quasi-static plant stable.
+    _, efforts = _squeeze_soft_object(c, creep=False, steps=400, stiffness=200.0)
+    assert c.holding
+    assert max(efforts) <= 1.0 + 1e-6 and min(efforts) > -1.0
+    assert efforts[-1] == pytest.approx(0.5, abs=0.02)
+
+
+def test_maker_cap_aims_at_goal_with_scaled_kp_and_leaves_opening_free():
+    c = HoldingController(1.5, (-1.7, -0.04), closing_direction=1, cap_closing_torque=True)
+    assert c.closing_cap_nm == 3.0
+    # Far from the goal: the real goal is sent, not a per-command lead, so free
+    # closing is not rate-limited; Kp is scaled so Kp x error == cap.
+    assert c.update(-0.04, -1.0, 0.0, 0.0, 20.0, 0.0) == pytest.approx(-0.04)
+    assert 20.0 * c.kp_scale * (-0.04 + 1.0) == pytest.approx(3.0)
+    assert c.last_command == pytest.approx(-1.0 + 3.0 / 20)  # full-gain equivalent
+    # Within the lead: full gain.
+    assert c.update(-0.95, -1.0, 0.0, 0.0, 20.0, 0.02) == pytest.approx(-0.95)
+    assert c.kp_scale == 1.0 and not c.closing_capped
+    # Opening: untouched.
+    assert c.update(-1.6, -1.0, 0.0, 0.0, 20.0, 0.04) == pytest.approx(-1.6)
+    assert c.kp_scale == 1.0
+
+
+def kp_of(msg):
+    return ((msg.data[3] & 15) << 8 | msg.data[4]) / 4095 * 500
+
+
+def test_maker_closing_command_is_capped_on_the_wire(rig):
+    robot, bus, device = rig
+    robot.connect(calibrate=False)
+    robot.config.startup_sync_speed_deg = None
+    start = device.positions[7]
+    with bus._lock:
+        robot.send_action({"gripper.pos": -5.0})
+        command = mit_commands(device)[-1]
+        assert target(command) == pytest.approx(-5.0, abs=0.05)
+        error = math.radians(target(command) - start)
+        effort = kp_of(command) * error
+        # Floor-quantized Kp: at most the cap, within one 500/4095 N.m/rad step.
+        cap = bus.controller.closing_cap_nm
+        assert cap - 500 / 4095 * error <= effort <= cap
+
+
+def kd(msg):
+    return (msg.data[5] << 4 | msg.data[6] >> 4) / 4095 * 5
+
+
+def test_maker_capped_closing_uses_low_kd_and_opening_keeps_full_kd(rig):
+    from makermodslab.metal_gripper_hold import CAPPED_CLOSING_KD
+
+    robot, bus, device = rig
+    robot.connect(calibrate=False)
+    robot.config.startup_sync_speed_deg = None
+    with bus._lock:
+        robot.send_action({"gripper.pos": -5.0})
+        assert bus.controller.closing_capped
+        assert kd(mit_commands(device)[-1]) == pytest.approx(CAPPED_CLOSING_KD, abs=0.002)
+        robot.send_action({"gripper.pos": -90.0})
+        assert not bus.controller.closing_capped
+        assert kd(mit_commands(device)[-1]) == pytest.approx(bus.kd, abs=0.002)
+
+
+def test_closing_capped_flag_clears_when_holding_or_uncapped():
+    c = HoldingController(0.5, (-1.7, -0.04), closing_direction=1, cap_closing_torque=True)
+    c.update(-0.04, -1.0, 0.0, 0.0, 20.0, 0.0)
+    assert c.closing_capped
+    c.update(-0.99, -1.0, 0.0, 0.0, 20.0, 0.02)
+    assert not c.closing_capped
+    metal = HoldingController(0.5, (0, 2.4))
+    metal.update(0.0, 1.0, 0.0, 0.0, 20.0, 0.0)
+    assert not metal.closing_capped
+
+
 def test_opening_effort_and_moving_closure_do_not_engage():
     c = HoldingController(0.5, (-2.1, -0.04), closing_direction=1)
     for n in range(20):
@@ -154,9 +265,9 @@ def test_real_follower_routes_goals_and_arms_restores_watchdog(rig):
     robot.config.startup_sync_speed_deg = None
     with bus._lock:
         device.messages.clear()
-        robot.send_action({"gripper.pos": -35.0, "wrist_roll.pos": 0.0})
+        robot.send_action({"gripper.pos": -60.0, "wrist_roll.pos": 0.0})
         command = mit_commands(device)[-1]
-        assert target(command) == pytest.approx(-35, abs=0.03)
+        assert target(command) == pytest.approx(-60, abs=0.03)
         assert ((command.data[3] & 15) << 8 | command.data[4]) / 4095 * 500 == pytest.approx(20, abs=0.13)
         assert any(m.arbitration_id == 6 for m in device.messages)
         assert all(
@@ -178,8 +289,8 @@ def test_full_turn_offset_keeps_limits_and_commands_in_raw_coordinates(rig, offs
     assert bus.joint_limits == pytest.approx(tuple(x - offset for x in robot.config.joint_limits["gripper"]))
     robot.config.startup_sync_speed_deg = None
     with bus._lock:
-        robot.send_action({"gripper.pos": -30})
-        assert target(mit_commands(device)[-1]) == pytest.approx(-30 - offset, abs=0.03)
+        robot.send_action({"gripper.pos": -80})
+        assert target(mit_commands(device)[-1]) == pytest.approx(-80 - offset, abs=0.03)
 
 
 def test_worker_regulates_during_pause_and_live_setting_applies(rig):
@@ -247,19 +358,37 @@ def test_warm_start_refused_without_enable(rig, temperature):
     assert not device.enabled and device.closed
 
 
-def test_missing_parameter_support_fails_closed(rig):
-    _, bus, device = rig
-    original = device.send
-
-    def send(msg):
-        original(msg)
-        if msg.arbitration_id == 0x307:
-            device.queue.clear()
-
-    device.send = send
-    with pytest.raises(ConnectionError):
-        bus.connect()
+def test_legacy_firmware_holds_without_watchdog(rig):
+    robot, bus, device = rig
+    device.legacy = True
+    robot.connect(calibrate=False)
+    assert bus._legacy_firmware and bus._enabled and 7 in device.enabled
+    assert not any(m.arbitration_id & 0x700 == 0x400 for m in device.messages)
+    robot.config.startup_sync_speed_deg = None
+    with bus._lock:
+        robot.send_action({"gripper.pos": -60.0})
+        assert target(mit_commands(device)[-1]) == pytest.approx(-60, abs=0.03)
+    robot.disconnect()
     assert not device.enabled and device.closed
+
+
+def test_legacy_firmware_still_trips_on_silent_gripper(rig):
+    robot, bus, device = rig
+    device.legacy = True
+    robot.connect(calibrate=False)
+    with bus._lock:
+        device.drop = True
+        with pytest.raises((grip.GripperSafetyError, ConnectionError)):
+            bus.write("Goal_Position", "gripper", -20)
+        assert bus._error and not bus._enabled
+
+
+def test_parameter_reply_without_mode_is_not_legacy(rig):
+    _, bus, device = rig
+    device.registers[0x7005] = 1
+    with pytest.raises(grip.GripperSafetyError, match="MIT operation mode"):
+        bus.connect()
+    assert not bus._legacy_firmware and not device.enabled and device.closed
 
 
 def test_defaults_bimanual_and_explicit_opt_out(tmp_lerobot_home):
@@ -381,3 +510,24 @@ def test_reenable_starts_at_current_position_without_old_hold_target(rig):
         assert not bus.controller.holding
         bus._force(bus._goal)
         assert target(mit_commands(device)[-1]) == pytest.approx(-90, abs=0.05)
+
+
+def test_joint_writes_skip_the_batch_quiet_wait_and_still_trip(rig, monkeypatch):
+    robot, bus, device = rig
+    robot.connect(calibrate=False)
+    robot.config.startup_sync_speed_deg = None
+
+    def no_batch(*args, **kwargs):
+        raise AssertionError("single-joint write took the batch path")
+
+    monkeypatch.setattr(bus._base, "_mit_control_batch", no_batch)
+    with bus._lock:
+        device.messages.clear()
+        robot.send_action({"wrist_roll.pos": 0.0, "gripper.pos": -60.0})
+        assert any(m.arbitration_id == 6 for m in device.messages)
+        assert target(mit_commands(device)[-1]) == pytest.approx(-60, abs=0.03)
+    bus._error = "latched"
+    with pytest.raises(grip.GripperSafetyError):
+        bus.write("Goal_Position", "wrist_roll", 0.0)
+    bus._error = None
+    robot.disconnect()
