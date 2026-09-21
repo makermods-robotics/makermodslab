@@ -219,7 +219,7 @@ def test_download_status_end_to_end(sdk_client):
     assert sdk_client.models.download_status().state in {"idle", "running", "done", "error"}
 
 
-def test_skills_listing_shapes():
+def test_policies_listing_shapes():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/skills"
         return httpx.Response(
@@ -248,7 +248,9 @@ def test_skills_listing_shapes():
         )
 
     with mock_client(handler) as client:
-        skills = client.models.skills()
-    assert skills.hub.ok is True
-    assert skills.skills[0].deployable is True
-    assert skills.skills[0].name == "pick-place v2"
+        listing = client.models.policies()
+    assert listing.hub.ok is True
+    # the wire envelope key stays "skills" (legacy route name); the SDK
+    # attribute is policy-first
+    assert listing.policies[0].deployable is True
+    assert listing.policies[0].name == "pick-place v2"

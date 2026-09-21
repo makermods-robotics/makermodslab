@@ -14,6 +14,8 @@ import time
 from collections.abc import Callable
 from typing import Literal
 
+from pydantic import Field
+
 from makermodslab_sdk._operations import operation
 from makermodslab_sdk.resources._base import Resource, SdkModel
 from makermodslab_sdk.resources._waiting import wait_for_repo_operation
@@ -150,16 +152,18 @@ class ModelsResource(Resource):
         )
 
     @operation("skills_list")
-    def skills(self) -> Skills:
-        """The skills view: every deployable policy across local jobs and the
+    def policies(self) -> Policies:
+        """The policies view: every deployable policy across local jobs and the
         Hub, with lineage (``superseded_by``) and per-row deployability —
         the "what can this robot do right now?" listing.
 
         Example:
-            >>> [s.name for s in client.models.skills().skills if s.deployable]
+            >>> [p.name for p in client.models.policies().policies if p.deployable]
             ['pick-place v2']
         """
-        return Skills.model_validate(self._transport.request("GET", "/api/v1/skills", action="List skills"))
+        return Policies.model_validate(
+            self._transport.request("GET", "/api/v1/skills", action="List policies")
+        )
 
     @operation("models_list")
     def list(self) -> list[ModelListItem]:
@@ -361,8 +365,8 @@ class ModelsResource(Resource):
         )
 
 
-class SkillsHubStatus(SdkModel):
-    """How trustworthy the Hub half of the skills listing is right now."""
+class PoliciesHubStatus(SdkModel):
+    """How trustworthy the Hub half of the policies listing is right now."""
 
     ok: bool
     authenticated: bool
@@ -370,7 +374,7 @@ class SkillsHubStatus(SdkModel):
     stale_rows: bool
 
 
-class Skill(SdkModel):
+class Policy(SdkModel):
     """One deployable policy ("skill"): a trained checkpoint viewed as a
     capability — where its weights live (``weights``/``source``), what it was
     trained on, and whether it is ``deployable`` right now. ``superseded_by``
@@ -399,11 +403,15 @@ class Skill(SdkModel):
     job_id: str | None = None
 
 
-class Skills(SdkModel):
-    """GET /api/v1/skills — the skills view over models + jobs."""
+class Policies(SdkModel):
+    """GET /api/v1/skills — the deployable-policies view over models + jobs.
 
-    skills: list[Skill]
-    hub: SkillsHubStatus
+    The wire path keeps its pre-rename name ("skill" is retired vocabulary,
+    but renaming a v1 route would break the API contract); the SDK's own
+    grammar is policy-first."""
+
+    policies: list[Policy] = Field(validation_alias="skills")
+    hub: PoliciesHubStatus
 
 
 class RunCheckpoint(SdkModel):
