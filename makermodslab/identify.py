@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -154,7 +154,8 @@ async def identify_arm_by_motion(ports: list[str] | None = None) -> dict:
     """
     candidates = [p.strip() for p in (ports or []) if p and p.strip()]
     if not candidates:
-        candidates = find_available_ports()
+        candidates = [p for p in find_available_ports() if not p.startswith("gs_usb:")]
+    candidates = [p for p in candidates if not p.startswith("gs_usb:")]
     candidates = list(dict.fromkeys(candidates))  # dedupe, keep order
     if not candidates:
         return {

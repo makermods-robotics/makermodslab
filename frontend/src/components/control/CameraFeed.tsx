@@ -25,13 +25,13 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
   label,
 }) => {
   return (
-    <div className="bg-card rounded-lg border border-border overflow-hidden">
-      <div className="aspect-[4/3] bg-muted relative">
+    <div className="min-w-0">
+      <div className="aspect-video relative">
         {cameraIndex !== undefined ? (
           <BackendCameraStream
             cameraIndex={cameraIndex}
             uniqueId={uniqueId}
-            className="w-full h-full object-cover"
+            className="w-full h-full object-contain"
           />
         ) : (
           <div className="w-full h-full flex flex-col items-center justify-center">
@@ -43,7 +43,7 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
         )}
       </div>
       {label && (
-        <div className="p-2 text-sm text-muted-foreground truncate border-t border-border">
+        <div className="mt-1 text-xs text-muted-foreground truncate" title={label}>
           {label}
         </div>
       )}

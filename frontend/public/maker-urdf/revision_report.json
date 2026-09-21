@@ -1,0 +1,190 @@
+{
+  "schema": 1,
+  "revision": "two_symmetric_sliding_jaws_visual_loops_removed",
+  "source_sha256": "93ebfa49552b38266350e5eeb8a4a122ea1c529225788de2f9467a53ca31d05e",
+  "kinematics": {
+    "independent_arm_joints": 6,
+    "independent_gripper_joints": 1,
+    "driver_joint": "gripper_left_joint",
+    "follower_joint": "gripper_right_joint",
+    "gap_m": [
+      0,
+      0.104825
+    ],
+    "per_jaw_travel_m": 0.0524125,
+    "mapping": "gap_m = 2 * gripper_left_joint (metres)",
+    "source": "user-reported gap and equal straight jaw travel",
+    "grasp_frame": "CAD inner-face area centroid; midpoint between symmetric fingers"
+  },
+  "jaw_part_assignments": {
+    "gripper_left": [
+      31,
+      32,
+      33,
+      34,
+      43,
+      45,
+      47
+    ],
+    "gripper_right": [
+      38,
+      39,
+      40,
+      41,
+      44,
+      46
+    ]
+  },
+  "removed_geometry": {
+    "visual_loops": [
+      47,
+      46
+    ],
+    "internal_drive_visuals_and_collisions": [
+      {
+        "part": 23,
+        "kind": "visual"
+      },
+      {
+        "part": 37,
+        "kind": "visual"
+      },
+      {
+        "part": 24,
+        "kind": "visual"
+      },
+      {
+        "part": 25,
+        "kind": "visual"
+      },
+      {
+        "part": 28,
+        "kind": "visual"
+      },
+      {
+        "part": 29,
+        "kind": "visual"
+      },
+      {
+        "part": 30,
+        "kind": "visual"
+      },
+      {
+        "part": 35,
+        "kind": "visual"
+      },
+      {
+        "part": 36,
+        "kind": "visual"
+      },
+      {
+        "part": 42,
+        "kind": "visual"
+      },
+      {
+        "part": 23,
+        "kind": "collision"
+      },
+      {
+        "part": 37,
+        "kind": "collision"
+      },
+      {
+        "part": 24,
+        "kind": "collision"
+      },
+      {
+        "part": 25,
+        "kind": "collision"
+      },
+      {
+        "part": 28,
+        "kind": "collision"
+      },
+      {
+        "part": 29,
+        "kind": "collision"
+      },
+      {
+        "part": 30,
+        "kind": "collision"
+      },
+      {
+        "part": 35,
+        "kind": "collision"
+      },
+      {
+        "part": 36,
+        "kind": "collision"
+      },
+      {
+        "part": 42,
+        "kind": "collision"
+      }
+    ]
+  },
+  "loops": "Visuals removed; real-arm loops retained as collisions and inertia on their respective moving jaws",
+  "inertias": {
+    "gripper_left": {
+      "mass_kg": 0.05990605065593802,
+      "com_m": [
+        -0.00903758844483889,
+        0.013495664065730113,
+        -0.13754321128049543
+      ],
+      "principal_inertias_kg_m2": [
+        1.588948359608288e-05,
+        3.588635439239513e-05,
+        4.661675423659393e-05
+      ]
+    },
+    "gripper_right": {
+      "mass_kg": 0.05961449774178022,
+      "com_m": [
+        -0.008547446945497566,
+        -0.013480101311708442,
+        -0.13768874232750716
+      ],
+      "principal_inertias_kg_m2": [
+        1.68069124331081e-05,
+        3.516339710458884e-05,
+        4.681240737364221e-05
+      ]
+    },
+    "link_007": {
+      "mass_kg": 0.28047945160228177,
+      "com_m": [
+        0.007191778849720125,
+        -3.462674893243458e-05,
+        -0.07066665485072303
+      ],
+      "principal_inertias_kg_m2": [
+        0.0002695196900685187,
+        0.0003173102135092835,
+        0.0003220602952362712
+      ]
+    }
+  },
+  "inertia_basis": "Moving assemblies use source terminal-link uniform density from mesh volumes; subtract their mass and full inertia from original wrist at CAD zero. Total mass, COM, inertia at closed are preserved. Internal drive inertia stays lumped into wrist.",
+  "source_terminal_density_kg_m3": 1246.9258625974996,
+  "motor_calibration": {
+    "protocol": "MIT",
+    "motor_id": 7,
+    "closed_encoder_rad": 0.0067132066834521,
+    "commanded_open_encoder_rad": -2.078984206912338,
+    "model": "two-endpoint linear interpolation for visual preview only",
+    "full_open_gap_at_encoder_verified": false,
+    "note": "Open capture reached pre-existing safe limit with mechanical-stop backoff; 104.825 mm gap at this encoder was not physically remeasured. Intermediate linkage nonlinearity unmeasured."
+  },
+  "rl_ready": false,
+  "remaining_validation": [
+    "Review CAD part assignments and actual Maker joint axes/zero poses against real arm",
+    "Weigh jaw assemblies and fixed wrist; source density and other link inertias unverified",
+    "Gripper effort=20 N and velocity=0.1 m/s are explicit placeholders, not measured specifications",
+    "Arm joint effort/velocity/limits inherited unverified from designer",
+    "Internal crank-and-rod drive omitted from visual/collision geometry; wrist inertia lumps its mass",
+    "Verify simulator mimic support, mesh collision decomposition, friction, backlash and self-collision exclusions",
+    "Source omitted CAD part_003; purpose and ownership still unverified",
+    "Validate actual full-open motor-to-gap relationship and intermediate points before physical control"
+  ]
+}

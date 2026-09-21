@@ -1,5 +1,6 @@
 import { Fetcher, apiRequest } from "./apiClient";
 import { JobRecord, JobState, LogLine } from "./jobsApi";
+import type { HostingPhase } from "./remoteApi";
 
 /** One entry of GET /api/v1/nodes (NodeEntry in makermodslab/schemas/nodes.py).
  *
@@ -23,6 +24,18 @@ export interface NodeEntry {
     accepts_jobs?: boolean;
     serves_ui?: boolean;
     gpu?: unknown;
+    /** Present only when the node runs the LiveKit SFU (--sfu). */
+    sfu?: { url: string };
+    /** Present only while the node has a live hosting session — the robot
+     * it offers for remote teleoperation. `robot`, `arm_type` and the
+     * operator identity are data. `phase` / `active_operator` are optional
+     * only for a version-skewed peer that predates them. */
+    hosting?: {
+      robot: string;
+      arm_type: string;
+      phase?: HostingPhase;
+      active_operator?: string | null;
+    };
   }) | null;
   status: "ok" | "unreachable" | "pending";
   source: "manual" | "tailscale";
@@ -254,6 +267,21 @@ export function isSelectableNode(node: NodeEntry): boolean {
 export function listableNodes(nodes: NodeEntry[]): NodeEntry[] {
   return nodes.filter(
     (n) => !n.is_self && n.capabilities?.accepts_jobs !== false,
+  );
+}
+
+/** The stations a remote-teleop operator can pick: peers only (never the
+ * self entry), reachable, verified (an instance id to route by), and
+ * currently advertising a hosted robot. A station that stops hosting simply
+ * drops out of this list — the capability is present only while its hosting
+ * session is live. */
+export function hostingNodes(nodes: NodeEntry[]): NodeEntry[] {
+  return nodes.filter(
+    (n) =>
+      !n.is_self &&
+      n.status === "ok" &&
+      n.instance_id != null &&
+      n.capabilities?.hosting != null,
   );
 }
 

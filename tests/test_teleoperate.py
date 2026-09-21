@@ -22,6 +22,7 @@ import time
 import pytest
 
 from lerobot.motors import Motor, MotorNormMode
+from makermodslab import rest_pose
 
 
 def test_teleoperate_request_rejects_missing_fields() -> None:
@@ -183,9 +184,10 @@ def test_start_teleoperation_force_disables_torque_and_warns_when_setup_fails_af
         "makermodslab.utils.robot_factory.setup_calibration_files",
         lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
-    monkeypatch.setattr(teleop, "verify_devices", lambda *a, **k: [])
-    monkeypatch.setattr(teleop, "reset_torque_limit", lambda *a, **k: [])
-    monkeypatch.setattr(teleop, "clear_goal_velocity", lambda *a, **k: [])
+    # The preflight runs through the arm family, which calls these modules.
+    monkeypatch.setattr("makermodslab.arm_identity.verify_devices", lambda *a, **k: [])
+    monkeypatch.setattr("makermodslab.motor_power.reset_torque_limit", lambda *a, **k: [])
+    monkeypatch.setattr("makermodslab.motor_power.clear_goal_velocity", lambda *a, **k: [])
 
     class _FollowerBus:
         def __init__(self) -> None:
@@ -281,9 +283,10 @@ def test_start_teleoperation_bimanual_force_disables_torque_and_warns_when_leade
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(teleop, "build_bimanual_configs", lambda request: ("robot_cfg", "teleop_cfg"))
-    monkeypatch.setattr(teleop, "verify_devices", lambda *a, **k: [])
-    monkeypatch.setattr(teleop, "reset_torque_limit", lambda *a, **k: [])
-    monkeypatch.setattr(teleop, "clear_goal_velocity", lambda *a, **k: [])
+    # The preflight runs through the arm family, which calls these modules.
+    monkeypatch.setattr("makermodslab.arm_identity.verify_devices", lambda *a, **k: [])
+    monkeypatch.setattr("makermodslab.motor_power.reset_torque_limit", lambda *a, **k: [])
+    monkeypatch.setattr("makermodslab.motor_power.clear_goal_velocity", lambda *a, **k: [])
 
     class _SubBus:
         def __init__(self, port: str, motors: dict, fail_disable: bool = False) -> None:
@@ -1706,8 +1709,6 @@ def test_return_followers_to_rest_covers_every_follower_bus(
     the list — it is human-held with torque off)."""
     import threading
 
-    import makermodslab.teleoperate as teleop
-
     calls: list[tuple] = []
     lock = threading.Lock()
 
@@ -1716,9 +1717,9 @@ def test_return_followers_to_rest_covers_every_follower_bus(
             calls.append((bus, pose, abort_event))
         return True, "returned"
 
-    monkeypatch.setattr(teleop, "return_to_rest_pose", _spy)
+    monkeypatch.setattr("makermodslab.rest_pose.return_to_rest_pose", _spy)
     abort = threading.Event()
-    teleop._return_followers_to_rest([("busL", {"m": 1}), ("busR", {"m": 2})], abort)
+    rest_pose.return_buses_to_rest([("busL", {"m": 1}), ("busR", {"m": 2})], abort)
 
     # Order is no longer deterministic (arms run concurrently), so assert on the
     # set of (bus, pose) covered rather than the sequence.
@@ -1739,8 +1740,6 @@ def test_return_followers_run_concurrently_not_sequentially(
     its return, and the barrier would time out."""
     import threading
 
-    import makermodslab.teleoperate as teleop
-
     started = threading.Barrier(2, timeout=5.0)
     both_started = threading.Event()
 
@@ -1752,9 +1751,9 @@ def test_return_followers_run_concurrently_not_sequentially(
         both_started.set()
         return True, "returned"
 
-    monkeypatch.setattr(teleop, "return_to_rest_pose", _spy)
+    monkeypatch.setattr("makermodslab.rest_pose.return_to_rest_pose", _spy)
     abort = threading.Event()
-    teleop._return_followers_to_rest([("busL", {"m": 1}), ("busR", {"m": 2})], abort)
+    rest_pose.return_buses_to_rest([("busL", {"m": 1}), ("busR", {"m": 2})], abort)
 
     assert both_started.is_set()  # both entered before either returned
 
@@ -1766,8 +1765,6 @@ def test_return_followers_wrapper_waits_for_all_arms(
     downstream torque release ordering depends on it. A slow arm must be joined,
     not left running."""
     import threading
-
-    import makermodslab.teleoperate as teleop
 
     finished = {"busL": False, "busR": False}
     fast_arm_done = threading.Event()
@@ -1784,7 +1781,7 @@ def test_return_followers_wrapper_waits_for_all_arms(
         finished[bus] = True
         return True, "returned"
 
-    monkeypatch.setattr(teleop, "return_to_rest_pose", _spy)
+    monkeypatch.setattr("makermodslab.rest_pose.return_to_rest_pose", _spy)
 
     def _release_after_fast_arm():
         # Once the fast arm has finished, let the slow arm complete. If the
@@ -1794,7 +1791,7 @@ def test_return_followers_wrapper_waits_for_all_arms(
 
     releaser = threading.Thread(target=_release_after_fast_arm)
     releaser.start()
-    teleop._return_followers_to_rest([("busL", {"m": 1}), ("busR", {"m": 2})], threading.Event())
+    rest_pose.return_buses_to_rest([("busL", {"m": 1}), ("busR", {"m": 2})], threading.Event())
     releaser.join()
 
     # If the wrapper returned before joining busL, this would still be False.
@@ -1809,8 +1806,6 @@ def test_return_followers_one_arm_failing_does_not_block_other(
     arm's return from completing."""
     import threading
 
-    import makermodslab.teleoperate as teleop
-
     completed: set = set()
     lock = threading.Lock()
 
@@ -1821,9 +1816,9 @@ def test_return_followers_one_arm_failing_does_not_block_other(
             completed.add(bus)
         return True, "returned"
 
-    monkeypatch.setattr(teleop, "return_to_rest_pose", _spy)
+    monkeypatch.setattr("makermodslab.rest_pose.return_to_rest_pose", _spy)
     # Must not raise even though busL's return raised.
-    teleop._return_followers_to_rest([("busL", {"m": 1}), ("busR", {"m": 2})], threading.Event())
+    rest_pose.return_buses_to_rest([("busL", {"m": 1}), ("busR", {"m": 2})], threading.Event())
 
     assert "busR" in completed  # the healthy arm still finished
 
@@ -1835,8 +1830,6 @@ def test_return_followers_abort_stops_every_arm(
     — each sees the same event set and bails out promptly."""
     import threading
 
-    import makermodslab.teleoperate as teleop
-
     seen_set: list[bool] = []
     lock = threading.Lock()
 
@@ -1845,10 +1838,10 @@ def test_return_followers_abort_stops_every_arm(
             seen_set.append(abort_event is not None and abort_event.is_set())
         return False, "cut-short"
 
-    monkeypatch.setattr(teleop, "return_to_rest_pose", _spy)
+    monkeypatch.setattr("makermodslab.rest_pose.return_to_rest_pose", _spy)
     abort = threading.Event()
     abort.set()
-    teleop._return_followers_to_rest([("busL", {"m": 1}), ("busR", {"m": 2})], abort)
+    rest_pose.return_buses_to_rest([("busL", {"m": 1}), ("busR", {"m": 2})], abort)
 
     assert seen_set == [True, True]  # both arms saw the abort already set
 
@@ -1860,16 +1853,14 @@ def test_return_followers_single_arm_still_returns(
     (one thread, joined) — same observable outcome as before."""
     import threading
 
-    import makermodslab.teleoperate as teleop
-
     calls: list[tuple] = []
 
     def _spy(bus, pose, abort_event=None, label=""):
         calls.append((bus, pose))
         return True, "returned"
 
-    monkeypatch.setattr(teleop, "return_to_rest_pose", _spy)
-    teleop._return_followers_to_rest([("busSolo", {"m": 7})], threading.Event())
+    monkeypatch.setattr("makermodslab.rest_pose.return_to_rest_pose", _spy)
+    rest_pose.return_buses_to_rest([("busSolo", {"m": 7})], threading.Event())
 
     assert calls == [("busSolo", {"m": 7})]
 

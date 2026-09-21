@@ -41,7 +41,7 @@ from pydantic import BaseModel
 from tqdm.auto import tqdm as _base_tqdm
 
 from .datasets import CAMERA_FEATURE_PREFIX, read_dataset_features, read_dataset_robot_type
-from .train import TrainingRequest
+from .train import TrainingRequest, wandb_requires_online_credentials
 from .utils.config import validate_job_name
 from .utils.errors import is_out_of_memory
 from .utils.hf_auth import LOGIN_COMMAND, cached_whoami, hf_hub_offline, shared_hf_api
@@ -50,7 +50,14 @@ from .utils.naming import (
     derive_imported_title,
     imported_name_suffixes,
 )
-from .utils.system import torchcodec_loads
+from .utils.system import (
+    policy_flow_steps_default,
+    policy_flow_steps_field,
+    policy_requires_task,
+    policy_supports_extra_image_roles,
+    policy_supports_model_dtype,
+    torchcodec_loads,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +91,33 @@ class TrainingMetrics(BaseModel):
     current_lr: float | None = None
     grad_norm: float | None = None
     eta_seconds: float | None = None
+
+
+class StepFloor:
+    """The highest step a runner's parser has ACCEPTED, for the replay guard.
+
+    Deliberately NOT `metrics.current_step`, and that distinction is the whole
+    point. `_initial_metrics` SEEDS `current_step` for a resumed run before any
+    line is parsed, and documents that seed as "a floor, not a claim about
+    progress: the parser still owns the value from the first tqdm frame
+    onwards" — because the bar-derived value reflects the checkpoint lerobot
+    ACTUALLY restored, while the seed only reflects what the request asked for.
+
+    Guarding against `current_step` would invert that contract: a seed that
+    overstates the restored step would reject every real frame until training
+    climbed past it, freezing progress, ETA, loss and grad-norm for the
+    difference — the very symptom MT47 exists to remove, reintroduced through
+    another door.
+
+    So the floor starts UNSET. The first frame a runner parses is always
+    accepted and may correct the seed downward; only frames after that are held
+    to monotonicity, which is exactly where replays live.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self) -> None:
+        self.value: int | None = None
 
 
 class LogLine(BaseModel):
@@ -410,6 +444,24 @@ def _runner_hook(runner: object, name: str):
 # tqdm progress: "Training:   1%|▏         | 125/10000 [02:02<2:36:10,  1.05step/s]"
 _TQDM_RE = re.compile(r"Training:\s*\d+%[^|]*\|[^|]*\|\s*(\d+)/(\d+)\s*\[(?:[\d:]+)<([\d:]+)")
 
+# The W&B run URL, as LEROBOT prints it — not as wandb does. lerobot's
+# WandBLogger sets WANDB_SILENT=True before importing wandb (wandb_utils.py),
+# which suppresses wandb's own "wandb: 🚀 View run at …" banner entirely, so
+# the only line carrying the URL is lerobot's own:
+#
+#   logging.info(f"Track this run --> {colored(wandb.run.get_url(), 'yellow', attrs=['bold'])}")
+#
+# `colored` wraps the URL in ANSI SGR codes when the stream looks colourable
+# ("Track this run --> \x1b[33m\x1b[1mhttps://…\x1b[0m") and leaves it bare
+# otherwise, so this matches the URL SHAPE anywhere in the line rather than the
+# sentence around it: the escape prefix sits before "https" and the reset is
+# excluded by the run-id character class, so one pattern covers both forms.
+#
+# wandb.ai only, deliberately. A self-hosted W&B prints a URL on some other
+# host and simply yields no link — which is the same "no URL" outcome as
+# offline/disabled mode, and is never treated as an error.
+_WANDB_URL_RE = re.compile(r"https://wandb\.ai/[^\s/]+/[^\s/]+/runs/[A-Za-z0-9_-]+")
+
 # Name of the file LocalJobRunner's subprocess wrapper writes the trainer's
 # real exit status to, relative to the run's output_dir. TailingJobRunner
 # reads it after a reattach — see both classes' start()/returncode().
@@ -444,17 +496,17 @@ def _parse_duration(s: str) -> float | None:
     return None
 
 
-# Wandb prints something like "wandb: 🚀 View run at https://wandb.ai/<entity>/<project>/runs/<id>"
-# when it boots. We capture the first URL of that shape we see.
-_WANDB_URL_RE = re.compile(r"https://wandb\.ai/[^\s/]+/[^\s/]+/runs/[A-Za-z0-9]+")
-
-
 def extract_wandb_run_url(line: str) -> str | None:
     match = _WANDB_URL_RE.search(line)
     return match.group(0) if match else None
 
 
-def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | None = None) -> None:
+def parse_metrics_into(
+    line: str,
+    metrics: TrainingMetrics,
+    resume_total: int | None = None,
+    floor: StepFloor | None = None,
+) -> None:
     """Update `metrics` in-place from one stdout line.
 
     Two complementary sources:
@@ -479,6 +531,29 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | 
     carries the true global step, so it needs no rebasing.
     """
     try:
+        # Progress only ever moves FORWARD once this parser has seen a frame.
+        # Training steps are monotonic in a run's own output, so a line
+        # reporting a step already passed did not come from the future of this
+        # run — it came from a reconnect replaying the past. Applying it would
+        # rewind current_step and drag an obsolete ETA/loss/LR along with it,
+        # which the monitor reads as a new run and answers by clearing the
+        # chart's history (review of PR #71).
+        #
+        # Held against `floor` — the highest step THIS PARSER has accepted —
+        # never against `metrics.current_step`, which is seeded before parsing
+        # begins and is explicitly documented as a floor the first real frame is
+        # allowed to correct downward (see StepFloor and _initial_metrics).
+        # Without a floor object there is no guard at all, which is what
+        # history re-parsing wants: it feeds an ordered file through a fresh
+        # accumulator.
+        #
+        # The de-dupe upstream is what normally stops a replay reaching here;
+        # this is the backstop that does not depend on remembering every line.
+        # Safe against the resume rebase either way: `resume_total − total +
+        # bar` holds both of its other terms fixed for a runner's lifetime, so
+        # it is monotonic in the bar exactly as a fresh run's raw bar is.
+        stale = False
+
         tqdm_frames = _TQDM_RE.findall(line)
         if tqdm_frames:
             try:
@@ -486,25 +561,61 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | 
                 tqdm_step = int(raw_step)
                 total = int(raw_total)
                 if resume_total is not None and total > 0:
-                    metrics.current_step = resume_total - total + tqdm_step
-                    metrics.total_steps = resume_total
+                    candidate_step = resume_total - total + tqdm_step
+                    candidate_total = resume_total
                 else:
-                    metrics.current_step = tqdm_step
-                    if total > 0:
-                        metrics.total_steps = total
-                eta = _parse_duration(raw_eta)
-                if eta is not None:
-                    metrics.eta_seconds = eta
+                    candidate_step = tqdm_step
+                    candidate_total = total if total > 0 else metrics.total_steps
+                step_floor = floor.value if floor is not None else None
+                if step_floor is not None and candidate_step < step_floor:
+                    # Replayed frame. Mark the whole LINE stale: the INFO
+                    # branch below belongs to this same tqdm burst, and its
+                    # step token is often the unparsable "4K" form that could
+                    # not be judged on its own.
+                    stale = True
+                else:
+                    metrics.current_step = candidate_step
+                    metrics.total_steps = candidate_total
+                    if floor is not None:
+                        floor.value = candidate_step
+                    eta = _parse_duration(raw_eta)
+                    if eta is not None:
+                        metrics.eta_seconds = eta
             except (ValueError, IndexError):
                 pass
 
-        if "step:" in line and "loss:" in line:
+        if not stale and "step:" in line and "loss:" in line:
             # Only useful below 1000 steps: lerobot renders this through
             # format_big_number, so the token becomes "4K" and int() raises —
             # suppressed, leaving the (now correct) tqdm step in place. Don't
             # try to expand the K suffix; it's rounded, hence lossy.
+            #
+            # DEPENDS ON LEROBOT'S ORDERING: this branch trusts that the tqdm
+            # bar is printed before the INFO line it belongs to (true for the
+            # pin — lerobot_train.py:588-606). A bump that swaps those two
+            # statements would make every sub-1000-step INFO line arrive
+            # BEFORE its bar, be judged stale against the newer floor, and
+            # silently stop contributing loss/lr points.
             with contextlib.suppress(ValueError):
-                metrics.current_step = int(line.split("step:")[1].split()[0].replace(",", ""))
+                info_step = int(line.split("step:")[1].split()[0].replace(",", ""))
+                # Re-read, never a snapshot from the top of the function: the
+                # tqdm branch above has just MOVED the floor. One SSE message
+                # commonly batches a burst spanning several log_freq boundaries
+                # (see this function's docstring), so `line.split("step:")[1]`
+                # is the FIRST INFO segment while tqdm_frames[-1] was the LAST
+                # frame. Comparing that earlier step against a pre-tqdm floor
+                # accepted it, walking current_step BACKWARDS within a single
+                # line and dragging the floor down with it — which reopened the
+                # skipped range to any genuine replay the de-dupe misses.
+                step_floor = floor.value if floor is not None else None
+                if step_floor is not None and info_step < step_floor:
+                    stale = True
+                else:
+                    metrics.current_step = info_step
+                    if floor is not None:
+                        floor.value = info_step
+
+        if not stale and "step:" in line and "loss:" in line:
             with contextlib.suppress(ValueError):
                 metrics.current_loss = float(line.split("loss:")[1].split()[0])
             if "lr:" in line:
@@ -585,6 +696,34 @@ def _initial_metrics(config: TrainingRequest) -> TrainingMetrics:
     return TrainingMetrics(current_step=start, total_steps=config.steps)
 
 
+def _settle_terminal_metrics(record: JobRecord) -> None:
+    """Reconcile a finished run's progress with the fact that it finished.
+
+    `metrics` only ever advances when a log line is parsed, so a run whose log
+    stream died mid-flight keeps the last frame it saw forever. That produced
+    the MT47 symptom: a `done` run rendering "3,650 / 10,000" beside a live
+    countdown ("00:53:05 remaining") while its step-10,000 checkpoint sat on the
+    Hub — three surfaces of one record disagreeing.
+
+    Two changes, both about not asserting what we no longer believe:
+
+      * `done` means the trainer reached its target, so progress is the target.
+        Only claimed when a target is actually known (`total_steps > 0`), and
+        only for `done` — a `failed`/`interrupted` run genuinely stopped where
+        the last frame said, and rounding that up to the target would invent
+        training that never happened.
+      * The ETA is cleared for EVERY terminal state. A finished run has no
+        remaining time, whatever the last frame extrapolated.
+
+    A mitigation, not the fix: the root cause is the log tail going silent
+    (MT47), and a repaired tail leaves this a no-op on a healthy run.
+    """
+    if record.metrics.eta_seconds is not None:
+        record.metrics.eta_seconds = None
+    if record.state == "done" and record.metrics.total_steps > 0:
+        record.metrics.current_step = record.metrics.total_steps
+
+
 def _read_log_metrics(path: Path, resume_total: int | None) -> builtins.list[MetricsHistoryPoint]:
     """Parse one job's log.jsonl into (step, loss, lr, grad_norm) points.
 
@@ -650,6 +789,9 @@ class LocalJobRunner:
         self._log_file = None  # type: ignore[assignment]
         self._wandb_run_url: str | None = None
         self._resume_total: int | None = None
+        # One floor per RUNNER, not per connection: surviving a reconnect is
+        # exactly what makes it a replay guard.
+        self._step_floor = StepFloor()
         # True only once we have actually signalled a LIVE process. Lets the
         # registry tell "we killed this" from "it had already died", which the
         # exit code alone cannot express.
@@ -822,7 +964,7 @@ class LocalJobRunner:
                 stripped = line.rstrip()
                 if not stripped:
                     continue
-                parse_metrics_into(stripped, self._metrics, self._resume_total)
+                parse_metrics_into(stripped, self._metrics, self._resume_total, self._step_floor)
                 if self._wandb_run_url is None:
                     url = extract_wandb_run_url(stripped)
                     if url is not None:
@@ -869,6 +1011,9 @@ class TailingJobRunner:
         self._pid = pid
         self._status_path = status_path
         self._resume_total = resume_total
+        # One floor per RUNNER, not per connection: surviving a reconnect is
+        # exactly what makes it a replay guard.
+        self._step_floor = StepFloor()
         self._log_queue: Queue[LogLine] = Queue()
         self._tail_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -993,7 +1138,9 @@ class TailingJobRunner:
                             log_line = LogLine.model_validate_json(raw.strip())
                         except Exception:
                             continue
-                        parse_metrics_into(log_line.message, self._metrics, self._resume_total)
+                        parse_metrics_into(
+                            log_line.message, self._metrics, self._resume_total, self._step_floor
+                        )
                         if self._wandb_run_url is None:
                             url = extract_wandb_run_url(log_line.message)
                             if url is not None:
@@ -1662,9 +1809,99 @@ def _list_hub_checkpoints(api, repo_id: str) -> list[JobCheckpoint]:
     return []
 
 
-_LANGUAGE_CONDITIONED_POLICY_TYPES = {"smolvla", "pi0", "pi0_fast", "pi05"}
+# Which policy types need a task string is `utils.system`'s
+# LANGUAGE_CONDITIONED_POLICY_TYPES / policy_requires_task — ONE vocabulary,
+# because the two DRTC policy servers refuse to start without a task for exactly
+# these types and a second copy here would let the Lab and the GPU disagree.
+# The set gained `molmoact2` with that move (S3.7a): MolmoAct2 renders a missing
+# task as the literal prompt "The task is to ." and degrades silently, so
+# `requires_task` was already wrong for it before this became shared.
 
-# None of _LANGUAGE_CONDITIONED_POLICY_TYPES has a legitimate from-scratch
+# Policy types whose class declares Real-Time Chunking support in the pinned
+# lerobot fork. See policy_type_supports_rtc for how this list was derived and
+# why it is a hand-mirrored table rather than a live import.
+_RTC_CAPABLE_POLICY_TYPES = frozenset({"evo1", "groot", "molmoact2", "pi0", "pi05", "smolvla"})
+
+# Every policy type registered via @PreTrainedConfig.register_subclass in the
+# pinned fork. Membership is what separates "this architecture cannot do RTC"
+# (False) from "we've never heard of it" (None) — a type we don't know about is
+# one the fork gained after this table was written, and guessing False for it
+# would refuse a run the subprocess would have accepted.
+_KNOWN_POLICY_TYPES = frozenset(
+    {
+        "act",
+        "diffusion",
+        "eo1",
+        "evo1",
+        "fastwam",
+        "gaussian_actor",
+        "groot",
+        "lingbot_va",
+        "molmoact2",
+        "multi_task_dit",
+        "pi0",
+        "pi0_fast",
+        "pi05",
+        "smolvla",
+        "tdmpc",
+        "vla_jepa",
+        "vqbet",
+        "wall_x",
+        "xvla",
+    }
+)
+
+
+def policy_type_supports_rtc(policy_type: str) -> bool | None:
+    """Whether a checkpoint of this architecture can run the Real-Time Chunking
+    inference engine (``--inference.type=rtc``).
+
+    True/False for a policy type registered in the pinned lerobot fork; None for
+    anything else, which means "not established", never "no" — callers must not
+    refuse a run on None, they must let the subprocess decide (same
+    silent-when-unreadable discipline as read_pretrained_policy_type).
+
+    **How it decides, and why.** The fork's own authority is
+    ``lerobot.rollout.inference.rtc.supports_rtc_inference(policy)``, which
+    takes an INSTANTIATED policy and asks two things: that ``policy.supports_rtc()``
+    returns True, and that ``predict_action_chunk`` binds ``inference_delay`` and
+    ``prev_chunk_left_over``. Neither can be evaluated here:
+
+    * ``supports_rtc`` is a plain instance method on every policy in the fork
+      (not a classmethod), so there is nothing to call without building the
+      policy — and MolmoAct2's reads ``self.config``.
+    * Reaching the classes at all means importing ``lerobot.policies.factory``,
+      which costs ~2 s and pulls ``transformers`` into the API process on the
+      first RTC launch. Optional-extra policies would also raise ImportError on
+      an install without their extra, turning a capability question into a
+      crash.
+
+    So the table above is a hand-mirrored read of the fork's classes, verified
+    against ``supports_rtc_inference``'s two criteria at class level on the
+    pinned SHA (b968c0c01). Six types declare support — evo1, groot, molmoact2,
+    pi0, pi05, smolvla — and all six accept the RTC call shape; every other
+    registered type inherits ``PreTrainedPolicy.supports_rtc`` (``return False``).
+    Notably **pi0_fast does NOT support RTC** even though its siblings do.
+    Change the fork's pin, re-check this table (test_rollout.py has a drift
+    test that reads the fork's sources without importing them).
+
+    **MolmoAct2 is reported True on purpose, and it is the one approximation
+    here.** Its ``supports_rtc`` is ``self.config.inference_action_mode ==
+    "continuous"`` — a per-CHECKPOINT condition, not a per-architecture one, and
+    the field defaults to None. The class does implement RTC semantics, so this
+    answers the architecture question honestly and leaves the config-level
+    condition to the subprocess, which still raises for a discrete-mode
+    MolmoAct2 checkpoint. Erring the other way would refuse continuous-mode
+    checkpoints that RTC genuinely runs.
+    """
+    if policy_type in _RTC_CAPABLE_POLICY_TYPES:
+        return True
+    if policy_type in _KNOWN_POLICY_TYPES:
+        return False
+    return None
+
+
+# None of the four types below has a legitimate from-scratch
 # mode: each builds a pretrained backbone (a vision-language model for
 # smolvla, a PaliGemma+expert stack for pi0/pi05/pi0_fast) from a bare config
 # object with no unconditional download anywhere in modeling_<policy>.py —
@@ -1700,8 +1937,21 @@ _HUB_ROOT_REF_RE = re.compile(r"^(?P<repo>[^@]+)@root$")
 _HUB_CKPT_SUBDIR = "pretrained_model"
 
 
+class DownloadCancelled(Exception):  # noqa: N818 — a cooperative cancel signal, not an error condition
+    """Raised from the snapshot-download progress hook when its `should_cancel`
+    predicate goes true, to abort a `snapshot_download` in flight.
+
+    huggingface_hub streams every chunk through `tqdm_class.update()`; raising
+    there unwinds `hf_hub_download` -> `snapshot_download` immediately (it isn't
+    one of the transient network errors the chunk loop retries). Partially
+    fetched files are left as `*.incomplete` blobs in the cache, so the next
+    attempt resumes rather than restarts. Callers catch this and treat it as a
+    clean stop, never a failure."""
+
+
 def make_snapshot_progress_tqdm(
     report: Callable[[int, int | None], None],
+    should_cancel: Callable[[], bool] | None = None,
 ) -> type[_base_tqdm]:
     """A ``tqdm_class`` for ``snapshot_download`` that reports byte progress.
 
@@ -1720,6 +1970,13 @@ def make_snapshot_progress_tqdm(
     (growing) total changed. The total keeps growing while file metadata is
     discovered, so percent can legitimately drop — honest, since the real total
     isn't known upfront.
+
+    When `should_cancel` is given it is polled on every progress callback (per
+    chunk on the bytes bar); the first time it returns True the hook raises
+    `DownloadCancelled`, which aborts the `snapshot_download` in flight rather
+    than letting it run to completion in the background. It is called from
+    huggingface_hub's download worker threads, so it must be cheap and
+    thread-safe — `threading.Event.is_set` or a lock-guarded flag read.
 
     `report` is called from huggingface_hub's download worker threads, so an
     implementation that touches shared state must do its own locking.
@@ -1743,7 +2000,12 @@ def make_snapshot_progress_tqdm(
             total = getattr(self, "total", None)
             report(self._bytes_done, int(total) if total else None)
 
+        def _abort_if_cancelled(self) -> None:
+            if should_cancel is not None and should_cancel():
+                raise DownloadCancelled
+
         def update(self, n: float | None = 1) -> bool | None:
+            self._abort_if_cancelled()
             if self._is_bytes_bar:
                 if n:
                     self._bytes_done += int(n)
@@ -1751,6 +2013,7 @@ def make_snapshot_progress_tqdm(
             return super().update(n)
 
         def refresh(self, *args: Any, **kwargs: Any) -> bool | None:
+            self._abort_if_cancelled()
             if self._is_bytes_bar:
                 self._report()
             return super().refresh(*args, **kwargs)
@@ -2063,13 +2326,16 @@ def localize_pretrained_path(pretrained_path: str, *, tqdm_class=None) -> str:
     raw Hub exception with nothing actionable in it. On the local start path the
     download no longer runs inside the request (see JobRegistry.start), so that
     message is now written onto the job record's `error_message` instead of
-    becoming an HTTP 400 — same words, later delivery.
+    becoming an HTTP 400 — same words, later delivery. A `DownloadCancelled`
+    (the caller asked to stop) is not a failure and passes through untouched.
 
     `tqdm_class` is forwarded to the download for byte-progress reporting."""
     if not needs_local_materialization(pretrained_path):
         return pretrained_path
     try:
         return download_hub_checkpoint_ref(pretrained_path, tqdm_class=tqdm_class)
+    except DownloadCancelled:
+        raise
     except Exception as exc:
         raise ValueError(
             f"Could not download the base checkpoint {pretrained_path!r} to fine-tune from: {exc}"
@@ -2156,6 +2422,21 @@ def _flat_feature_dim(feat: object) -> int | None:
         return int(shape[0])
     except (TypeError, ValueError):
         return None
+
+
+def _positive_int_or_none(value: object) -> int | None:
+    """A checkpoint config's integer knob, or None when it can't be trusted.
+
+    Sibling of `_flat_feature_dim` for the scalar fields (`n_action_steps`,
+    `chunk_size`). Absent, non-integral or non-positive all answer None: every
+    policy config validates these itself at construction, so a bad value here
+    means a hand-edited or corrupt config.json, and the honest answer
+    downstream is "unknown" rather than a number someone derives a horizon
+    from. `bool` is rejected explicitly because it is an `int` subclass and
+    `True` would otherwise read as a horizon of 1."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
 
 
 def read_pretrained_config(pretrained_path: str) -> dict[str, Any] | None:
@@ -2865,6 +3146,22 @@ class JobNotRunningError(Exception):
     """Raised when stop() is called on a non-running job."""
 
 
+class JobPublishInProgressError(Exception):
+    """Raised when delete() targets a run whose checkpoints the background Hub
+    publish (models.model_upload_manager) is uploading right now.
+
+    A publish reads the run's checkpoint dirs for minutes off the request
+    thread, so a delete that passes every other guard (the run IS terminal)
+    would rmtree the files out from under upload_folder mid-read — the upload
+    dies with an opaque OS/Hub error and its repo pin fails against a deleted
+    record. One guard here covers both delete surfaces, since POST
+    /models/delete's run branch reuses JobRegistry.delete."""
+
+    def __init__(self, job_id: str) -> None:
+        super().__init__(job_id)
+        self.job_id = job_id
+
+
 class JobSourceOfQueuedRunError(Exception):
     """Raised when delete() would take the checkpoint a QUEUED run will read.
 
@@ -3347,6 +3644,13 @@ class JobRegistry:
         )
 
     def start(self, config: TrainingRequest, target: JobTarget | None = None) -> JobRecord:
+        # Lazy, and the ONE import site in this method: runners.hf_cloud imports
+        # from this module, so a module-level import would close the cycle.
+        from .runners.hf_cloud import (  # lazy import to avoid circular import
+            WANDB_KEY_MISSING_MESSAGE,
+            resolve_wandb_api_key,
+        )
+
         target = target or JobTarget()
         # The submit half of the shared display-name rule (rename is the other
         # half): a blank/absent job_name still means "derive a name below", but
@@ -3592,7 +3896,7 @@ class JobRegistry:
             config.policy_pretrained_path = hub_ref
 
         # Asked BEFORE the lock, and for the same reason `_drain_queue` phase 1
-        # asks before its own: `_robot_busy` reads seven feature modules whose
+        # asks before its own: `_robot_busy` reads eight feature modules whose
         # `training_is_active()` calls take THIS lock from inside their own
         # `_state_lock`. Reading them while holding it closes the cycle and
         # deadlocks. Never move this inside.
@@ -3689,6 +3993,43 @@ class JobRegistry:
                     owner = source
                     if config.resume_from_checkpoint_job_id:
                         owner = self._resolve_checkpoint_owner(source, config)
+
+                    # W&B state is INHERITED, never form-decided. lerobot
+                    # resumes with `wandb.init(resume="must")` using the run id
+                    # in the checkpoint's train_config.json (wandb_utils.py), so
+                    # a continuation always re-opens the W&B run that wrote the
+                    # checkpoint: turning W&B on for a resume of a non-W&B
+                    # checkpoint is not a thing lerobot can do, and turning it
+                    # off is the only other lever. Copying those settings here —
+                    # under the lock, before the record exists — makes the
+                    # persisted config describe the run's real shape and gives
+                    # the credential preflight below the true value to check.
+                    #
+                    # From `owner`, NOT `source`, and that distinction is
+                    # load-bearing on a rewind: the W&B run rides the CHECKPOINT
+                    # (its run_id is inside that checkpoint's train_config.json),
+                    # so it belongs to whichever record wrote the chosen
+                    # checkpoint. Reading the leaf instead would be wrong in
+                    # both directions — inheriting `enable: true` from a leaf
+                    # whose rewound-to ancestor checkpoint carries no run_id
+                    # sends lerobot down `get_wandb_run_id_from_filesystem`,
+                    # which globs THIS run's empty output dir and raises; and
+                    # inheriting the leaf's project/entity would describe the
+                    # record with a W&B run the trainer never opens. On a plain
+                    # tip-resume `owner is source`, so this is unchanged there.
+                    #
+                    # Runner-blind either way: a continuation that crosses
+                    # runners (F7) keeps logging to the same W&B run, because
+                    # that run is identified by the checkpoint, not by where the
+                    # trainer happens to execute.
+                    #
+                    # Copy mode too: although no resume mode flag is emitted,
+                    # credential validation must match the checkpoint mode the
+                    # trainer restores, rather than the form's fresh-run default.
+                    config.wandb_enable = owner.config.wandb_enable
+                    config.wandb_project = owner.config.wandb_project
+                    config.wandb_entity = owner.config.wandb_entity
+                    config.wandb_mode = owner.config.wandb_mode
                     # A resume may continue on EITHER runner (F7). What changes
                     # across the four combinations is only where the parent's
                     # checkpoint has to end up before the trainer can read it —
@@ -3808,6 +4149,37 @@ class JobRegistry:
                         "Raise the step target above the checkpoint, or pick an earlier "
                         "checkpoint."
                     )
+
+            # W&B credentials, THE authoritative preflight (MT40). Applies to
+            # local/cloud online modes. LAN peers validate their own credentials;
+            # offline and disabled modes never need a server login.
+            #
+            #   * cloud — the key is forwarded into the pod as a job secret;
+            #     without it the trainer dies inside a billed GPU container.
+            #   * local — the trainer is a subprocess with no tty, so
+            #     `wandb.init` cannot prompt for a login and simply fails,
+            #     AFTER the record already says `running`.
+            #
+            # Deliberately here: after the resume block, so it reads the
+            # INHERITED `wandb_enable` rather than whatever the form sent, and
+            # before the first line below that has a side effect — no job
+            # record, no output directory, no dataset push
+            # (HfCloudJobRunner._ensure_dataset_on_hub runs later still), no
+            # local subprocess, and crucially none of the deferred threads
+            # (_upload_resume_then_start / _materialize_then_start), which
+            # return 201 and would turn this refusal into a FAILED JOB the user
+            # has to go read logs for instead of a message on the button they
+            # just pressed.
+            #
+            # The original MT40 defect was exactly this check being absent on
+            # the resume path: a W&B-enabled parent resumed on the cloud with no
+            # key, and died inside a billed GPU container.
+            if (
+                target.runner != "lan_node"
+                and wandb_requires_online_credentials(config)
+                and not resolve_wandb_api_key()
+            ):
+                raise ValueError(WANDB_KEY_MISSING_MESSAGE)
 
             job_id = self._unique_job_id(config.policy_type, config.dataset_repo_id)
             job_dir = _job_dir(self._output_root, job_id)
@@ -4139,18 +4511,25 @@ class JobRegistry:
         No synthetic exit code is invented for any of them: there was no
         process, so `exit_code` stays None.
 
-        On the cancel check: a huggingface_hub download cannot be interrupted
-        mid-flight, so a Stop pressed while bytes are moving takes effect HERE —
-        after the download returns and before the trainer is spawned. The bytes
-        are already on disk (and cached for the next attempt); what the user
-        gets is a run that never starts training, which is what they asked for.
-        The spawn + runner handoff happen inside the registry lock, so a stop can
-        neither be missed (spawning a trainer nobody will signal) nor land on a
-        runner that has already been replaced.
+        On the cancel check: a Stop pressed while bytes are moving is fed to the
+        download's progress hook, which aborts it within a chunk and raises
+        DownloadCancelled; a Stop that lands after the transfer returns is caught
+        by `_start_after_prepare` instead. Either way the bytes so far are cached
+        for the next attempt and no trainer is spawned — a run that never starts
+        training, which is what the user asked for. The spawn + runner handoff
+        happen inside the registry lock, so a stop can neither be missed
+        (spawning a trainer nobody will signal) nor land on a runner that has
+        already been replaced.
         """
         reporter = _DownloadProgressLogger(prep.emit, hub_ref_step_label(ref))
         try:
-            local_path = localize_pretrained_path(ref, tqdm_class=make_snapshot_progress_tqdm(reporter))
+            local_path = localize_pretrained_path(
+                ref, tqdm_class=make_snapshot_progress_tqdm(reporter, should_cancel=prep.cancelled)
+            )
+        except DownloadCancelled:
+            prep.emit("Stopped before the trainer started.")
+            self._finalize_prepare(job_id, "interrupted", _PREPARE_STOPPED_MESSAGE)
+            return
         except Exception as exc:
             logger.exception("Base-checkpoint download failed for job %s", job_id)
             self._fail_prepare(job_id, prep, str(exc))
@@ -4190,8 +4569,12 @@ class JobRegistry:
         reporter = _DownloadProgressLogger(prep.emit, hub_ref_step_label(ref))
         try:
             config_path = download_hub_resume_checkpoint(
-                ref, tqdm_class=make_snapshot_progress_tqdm(reporter)
+                ref, tqdm_class=make_snapshot_progress_tqdm(reporter, should_cancel=prep.cancelled)
             )
+        except DownloadCancelled:
+            prep.emit("Stopped before the trainer started.")
+            self._finalize_prepare(job_id, "interrupted", _PREPARE_STOPPED_MESSAGE)
+            return
         except Exception as exc:
             logger.exception("Resume-checkpoint download failed for job %s", job_id)
             self._fail_prepare(
@@ -4850,6 +5233,39 @@ class JobRegistry:
         self._notify_change()
         return record
 
+    def set_hf_repo_id(self, job_id: str, repo_id: str) -> JobRecord:
+        """Record the Hub model repo a LOCAL run has been published to.
+
+        Unlike `rename` this is identity, not decoration. It is what makes a
+        SECOND publish land in the same repo as the first — models.
+        `upload_local_model` defaults its target to `record.hf_repo_id` — and
+        what the training dialog reads to render "View on Hub" and to offer
+        "add more checkpoints" instead of a fresh publish.
+
+        Cloud runs get theirs at submit time (see `start`); this is the
+        local-run equivalent, written after the first successful upload.
+        Idempotent: re-publishing to the same repo rewrites the same value."""
+        target = repo_id.strip()
+        if not target:
+            raise ValueError("Hub repo id cannot be empty.")
+        with self._lock:
+            record = self._records.get(job_id)
+            if record is None:
+                raise JobNotFoundError(job_id)
+            if record.hf_repo_id == target:
+                return record
+            record.hf_repo_id = target
+            # Zeroed before the write, then restamped after — the same derived-
+            # field protocol `rename`, `start` and `reorder_queue` follow, so a
+            # position a read stamped onto the live record never freezes into
+            # job.json. (Publish targets terminal runs, whose position is 0
+            # anyway — the convention holds so no caller has to prove that.)
+            record.queue_position = 0
+            self._persist(record, force=True)
+            self._annotate_queue(record, self._queue_positions(self._records))
+        self._notify_change()
+        return record
+
     def stop(self, job_id: str, expect_state: JobState | None = None) -> JobRecord:
         """Ask a running job to stop, and record that we asked.
 
@@ -5116,10 +5532,13 @@ class JobRegistry:
         height/width, whether the policy needs a --task string, the flat
         state/action widths, and the arm the checkpoint was trained on.
 
-        The arm isn't in config.json — it's recovered via train_config.json's
-        dataset repo id → that dataset's meta/info.json robot_type. None
-        whenever any hop can't be made (an imported flat model, a deleted
-        training dataset, an untagged one); the fine-tune panel treats None as
+        Neither the training dataset nor the arm is in config.json. Both come
+        from train_config.json: it names the dataset repo id (returned as
+        `dataset_repo_id`, and what the Deploy panel prefills the task
+        description from), and that dataset's meta/info.json names the robot
+        (`trained_on_robot_type`). Either is None whenever a hop can't be made
+        (an imported flat model with no train_config, a deleted training
+        dataset, an untagged one); the fine-tune panel treats a None arm as
         "can't tell", not "matches"."""
         with self._lock:
             record = self._records.get(job_id)
@@ -5142,27 +5561,40 @@ class JobRegistry:
             )
         cfg = _read_checkpoint_config(match)
         policy_type = cfg.get("type")
-        # The arm the checkpoint was trained on, for the fine-tune panel's
-        # cross-arm warning: train_config.json names the training dataset, and
-        # that dataset's meta/info.json names the robot. LOCAL checkpoints only
-        # — for a hub checkpoint read_checkpoint_train_config is itself a Hub
-        # download, and read_dataset_robot_type (local-only) would almost
-        # always return None for its training dataset anyway. Not worth a
-        # network round-trip on this synchronous GET.
-        train_cfg = read_checkpoint_train_config(match) if match.source == "local" else {}
+        # The dataset this checkpoint was trained on, read from its OWN
+        # train_config.json and only then falling back to the registry record.
+        # That order matters: an import's record carries the "(imported)"
+        # placeholder rather than a repo id (see register_imported), so the
+        # record is exactly the wrong source for the one case that most needs an
+        # answer. The checkpoint knows; the record does not.
+        #
+        # Read for hub checkpoints too. The previous local-only gate was
+        # justified as "not worth a network round-trip on this synchronous GET",
+        # but _read_checkpoint_config above ALREADY downloads config.json from
+        # the same repo on this same request — train_config.json is a second
+        # small file alongside it, not a new class of cost. It also degrades to
+        # {} on any failure, so a miss costs a log line, not the response.
+        train_cfg = read_checkpoint_train_config(match)
         train_dataset = train_cfg.get("dataset")
         base_dataset_repo_id = (
             train_dataset.get("repo_id") if isinstance(train_dataset, dict) else None
         ) or record.config.dataset_repo_id
-        trained_on_robot_type = (
-            read_dataset_robot_type(base_dataset_repo_id)
-            # "(imported)" is the placeholder an import's config carries — not a
-            # real repo id, so don't even try to resolve it.
+        # "(imported)" is the placeholder an import's config carries — not a real
+        # repo id, so it must never be resolved OR reported as one.
+        dataset_repo_id = (
+            base_dataset_repo_id
             if isinstance(base_dataset_repo_id, str)
             and base_dataset_repo_id
             and base_dataset_repo_id != "(imported)"
             else None
         )
+        # The arm the checkpoint was trained on, for the fine-tune panel's
+        # cross-arm warning: the dataset above, then that dataset's
+        # meta/info.json robot_type. read_dataset_robot_type is local-only, so a
+        # dataset that lives only on the Hub still answers None here — lifting
+        # the gate above widened which checkpoints can be ASKED, not where the
+        # answer comes from.
+        trained_on_robot_type = read_dataset_robot_type(dataset_repo_id) if dataset_repo_id else None
         input_features = cfg.get("input_features") or {}
         image_features: dict[str, dict[str, int]] = {}
         for full_name, feat in input_features.items():
@@ -5179,7 +5611,41 @@ class JobRegistry:
         return {
             "policy_type": policy_type,
             "image_features": image_features,
-            "requires_task": policy_type in _LANGUAGE_CONDITIONED_POLICY_TYPES,
+            "requires_task": policy_requires_task(policy_type),
+            # Whether this architecture can run the Real-Time Chunking engine,
+            # so the launch UI can offer the engine choice only where it works
+            # instead of letting the run die inside the subprocess with the arm
+            # already claimed. null = unknown type (a fork newer than our table)
+            # — the UI must treat that as "offer it", matching the server-side
+            # guard in rollout.handle_start_inference, which only refuses on a
+            # definite False.
+            "supports_rtc": (policy_type_supports_rtc(policy_type) if isinstance(policy_type, str) else None),
+            # Whether the two GPU-launch knobs apply to THIS checkpoint
+            # (S3.8f), so the remote panel can disable a select with a reason
+            # rather than send a value the launcher would drop. Both read off
+            # the same `cfg` every other field here comes from; the rules live
+            # in utils.system so the Lab, the route and the container cannot
+            # disagree about what a checkpoint supports.
+            "supports_model_dtype": policy_supports_model_dtype(cfg),
+            # And whether it has a step count to set at all — which
+            # `flow_steps_default` below CANNOT answer, because null there is
+            # both "no such knob" (ACT) and "the knob exists and this
+            # checkpoint saved nothing we can resolve" (a pi05 with a null
+            # `num_inference_steps`).
+            "supports_flow_steps": policy_flow_steps_field(cfg.get("type")) is not None,
+            # And whether extra camera VIEWS may be declared on it (S3.8g).
+            # Off a table rather than off key presence, because no config.json
+            # field says "this family's vision tower takes any number of
+            # pictures" — that is a fact about its processor, and
+            # `utils.system.VARIABLE_VIEW_POLICY_TYPES` is where it was written
+            # down after reading one.
+            "supports_extra_image_roles": policy_supports_extra_image_roles(cfg.get("type")),
+            # Null when there is no number to show — a policy with no such knob,
+            # or one that saved none and whose applying default this side cannot
+            # see. MolmoAct2 is NOT that case: it saves null and runs at 10, the
+            # pin's backbone default, which `policy_flow_steps_default` fills in.
+            # The client must read null as "no number to show", not "no default".
+            "flow_steps_default": policy_flow_steps_default(cfg),
             # Flat proprioceptive state / action widths. For an SO-101 arm this
             # is 6 (one per joint); a bimanual-trained checkpoint carries 12
             # (two arms). The inference modal compares this against the selected
@@ -5187,9 +5653,35 @@ class JobRegistry:
             # the user hits Start. None when the checkpoint omits the feature.
             "state_dim": _flat_feature_dim(input_features.get("observation.state")),
             "action_dim": _flat_feature_dim((cfg.get("output_features") or {}).get("action")),
+            # The checkpoint's own chunk geometry, straight off config.json.
+            # `n_action_steps` is how many steps of a predicted chunk the policy
+            # actually returns, so it is the CEILING on a remote-inference
+            # horizon: declare more and the two Portal peers disagree about the
+            # action-chunk shape, the fingerprint stops matching, and every
+            # packet is dropped in silence — a healthy-looking session with zero
+            # chunks. The default the panel prints (50) is a smolvla/pi0 number;
+            # MolmoAct2's published checkpoint is 30, which is exactly the case
+            # this field exists to stop the operator walking into. `chunk_size`
+            # is the width the policy predicts internally (>= n_action_steps),
+            # carried alongside so the two are readable together. Both null when
+            # the checkpoint omits them or saves a non-integer.
+            "n_action_steps": _positive_int_or_none(cfg.get("n_action_steps")),
+            "chunk_size": _positive_int_or_none(cfg.get("chunk_size")),
             # Raw lerobot robot_type string (e.g. "maker_follower"); the client
             # normalises it. None when it can't be established.
             "trained_on_robot_type": trained_on_robot_type,
+            # The dataset this checkpoint was trained on, from its own
+            # train_config.json (see above). None when the lineage offers no real
+            # id — an imported flat model repo with no train_config, or a record
+            # still carrying the "(imported)" placeholder.
+            #
+            # The Deploy panel prefills the task description from this rather
+            # than from the selected JOB's config: a job record is the wrong
+            # source twice over — an import's is a placeholder, and on a resume
+            # chain the tip's record does not describe a checkpoint owned by an
+            # ancestor. Addressed by (owner, step), this is the checkpoint's own
+            # provenance.
+            "dataset_repo_id": dataset_repo_id,
         }
 
     def _queued_dependents_of(self, record: JobRecord) -> builtins.list[str]:
@@ -5288,6 +5780,18 @@ class JobRegistry:
             )
 
     def delete(self, job_id: str) -> None:
+        # Refuse while the background Hub publish is reading this run's
+        # checkpoint dirs (lazy import: models imports from this module).
+        # Checked BEFORE our lock so the two locks are never held together —
+        # the publish worker takes this registry's lock (set_hf_repo_id)
+        # without holding the manager's. The unlocked read leaves a tiny
+        # start-after-check window, which is fine: a publish that starts after
+        # this point 404s on the deleted run instead of racing the rmtree.
+        from .models import model_upload_manager
+
+        publish = model_upload_manager.get_status()
+        if publish["state"] == "running" and publish["model_id"] == job_id:
+            raise JobPublishInProgressError(job_id)
         with self._lock:
             record = self._records.get(job_id)
             if record is None:
@@ -5548,6 +6052,14 @@ class JobRegistry:
                                 record.error_message = f"Subprocess exited with code {rc}"
                         if record.ended_at is None:
                             record.ended_at = time.time()
+                        # The watchdog's twin (MT47), for the restart route into
+                        # a terminal state. This record's `metrics` were last
+                        # written while it was live, so it carries whatever ETA
+                        # the parser had extrapolated — a countdown that would
+                        # otherwise render beside a run that has already ended.
+                        # Same rule as the watchdog: `done` snaps to target,
+                        # `interrupted`/`failed` only lose the stale ETA.
+                        _settle_terminal_metrics(record)
                         self._write_meta(record)
                 elif record.runner == "hf_cloud" and record.hf_job_id and record.hf_flavor:
                     # Always reattach; the status poller is the source of truth
@@ -5987,13 +6499,13 @@ class JobRegistry:
 
         Local training is bounded by this machine's GPU/USB (the premise
         `_local_slot_busy` is built on), and teleoperation, recording,
-        inference, replay, calibration, auto-calibration and wiggle are all
-        mutually exclusive with each other for exactly that reason — each
-        checks the other six before starting (CLAUDE.md: "New features that
-        drive the robot must add the same reciprocal checks against every
-        existing one"). Training never joined that set, which was survivable
-        while a training could only begin from an explicit user submit: the
-        user was present and knew what else they had running.
+        inference, remote inference, replay, calibration, auto-calibration and
+        wiggle are all mutually exclusive with each other for exactly that
+        reason — each checks the other seven before starting (CLAUDE.md: "New
+        features that drive the robot must add the same reciprocal checks
+        against every existing one"). Training never joined that set, which was
+        survivable while a training could only begin from an explicit user
+        submit: the user was present and knew what else they had running.
 
         The queue removes that. `_drain_queue` starts a trainer from a WATCHDOG
         THREAD, at an arbitrary moment, with nobody at the keyboard — several GB
@@ -6006,7 +6518,7 @@ class JobRegistry:
         globals, this is an advisory "is now a good moment" check rather than a
         mutex, and the cost of a stale read is one second's delay.
 
-        Never raises. These seven modules pull in cv2, av and the lerobot robot
+        Never raises. These eight modules pull in cv2, av and the lerobot robot
         backends, none of which `jobs` depended on before the queue existed, and
         this runs as the FIRST statement of `_drain_queue` — so an ImportError
         here (a headless install, a half-installed optional extra, a broken cv2)
@@ -6025,6 +6537,7 @@ class JobRegistry:
                 auto_calibrate as _auto_calibrate,
                 calibrate as _calibrate,
                 record as _record,
+                remote_inference as _remote_inference,
                 replay as _replay,
                 rollout as _rollout,
                 teleoperate as _teleoperate,
@@ -6035,6 +6548,8 @@ class JobRegistry:
                 return "a recording session"
             if _rollout.inference_active:
                 return "an inference session"
+            if _remote_inference.remote_inference_is_active():
+                return "a remote inference session"
             if _teleoperate.teleoperation_active:
                 return "teleoperation"
             if _replay.replay_active:
@@ -6371,6 +6886,17 @@ class JobRegistry:
                 record.state = state
                 record.ended_at = time.time()
                 record.exit_code = rc
+                # Deliberately AFTER `record.state` is assigned and before
+                # anything reads the record again: it keys on the state, so one
+                # call here covers every outcome this block can produce —
+                # `done` snaps progress to the target, while `failed` and both
+                # flavours of `interrupted` (a stop we asked for, and the
+                # unconfirmed disappearance above) only get their stale ETA
+                # cleared. Never snapping without a CONFIRMED completion is the
+                # point: an unconfirmed run has no evidence it reached its
+                # target, and claiming it did would be the same lie MT10 exists
+                # to stop telling.
+                _settle_terminal_metrics(record)
                 if record.error_message is None:
                     if state == "interrupted":
                         # Never the synthetic exit-code text here: that message

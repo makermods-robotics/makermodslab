@@ -93,6 +93,7 @@ export default {
       recordingEpisode: "Recording episode {{index}}",
       resetPaused: "Reset paused",
       resetGetReady: "Reset — get ready",
+      namingEpisode: "Name this episode's task",
       connectingRobot: "Connecting arm & cameras…",
       // {{attempt}}/{{max}} come straight off the status payload.
       reconnectingRetry: "Camera hiccup, retrying ({{attempt}}/{{max}})…",
@@ -114,17 +115,31 @@ export default {
       unmute: "Unmute",
     },
     button: {
-      done: "Done",
+      done: "Finish session",
       quit: "Quit",
-      endEpisode: "End Episode",
+      endEpisode: "Done",
       startNextEpisode: "Start Next Episode",
       advance: "Advance",
       pause: "Pause",
       resume: "Resume",
       rerecord: "Re-record",
-      keepEpisodes: "Keep episodes & continue",
-      discardExit: "Discard & exit",
-      backHome: "Back to home",
+      // Shown on the ended-with-issue screen: opens the Finalize review when
+      // something was saved (keep/discard becomes a per-episode checkbox
+      // choice there), or just continues on when nothing was.
+      reviewAndFinalize: "Review & finalize",
+      continue: "Continue",
+      saveEpisodeTask: "Start recording",
+    },
+    // The blocking card shown before each episode while resetting the environment
+    // while the operator enters the next task.
+    naming: {
+      title: "What is the next task?",
+      description:
+        "Enter the task description and reset the environment. Start when you are ready.",
+      inputLabel: "Task description for episode {{index}}",
+      placeholder: "e.g., fold the left sleeve inward",
+      keyboardHint: "Press Enter to finish editing, then Space to start recording.",
+      rerecordPrevious: "Re-record previous task",
     },
     ended: {
       complete: "Recording complete — returning home…",

@@ -28,6 +28,9 @@ import { useLanguage } from "@/contexts/LanguageContext";
 import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
 import LogPanel from "@/components/LogPanel";
+import EpisodeTaskPrompt from "@/components/recording/EpisodeTaskPrompt";
+import SessionLiveView from "@/components/control/SessionLiveView";
+import { useRobots } from "@/hooks/useRobots";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   AlertDialog,
@@ -47,6 +50,8 @@ export interface RecordingConfig {
   robot: string;
   dataset_repo_id: string;
   single_task: string;
+  /** Wait before each episode to enter its task (the "naming" phase). */
+  per_episode_task: boolean;
   num_episodes: number;
   episode_time_s: number;
   reset_time_s: number;
@@ -65,11 +70,12 @@ export interface RecordedInfo {
   discarded_empty: boolean;
 }
 
-type Phase = "preparing" | "recording" | "resetting" | "completed";
+type Phase = "preparing" | "recording" | "naming" | "resetting" | "completed";
 
 interface BackendStatus {
   recording_active: boolean;
   current_phase: string;
+  preparation_message?: string | null;
   // Only meaningful while current_phase === "reconnecting_robot" — which
   // connect attempt is about to be retried, out of connect_retry_max.
   connect_retry_attempt?: number;
@@ -102,12 +108,18 @@ interface BackendStatus {
   outcome?: "ok" | "ran_with_warning" | "failed" | null;
   error?: string | null;
   hint?: string | null;
+  // Per-episode-task sessions: what to prefill the "name this episode's task"
+  // prompt with (the previous episode's task, or single_task before the first
+  // is named). Only meaningful while current_phase === "naming".
+  current_episode_task_default?: string;
   available_controls: {
     stop_recording: boolean;
     exit_early: boolean;
     rerecord_episode: boolean;
     pause_recording: boolean;
     resume_recording: boolean;
+    // True only during the "naming" phase.
+    submit_episode_task?: boolean;
   };
 }
 
@@ -126,6 +138,8 @@ const RecordingSessionDialog: React.FC<{
    * (quit, discard, start failure). */
   onExit: (recorded?: RecordedInfo) => void;
 }> = ({ config: recordingConfig, onExit }) => {
+  const { records } = useRobots();
+  const recordingRobot = records[recordingConfig.robot];
   const { toast } = useToast();
   const { t } = useTranslation();
   const { language } = useLanguage();
@@ -137,10 +151,15 @@ const RecordingSessionDialog: React.FC<{
     null
   );
   const [recordingSessionStarted, setRecordingSessionStarted] = useState(false);
+  const [initialTask, setInitialTask] = useState<string | null>(null);
+  const pendingInitialTaskRef = useRef<string | null>(null);
   const [logs, setLogs] = useState("");
 
   const [optimisticPhase, setOptimisticPhase] = useState<Phase | null>(null);
   const [optimisticPaused, setOptimisticPaused] = useState<boolean | null>(null);
+  // A per-episode-task submission is in flight — locks the prompt's button
+  // until the poll moves the phase on (or the request comes back refused).
+  const [submittingTask, setSubmittingTask] = useState(false);
   // The two explicit exits while a session is live: Done (finish + keep) and
   // Quit (end without saving / discard). Each gets its own confirm dialog.
   const [showDoneConfirm, setShowDoneConfirm] = useState(false);
@@ -199,10 +218,11 @@ const RecordingSessionDialog: React.FC<{
   useSessionHeartbeat(sessionId, tabOwnerId(), sessionLive);
   useUnloadWarning(sessionLive);
 
-  // Start recording session when the dialog mounts. The ref guard prevents
+  // Collect the first task before starting the hardware session. The ref prevents
   // React StrictMode (and any future re-renders) from POSTing the session
   // start twice — the second call returns 409 and bounces the user out.
   useEffect(() => {
+    if (recordingConfig.per_episode_task && initialTask === null) return;
     if (!startInitiatedRef.current) {
       startInitiatedRef.current = true;
       startRecordingSession();
@@ -210,7 +230,7 @@ const RecordingSessionDialog: React.FC<{
     // startRecordingSession is intentionally omitted: re-running this effect
     // on its identity change would re-fire the session start.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [initialTask, recordingConfig.per_episode_task]);
 
   // Refs so the poll interval below stays stable and reads the latest values
   // without tearing itself down on every state change.
@@ -220,6 +240,8 @@ const RecordingSessionDialog: React.FC<{
   optimisticPausedRef.current = optimisticPaused;
   const rerecordTickRef = useRef(rerecordTick);
   rerecordTickRef.current = rerecordTick;
+  const submittingTaskRef = useRef(submittingTask);
+  submittingTaskRef.current = submittingTask;
 
   // Poll backend status continuously to stay in sync
   useEffect(() => {
@@ -264,6 +286,16 @@ const RecordingSessionDialog: React.FC<{
         const currentOptimistic = optimisticPhaseRef.current;
         if (currentOptimistic && status.current_phase === currentOptimistic) {
           setOptimisticPhase(null);
+        } else if (
+          currentOptimistic === "naming" &&
+          status.current_phase !== "recording" &&
+          status.current_phase !== "naming"
+        ) {
+          // The naming phase was entered optimistically on exit-early; if the
+          // real phase has already moved past it (a fast submit landed before
+          // the first "naming" poll), clear the optimistic value so it can't
+          // wedge the prompt open for the rest of the session.
+          setOptimisticPhase(null);
         }
 
         const currentOptimisticPaused = optimisticPausedRef.current;
@@ -286,11 +318,19 @@ const RecordingSessionDialog: React.FC<{
         if (prev !== real) {
           if (real === "recording" && prev !== null) {
             playRecordingStartCue();
-          } else if (real === "resetting") {
+          } else if (real === "resetting" || (real === "naming" && prev === "recording")) {
             playResetStartCue();
           }
           prevRealPhaseRef.current = real;
           warningFiredForPhaseRef.current = { phase: null, episode: null, tick: 0 };
+        }
+
+        // The naming prompt locks its button on submit and waits for this
+        // poll to move the phase on; once it has, clear the flag so a later
+        // episode's prompt starts unlocked. Also covers a refused submission
+        // whose own handler already reset it.
+        if (real !== "naming" && submittingTaskRef.current) {
+          setSubmittingTask(false);
         }
 
         const elapsed = status.phase_elapsed_seconds || 0;
@@ -360,7 +400,7 @@ const RecordingSessionDialog: React.FC<{
         kind: "recording",
         robot,
         owner: tabOwnerId(),
-        options,
+        options: { ...options, single_task: initialTask ?? options.single_task },
       });
       setSessionId(session.id);
       setRecordingSessionStarted(true);
@@ -403,12 +443,13 @@ const RecordingSessionDialog: React.FC<{
 
     const realPhase = backendStatus.current_phase as Phase;
     const next: Phase | null =
-      realPhase === "recording" ? "resetting" :
-      realPhase === "resetting" ? "recording" : null;
+      realPhase === "recording"
+        ? "resetting"
+        : realPhase === "resetting" ? "recording" : null;
 
     if (!next) return;
 
-    setOptimisticPhase(next);
+    if (!recordingConfig.per_episode_task) setOptimisticPhase(next);
 
     try {
       const response = await fetchWithHeaders(
@@ -436,7 +477,56 @@ const RecordingSessionDialog: React.FC<{
         variant: "destructive",
       });
     }
-  }, [backendStatus, optimisticPhase, baseUrl, fetchWithHeaders, toast, t]);
+  }, [backendStatus, optimisticPhase, recordingConfig, baseUrl, fetchWithHeaders, toast, t]);
+
+  // Submit the upcoming task and start its recording. A refused request
+  // leaves the prompt open so the operator can correct it and retry.
+  const handleSubmitEpisodeTask = useCallback(
+    async (task: string) => {
+      if (submittingTask) return;
+      setSubmittingTask(true);
+      try {
+        const response = await fetchWithHeaders(
+          `${baseUrl}/api/v1/recording-episode-task`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ task }),
+          }
+        );
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+          toast({
+            // Body is the backend's own message — untranslated by design.
+            title: t("recording.session.toast.errorTitle"),
+            description: data.message,
+            variant: "destructive",
+          });
+          setSubmittingTask(false);
+        }
+        // On success leave the button locked: the 1 s poll picks up the phase
+        // change and the prompt unmounts. The naming-phase watchdog below
+        // clears the flag if that poll never arrives.
+      } catch (error) {
+        toast({
+          title: t("recording.session.toast.connectionErrorTitle"),
+          description: t("recording.session.toast.connectionErrorBody"),
+          variant: "destructive",
+        });
+        setSubmittingTask(false);
+      }
+    },
+    [submittingTask, baseUrl, fetchWithHeaders, toast, t]
+  );
+
+  // The first Space already requested capture. Submit once the backend is ready.
+  useEffect(() => {
+    if (backendStatus?.current_phase !== "naming") return;
+    const task = pendingInitialTaskRef.current;
+    if (task === null) return;
+    pendingInitialTaskRef.current = null;
+    void handleSubmitEpisodeTask(task);
+  }, [backendStatus?.current_phase, handleSubmitEpisodeTask]);
 
   const handlePauseRecording = useCallback(async () => {
     if (!backendStatus?.available_controls.pause_recording) return;
@@ -540,14 +630,14 @@ const RecordingSessionDialog: React.FC<{
       );
       const data = await response.json();
 
-      if (response.ok) {
+      if (response.ok && data.success) {
         setRerecordTick((t) => t + 1);
         toast({
           title: t("recording.session.toast.rerecordTitle"),
           description: t("recording.session.toast.rerecordBody", {
             // Same `?? 1` default the HUD's episode counter uses; the field is
             // always populated on the re-record path.
-            index: backendStatus.current_episode ?? 1,
+            index: (backendStatus.current_episode ?? 1) - (backendStatus.current_phase === "naming" ? 1 : 0),
           }),
         });
       } else {
@@ -638,8 +728,14 @@ const RecordingSessionDialog: React.FC<{
 
   // Leave the frozen outcome banner for the launchpad handoff — same `recorded`
   // payload the auto-exit builds, on the user's own click. The handoff banner
-  // handles the zero-saved case (discarded_empty → "nothing was saved").
-  const continueToUpload = useCallback(() => {
+  // handles the zero-saved case (discarded_empty → "nothing was saved"). For
+  // an errored/warned session this is now the ONLY path off the ended screen
+  // when something was saved: it opens the dataset viewer in Finalize mode
+  // (CollectPanel), where keeping vs. discarding is a per-episode checkbox
+  // choice instead of a blind "keep everything" / "discard everything"
+  // fork — deleting every episode there falls back to deleting the whole
+  // dataset, so nothing is lost by dropping the old dedicated discard button.
+  const reviewAndFinalize = useCallback(() => {
     if (!backendStatus) return;
     onExitRef.current({
       repo_id:
@@ -648,26 +744,6 @@ const RecordingSessionDialog: React.FC<{
       discarded_empty: backendStatus.discarded_empty || false,
     });
   }, [backendStatus, recordingConfig]);
-
-  // "Discard & exit" from an ENDED failed/warning session that kept episodes on
-  // disk: the session is already over (no active-session stop to issue), so
-  // delete the dataset directory outright, then close.
-  const discardAndExit = useCallback(async () => {
-    const repoId =
-      backendStatus?.dataset_repo_id || recordingConfig?.dataset_repo_id;
-    if (repoId) {
-      try {
-        await fetchWithHeaders(`${baseUrl}/api/v1/delete-dataset`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dataset_repo_id: repoId }),
-        });
-      } catch {
-        /* best-effort — we're leaving regardless */
-      }
-    }
-    onExitRef.current();
-  }, [backendStatus, recordingConfig, baseUrl, fetchWithHeaders]);
 
   // Re-record is keyboard-driven on DELETE (and Backspace, for keyboards/
   // muscle memory where Delete sends Backspace — explicit user request; the
@@ -703,8 +779,9 @@ const RecordingSessionDialog: React.FC<{
     if (!keyboardActive) return;
 
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.repeat) return;
       const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "BUTTON" || target.isContentEditable)) {
         return;
       }
       if (e.key === " " || e.code === "Space" || e.key === "ArrowRight") {
@@ -779,6 +856,8 @@ const RecordingSessionDialog: React.FC<{
       return isRecordingPaused
         ? t("recording.session.status.resetPaused")
         : t("recording.session.status.resetGetReady");
+    if (currentPhase === "naming")
+      return t("recording.session.status.namingEpisode");
     // Finer "preparing" substeps (and terminal states) the backend now reports
     // (record.py). These aren't in the Phase-narrowed set that drives the
     // recording/resetting colors, so read the raw backend string: they render
@@ -800,7 +879,7 @@ const RecordingSessionDialog: React.FC<{
     if (raw === "stopping") return t("recording.session.status.stopping");
     if (raw === "error") return t("recording.session.status.error");
     if (currentPhase === "preparing")
-      return t("recording.session.status.preparing");
+      return backendStatus?.preparation_message || t("recording.session.status.preparing");
     return t("recording.session.status.complete");
   };
 
@@ -830,7 +909,7 @@ const RecordingSessionDialog: React.FC<{
         onEscapeKeyDown={(e) => e.preventDefault()}
         onPointerDownOutside={(e) => e.preventDefault()}
         onInteractOutside={(e) => e.preventDefault()}
-        className="max-h-[92vh] max-w-2xl gap-0 overflow-y-auto p-6"
+        className="max-h-[94vh] w-[94vw] max-w-[1200px] gap-0 overflow-y-auto p-4"
         aria-describedby={undefined}
       >
         <DialogTitle className="sr-only">
@@ -838,7 +917,22 @@ const RecordingSessionDialog: React.FC<{
         </DialogTitle>
 
         {/* Loading state while waiting for the first backend status */}
-        {!backendStatus ? (
+        {recordingConfig.per_episode_task && initialTask === null ? (
+          <div className="space-y-4 py-6">
+            <EpisodeTaskPrompt
+              episode={1}
+              defaultTask={recordingConfig.single_task}
+              submitting={false}
+              onSubmit={(task) => {
+                pendingInitialTaskRef.current = task;
+                setInitialTask(task);
+              }}
+            />
+            <Button variant="ghost" onClick={() => onExit()}>
+              {t("common.cancel")}
+            </Button>
+          </div>
+        ) : !backendStatus ? (
           <div className="flex flex-col items-center justify-center py-16 text-center">
             <div className="mb-4 h-12 w-12 animate-spin rounded-full border-b-2 border-red-500" />
             <p className="text-lg">{t("recording.session.connecting")}</p>
@@ -848,7 +942,7 @@ const RecordingSessionDialog: React.FC<{
             {/* Two explicit exits, LIVE-only. Once the session has ended these
                 unmount — no control may imply the session is still alive. */}
             {!sessionEnded && (
-              <div className="mb-6 flex justify-end gap-3">
+              <div className="mb-3 flex justify-end gap-3">
                 <Button
                   onClick={requestDone}
                   disabled={!backendStatus.available_controls.stop_recording}
@@ -867,12 +961,34 @@ const RecordingSessionDialog: React.FC<{
               </div>
             )}
 
-            <div className="bg-card rounded-lg border border-border p-8">
+            {!sessionEnded && (
+              <div className="mb-3">
+                <SessionLiveView robot={recordingRobot} recording paused={backendStatus.paused} />
+              </div>
+            )}
+            <div className="bg-card rounded-lg border border-border p-4">
+              {/* Reset the environment and describe the upcoming episode.
+                  Recording waits for the operator; there is no countdown. */}
+              {!sessionEnded && currentPhase === "naming" && (
+                <EpisodeTaskPrompt
+                  key={currentEpisode}
+                  episode={currentEpisode}
+                  defaultTask={
+                    backendStatus.current_episode_task_default ??
+                    recordingConfig.single_task
+                  }
+                  submitting={submittingTask || anyExitDialogOpen}
+                  onSubmit={handleSubmitEpisodeTask}
+                  onRerecord={backendStatus.available_controls.rerecord_episode
+                    ? handleRerecordEpisode : undefined}
+                />
+              )}
+
               {/* LIVE session chrome: episode HUD, phase pill, timers, Advance.
                   Replaced wholesale by the end-state UI once the session ends. */}
-              {!sessionEnded && (
+              {!sessionEnded && currentPhase !== "naming" && (
                 <>
-                  <div className="flex justify-end items-center gap-4 mb-6 text-sm text-muted-foreground">
+                  <div className="flex justify-end items-center gap-4 mb-2 text-sm text-muted-foreground">
                     <span
                       aria-label={t(
                         "recording.session.hud.episodeCounterLabel",
@@ -913,7 +1029,7 @@ const RecordingSessionDialog: React.FC<{
                     </Button>
                   </div>
 
-                  <div className="text-center mb-6">
+                  <div className="text-center mb-2">
                     <div
                       role="status"
                       aria-live="polite"
@@ -932,7 +1048,7 @@ const RecordingSessionDialog: React.FC<{
                   </div>
 
                   <div className="text-center mb-4">
-                    <div className={`text-7xl font-mono font-bold leading-none ${phaseColor.timer}`}>
+                    <div className={`text-4xl font-mono font-bold leading-none ${phaseColor.timer}`}>
                       {formatTime(phaseElapsedTime)}
                     </div>
                     <div className="text-sm text-muted-foreground mt-2">
@@ -940,7 +1056,7 @@ const RecordingSessionDialog: React.FC<{
                     </div>
                   </div>
 
-                  <div className="w-full bg-muted rounded-full h-1.5 mb-8">
+                  <div className="w-full bg-muted rounded-full h-1.5 mb-3">
                     <div
                       className={`h-1.5 rounded-full transition-all duration-500 ${phaseColor.bar}`}
                       style={{
@@ -978,7 +1094,7 @@ const RecordingSessionDialog: React.FC<{
                       )}
                     </Button>
                     <div className="flex gap-3">
-                      {(currentPhase === "recording" || currentPhase === "resetting") && (
+                      {!recordingConfig.per_episode_task && (currentPhase === "recording" || currentPhase === "resetting") && (
                         <Button
                           onClick={isPauseActive ? handleResumeRecording : handlePauseRecording}
                           disabled={
@@ -1068,34 +1184,20 @@ const RecordingSessionDialog: React.FC<{
                       </pre>
                     )}
                     <div className="mt-4 flex flex-col gap-2">
-                      {/* Keep the saved episodes — hidden when nothing was saved
-                          (discarded_empty) since there's no dataset to upload. */}
-                      {keptSomething && (
-                        <Button
-                          onClick={continueToUpload}
-                          className="w-full font-semibold"
-                        >
-                          {t("recording.session.button.keepEpisodes")}
-                        </Button>
-                      )}
-                      {/* Discard the kept episodes and leave (quit path from an
-                          already-ended session). Only when there's something to
-                          discard. */}
-                      {keptSomething && (
-                        <Button
-                          onClick={discardAndExit}
-                          variant="outline"
-                          className="w-full border-red-500/50 text-red-600 dark:text-red-300 hover:bg-red-500/10"
-                        >
-                          {t("recording.session.button.discardExit")}
-                        </Button>
-                      )}
+                      {/* The only path off this screen. When something was
+                          saved, this opens the Finalize review, where
+                          keep/delete is a per-episode choice instead of a
+                          blind all-or-nothing fork. When nothing was saved
+                          (discarded_empty), the SAME handler's payload takes
+                          this straight to the empty-handoff banner instead —
+                          there's nothing to review. */}
                       <Button
-                        onClick={() => onExitRef.current()}
-                        variant="ghost"
-                        className="w-full text-muted-foreground hover:text-foreground hover:bg-muted"
+                        onClick={reviewAndFinalize}
+                        className="w-full font-semibold"
                       >
-                        {t("recording.session.button.backHome")}
+                        {keptSomething
+                          ? t("recording.session.button.reviewAndFinalize")
+                          : t("recording.session.button.continue")}
                       </Button>
                     </div>
                   </div>

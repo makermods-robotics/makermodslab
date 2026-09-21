@@ -111,6 +111,12 @@ describe("formatSessionHeld", () => {
     expect(formatSessionHeld(t, heldError("auto_calibration"))).toBe(
       "The robot is busy — an auto-calibration is running. Stop it first."
     );
+    expect(formatSessionHeld(t, heldError("hosting"))).toBe(
+      "The robot is busy — remote-teleop hosting is running. Stop it first."
+    );
+    expect(formatSessionHeld(t, heldError("remote_teleoperation"))).toBe(
+      "The robot is busy — remote teleoperation is running. Stop it first."
+    );
   });
 
   it("falls back to the generic line for an unnamed or unknown holder", () => {
@@ -127,5 +133,18 @@ describe("formatSessionHeld", () => {
     expect(
       formatSessionHeld(t, new ApiError("x failed", 409, "busy", null))
     ).toBeNull();
+  });
+
+  it("renders robot.busy.releasing as a 'try again' line, not 'stop the other session'", () => {
+    const releasing = new ApiError(
+      "Start session failed: releasing",
+      409,
+      "The previous session is still shutting down. Try again in a few seconds.",
+      "robot.busy.releasing",
+      null
+    );
+    expect(formatSessionHeld(t, releasing)).toBe(
+      "Still finishing the last session — try again in a moment."
+    );
   });
 });

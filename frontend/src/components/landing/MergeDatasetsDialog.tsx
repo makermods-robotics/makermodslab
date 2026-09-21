@@ -24,7 +24,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { ArmType, armTypeFromRobotType, ARM_TYPE_LABEL } from "@/lib/armTypes";
+import { ArmType, armTypeFromRobotType, armLabel } from "@/lib/armTypes";
+import { useArms } from "@/hooks/useArms";
 import {
   Loader2,
   CheckCircle2,
@@ -46,6 +47,7 @@ import {
   DatasetItem,
   MAX_SOURCE_WEIGHT,
   MergeStatus,
+  cancelDatasetMerge,
   getDatasetInfo,
   getDatasetMergeStatus,
   startDatasetMerge,
@@ -99,6 +101,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
 }) => {
   const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
+  const { arms, byId } = useArms();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // Per-source repeat count, keyed by repo id. A repo absent from this map (or
   // not selected) weighs 1 — the map only ever holds deliberate overrides.
@@ -109,6 +112,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
   const [output, setOutput] = useState("");
   const [status, setStatus] = useState<MergeStatus | null>(null);
   const [starting, setStarting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   // Set when the merge is one confirmation away: the sources are identical
   // apart from a column we're willing to drop (see MergeStartResult).
@@ -143,6 +147,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
     setOutput(initialOutput ?? "");
     setStartError(null);
     setPendingWarnings(null);
+    setCancelling(false);
     notifiedDone.current = false;
     getDatasetMergeStatus(baseUrl, fetchWithHeaders)
       .then((s) => setStatus(s.state === "running" ? s : null))
@@ -352,15 +357,17 @@ const MergeDatasetsDialog: React.FC<Props> = ({
   const armMismatchWarning = useMemo<string | null>(() => {
     const byArm = new Map<ArmType, string[]>();
     for (const repoId of selectedIds) {
-      const arm = armTypeFromRobotType(infos[repoId]?.robot_type);
+      const arm = armTypeFromRobotType(arms, infos[repoId]?.robot_type);
       if (arm) byArm.set(arm, [...(byArm.get(arm) ?? []), repoId]);
     }
     if (byArm.size < 2) return null;
     const groups = [...byArm.entries()]
-      .map(([arm, ids]) => `${ids.join(", ")} (${ARM_TYPE_LABEL[arm]})`)
+      .map(
+        ([arm, ids]) => `${ids.join(", ")} (${armLabel(byId(arm), arm, t)})`,
+      )
       .join("; ");
     return t("landing.mergeDatasets.armMismatchWarning", { groups });
-  }, [selectedIds, infos, t]);
+  }, [selectedIds, infos, arms, byId, t]);
 
   // Resulting mix: episodes each source contributes AFTER its weight, and that
   // as a share of the merged total. Shares are what the user is really tuning —
@@ -465,6 +472,23 @@ const MergeDatasetsDialog: React.FC<Props> = ({
   };
 
   const handleMerge = (dropFeatures: string[] = []) => doMerge(false, dropFeatures);
+
+  // Stop a running merge on the operator's request. The backend SIGTERMs the
+  // subprocess and reclaims its partial output; the poll would also settle to
+  // "cancelled" on its own, but reflect it now so the dialog doesn't lag.
+  const handleCancel = async () => {
+    setCancelling(true);
+    try {
+      const res = await cancelDatasetMerge(baseUrl, fetchWithHeaders);
+      if (res.cancelled) {
+        setStatus((prev) => (prev ? { ...prev, state: "cancelled" } : prev));
+      }
+    } catch {
+      // Best-effort — the next poll still catches a backend-side stop.
+    } finally {
+      setCancelling(false);
+    }
+  };
 
   const state = status?.state ?? "idle";
 
@@ -782,6 +806,11 @@ const MergeDatasetsDialog: React.FC<Props> = ({
                     components={[<code key="0" className="text-ok" />]}
                   />
                 </>
+              ) : state === "cancelled" ? (
+                <>
+                  <XCircle className="w-4 h-4 text-muted-foreground" />{" "}
+                  {t("landing.mergeDatasets.cancelled")}
+                </>
               ) : (
                 <>
                   <XCircle className="w-4 h-4 text-destructive" />{" "}
@@ -800,7 +829,19 @@ const MergeDatasetsDialog: React.FC<Props> = ({
             {status?.error ? (
               <p className="text-sm text-destructive">{status.error}</p>
             ) : null}
-            <div className="flex justify-end">
+            <div className="flex justify-end gap-2">
+              {state === "running" && (
+                <Button
+                  variant="outline"
+                  disabled={cancelling}
+                  className="text-destructive hover:text-destructive"
+                  onClick={handleCancel}
+                >
+                  {cancelling
+                    ? t("landing.mergeDatasets.cancelling")
+                    : t("landing.mergeDatasets.cancel")}
+                </Button>
+              )}
               <Button
                 variant="outline"
                 onClick={() => onOpenChange(false)}

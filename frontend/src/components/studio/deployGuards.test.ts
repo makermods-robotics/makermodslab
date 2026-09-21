@@ -10,13 +10,17 @@ const ok: DeployGuardContext = {
   armMismatch: false,
   allCamerasBound: true,
   temporalEnsembleInvalid: false,
+  durationValid: true,
   inferenceActive: false,
   leaderMissing: false,
   requiresTask: false,
   task: "pick up the red block",
+  transportReady: true,
+  armSupportsRemote: true,
+  remoteEngineSupported: true,
 };
 
-const MODES: DeployRunMode[] = ["single", "eval", "coach"];
+const MODES: DeployRunMode[] = ["single", "eval", "coach", "remote"];
 
 describe("a language-conditioned policy cannot launch without its task", () => {
   // The check used to live only under `mode === "coach"`, so a plain run or a
@@ -56,6 +60,99 @@ describe("coaching keeps its own task requirement", () => {
   it("does not demand a leader arm for the other modes", () => {
     expect(deployBlockedReason("single", { ...ok, leaderMissing: true })).toBeNull();
     expect(deployBlockedReason("eval", { ...ok, leaderMissing: true })).toBeNull();
+    // Remote inference least of all: the Star Arm 102 leader holds encoders
+    // and no motors, and the remote run never touches a leader anyway.
+    expect(deployBlockedReason("remote", { ...ok, leaderMissing: true })).toBeNull();
+  });
+});
+
+describe("the shared max-duration field means different things per mode", () => {
+  // One field, two contracts: 0 is "run until I stop you" for a remote run and
+  // a run that ends the instant it starts for a local one. The panel cannot
+  // express that with a min= on the input, because the same input serves both.
+  it.each(["single", "eval", "coach"] as DeployRunMode[])(
+    "blocks %s on a duration this mode cannot use",
+    (mode) => {
+      expect(deployBlockedReason(mode, { ...ok, durationValid: false })).toMatch(
+        /blocked\.durationRequired/,
+      );
+    },
+  );
+
+  it("lets a remote run keep an unbounded duration", () => {
+    expect(deployBlockedReason("remote", { ...ok, durationValid: false })).toBeNull();
+  });
+});
+
+describe("remote inference has three guards of its own", () => {
+  it("blocks remote when the transport is not ready", () => {
+    // Also the pre-probe state. Launching into an unverified transport
+    // energizes the arm for a run that nothing may ever drive.
+    expect(deployBlockedReason("remote", { ...ok, transportReady: false })).toMatch(
+      /blocked\.transportNotReady/,
+    );
+  });
+
+  it("blocks remote on an arm family the ease-in does not support", () => {
+    expect(deployBlockedReason("remote", { ...ok, armSupportsRemote: false })).toMatch(
+      /blocked\.remoteArmUnsupported/,
+    );
+  });
+
+  it("reports the unsupported arm before the transport", () => {
+    // The arm is a fact about the robot that no transport fix changes; naming
+    // the transport first sends the operator to the wrong problem.
+    expect(
+      deployBlockedReason("remote", {
+        ...ok,
+        armSupportsRemote: false,
+        transportReady: false,
+      }),
+    ).toMatch(/blocked\.remoteArmUnsupported/);
+  });
+
+  it("blocks remote when the engine does not suit the checkpoint", () => {
+    // The engine guard has NO backend twin and cannot have one: the server
+    // never loads the checkpoint, so it cannot tell a flow policy from an ACT
+    // one and accepts whichever engine it is handed. This is the only gate.
+    expect(
+      deployBlockedReason("remote", { ...ok, remoteEngineSupported: false }),
+    ).toMatch(/blocked\.remoteEngineUnsupported/);
+  });
+
+  it("reports the unsuitable engine before the transport", () => {
+    // A fact about the CHECKPOINT, with a one-click remedy (switch back to
+    // Adaptive sync) that "the transport isn't ready" would send them past.
+    expect(
+      deployBlockedReason("remote", {
+        ...ok,
+        remoteEngineSupported: false,
+        transportReady: false,
+      }),
+    ).toMatch(/blocked\.remoteEngineUnsupported/);
+  });
+
+  it("still reports the unsupported arm before the engine", () => {
+    expect(
+      deployBlockedReason("remote", {
+        ...ok,
+        armSupportsRemote: false,
+        remoteEngineSupported: false,
+      }),
+    ).toMatch(/blocked\.remoteArmUnsupported/);
+  });
+
+  it("imposes none of the three on the local modes", () => {
+    for (const mode of ["single", "eval", "coach"] as DeployRunMode[]) {
+      expect(
+        deployBlockedReason(mode, {
+          ...ok,
+          transportReady: false,
+          armSupportsRemote: false,
+          remoteEngineSupported: false,
+        }),
+      ).toBeNull();
+    }
   });
 });
 
@@ -88,5 +185,66 @@ describe("preflight order puts the most fundamental gap first", () => {
 describe("a fully configured panel launches every mode", () => {
   it.each(MODES)("permits %s", (mode) => {
     expect(deployBlockedReason(mode, ok)).toBeNull();
+  });
+});
+
+describe("several tasks are refused rather than guessed between", () => {
+  // A merged dataset carries every task string of its inputs, and nothing
+  // distinguishes them well enough to pick one: measured on real merged
+  // datasets, two near-identical sentences sat 99 vs 100 episodes apart. The
+  // panel used to send whichever had one more episode, and on a coaching run
+  // that string is then stamped into every recorded frame.
+  it("blocks every mode for a language-conditioned policy", () => {
+    for (const mode of MODES) {
+      const reason = deployBlockedReason(mode, {
+        ...ok,
+        requiresTask: true,
+        task: "",
+        taskAmbiguous: true,
+      });
+      expect(reason).toMatch(/blocked\.taskAmbiguous/);
+    }
+  });
+
+  it("blocks coaching even for a policy that never reads the task", () => {
+    const reason = deployBlockedReason("coach", {
+      ...ok,
+      requiresTask: false,
+      task: "",
+      taskAmbiguous: true,
+    });
+    expect(reason).toMatch(/blocked\.taskAmbiguous/);
+  });
+
+  it("does not block a plain run whose policy ignores the task", () => {
+    // The field is not even on screen there, so there is nothing to resolve and
+    // refusing would be a dead end.
+    for (const mode of ["single", "eval"] as DeployRunMode[]) {
+      expect(
+        deployBlockedReason(mode, {
+          ...ok,
+          requiresTask: false,
+          task: "",
+          taskAmbiguous: true,
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("clears once the operator picks one", () => {
+    for (const mode of MODES) {
+      expect(
+        deployBlockedReason(mode, {
+          ...ok,
+          requiresTask: true,
+          task: "the chosen one",
+          taskAmbiguous: false,
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("is absent by default, so existing callers are unaffected", () => {
+    expect(deployBlockedReason("coach", { ...ok })).toBeNull();
   });
 });

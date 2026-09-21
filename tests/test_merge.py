@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -1143,3 +1144,196 @@ def test_a_codec_mismatch_is_reported_instead_of_a_pointless_drop_prompt(
     assert message is not None
     assert "codecs" in message
     assert "intervention" not in message
+
+
+# ── Cancel + stuck-merge watchdog ────────────────────────────────────────────
+
+import signal  # noqa: E402
+
+
+class _NullStream:
+    def readline(self) -> str:
+        return ""
+
+
+class _FakeProc:
+    """Stand-in for the merge subprocess: records the signals it is sent and
+    reports 'exited' only once it has been terminated."""
+
+    def __init__(self, pid: int = 999_999) -> None:
+        self.pid = pid
+        self.terminated = False
+        self.killed = False
+        self.returncode: int | None = None
+        self.stdout = _NullStream()
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is None:
+            self.returncode = -signal.SIGTERM
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -signal.SIGTERM
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -signal.SIGKILL
+
+
+def _running_manager(
+    tmp_lerobot_home: Path, output_rel: str, monkeypatch: pytest.MonkeyPatch
+) -> tuple[object, _FakeProc, Path]:
+    from makermodslab import merge
+    from makermodslab.merge import MergeManager
+
+    # The fake pid must never reach os.killpg — on a host where that pid is
+    # real, the kill path would signal an unrelated process group.
+    monkeypatch.setattr(merge, "_signal_process_group", lambda proc, signum: False)
+    mgr = MergeManager()
+    mgr.state = "running"
+    proc = _FakeProc()
+    mgr.process = proc
+    out = tmp_lerobot_home / output_rel
+    (out / "meta").mkdir(parents=True)
+    mgr._output_root = out
+    mgr._last_output_at = 1_000.0
+    return mgr, proc, out
+
+
+def test_cancel_terminates_a_running_merge(tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mgr, proc, out = _running_manager(tmp_lerobot_home, "a/mix-dead", monkeypatch)
+
+    res = mgr.cancel()
+
+    assert res == {"cancelled": True, "message": "Merge cancelled."}
+    assert proc.terminated is True
+    assert mgr.state == "cancelled"
+    assert not out.exists()  # partial output reclaimed
+
+
+def test_cancel_is_a_noop_when_no_merge_is_running() -> None:
+    from makermodslab.merge import MergeManager
+
+    mgr = MergeManager()
+    proc = _FakeProc()
+    mgr.process = proc
+    mgr.state = "done"
+
+    res = mgr.cancel()
+
+    assert res["cancelled"] is False
+    assert proc.terminated is False
+    assert mgr.state == "done"
+
+
+def test_monitor_does_not_overwrite_a_cancelled_verdict(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mgr, proc, _ = _running_manager(tmp_lerobot_home, "a/mix-race", monkeypatch)
+    proc.returncode = -signal.SIGTERM
+    mgr.state = "cancelled"
+
+    mgr._monitor()
+
+    assert mgr.state == "cancelled"
+
+
+def test_watchdog_kills_a_merge_that_goes_silent(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mgr, proc, out = _running_manager(tmp_lerobot_home, "a/mix-stuck", monkeypatch)
+    clock = [1_000.0]
+    mgr._now = lambda: clock[0]
+    mgr._last_output_at = clock[0]
+    mgr._stuck_after = 600
+
+    clock[0] += 300  # 5 min of silence — not stuck yet
+    assert mgr._watchdog_tick() is False
+    assert mgr.state == "running"
+
+    clock[0] += 400  # 700s of silence — over the threshold
+    assert mgr._watchdog_tick() is True
+    assert proc.terminated is True
+    assert mgr.state == "error"
+    assert "no output" in mgr.error.lower() or "stuck" in mgr.error.lower()
+    assert not out.exists()
+
+
+def test_watchdog_does_not_fire_while_output_keeps_arriving(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mgr, proc, _ = _running_manager(tmp_lerobot_home, "a/mix-live", monkeypatch)
+    clock = [1_000.0]
+    mgr._now = lambda: clock[0]
+    mgr._last_output_at = clock[0]
+    mgr._stuck_after = 600
+
+    for _ in range(20):
+        clock[0] += 120  # a progress line every 2 minutes
+        mgr._enqueue("aggregating episode ...")
+        assert mgr._watchdog_tick() is False
+
+    assert mgr.state == "running"
+    assert proc.terminated is False
+
+
+def test_cancel_releases_the_cleanup_guard_and_start_refuses_meanwhile(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from makermodslab import merge
+    from makermodslab.merge import MergeRequest
+
+    mgr, _, out = _running_manager(tmp_lerobot_home, "a/mix-guard", monkeypatch)
+    seen: list[dict[str, object]] = []
+
+    def slow_cleanup(output_root: Path) -> None:
+        # Mid-cleanup a retry must be refused, and not with the misleading
+        # "already exists locally" — the directory is being deleted right now.
+        req = MergeRequest(source_repo_ids=["a/one", "a/two"], output_repo_id="a/mix-guard")
+        seen.append(mgr.start(req))
+        shutil.rmtree(output_root)
+
+    monkeypatch.setattr(merge, "_cleanup_partial_output", slow_cleanup)
+
+    assert mgr.cancel()["cancelled"] is True
+
+    assert seen == [
+        {
+            "started": False,
+            "message": "The previous merge is still being cleaned up. Try again in a moment.",
+        }
+    ]
+    assert mgr._cancelling is False  # released once cleanup returned
+    assert not out.exists()
+
+
+def test_watchdog_treats_output_growth_as_progress(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mgr, proc, out = _running_manager(tmp_lerobot_home, "a/mix-writing", monkeypatch)
+    clock = [1_000.0]
+    mgr._now = lambda: clock[0]
+    mgr._last_output_at = clock[0]
+    mgr._stuck_after = 600
+
+    for i in range(5):
+        clock[0] += 500  # silent on stdout for 500s at a time ...
+        (out / "meta" / f"chunk-{i}.parquet").write_bytes(b"x" * (i + 1))  # ... but writing
+        assert mgr._watchdog_tick() is False
+    assert mgr.state == "running"
+    assert proc.terminated is False
+
+    clock[0] += 700  # nothing written AND nothing printed — now it is stuck
+    assert mgr._watchdog_tick() is True
+    assert mgr.state == "error"
+    assert not out.exists()
+
+
+def test_merge_cancel_endpoint_reports_no_merge_when_idle(client) -> None:
+    r = client.post("/api/v1/datasets/merge/cancel")
+    assert r.status_code == 200
+    assert r.json() == {"cancelled": False, "message": "No merge is running."}

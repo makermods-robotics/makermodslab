@@ -19,6 +19,7 @@ import { TooltipProvider } from "@radix-ui/react-tooltip";
 import { ApiProvider } from "./contexts/ApiContext";
 import { HfAuthProvider } from "./contexts/HfAuthContext";
 import { ModelsDataProvider } from "@/contexts/ModelsDataContext";
+import { ArmsProvider } from "@/contexts/ArmsContext";
 import { SessionProvider } from "./contexts/SessionContext";
 
 const queryClient = new QueryClient();
@@ -30,6 +31,11 @@ function App() {
         <ThemeProvider>
           <LanguageProvider>
           <ApiProvider>
+           {/* The arms manifest outranks everything that reads a robot
+               record: the corner, the studio, the dialogs and the teleop
+               page all resolve arm_type through it. Needs ApiProvider's
+               baseUrl, nothing else. */}
+           <ArmsProvider>
            <SessionProvider>
             <HfAuthProvider>
              {/* Above the router: the launchpad's skill slider and library
@@ -67,7 +73,7 @@ function App() {
                           {/* /inference is no longer a route — it's the
                               InferenceSessionDialog window, hosted by
                               InferenceSessionProvider and opened by the launch
-                              flows (Deploy panel + InferenceModal). */}
+                              flow (the studio's Deploy panel). */}
                           {/* Robot settings is no longer a route — it's the
                               RobotConfigDialog window, opened from the robot
                               corner (Launchpad + studio headers). */}
@@ -85,6 +91,7 @@ function App() {
              </ModelsDataProvider>
             </HfAuthProvider>
            </SessionProvider>
+           </ArmsProvider>
           </ApiProvider>
           </LanguageProvider>
         </ThemeProvider>

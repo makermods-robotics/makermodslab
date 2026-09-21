@@ -1,0 +1,289 @@
+export default {
+  network: {
+    autoRegionHint: "由 Modal 选择区域。网络延迟可能不同。",
+    "title": "网络",
+    "region": "GPU 区域",
+    "regionHint": "选择附近区域。重启 GPU 后生效。",
+    "advanced": "高级",
+    "videoQuality": "MJPEG 画质",
+    "videoQualityHint": "降低可减少带宽占用。",
+    "videoBitrateKbps": "H264 码率 (kbps)",
+    "videoBitrateKbpsHint": "每路相机。降低可减少带宽占用。",
+    "cameraSendHz": "相机发送频率 (Hz)",
+    "cameraSendHzHint": "0 = 自动。限制相机和状态更新，不改变机械臂控制频率。",
+    "latencyK": "抖动余量",
+    "latencyKHint": "越高，可容纳的延迟波动越大。",
+    "tolerance": "帧匹配容差",
+    "toleranceHint": "单位为控制周期。越高，允许的帧时间差越大。重启 GPU 后生效。",
+    "budget": "RTC 时间预算",
+    "delay": "预计延迟 {{delay}} / {{budget}} ms",
+    "within": "预算内",
+    "near": "接近上限",
+    "over": "超出预算",
+    "budgetHint": "包含推理时间和抖动余量。队列仍可能出现停顿。"
+},
+  form: {
+    autoAssignment: "自动（减少等待）",
+    autoShort: "自动",
+    autoGpuHint: "A10G、L4 或更大显存的 GPU。价格可能不同。",
+
+    motionTuning: "运动与网络",
+    gpuTuning: "GPU 调整",
+    humanUnavailable: "远程运行不支持人工接管。",
+
+    hubIdLabel: "Hub 策略 id",
+    // 引擎的标签位于 `studio.deploy.engine` —— 它现在是本地与远程共用的一个
+    // 字段。这里只保留两条说明文案，因为它们讲的是两种引擎各自做什么，
+    // 而不是谁是默认值。
+    engine: {
+      syncHint:
+        "把每个动作块执行完，再刚好及时地请求下一个。适用于任何策略，也是 ACT 的唯一选择。",
+      rtcHint:
+        "每次请求都把尚未执行的动作一并发过去，让 GPU 据此生成能够接续的下一个动作块，从而消除块与块之间的接缝。只有流式策略（SmolVLA、π0、π0.5、diffusion）能这样被引导。",
+    },
+    // “高级参数”折叠标题下的摘要行。其中每个取值都是实时数据 —— 编码 id 是
+    // 线上取值，数字就是实际发出的数字。写成两句完整的话而不是一句加片段：
+    // s_min 只有 rtc 才会真正上线，因此只在那一句里提到它。GPU 侧的参数原先
+    // 也拼在这里，现在它们移到了 Modal 卡片上，这一行只描述传输。
+    advancedSummary: "传输：horizon {{horizon}} · {{fps}} fps · {{codec}}",
+    advancedSummaryRtc:
+      "{{fps}} Hz · 平滑 {{lpfHz}} Hz",
+    horizonLabel: "Horizon",
+    fpsLabel: "帧率",
+    codecLabel: "视频编码",
+    // {{steps}} 是从检查点配置里读出的数字，不做任何翻译。
+    horizonFromCheckpoint:
+      "该检查点每个动作块返回 {{steps}} 步，因此 horizon 以此为起点，且不能超过它。",
+    horizonOverCeiling:
+      "horizon 超过了该检查点返回的 {{steps}} 步。这样两侧对动作块形状的理解就不一致，所有数据包都会被静默丢弃 — 运行看上去已连接，却收不到任何东西。",
+    filterLabel: "动作平滑（Hz）",
+    filterHint: "0 表示关闭滤波。较低的值可减缓突变，但会增加响应延迟。",
+    sMinLabel: "最小预留",
+    // "--s-min" 是命令行标志名，与本面板中其他标识符一样保留拉丁文写法。
+    sMinHint:
+      "机械臂为一次往返预留的计划步数。它必须和上面命令里的 --s-min 完全一致：机械臂据此算出下一个动作块中还“新鲜”的部分，而 GPU 会直接采信这个结果。",
+    // GPU 侧的参数。它们放在 Modal 卡片上而不是“高级参数”里：它们不需要与
+    // 机械臂一致 —— 决定的是容器加载什么、跑在什么硬件上。这里只保留标签，
+    // 卡片上是紧挨“启动 GPU”的一排下拉框，本身不带说明文案。
+    precisionLabel: "精度",
+    // 只有这一个选项是文案：它表示不传任何标志。其余都是 torch dtype 名称，
+    // 属于线上取值，不翻译。
+    precisionCheckpoint: "检查点默认值",
+    gpuLabel: "GPU",
+    gpuHint:
+      "策略服务运行所用的 Modal GPU。越大越快、每小时也越贵；它是继精度之后的第二根杠杆，而且无论如何都在计费。",
+    // 写在被禁用的下拉框旁边，因为这个原因属于“当前这个检查点”。
+    precisionUnavailable:
+      "该检查点没有可覆盖的精度设置 —— 它按保存时的精度加载。",
+    // 流步数参数（S3.8f）。
+    flowStepsLabel: "流步数",
+    slackLabel: "同步缓冲余量（周期）",
+    slackHint:
+      "较低的值减少缓冲，较高的值可容忍传输波动。默认值为 5。更改后需重新启动 GPU。",
+    // 只有这一个选项是文案：它表示不传任何标志。第二种写法里的数字是该检查点
+    // 实际会用的步数，属于数据 —— 由服务端算出，不在本文件里写死。
+    flowStepsCheckpoint: "检查点默认值",
+    flowStepsCheckpointKnown: "检查点默认值（{{steps}}）",
+    flowStepsUnavailable: "该检查点不是分步生成动作的，因此没有可缩短的步数。",
+  },
+  // 按角色绑定摄像头。只有当检查点的某个摄像头在机器人上找不到同名摄像头时才会出现。
+  cameraRoles: {
+    title: "摄像头角色",
+    nameMatched_other: "另有 {{count}} 个摄像头按名称自动匹配。",
+    capturesAt: "策略的训练分辨率为 {{width}}×{{height}}。",
+    unbound: "尚未选择",
+    noCameras: "该机器人没有摄像头 — 请在机器人设置中添加。",
+    disconnected: "当前未接入。",
+    // S3.8g —— 检查点本身并未声明的视角。下面插值的角色名是数据（cam2），各语言均原样呈现。
+    addRole: "添加摄像头角色",
+    addRoleHint:
+      "该检查点是用它声明的两个视角微调的，但底层模型可接受任意数量的视角，因此可以让 GPU 端再加一个。这会增加延迟（每步的图像 token 更多），且检查点作者从未测试过这种用法 —— 请先实测再信任它。新增的摄像头需要在上方选择，并且必须从本面板启动 GPU，两端才能保持一致。",
+    addRoleFull:
+      "本启动器最多只添加这么多额外视角。每多一个视角，每步的计算量都会增加；超过一定数量后，动作块会在机械臂需要它之后才送达。",
+    extraBadge: "为本次运行添加 —— 并非该检查点训练时使用的视角。",
+    remove: "移除",
+    removeRole: "移除摄像头角色 {{role}}",
+  },
+  // 后端引擎取值。用于匹配，不直接展示 — 原值只作为新版服务端引入新引擎时的兜底。
+  engine: {
+    sync: "自适应同步",
+    rtc: "实时分块",
+  },
+  modalRun: {
+    manualToggle: "改为自己手动启动",
+    title: "MakerMods Lab 将要运行的命令",
+    intro:
+      "同一条命令，供手动启动使用 — 当 modal 命令缺失或尚未登录时，这是唯一的途径；当运行已连接却收不到任何东西时，也用它来做对照。",
+    copy: "复制",
+    copiedTitle: "命令已复制",
+    copyFailedTitle: "复制失败",
+    copyFailedBody: "请手动选中命令并复制。",
+    noRoomYet: "尚未解析出房间 — 请先在下方重新检查传输，然后再复制命令。",
+    tokenHint:
+      "命令中的 token 由本 MakerMods Lab 为 GPU 端签发：只能进入这个房间、只对应一个身份，约一小时后过期 — 如果命令放了一段时间，请重新复制。MakerMods Lab 的接口从不返回签名用的 secret。",
+    noTailnetUrl:
+      "没有 tailnet 地址，命令中也就没有可供 GPU 端拨号的 URL。请在本机登录 Tailscale，然后重新检查传输。",
+  },
+  // GPU 侧，自 S3.8 起由 MakerMods Lab 自己启动。它不会作为远程按钮的前置条件 —
+  // 那仍由传输探测中的 operator 检查决定。
+  gpu: {
+    setup: {
+      install: "请先安装 Modal，再启动 GPU。",
+      signIn: "请先登录 Modal，再启动 GPU。",
+      where: "请在运行 MakerMods Lab 的电脑上执行以下命令。",
+      checkAgain: "重新检查",
+      failed: "GPU 启动失败。详情",
+    },
+
+    title: "Modal 上的策略服务",
+    start: "启动 GPU",
+    retry: "重试",
+    stop: "停止 GPU",
+    cancel: "取消",
+    // {{wrapper}} 是包装脚本的路径，{{gpu}} 是 Modal 的 GPU 规格，都属于数据，
+    // 原样显示。GPU 改为插值而不是写死在句子里，因为它现在是可选的（S3.8e）。
+    idleHint:
+      "Modal {{gpu}}。首次启动可能需要 1–3 分钟。",
+    // {{seconds}} 是普通整数，刻意不使用 i18next 的 count 机制。
+    elapsed: "{{seconds}} 秒",
+    // 后端阶段取值。用于匹配，不直接展示 — 原值只作为新版服务端引入新阶段时的兜底。
+    phase: {
+      pending: "等待 GPU",
+      tailscale_up: "正在加入 tailnet",
+      loading: "正在加载检查点",
+      warmup: "正在预热模型",
+      connecting: "正在连接房间",
+      connected: "已在房间中",
+      claimed: "正在驱动",
+    },
+    // 两个目标选择器。它们的选项永远不翻译：profile 名、workspace 名和
+    // environment 名都是 CLI 用于匹配的标识符，面板按 modal 报告的原样显示。
+    profileLabel: "Modal profile",
+    environmentLabel: "Environment",
+    running: "GPU 正在运行 — 这会产生费用。",
+    // {{profile}}、{{workspace}} 和 {{environment}} 都是数据 — Modal 自己的
+    // 名称，在译文句子中原样呈现。
+    billingTo: "计费到 {{profile}}。",
+    billingToWorkspace: "计费到 {{profile}} · {{workspace}}。",
+    billingEnvironment: "环境 {{environment}}。",
+    // {{minutes}} 是普通整数，刻意不使用 count 机制。
+    idleStopIn: "若约 {{minutes}} 分钟内没有远程运行开始，它会自动停止。",
+    idleStopPaused: "有远程运行正在使用它，因此不会自动停止。",
+    // 表单与正在运行的服务之间的不一致。{{fields}} 是一组参数名
+    //（engine、horizon、fps、codec、s_min、policy、task）— 属于数据。
+    // 启动时的取值原样跟在这句话之后。
+    driftBody:
+      "GPU 启动后你改动了 {{fields}}。正在运行的服务会一直沿用启动时的取值，二者不一致时运行不会报错，只会什么都收不到。它当前的取值是：",
+    restart: "用这些设置重启 GPU",
+    restarting: "正在重启 GPU…",
+    restartingBody: "正在停止当前 GPU，随后会按所选设置请求新的 GPU。",
+    // 任务为空、“启动 GPU” 被禁用时，在空闲状态下显示。
+    taskRequired:
+      "请先描述任务 — 该策略以语言为条件，GPU 上的策略服务没有任务就会拒绝启动。",
+    roomLabel: "房间",
+    logLabel: "日志",
+  },
+  transport: {
+    details: "详情",
+    // 传输区块已经撤掉，这里剩下的是：手动命令旁边那份需要人用眼睛读、再手动
+    // 抄到别处的小抄；会话对话框策略行要用的来源标签；以及“开始”下面那句结论。
+    // 这些标签背后的每个取值都是数据，一律原样显示。
+    unresolved: "未设置",
+    source: {
+      sfu: "MakerMods Lab 自带的 SFU",
+      none: "无来源 — MakerMods Lab 未运行自带的 SFU",
+    },
+    roomLabel: "房间",
+    extraMissing:
+      "未安装可选的 remote 附加依赖，因此无法进行任何检查。请在主检出目录中安装 — 在 worktree 中执行可编辑安装会让其他所有会话都指向该目录。",
+    sfuModalUrlLabel: "供 GPU 使用的地址",
+    sfuNoTailnet: "没有 tailnet 地址",
+    // 和下面那些结论句一样，只是没有放进 summary：它是唯一一条“解决办法是一条
+    // 命令”的结论，面板会把那条命令（以及后端给出的安装提示，如果有）打印在这
+    // 句话下面。“下面的参数”指的就是那段 <pre>。参见 transportSummary.ts。
+    sfuNotRunning:
+      "请用 --sfu 启动 MakerMods Lab。",
+    // 把传输状态归纳成一句话，按“第一个出问题的环节”来选 —— 顺序就是操作者
+    // 需要依次解决的顺序。它会取代“开始”下面那句笼统的“尚未就绪”，所以每一条
+    // 都必须说清楚接下来该做什么。参见 transportSummary.ts。
+    summary: {
+      // {{error}} 是抛出的错误自身的文本，属于后端文案，原样显示。
+      fetchFailed: "无法读取传输状态：{{error}}",
+      checking: "正在检查房间…",
+      notChecked: "尚未检查房间。",
+      notConfigured:
+        "连接配置失败。请用 --sfu 重新启动 MakerMods Lab。",
+      // {{url}} 就是地址本身，属于数据。
+      unreachable:
+        "{{url}} 上没有任何响应。请确认 LiveKit 服务器已启动，并且本机能连上它。",
+      notProbed: "无法从本机检查该房间。",
+      // {{room}} 是房间名，属于数据。
+      ready: "已有 GPU 在 {{room}} 中，随时可以驱动机械臂。",
+      gpuStarting: "GPU 正在启动…",
+      gpuWaiting: "正在等待 GPU…",
+      operatorAbsent:
+        "请先启动 GPU。",
+    },
+  },
+  phase: {
+    idle: "未运行",
+    resolving: "正在解析检查点",
+    transport_check: "正在检查传输",
+    preflight: "启动前检查",
+    starting: "正在启动",
+    connecting: "正在连接房间",
+    warming_up: "等待策略接入",
+    easing: "正在把机械臂移入初始位姿",
+    running: "运行中",
+    stopping: "正在停止",
+    stopped: "已停止",
+    error: "失败",
+  },
+  outcome: {
+    ok: "已正常结束",
+    failed: "运行失败",
+    ran_with_warning: "已结束，但清理时有警告",
+  },
+  status: {
+    // 会话对话框中远程运行专用的文案。状态药丸、按钮和日志标题与本地运行共用，
+    // 位于 `inference.*` 之下。
+    //
+    // 整个启动阶段只用这一句：当前阶段会显示在按钮下方的阶段行里，若这里也跟着
+    // 变，计时器下方就会成为整屏最吵的地方。
+    connectingSubtitle: "正在连接 GPU 与机械臂…",
+    // duration 为 0 的远程运行会一直跑到被停止。这里的 “/” 与有时限运行显示的
+    // “/ 01:00” 保持一致。
+    unbounded: "/ ∞ — 你不停它就不停",
+    unboundedDone: "/ ∞",
+    // {{ref}} 是策略 ref，{{room}} 是房间名，{{source}} 是解析出的来源标签，
+    // 三者都是数据，原样显示。
+    policyLine: "策略：{{ref}} · 远程 · {{room}}，来自 {{source}}",
+    policyLineNoRoom: "策略：{{ref}} · 远程",
+    gpuCardTitle: "远程 GPU",
+    // {{profile}} 是 Modal 自己的 profile 名，{{gpu}} 是 Modal 的 GPU 规格
+    // 字符串，二者都属于数据。它们与“计费”说明的是这次运行的成本，就写在
+    // 操作者盯着它运行的地方。
+    gpuBilling: "Modal · {{profile}} · {{gpu}} · 计费中",
+    // 子进程会写一个日志文件并报告它的路径；浏览器这边没有任何流式日志，
+    // 因此日志区域显示这个路径，由操作者自行打开。
+    noLogYet: "尚无日志路径 — 本次运行还没有创建。",
+    returningToRest: "正在把机械臂缓慢送回起始位姿，然后再释放力矩。",
+    operator: "操作方",
+    noOperatorYet: "等待中",
+    chunks: "动作块 / 请求",
+    chunkAge: "动作块时延",
+    e2e: "端到端 p50 / p95",
+    rtt: "往返时延",
+    holdsRate: "保持次数",
+    holdsPerSecond: "{{rate}}/秒",
+    leadLabel: "调度余量",
+    leadValue: "{{lead}} / {{margin}}",
+    degradeHint: "质量正在下降",
+    noSampleYet: "尚无采样 — 连接成功一秒后会收到第一条。",
+  },
+  toast: {
+    startFailed: "无法启动远程运行",
+    stopFailed: "无法停止远程运行",
+    noSession: "该服务器上没有登记的远程运行。",
+  },
+} as const;

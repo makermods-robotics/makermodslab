@@ -275,6 +275,60 @@ def test_shutdown_stops_active_inference(monkeypatch: pytest.MonkeyPatch) -> Non
     assert rollout.inference_active is False
 
 
+def test_shutdown_stops_an_active_remote_inference_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sharpest case on the shutdown handler's list.
+
+    A remote-inference run's arm is held by a child spawned with
+    `start_new_session=True`, so the SIGTERM/SIGINT that ends this worker
+    (a `--reload` save, a Ctrl-C, `makermodslab --stop`) never reaches it — and
+    it ignores stdin EOF by design. `STOP` on that stdin is the ONLY thing that
+    makes it return the arm to its captured start pose before releasing torque.
+    Without this the child was left driving an energized arm with nobody able
+    to reach it from the API, against the repo's "stopped means de-energized"
+    contract."""
+    from makermodslab import remote_inference
+
+    class _FakeStdin:
+        def __init__(self) -> None:
+            self.written: list[bytes] = []
+
+        def write(self, data: bytes) -> None:
+            self.written.append(data)
+
+        def flush(self) -> None:
+            pass
+
+    class _FakeChild:
+        def __init__(self) -> None:
+            self.stdin = _FakeStdin()
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.returncode = 0
+            return 0
+
+    child = _FakeChild()
+    monkeypatch.setattr(remote_inference, "remote_inference_active", True)
+    monkeypatch.setattr(remote_inference, "_remote_proc", child)
+    monkeypatch.setattr(remote_inference, "_remote_started_at", time.time())
+    monkeypatch.setattr(remote_inference, "_remote_meta", {"phase": remote_inference.PHASE_RUNNING})
+    monkeypatch.setattr(remote_inference, "_last_result", None)
+    monkeypatch.setattr(remote_inference, "_startup_thread", None)
+    # Broadcast-thread cleanup isn't under test here.
+    monkeypatch.setattr(server_mod, "manager", None)
+
+    asyncio.run(server_mod.shutdown_event())
+
+    assert child.stdin.written == [b"STOP\n"], (
+        "shutdown did not send STOP to the remote-inference child — a SIGTERM would "
+        "have released torque wherever the policy left the arm"
+    )
+    assert remote_inference.remote_inference_active is False
+
+
 def test_health_endpoint_returns_200_with_json_object(client: TestClient) -> None:
     response = client.get("/health")
     assert response.status_code == 200

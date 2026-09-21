@@ -11,7 +11,7 @@ import PolicySlider from "@/components/launchpad/PolicySlider";
 import NewPolicyBanner from "@/components/launchpad/NewPolicyBanner";
 import ActivityStrip from "@/components/launchpad/ActivityStrip";
 import LibrarySheet from "@/components/launchpad/LibrarySheet";
-import RobotCorner from "@/components/launchpad/RobotCorner";
+import RobotToolbar from "@/components/launchpad/RobotToolbar";
 import CoachHandoff from "@/components/studio/CoachHandoff";
 import StudioOverlay from "@/components/studio/StudioOverlay";
 import { useStudio } from "@/contexts/StudioContext";
@@ -47,12 +47,12 @@ const Launchpad = () => {
 
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">
-      <header className="flex items-center justify-between gap-3 px-4 py-3 sm:px-6">
+      <header className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6">
         <div className="flex items-center gap-3">
           <BrandMark />
           <HfAuthChip />
         </div>
-        <div className="flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-3">
           <Button
             variant="ghost"
             size="sm"
@@ -63,12 +63,7 @@ const Launchpad = () => {
             <Library className="h-3.5 w-3.5" />
             {t("launchpad.header.myLibrary")}
           </Button>
-          {/* Wrapped (rather than tagging RobotCorner.tsx itself) since the
-              same component also renders inside StudioOverlay's header —
-              tagging it directly would give the tour two matching elements. */}
-          <div data-tour="launchpad-robot-corner">
-            <RobotCorner />
-          </div>
+          <RobotToolbar tourTarget />
         </div>
       </header>
 

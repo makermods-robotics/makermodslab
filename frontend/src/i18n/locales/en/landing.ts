@@ -12,8 +12,7 @@
  * i18next's `count`.
  */
 export default {
-  // Shared by DatasetPicker and ModelPicker: the two popovers render the same
-  // section headings and row chips, so one set of keys serves both.
+  // The dataset picker's section headings and row chips.
   picker: {
     // Product name — same in every language, keyed so both sections have one
     // uniform shape.
@@ -31,12 +30,29 @@ export default {
     empty:
       "No datasets yet. Use “Add dataset” to record, download, or import one.",
     deleteAria: "Delete {{repoId}}",
+    // <0> is the mono repo-id span; {{repoId}} is the typed Hub id.
+    useHub: "Use <0>{{repoId}}</0> from the Hub",
+    useHubHint: "Public dataset — training fetches it on demand.",
+    row: {
+      // Abbreviated episode count on a picker row. {{episodes}} rather than
+      // {{count}}: this is a compact badge with no plural form.
+      episodes: "{{episodes}} ep",
+      // Source marker for a Hub-only row. Product name — same in every
+      // language, keyed so the two markers have one uniform shape.
+      hub: "Hub",
+      // Compact badge: this dataset carries per-episode sampling weights.
+      weighted: "weighted",
+      weightedTitle:
+        "Carries per-episode sampling weights — some episodes are sampled more often during training",
+    },
   },
   modelPicker: {
     searchPlaceholder: "Search models…",
     loading: "Loading models…",
     empty: "No models yet. Use “Add model” to train, download, or import one.",
     deleteAria: "Delete {{name}}",
+    // Badge on a run that exited non-zero but left usable weights.
+    failedBadge: "failed run",
   },
   addDatasetFromHub: {
     title: "Add a dataset from Hugging Face",
@@ -84,9 +100,20 @@ export default {
     armLayout: "Arm layout",
     // Same, for the hardware-family radiogroup.
     armTypeLabel: "Arm type",
-    // The DISPLAY half of ARM_TYPE_OPTIONS. The submitted value ("so101" /
-    // "maker") is logic and stays in the component, untranslated — it is
-    // persisted verbatim into the robot record on disk.
+    // Shown under the (empty) card grid until the arms manifest answers.
+    armTypesLoading: "Loading arm types…",
+    // The manifest fetch failed; the provider keeps retrying. The raw error
+    // is appended by the component.
+    armTypesFailed:
+      "Could not load arm types from the server — retrying. Nothing can be created until it answers.",
+    // {{extension}} is the manifest's provided_by — an extension's name, data.
+    providedBy: "Provided by {{extension}}",
+    // The DISPLAY half of the arm-type cards, keyed by manifest id. The
+    // submitted value ("so101" / "maker" / …) is logic and stays in the
+    // component, untranslated — it is persisted verbatim into the robot
+    // record on disk. These are per-id OVERRIDES of the arms manifest's own
+    // label; a family without an entry shows the manifest's English label and
+    // no description.
     armTypes: {
       so101: {
         label: "SO-101",
@@ -213,6 +240,9 @@ export default {
     merging: "Merging into <0>{{repoId}}</0>…",
     created: "Created <0>{{repoId}}</0>",
     failed: "Merge failed",
+    cancelled: "Merge cancelled",
+    cancel: "Cancel merge",
+    cancelling: "Cancelling…",
     done: "Done",
     // --- Per-source weights ---------------------------------------------
     // Incompatibility reasons. Camera lists are DATA — the names come from the
@@ -394,71 +424,6 @@ export default {
       failedTitle: "Download failed",
       startFailedTitle: "Couldn't start download",
     },
-  },
-  inference: {
-    title: "Configure Inference",
-    description:
-      "Pick a checkpoint and confirm hardware. The selected policy will drive the follower autonomously for the configured duration.",
-    robotSection: "Robot Configuration",
-    noRobot: "Select and configure a robot on the Landing page first.",
-    // <0> bolds the robot name; {{gap}} is the rendered setup-gap phrase from
-    // formatRobotSetupGap (robot.setupGap.* in the robot namespace).
-    followerNotReady:
-      "<0>{{name}}</0> {{gap}}. Open Robot settings before running inference. (Inference only uses the follower arm — leader setup isn't needed.)",
-    runningOn: "Running on <0>{{name}}</0>",
-    runningOnBimanual: "Running on <0>{{name}}</0> (bimanual — both followers)",
-    checkpointSection: "Checkpoint",
-    noCheckpoints: "No checkpoints available for this job yet.",
-    // <0> bolds the checkpoint's layout, <1> the robot name. {{dim}} and
-    // {{arms}} are raw numbers read off the checkpoint.
-    mismatchBimanual:
-      "This checkpoint was trained on a <0>bimanual robot</0> ({{dim}}-dim state, {{arms}} arms), but <1>{{name}}</1> is a single-arm robot. Pick a single-arm checkpoint, or select a bimanual robot on the Landing page.",
-    mismatchSingle:
-      "This checkpoint was trained on a <0>single-arm robot</0> ({{dim}}-dim state), but <1>{{name}}</1> is a bimanual robot. Pick a bimanual checkpoint, or select a single-arm robot on the Landing page.",
-    paramsSection: "Run parameters",
-    taskLabel: "Task description",
-    taskPlaceholder: "e.g., pick up the red block",
-    // {{policyType}} is the policy id from the checkpoint — data.
-    languageConditioned: "This policy is language-conditioned ({{policyType}}).",
-    durationLabel: "Max duration (seconds)",
-    engineLabel: "Inference engine",
-    // Only the option LABELS are translated — the submitted values stay
-    // "sync" / "rtc" in the component.
-    engineSync: "Sync (default)",
-    engineRtc: "RTC — experimental, smoother control",
-    engineRtcHint:
-      "Real-Time Chunking overlaps inference with motion, removing the pause between action chunks. It also changes how actions are generated — compare against Sync before trusting a result.",
-    engineSyncHint:
-      "One policy forward per control step. The arm pauses briefly between action chunks.",
-    camerasSection: "Cameras",
-    policyConfigLoading: "Reading policy config…",
-    // {{message}} is the raw error text (backend or JS) — not ours to translate.
-    policyConfigError: "Couldn't load policy config: {{message}}",
-    noCameras: "This policy doesn't use cameras.",
-    bindHint:
-      "Bind one of this robot's cameras to each name the policy was trained with. Which camera and how it's opened come from the robot (edit in Robot settings); the capture resolution comes from the checkpoint.",
-    capturesAt: "Captures at {{width}}×{{height}} — the policy's resolution",
-    robotCameraResolution:
-      "({{name}} is set to {{width}}×{{height}} in Robot settings)",
-    disconnected: "Disconnected — reconnect it before starting",
-    selectCamera: "Select a camera",
-    noRobotCameras: "This robot has no cameras — add them in Robot settings",
-    thumbnailReleased: "Released",
-    thumbnailNoPreview: "No preview",
-    advancedSummary: "Temporal ensembling for ACT",
-    actionSelection: "Action selection",
-    temporalEnsemble: "Temporal ensembling",
-    temporalEnsembleHint:
-      "Averages the overlapping action chunks the policy predicts at each step instead of executing one chunk open-loop — smoother motion, but the policy runs every control step, so it is slower.",
-    coeffLabel: "Ensemble coefficient",
-    // {{coeff}} is the ACT paper's default, rendered as the literal number.
-    coeffPlaceholder: "{{coeff}} (ACT paper default)",
-    coeffInvalid: "Enter a number greater than 0.",
-    coeffHint:
-      "Weights are exp(-coeff × age): higher favours the newest prediction, lower averages more evenly. The ACT paper uses {{coeff}}.",
-    start: "Start Inference",
-    starting: "Starting…",
-    startFailedTitle: "Couldn't start inference",
   },
   // useDatasetUpload / useHubDownload. These are the CLIENT-side fallbacks used
   // only when the backend sent no message of its own; a backend message is

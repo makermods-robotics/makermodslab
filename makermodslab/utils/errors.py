@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -109,6 +109,60 @@ def classify_outcome(work_completed: bool, error_text: str | None) -> str:
     return "ran_with_warning" if work_completed else "failed"
 
 
+# The remedy for each `transport.*` refusal (see api_errors.ErrorCode), as
+# prose the preflight appends to its message. Kept here, beside friendly_hint,
+# because it is the same job — a plain-language, actionable headline — and
+# because it must stay PURE: nothing here reads the machine's state, so the
+# wording is unit-testable without touching the filesystem.
+
+
+def transport_hint(code: str, *, sfu: bool = True, room: str = "") -> str:
+    """What to do about a `transport.*` refusal. Always a non-empty sentence.
+
+    The transport is the Lab's OWN SFU (`makermodslab --sfu`) — the one
+    remote teleoperation and remote inference share — so every remedy here is
+    about a process on this machine, never about a file of credentials. `sfu`
+    is kept for the callers that still pass it; it no longer selects a second
+    set of remedies.
+    """
+    code = str(code)
+    if code.endswith("extra_missing"):
+        # Never "run this here": an editable install re-points the shared venv
+        # at whatever directory it is run from, so a worktree install silently
+        # breaks every other session's `makermodslab`.
+        return (
+            "Install it from the PRIMARY checkout (never a git worktree — an editable install "
+            "re-points the shared virtualenv at whatever directory it runs from): "
+            "uv pip install -e '.[remote]' — or use the in-app installer (Remote → Install)"
+        )
+    if code.endswith("not_configured"):
+        return (
+            "Start the Lab with `makermodslab --sfu` (add `--sfu-external-ip` for a Modal GPU): "
+            "it runs the LiveKit server the two sides meet on and signs every join itself."
+        )
+    if code.endswith("unreachable"):
+        return (
+            "The Lab's SFU isn't answering — was the Lab started with `--sfu`? It runs as a "
+            "child of the launcher, so it stops with the Lab and a reload does not bring it "
+            "back on its own."
+        )
+    if code.endswith("unauthorized"):
+        return (
+            "The SFU rejected the key pair the Lab signs with. The pair is minted once into "
+            "the key file under MAKERMODSLAB_HOME (livekit_keys.yaml) and the running server "
+            "reads the same file; delete it and restart the Lab to rotate both together."
+        )
+    if code.endswith("no_policy"):
+        where = f" '{room}'" if room else ""
+        return (
+            "Three things do this: the GPU side was never started (Start GPU, or the modal run "
+            f"line in the panel); it was started with a --livekit-room other than{where or ' yours'} "
+            "— the panel's line and the launcher both pin it, a hand-typed one may not; or the "
+            "container's TS_AUTHKEY expired, so it never made it onto the tailnet to join at all."
+        )
+    return "Check the LiveKit transport settings and try again."
+
+
 def friendly_hint(error_text: str | None) -> str | None:
     """A plain-language, actionable headline for the common SO-101 and
     training failures, or None when the text doesn't match a known pattern.
@@ -187,6 +241,14 @@ def friendly_hint(error_text: str | None) -> str | None:
         "connect" in low or "reach" in low or "retries" in low or "timed out" in low or "timeout" in low
     ):
         return "Couldn't download the model — check your internet connection, then confirm the repo id."
+    if "camera" in low and any(
+        marker in low
+        for marker in ("timed out waiting for frame", "read failed", "failed to capture", "failed to open")
+    ):
+        return (
+            "The camera isn't delivering frames — close other camera apps/previews, reconnect its USB cable, "
+            "and check camera settings and macOS camera access before retrying."
+        )
     if "could not connect" in low or "failed to connect" in low or "not connected" in low:
         return "Couldn't connect to the arm — make sure it's plugged in, powered on, and on the right port."
     if "frame is too old" in low or "no frame" in low or "frame timeout" in low:

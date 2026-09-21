@@ -22,13 +22,13 @@ const WIDE_COLUMN_MIN_PX = 800;
 export const GRID_MIN_H = "min-h-[18.875rem]";
 
 /** The same reservation as a FIXED height, for a library whose content is not
- * a fixed-height card row. A grid can floor its height and stop there — its
- * rows are 16.5rem whatever they hold. Jobs renders a dropdown plus one
- * variable-height detail card, so flooring alone would let a tall card push the
- * Train panel's action row back out of line with its siblings; capping too, and
- * scrolling inside the box, keeps the block one exact height in both
- * directions. Same measurement as GRID_MIN_H — change them together (and keep
- * both literal: Tailwind only generates classes it can see). */
+ * a fixed-height card row. Jobs renders a dropdown plus one variable-height
+ * detail card, so flooring alone would let a tall card resize the block under
+ * the Train panel's action row; capping too, and scrolling inside the box,
+ * keeps the block one exact height in both directions. The
+ * card grids do the same thing one level down (see the row viewport below).
+ * Same measurement as GRID_MIN_H — change them together (and keep both
+ * literal: Tailwind only generates classes it can see). */
 export const GRID_H = "h-[18.875rem]";
 /** Just the 16.5rem card row, without the footer slot. An empty/no-match state
  * that renders its OWN footer row beneath it (jobs' Untracked toggle) must use
@@ -40,9 +40,11 @@ export const GRID_ROW_MIN_H = "min-h-[16.5rem]";
  * The shared library grid, capped at one row. Every studio library (datasets,
  * training jobs, models) renders one row of cards by default — three where the
  * column is wide enough (see WIDE_COLUMN_MIN_PX), two otherwise; anything past
- * that stays hidden behind a "Show all" toggle. The row is always reserved
- * (fixed row height, blank cells when there aren't enough cards) so the three
- * panels' libraries keep one uniform height however large a collection grows.
+ * that stays hidden behind a "Show all" toggle, and reveals by scrolling
+ * inside the reserved row rather than by growing the block. The row is always
+ * reserved (fixed row height, blank cells when there aren't enough cards) so
+ * the three panels' libraries keep one uniform height however large a
+ * collection grows, expanded or not.
  */
 const CappedGrid: React.FC<{
   /** Pre-keyed cards, already sorted newest-first by the caller. */
@@ -106,16 +108,32 @@ const CappedGrid: React.FC<{
   }, [overflow, onOverflowChange]);
   const shown = expanded || overflow <= 0 ? items : items.slice(0, cap);
   return (
-    <div ref={columnRef} className="space-y-2">
+    <div
+      ref={columnRef}
+      className="flex min-h-0 flex-1 flex-col space-y-2"
+    >
+      {/* The reserved row is a scrolling VIEWPORT that FILLS the library, not
+          a content-height block: it takes every pixel the section has spare
+          (flex-1) and never drops below one card row (min-h), so "Show all"
+          scrolls the extra rows inside it instead of growing the block, and
+          the footer below stays put at the foot of the column whatever the
+          card count does. Only for reserveRows grids: a nested one (jobs'
+          Untracked) hugs its content inside a box that is already held. */}
       <div
         className={cn(
-          LIBRARY_GRID,
-          LIBRARY_GRID_COLS[cap],
-          "auto-rows-[16.5rem]",
-          reserveRows && "grid-rows-[16.5rem]",
+          reserveRows && "min-h-[16.5rem] flex-1 overflow-y-auto",
         )}
       >
-        {shown}
+        <div
+          className={cn(
+            LIBRARY_GRID,
+            LIBRARY_GRID_COLS[cap],
+            "auto-rows-[16.5rem]",
+            reserveRows && "grid-rows-[16.5rem]",
+          )}
+        >
+          {shown}
+        </div>
       </div>
       {overflow > 0 ? (
         <button

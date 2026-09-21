@@ -229,6 +229,26 @@ def test_arm_count_mismatch_none_for_unrecognised_width() -> None:
     assert _arm_count_mismatch("bimanual", 7) is None
 
 
+def test_arm_count_mismatch_reads_the_arm_width_live_from_the_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A width table captured at import is stale for a family registered
+    later (an extension's), and against the SO-101's 6 a 9-dim checkpoint is
+    neither <= 6 nor a multiple of it — the guard would fall through the
+    odd-width escape on every run. Read the width off the family instead."""
+    from makermodslab.arms import registry
+    from makermodslab.rollout import _arm_count_mismatch
+    from tests.mocks import make_arm_family, scratch_registry
+
+    scratch_registry(monkeypatch)
+    registry.register(make_arm_family("nine", joints_per_arm=9))
+
+    assert _arm_count_mismatch("single", 9, "nine") is None
+    assert _arm_count_mismatch("bimanual", 18, "nine") is None
+    assert _arm_count_mismatch("bimanual", 9, "nine") is not None
+    assert _arm_count_mismatch("single", 18, "nine") is not None
+
+
 def test_detect_device_returns_cpu_when_neither_cuda_nor_mps(monkeypatch: pytest.MonkeyPatch) -> None:
     import torch
 
@@ -730,13 +750,18 @@ def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp
     cache — we only inspect the argv handed to Popen. The resolve stub takes the
     `report` kwarg the worker now passes for download progress."""
     from makermodslab import rollout
+    from makermodslab.arms import so101
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda cfg, arm_type="so101": cfg)
-    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    # The SO-101 follower preflights live in arms/so101.py (TB6a); rollout
+    # reaches them through family.preflight_ports.
+    monkeypatch.setattr(so101, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(so101, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(
-        rollout, "_resolve_policy_path", lambda ref, report=None: str(tmp_path / "pretrained_model")
+        rollout,
+        "_resolve_policy_path",
+        lambda ref, report=None, should_cancel=None: str(tmp_path / "pretrained_model"),
     )
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
 
@@ -764,7 +789,7 @@ def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp
     cmd = captured["cmd"]
     assert "--return_to_initial_position=true" in cmd
     # Sanity: the core rollout invocation is intact around our pinned flag.
-    assert "lerobot.scripts.lerobot_rollout" in cmd
+    assert "makermodslab.maker_rollout" in cmd
     assert "--strategy.type=base" in cmd
 
 
@@ -956,7 +981,7 @@ def test_build_rollout_cmd_wraps_robot_args_with_shared_flags() -> None:
 
     robot_args = ["--robot.type=so101_follower", "--robot.port=/dev/ttyUSB0"]
     cmd = _build_rollout_cmd(_stub_request(), "/local/pretrained_model", robot_args)
-    assert "lerobot.scripts.lerobot_rollout" in cmd
+    assert "makermodslab.maker_rollout" in cmd
     assert "--strategy.type=base" in cmd
     assert "--policy.path=/local/pretrained_model" in cmd
     assert "--robot.type=so101_follower" in cmd
@@ -1029,6 +1054,174 @@ def test_handle_start_inference_rejects_non_positive_ensemble_coeff() -> None:
     assert result["status_code"] == 400
     assert "temporal_ensemble_coeff" in result["message"]
     assert rollout.inference_active is False
+
+
+# ---------------------------------------------------------------------------
+# Real-Time Chunking capability — the table, and the pre-flight guard that
+# refuses an rtc launch on an architecture that cannot run it. Both matter
+# because the fork only discovers this AFTER the policy is loaded and the arm
+# is claimed (lerobot/rollout/context.py, supports_rtc_inference).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("policy_type", "expected"),
+    [
+        # Declare supports_rtc() -> True in the pinned fork.
+        ("smolvla", True),
+        ("pi0", True),
+        ("pi05", True),
+        ("evo1", True),
+        ("groot", True),
+        # Per-CONFIG in the fork (inference_action_mode == "continuous"), so the
+        # architecture answer is True and the subprocess enforces the rest.
+        ("molmoact2", True),
+        # Inherit PreTrainedPolicy.supports_rtc -> False.
+        ("act", False),
+        ("diffusion", False),
+        ("tdmpc", False),
+        ("vqbet", False),
+        # The sibling that does NOT support it, unlike pi0/pi05.
+        ("pi0_fast", False),
+        # Not registered in the pinned fork: "not established", never "no".
+        ("some_future_policy", None),
+        ("", None),
+    ],
+)
+def test_policy_type_supports_rtc_decisions(policy_type: str, expected: bool | None) -> None:
+    from makermodslab.rollout import policy_type_supports_rtc
+
+    assert policy_type_supports_rtc(policy_type) is expected
+
+
+def test_rtc_table_matches_the_pinned_fork() -> None:
+    """Drift guard: the table is a hand-mirrored read of lerobot's policy
+    classes, so re-derive it from the fork's SOURCES on every run.
+
+    Reads the files rather than importing them — importing
+    lerobot.policies.factory costs ~2 s and pulls transformers, which is
+    exactly the cost policy_type_supports_rtc exists to avoid.
+    """
+    import re as _re
+
+    import lerobot.policies as _policies_pkg
+    from makermodslab.jobs import _KNOWN_POLICY_TYPES, _RTC_CAPABLE_POLICY_TYPES
+
+    root = Path(_policies_pkg.__file__).parent
+    registered: set[str] = set()
+    declares_rtc: set[str] = set()
+    for cfg in root.rglob("configuration_*.py"):
+        for name in _re.findall(r'@PreTrainedConfig\.register_subclass\("([^"]+)"\)', cfg.read_text()):
+            registered.add(name)
+            modeling = cfg.with_name(cfg.name.replace("configuration_", "modeling_", 1))
+            if modeling.is_file() and "def supports_rtc(" in modeling.read_text():
+                declares_rtc.add(name)
+
+    assert registered, f"no registered policy types found under {root}"
+    assert registered == set(_KNOWN_POLICY_TYPES)
+    assert declares_rtc == set(_RTC_CAPABLE_POLICY_TYPES)
+
+
+def _rtc_request(policy_ref: str = "user/repo@checkpoints/000050", **kwargs):
+    from makermodslab.rollout import InferenceRequest
+
+    return InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref=policy_ref,
+        inference_engine="rtc",
+        **kwargs,
+    )
+
+
+def test_handle_start_inference_refuses_rtc_on_an_act_checkpoint(monkeypatch) -> None:
+    """400 in the launch panel, before the model download and before any port
+    is opened — and the session slot is handed back."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "read_pretrained_policy_type", lambda ref: "act")
+    monkeypatch.setattr(
+        rollout.camera_preview_manager,
+        "stop_all",
+        lambda: pytest.fail("refused start must not disturb the camera previews"),
+    )
+    monkeypatch.setattr(
+        rollout.threading, "Thread", lambda *a, **k: pytest.fail("no startup worker may spawn")
+    )
+
+    result = rollout.handle_start_inference(_rtc_request())
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert result["message"] == (
+        "Real-Time Chunking isn't available for act checkpoints; use the standard (sync) engine."
+    )
+    assert rollout.inference_active is False
+
+
+def test_handle_start_inference_allows_rtc_on_a_supporting_checkpoint(monkeypatch) -> None:
+    """A smolvla checkpoint passes the RTC gate — proven by the request landing
+    on the NEXT guard (camera bindings with no robot record) instead."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "read_pretrained_policy_type", lambda ref: "smolvla")
+
+    result = rollout.handle_start_inference(_rtc_request(camera_bindings={"front": "wrist"}))
+
+    assert result["success"] is False
+    assert "Real-Time Chunking" not in result["message"]
+    assert "No robot selected" in result["message"]
+    assert rollout.inference_active is False
+
+
+def test_handle_start_inference_allows_rtc_on_an_unknown_policy_type(monkeypatch) -> None:
+    """A type newer than our table, and an unreadable config, both mean "not
+    established" — neither may refuse a run the subprocess would accept."""
+    from makermodslab import rollout
+
+    for policy_type in ("some_future_policy", None):
+        monkeypatch.setattr(rollout, "read_pretrained_policy_type", lambda ref, t=policy_type: t)
+        result = rollout.handle_start_inference(_rtc_request(camera_bindings={"front": "wrist"}))
+        assert "Real-Time Chunking" not in result["message"]
+        assert rollout.inference_active is False
+
+
+def test_handle_start_inference_reads_no_config_for_the_sync_engine(monkeypatch) -> None:
+    """sync runs on every architecture, so the gate must not cost a config read
+    (which is an hf_hub_download for a Hub ref) on the ordinary path."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(
+        rollout,
+        "read_pretrained_policy_type",
+        lambda ref: pytest.fail("sync must not read the checkpoint config"),
+    )
+    req = _rtc_request(camera_bindings={"front": "wrist"})
+    req.inference_engine = "sync"
+    result = rollout.handle_start_inference(req)
+    # Stopped by the NEXT guard (bindings with no robot record), not this one.
+    assert result["success"] is False
+    assert "No robot selected" in result["message"]
+
+
+def test_rtc_gate_asks_about_a_root_ref_by_its_bare_repo_id(monkeypatch) -> None:
+    """'user/repo@root' means the repo root IS the pretrained dir, which is
+    where read_pretrained_policy_type looks for a plain repo id. Passing the
+    suffixed ref through would fail the lookup and silently skip the guard."""
+    from makermodslab import rollout
+
+    seen: list[str] = []
+
+    def _record(ref: str) -> str:
+        seen.append(ref)
+        return "act"
+
+    monkeypatch.setattr(rollout, "read_pretrained_policy_type", _record)
+    result = rollout.handle_start_inference(_rtc_request(policy_ref="user/repo@root"))
+
+    assert seen == ["user/repo"]
+    assert result["status_code"] == 400
+    assert "Real-Time Chunking" in result["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -1165,6 +1358,7 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
     its stdout pump) run inline via _SyncThread and HOME is redirected so the log
     file lands in tmp."""
     from makermodslab import rollout
+    from makermodslab.arms import so101
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(rollout, "bimanual_base_id", lambda name: "dual_arm")
@@ -1173,10 +1367,14 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
         "stage_bimanual_follower_calibrations",
         lambda *a, **k: ("/staging/follower", "dual_arm"),
     )
-    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    # The SO-101 follower preflights live in arms/so101.py (TB6a); rollout
+    # reaches them through family.preflight_ports.
+    monkeypatch.setattr(so101, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(so101, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(
-        rollout, "_resolve_policy_path", lambda ref, report=None: str(tmp_path / "pretrained_model")
+        rollout,
+        "_resolve_policy_path",
+        lambda ref, report=None, should_cancel=None: str(tmp_path / "pretrained_model"),
     )
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
 
@@ -1508,7 +1706,7 @@ def test_stopped_startup_worker_blocks_a_new_session_from_starting(monkeypatch) 
         return [], []
 
     monkeypatch.setattr(rollout, "_prepare_robot", _blocking_prepare_robot)
-    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: ref)
+    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None, should_cancel=None: ref)
 
     created_threads: list[threading.Thread] = []
     real_thread = threading.Thread
@@ -1926,7 +2124,7 @@ def test_startup_download_failure_reports_failed_and_hint_without_spawn(monkeypa
         {"phase": rollout.PHASE_STARTING, "policy_ref": "user/repo@checkpoints/000050"},
     )
 
-    def _raise(ref, report=None):
+    def _raise(ref, report=None, should_cancel=None):
         raise RuntimeError("Repository Not Found for url: https://huggingface.co/api/models/x")
 
     monkeypatch.setattr(rollout, "_resolve_policy_path", _raise)
@@ -1970,7 +2168,7 @@ def test_stop_during_download_leaves_clean_idle_without_spawn(monkeypatch) -> No
         {"phase": rollout.PHASE_DOWNLOADING_MODEL, "policy_ref": "user/repo@checkpoints/000050"},
     )
 
-    def _resolve_then_stop(ref, report=None):
+    def _resolve_then_stop(ref, report=None, should_cancel=None):
         rollout.handle_stop_inference()
         return "/tmp/snap/pretrained_model"
 
@@ -1990,6 +2188,70 @@ def test_stop_during_download_leaves_clean_idle_without_spawn(monkeypatch) -> No
     assert rollout._inference_proc is None
     assert rollout._inference_meta == {}
     assert rollout.handle_inference_status()["inference_active"] is False
+
+
+def test_download_cancelled_mid_flight_leaves_a_clean_idle_not_a_failure(monkeypatch) -> None:
+    """A stop DURING the transfer aborts snapshot_download from its progress
+    hook (DownloadCancelled). The worker treats that as the stop it is — clean
+    idle, no _fail_startup payload — never opening the bus or spawning."""
+    from makermodslab import rollout
+    from makermodslab.jobs import DownloadCancelled
+
+    cancel = threading.Event()
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_cancel", cancel)
+    monkeypatch.setattr(rollout, "_inference_proc", None)
+    monkeypatch.setattr(
+        rollout,
+        "_inference_meta",
+        {"phase": rollout.PHASE_DOWNLOADING_MODEL, "policy_ref": "user/repo@checkpoints/000050"},
+    )
+
+    def _abort_like_a_cancelled_download(ref, report=None, should_cancel=None):
+        # stop() ran first (proc is None -> _go_idle_locked), and the progress
+        # hook then raised as the next chunk arrived.
+        rollout.handle_stop_inference()
+        raise DownloadCancelled
+
+    monkeypatch.setattr(rollout, "_resolve_policy_path", _abort_like_a_cancelled_download)
+    monkeypatch.setattr(
+        rollout, "_prepare_robot", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no bus"))
+    )
+    monkeypatch.setattr(
+        rollout.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no spawn"))
+    )
+
+    rollout._run_inference_startup(_stub_request(), cancel)
+
+    assert rollout.inference_active is False
+    assert rollout._inference_proc is None
+    assert rollout._last_result is None  # NOT a startup failure
+    assert rollout.handle_inference_status()["inference_active"] is False
+
+
+def test_resolve_policy_path_threads_should_cancel_into_the_download(monkeypatch, tmp_path) -> None:
+    """`should_cancel` reaches snapshot_download's tqdm_class, so a real
+    transfer would abort on the next chunk once the predicate goes true."""
+    from makermodslab import rollout
+    from makermodslab.jobs import DownloadCancelled
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: True)
+
+    def _fake_snapshot_download(**kwargs):
+        cls = kwargs["tqdm_class"]
+        bar = cls(unit="B", total=1_000)
+        bar.update(10)  # the caller wants to abort now
+        return str(tmp_path)  # unreachable when should_cancel fires
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_snapshot_download)
+
+    with pytest.raises(DownloadCancelled):
+        rollout._resolve_policy_path(
+            "user/repo@root",
+            report=rollout._report_download_progress,
+            should_cancel=lambda: True,
+        )
 
 
 def test_run_inference_startup_local_ref_skips_download_phase(monkeypatch, tmp_path) -> None:
@@ -2804,7 +3066,7 @@ def test_eval_runner_and_rollout_argv_share_every_flag() -> None:
     rollout_cmd = _build_rollout_cmd(request, *args)
     runner_cmd = _build_eval_runner_cmd(request, *args)
 
-    assert rollout_cmd[1:3] == ["-m", "lerobot.scripts.lerobot_rollout"]
+    assert rollout_cmd[1:3] == ["-m", "makermodslab.maker_rollout"]
     assert runner_cmd[1:3] == ["-m", "makermodslab.eval_runner"]
     assert rollout_cmd[3:] == runner_cmd[3:]
     assert "--return_to_initial_position=true" in runner_cmd
@@ -2815,12 +3077,17 @@ def test_eval_start_spawns_the_runner_with_stdin_left_open(monkeypatch, tmp_path
     """Eval mode gets ONE long-lived runner whose stdin is the command channel;
     the single-episode path still gets `lerobot-rollout` with stdin closed."""
     from makermodslab import rollout
+    from makermodslab.arms import so101
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    # The SO-101 follower preflights live in arms/so101.py (TB6a); rollout
+    # reaches them through family.preflight_ports.
+    monkeypatch.setattr(so101, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(so101, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda name, arm_type="so101": name)
-    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/local/model")
+    monkeypatch.setattr(
+        rollout, "_resolve_policy_path", lambda ref, report=None, should_cancel=None: "/local/model"
+    )
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
     monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: True)
     monkeypatch.setattr(rollout.camera_preview_manager, "stop_all", lambda: None)
@@ -2873,12 +3140,17 @@ def test_single_episode_start_still_spawns_lerobot_rollout(monkeypatch, tmp_path
     """`eval_episodes == 1` is untouched by the redesign: same module, and stdin
     closed straight after the calibration seed."""
     from makermodslab import rollout
+    from makermodslab.arms import so101
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    # The SO-101 follower preflights live in arms/so101.py (TB6a); rollout
+    # reaches them through family.preflight_ports.
+    monkeypatch.setattr(so101, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(so101, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda name, arm_type="so101": name)
-    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/local/model")
+    monkeypatch.setattr(
+        rollout, "_resolve_policy_path", lambda ref, report=None, should_cancel=None: "/local/model"
+    )
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
     monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: True)
     monkeypatch.setattr(rollout.camera_preview_manager, "stop_all", lambda: None)
@@ -2915,7 +3187,7 @@ def test_single_episode_start_still_spawns_lerobot_rollout(monkeypatch, tmp_path
     monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
 
     assert rollout.handle_start_inference(_eval_request(1))["success"] is True
-    assert captured["cmd"][1:3] == ["-m", "lerobot.scripts.lerobot_rollout"]
+    assert captured["cmd"][1:3] == ["-m", "makermodslab.maker_rollout"]
     assert captured["stdin"].closed is True
     assert rollout._eval_session is None
 

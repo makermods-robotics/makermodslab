@@ -2,18 +2,29 @@ import { createContext, useContext, useEffect, useState } from "react";
 import { useApi } from "@/contexts/ApiContext";
 
 /**
- * The seven robot-driving features of the backend's mutual-exclusion state
- * model (CLAUDE.md "State model & mutual exclusion") — the `kind` vocabulary
- * of the `session_changed` event (makermodslab/session_events.py).
+ * The robot-driving features of the backend's mutual-exclusion state model
+ * (CLAUDE.md "State model & mutual exclusion") — the `kind` vocabulary of the
+ * `session_changed` event (makermodslab/session_events.py). `hosting` is the
+ * station side of remote teleoperation (holds the follower like teleop),
+ * `remote_teleoperation` the operator side (holds the leader only), and
+ * `remote_inference` a remote-GPU policy driving this node's follower.
  */
 export type SessionKind =
   | "teleoperation"
   | "recording"
   | "inference"
+  // Remote inference (DRTC): the arm is driven locally while the policy runs
+  // on a remote GPU over a LiveKit room. Its own kind, not a variant of
+  // `inference` — different runner, different phases, and a client refused
+  // with `robot.busy.remote_inference` must be able to tell WHICH inference
+  // holds the arm.
+  | "remote_inference"
   | "replay"
   | "calibration"
   | "auto_calibration"
-  | "wiggle";
+  | "wiggle"
+  | "hosting"
+  | "remote_teleoperation";
 
 /** The latest `session_changed` hint seen on the shared WS channel. */
 export interface SessionChangedEvent {

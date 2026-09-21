@@ -408,18 +408,22 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
     [hubJobs, trackedHfJobIds],
   );
   // Hide model repos already claimed by a tracked job — a cloud run (shown via
-  // JobCard) OR an imported model (also a JobCard, and the target a lazy
-  // auto-import lands on). Repo ids are compared case-insensitively to match
-  // the backend's find_imported dedup. The remainder are past trainings the
-  // registry no longer remembers, rendered as untracked Hub cards.
+  // JobCard), an imported model (also a JobCard, and the target a lazy
+  // auto-import lands on), or a LOCAL run published to the Hub (its pinned
+  // hf_repo_id is its own repo; without this the publish grew a duplicate
+  // "untracked Hub model" card beside the run's card). Built from every
+  // registry record rather than per-runner slices so no future hf_repo_id
+  // producer reopens the gap. Repo ids are compared case-insensitively to
+  // match the backend's find_imported dedup. The remainder are past trainings
+  // the registry no longer remembers, rendered as untracked Hub cards.
   const trackedRepoIds = useMemo(
     () =>
       new Set(
-        [...trackedCloudJobs, ...importedJobs]
+        jobs
           .map((j) => j.hf_repo_id?.toLowerCase())
           .filter((id): id is string => !!id),
       ),
-    [trackedCloudJobs, importedJobs],
+    [jobs],
   );
   const untrackedHubModels = useMemo(
     () =>

@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -227,6 +227,9 @@ class _AutoCalArmRunner:
             from . import (
                 calibrate as _calibrate,
                 record as _record,
+                remote_host as _remote_host,
+                remote_inference as _remote_inference,
+                remote_teleoperate as _remote_teleoperate,
                 replay as _replay,
                 rollout as _rollout,
                 teleoperate as _teleoperate,
@@ -251,6 +254,12 @@ class _AutoCalArmRunner:
                     "message": "Inference is currently active. Stop it first.",
                     "code": ErrorCode.ROBOT_BUSY_INFERENCE,
                 }
+            if _remote_inference.remote_inference_is_active():
+                return {
+                    "success": False,
+                    "message": "Remote inference is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
+                }
             if _calibrate.calibration_is_active():
                 return {
                     "success": False,
@@ -262,6 +271,18 @@ class _AutoCalArmRunner:
                     "success": False,
                     "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
                     "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+                }
+            if _remote_host.hosting_active:
+                return {
+                    "success": False,
+                    "message": "This robot is hosted for remote teleoperation. Stop hosting first.",
+                    "code": ErrorCode.ROBOT_BUSY_HOSTING,
+                }
+            if _remote_teleoperate.remote_teleoperation_active:
+                return {
+                    "success": False,
+                    "message": "Remote teleoperation is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_REMOTE_TELEOPERATION,
                 }
             if _replay.replay_active:
                 return {
@@ -641,6 +662,9 @@ class AutoCalibrationBatchManager:
             from . import (
                 calibrate as _calibrate,
                 record as _record,
+                remote_host as _remote_host,
+                remote_inference as _remote_inference,
+                remote_teleoperate as _remote_teleoperate,
                 replay as _replay,
                 rollout as _rollout,
                 teleoperate as _teleoperate,
@@ -665,6 +689,12 @@ class AutoCalibrationBatchManager:
                     "message": "Inference is currently active. Stop it first.",
                     "code": ErrorCode.ROBOT_BUSY_INFERENCE,
                 }
+            if _remote_inference.remote_inference_is_active():
+                return {
+                    "success": False,
+                    "message": "Remote inference is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
+                }
             if _calibrate.calibration_is_active():
                 return {
                     "success": False,
@@ -676,6 +706,18 @@ class AutoCalibrationBatchManager:
                     "success": False,
                     "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
                     "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+                }
+            if _remote_host.hosting_active:
+                return {
+                    "success": False,
+                    "message": "This robot is hosted for remote teleoperation. Stop hosting first.",
+                    "code": ErrorCode.ROBOT_BUSY_HOSTING,
+                }
+            if _remote_teleoperate.remote_teleoperation_active:
+                return {
+                    "success": False,
+                    "message": "Remote teleoperation is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_REMOTE_TELEOPERATION,
                 }
             if _replay.replay_active:
                 return {

@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,15 @@ have. Those predicates live here, once, rather than as `arm_type == "maker"`
 literals scattered across teleoperate/record/rollout/replay — a scattered
 check is a check somebody forgets to add to the next flow.
 
-The three arm types:
+The set of arm types is OPEN: the registry (``makermodslab/arms``) holds
+the three built-ins below plus whatever an extension registers, and every
+predicate here asks it live. A MISSING arm type (None — a record written
+before arm types existed) reads as the default SO-101; an unknown STRING
+raises the registry's ``UnknownArmType`` rather than masquerading as an
+SO-101, and ``require_known_arm_type`` is the one refusal every request
+gate uses so that raise is never reached from a request.
+
+The three built-in arm types:
 
 * ``so101`` — SO-101 leader/follower. Feetech STS3215 smart servos on a USB
   serial bus. Registers are readable and writable (EEPROM + RAM), which is
@@ -34,21 +42,111 @@ The three arm types:
   everywhere a bus is touched casually: the Damiao HANDSHAKE is the motor
   enable command, so even a "read-only" ping energizes the arm.
 
-Import this instead of writing the comparison inline.
+Import this instead of writing the comparison inline. The answers come from
+the arm-family registry (``makermodslab/arms``); each predicate here is a
+named lookup that keeps the hardware reasoning next to the flag it gates.
 """
 
-from .utils.config import normalize_arm_type
+from collections.abc import Iterator, Mapping
 
-# Flat proprioceptive width of ONE follower arm — one dim per joint. The SO-101
-# has 6; the CAN arms have 7 (6 joints plus a permanent gripper). This is the
-# number a bimanual robot doubles, and the number a trained checkpoint's
-# observation.state must match.
-_JOINTS_PER_ARM = {"so101": 6, "maker": 7, "metal": 7}
+from .api_errors import ApiError, ErrorCode
+from .arms import registry as _registry
+from .utils.config import DEFAULT_ARM_TYPE, is_known_arm_type, normalize_arm_type
+
+
+def _family(arm_type: object):
+    """The family for an arm type: None/non-string → the default; an unknown
+    string → UnknownArmType (KeyError). See utils.config.normalize_arm_type."""
+    return _registry.get(normalize_arm_type(arm_type))
+
+
+def require_known_arm_type(arm_type: object) -> None:
+    """Refuse (400 robot.arm_type.unavailable) an arm type nothing registered.
+
+    THE gate every request path calls before an arm type reaches the
+    registry or a device builder: the sessions front door, the legacy start
+    handlers, the robot-record upsert, the calibration-library routes and
+    the CAN-only routes. One helper so every refusal carries the same
+    status, code and remedy.
+
+    Reads its input the way normalize_arm_type does: None, "" and a
+    non-string mean "unspecified" and pass as the default family (an absent
+    ``arm_type`` in a request body or an empty ``?arm_type=`` query is an
+    SO-101, exactly as a pre-Maker record on disk is); only a STRING nothing
+    registered is refused. A known id returns None.
+    """
+    resolved = normalize_arm_type(arm_type)
+    if not is_known_arm_type(resolved):
+        raise ApiError(
+            status_code=400,
+            detail=(
+                f"Arm type {resolved!r} is not installed. Install the extension that "
+                "provides it, or delete this robot and create it again with an installed arm type."
+            ),
+            code=ErrorCode.ROBOT_ARM_TYPE_UNAVAILABLE,
+        )
+
+
+def require_leader_kind(arm_type: object, leader_kind: object) -> None:
+    """Refuse (400 robot.leader_kind.unknown) a leader kind the family does not offer.
+
+    The gate every request that CARRIES a leader kind calls after
+    require_known_arm_type: the robot-record upsert, the calibration-library
+    routes' ``?leader_kind=``, the CAN port-detection routes. A missing kind
+    (None, "") is the family's default and passes; a string the family's
+    leader_options do not list is refused with the offered ids named.
+    """
+    require_known_arm_type(arm_type)
+    family = _family(arm_type)
+    try:
+        family.leader_option(leader_kind)
+    except KeyError:
+        offered = ", ".join(o.id for o in family.leader_options())
+        raise ApiError(
+            status_code=400,
+            detail=(
+                f"Leader kind {leader_kind!r} is not one the {family.short_label} can be driven by "
+                f"(offered: {offered})."
+            ),
+            code=ErrorCode.ROBOT_LEADER_KIND_UNKNOWN,
+        ) from None
+
+
+def require_leader_available(arm_type: object, leader_kind: object) -> None:
+    """Refuse (400 robot.leader_kind.unavailable) a leader this install cannot drive.
+
+    Called by every start that OPENS the leader (teleoperation, recording, a
+    coaching inference) — never by a follower-only flow, and never by
+    calibration, which zeroes the leader over its bus and needs none of the
+    leader's heavier dependencies. The detail is the option's own remedy
+    (which extra to install). An unknown kind is refused first, as above.
+    """
+    require_leader_kind(arm_type, leader_kind)
+    option = _family(arm_type).leader_option(leader_kind)
+    if not option.available:
+        raise ApiError(
+            status_code=400,
+            detail=option.unavailable_reason or f"The {option.label} is not available on this install.",
+            code=ErrorCode.ROBOT_LEADER_KIND_UNAVAILABLE,
+        )
+
+
+def leader_holds_torque(arm_type: object, leader_kind: object) -> bool:
+    """True when the selected leader is energized while the human moves it
+    (the Metal arm's gravity-compensated leader). What the connect-failure
+    and stop paths read to treat the leader like a follower."""
+    return _family(arm_type).leader_holds_torque(leader_kind)
 
 
 def joints_per_arm(arm_type: object) -> int:
-    """Joint count of a single follower arm of this type."""
-    return _JOINTS_PER_ARM[normalize_arm_type(arm_type)]
+    """Joint count of a single follower arm of this type.
+
+    Flat proprioceptive width of ONE follower arm — one dim per joint. The
+    SO-101 has 6; the CAN arms have 7 (6 joints plus a permanent gripper).
+    This is the number a bimanual robot doubles, and the number a trained
+    checkpoint's observation.state must match.
+    """
+    return _family(arm_type).joints_per_arm
 
 
 def uses_feetech_bus(arm_type: object) -> bool:
@@ -70,7 +168,7 @@ def uses_feetech_bus(arm_type: object) -> bool:
     A Maker or Metal session skips all of them; ``maker_ports`` provides the
     CAN/UART port detection that replaces identify/wiggle.
     """
-    return normalize_arm_type(arm_type) == "so101"
+    return _family(arm_type).uses_feetech_bus
 
 
 def supports_auto_calibration(arm_type: object) -> bool:
@@ -85,19 +183,23 @@ def supports_auto_calibration(arm_type: object) -> bool:
     constants (``MakerFollowerConfig.joint_limits`` /
     ``MetalFollowerConfig.joint_limits``), measured once against the arms'
     mechanical stops. All their calibration has to establish is where zero
-    is, which is what ``zero_calibrate`` does — with torque OFF, by hand.
+    is, which their families do as a step wizard (``step_calibrate``) — with
+    torque OFF, by hand.
     """
-    return normalize_arm_type(arm_type) == "so101"
+    return _family(arm_type).supports_auto_calibration
 
 
-def uses_zero_calibration(arm_type: object) -> bool:
-    """True when calibrating this arm type means setting a zero pose.
+def calibration_kind(arm_type: object) -> str:
+    """How this arm type is calibrated: one of ``arms.base.CALIBRATION_KINDS``.
 
-    The exact complement of ``supports_auto_calibration`` today, but they are
-    not the same question and need not stay complementary as arm types
-    arrive — keep them separate.
+    ``range_sweep`` — the SO-101's Feetech sweep (``calibrate.py``, manual,
+    and ``auto_calibrate.py``, driven); ``steps`` — the family's own
+    procedure run by the generic step wizard (``step_calibrate.py``: the CAN
+    arms' zero pose); ``panel`` — an extension's own page, mounted by the
+    config dialog. Not a boolean on purpose: it picks the manager in
+    sessions.py, and a third kind fits a name where a flag could not.
     """
-    return normalize_arm_type(arm_type) in ("maker", "metal")
+    return _family(arm_type).calibration_kind
 
 
 def supports_dagger(arm_type: object) -> bool:
@@ -119,7 +221,37 @@ def supports_dagger(arm_type: object) -> bool:
     is a value to read rather than a fact somebody has to rediscover from the
     hardware; ``tests/test_arm_capabilities.py`` pins both halves.
     """
-    return normalize_arm_type(arm_type) == "so101"
+    return _family(arm_type).supports_dagger
+
+
+def supports_remote_inference(arm_type: object, mode: object = "single") -> bool:
+    """True when this arm type + layout can run a REMOTE inference session.
+
+    Single-arm SO-101 only, and — unlike ``supports_dagger`` above — both
+    halves of that are WIRING limits, not hardware ones. Nothing about a Maker
+    or Metal arm makes it unable to play action chunks from a remote policy;
+    the entrypoint simply has not been wired for it:
+
+    * **CAN arms.** ``makermodslab/drtc/robot_sync.py`` registers
+      ``so_follower``, ``bi_so_follower``, ``koch_follower`` and
+      ``omx_follower`` with draccus and nothing else, so
+      ``--robot.type=maker_follower`` fails at CLI-PARSE time inside the child
+      — after a session has claimed the arm and preflighted it. And its
+      return-to-rest goes through ``rest_pose`` (Feetech ticks), with no
+      ``maker_rest_pose`` call site, so a CAN arm would also have no safe stop.
+    * **Bimanual.** The first-action ease-in is single-Feetech-bus only: a BiSO
+      robot's action keys are ``left_``/``right_`` prefixed while each sub-arm's
+      ``bus.motors`` are bare, so the action→bus mapping matches nothing and
+      the ease refuses rather than guessing (see ``drtc/_pose.ease_to_action``).
+      Without it the arm's FIRST move is a full-speed snap from wherever it is
+      to the policy's first pose. The return-to-rest works fine per bus — it is
+      only the entry that is unsafe.
+
+    Both are removable with work, which is exactly why this reads as a
+    capability rather than as an ``arm_type == "so101"`` literal at the refusal
+    site: when the wiring lands, one function changes.
+    """
+    return _family(arm_type).supports_remote_inference and mode != "bimanual"
 
 
 # lerobot `RobotConfig` choice-registry keys, mapped to the arm type they
@@ -141,30 +273,42 @@ def arm_type_of_robot_config(robot_config: object) -> str:
     original request (recording's ``record_with_web_events`` takes a
     ``RecordConfig``), this reads the arm type back off the config instead of
     threading a parallel parameter that could drift out of agreement with it.
+    Matched on the config's REGISTERED type string rather than by isinstance
+    so this module never imports the device classes (which would drag the
+    python-can / motorbridge stack into every import of it).
     """
-    return _ROBOT_TYPE_TO_ARM_TYPE.get(getattr(robot_config, "type", None), "so101")
+    return _registry.family_for_robot_config_type(getattr(robot_config, "type", None)).id
 
 
-# Human-readable name per arm type, for prose a user reads (merge/fine-tune
-# compatibility warnings). Not localized — the backend never is (see
-# frontend/docs/localization.md).
-ARM_TYPE_LABEL = {"so101": "an SO-101 arm", "maker": "a Maker arm", "metal": "a Metal arm"}
+class _ArmTypeLabels(Mapping[str, str]):
+    """Human-readable name per arm type, for prose a user reads (merge /
+    fine-tune / replay compatibility warnings). Not localized — the backend
+    never is (see frontend/docs/localization.md). A live view of the registry
+    rather than a dict captured at import, so a family registered later (an
+    extension's) has a label the moment ``arm_type_from_robot_type`` can
+    return its id."""
 
-# Substrings that identify an arm family inside a dataset's free-form
-# ``robot_type`` string. "maker"/"metal" are unambiguous; the SO family is
-# every string carrying an ``so100``/``so101`` marker or the bare
-# ``so_follower``/``so_leader`` device names lerobot writes for a bimanual SO
-# rig (``bi_so_follower``).
-_ROBOT_TYPE_STRING_MARKERS = (
-    ("maker", "maker"),
-    ("metal", "metal"),
-    ("so100", "so101"),
-    ("so101", "so101"),
-    ("so-100", "so101"),
-    ("so-101", "so101"),
-    ("so_follower", "so101"),
-    ("so_leader", "so101"),
-)
+    def __getitem__(self, arm_type: str) -> str:
+        return _registry.get(arm_type).indefinite_label
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(_registry.ids())
+
+    def __len__(self) -> int:
+        return len(_registry.ids())
+
+
+ARM_TYPE_LABEL: Mapping[str, str] = _ArmTypeLabels()
+
+
+def _marker_scan_order():
+    """Families in registry order with the default family LAST: its markers
+    are the loosest (``so_follower``, ``so_leader``), so a string naming a
+    specific family must get that family."""
+    families = _registry.families()
+    return [f for f in families if f.id != DEFAULT_ARM_TYPE] + [
+        f for f in families if f.id == DEFAULT_ARM_TYPE
+    ]
 
 
 def arm_type_from_robot_type(robot_type: object) -> str | None:
@@ -173,7 +317,9 @@ def arm_type_from_robot_type(robot_type: object) -> str | None:
     lerobot writes the recording robot's ``.name`` there — ``so101_follower``,
     ``bi_maker_follower``, ``metal_follower`` — but a dataset recorded outside
     this app (or imported from the Hub) can carry anything: ``so100``,
-    ``so-101``, ``aloha``, a custom string, or nothing at all.
+    ``so-101``, ``aloha``, a custom string, or nothing at all. Each family
+    declares the substrings that identify it (``robot_type_markers``); a
+    marker anywhere in the string wins, deliberately greedily.
 
     Returns ``None`` — NOT the ``so101`` default ``arm_type_of_robot_config``
     falls back to — when the string is missing, non-string or unrecognized.
@@ -186,7 +332,8 @@ def arm_type_from_robot_type(robot_type: object) -> str | None:
     text = robot_type.strip().lower()
     if not text:
         return None
-    for marker, arm_type in _ROBOT_TYPE_STRING_MARKERS:
-        if marker in text:
-            return arm_type
+    for family in _marker_scan_order():
+        for marker in family.robot_type_markers:
+            if marker in text:
+                return family.id
     return None

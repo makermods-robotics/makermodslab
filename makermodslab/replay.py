@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -29,39 +29,36 @@ ease-in + playback loop runs in the background thread.
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 import threading
 import time
-from typing import Any
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
+from . import rest_pose as _rest_pose
 from .api_errors import ErrorCode
-from .arm_capabilities import ARM_TYPE_LABEL, arm_type_from_robot_type, uses_feetech_bus
-from .arm_identity import verify_devices
+from .arm_capabilities import ARM_TYPE_LABEL, arm_type_from_robot_type, require_known_arm_type
+from .arms import registry as arm_registry
 from .datasets import get_episode_action_series, read_dataset_robot_type
-from .maker_rest_pose import capture_maker_pose, return_maker_to_pose
-from .motor_power import FOLLOWER, clear_goal_velocity, reset_torque_limit
+from .maker_rest_pose import maker_follower_arms, return_maker_to_pose
+from .motor_power import FOLLOWER, clear_goal_velocity
 from .rest_pose import (
     RETURN_CEILING_S,
     _clamp_to_representable_range,
-    capture_rest_pose,
-    return_to_rest_pose,
 )
 from .session_events import notify_session_changed
-from .teleoperate import _cleanup_after_setup_failure, force_disable_torque
-from .torque import release_maker_torque
-from .utils.config import get_robot_record, setup_follower_calibration_file
+from .teleoperate import _cleanup_after_setup_failure
+from .utils.config import get_robot_record, normalize_arm_type, setup_follower_calibration_file
 
 logger = logging.getLogger(__name__)
-
-# v1 is single-arm only — a bimanual dataset/robot mismatch is a confusing
-# error otherwise (left_/right_-prefixed action keys read as "every joint is
-# missing"), and bimanual replay needs its own two-bus ease-in/playback shape
-# this module doesn't implement yet.
-_SINGLE_ARM_MODE = "single"
 
 # Ease-in tolerance, in the SAME normalized units as robot.send_action() (not
 # raw ticks — see rest_pose.py's normalize=True path). Numerically smaller
@@ -135,12 +132,11 @@ class ReplayRequest(BaseModel):
     episode_index: int
     follower_port: str
     follower_config: str
-    # Robot record name, used only to look up the record's `mode` for the
-    # bimanual-rejection guard — the port/config above are what actually
-    # drive the connection.
+    mode: Literal["single", "bimanual"] = "single"
+    right_follower_port: str = ""
+    right_follower_config: str = ""
     robot_name: str = ""
-    # Hardware family: "so101" or "maker" — selects the follower config class
-    # and the calibration library the follower_config name resolves in.
+    # Selects the follower config class and calibration library.
     arm_type: str = "so101"
     skip_identity_check: bool = False
 
@@ -154,6 +150,14 @@ _replay_started_at: float | None = None
 # set left a stop pressed during the ease-in with nothing to notice it. Reset
 # at the start of every new session (see handle_start_replay).
 _stop_event = threading.Event()
+# The second-stop-press event, mirroring teleoperate.py's _release_now. It is
+# NOT _stop_event: by the time the stopping-phase return runs, _stop_event is
+# already set by the stop that ended playback, so handing it to the return as
+# its abort_event cut the return short on its first frame — on a CAN arm that
+# released torque wherever playback stopped and dropped the arm under gravity
+# (seen on a Maker arm, 2026-09-07). The return only aborts on THIS event,
+# which a second Stop press sets.
+_release_now = threading.Event()
 # {phase, episode_index, elapsed_s, duration_s, error, hint} — see
 # handle_replay_status. phase is one of: idle | easing_in | playing |
 # stopping | done | error.
@@ -177,10 +181,18 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
         auto_calibrate as _auto_calibrate,
         calibrate as _calibrate,
         record as _record,
+        remote_host as _remote_host,
+        remote_inference as _remote_inference,
+        remote_teleoperate as _remote_teleoperate,
         rollout as _rollout,
         teleoperate as _teleoperate,
         wiggle as _wiggle,
     )
+
+    # Argument validation first: an arm type nothing registered is refused
+    # (400 robot.arm_type.unavailable) before the record and the episode are
+    # loaded or the follower connected.
+    require_known_arm_type(request.arm_type)
 
     with _state_lock:
         if _teleoperate.teleoperation_active:
@@ -204,6 +216,13 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
                 "message": "Inference is currently active. Stop it first.",
                 "code": ErrorCode.ROBOT_BUSY_INFERENCE,
             }
+        if _remote_inference.remote_inference_is_active():
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Remote inference is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
+            }
         if _calibrate.calibration_is_active():
             return {
                 "success": False,
@@ -224,6 +243,20 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
                 "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
                 "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+            }
+        if _remote_host.hosting_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "This robot is hosted for remote teleoperation. Stop hosting first.",
+                "code": ErrorCode.ROBOT_BUSY_HOSTING,
+            }
+        if _remote_teleoperate.remote_teleoperation_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Remote teleoperation is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REMOTE_TELEOPERATION,
             }
         if replay_active:
             return {
@@ -254,11 +287,11 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
             }
 
         record = _load_robot_record(request.robot_name)
-        if record is not None and record.get("mode") == "bimanual":
+        if record is not None and record.get("mode") == "bimanual" and request.mode != "bimanual":
             return {
                 "success": False,
                 "status_code": 400,
-                "message": "Bimanual replay isn't supported yet — select a single-arm robot.",
+                "message": "Bimanual replay requires both follower ports and calibrations.",
             }
         action_series = get_episode_action_series(request.repo_id, request.episode_index)
         if action_series is None:
@@ -292,7 +325,16 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
             }
 
         try:
-            robot, identity_warnings = _connect_follower(request)
+            if request.mode == "bimanual":
+                _validate_bimanual_actions(action_series, request.arm_type)
+                robot = _build_bimanual_follower(request, action_series["action_names"])
+                if set(action_series["action_names"]) != set(robot.action_features):
+                    raise ValueError("This dataset's joints don't match the selected bimanual robot.")
+                identity_warnings = _connect_bimanual_follower(robot, request)
+            else:
+                robot, identity_warnings = _connect_follower(request)
+        except ValueError as e:
+            return {"success": False, "status_code": 400, "message": str(e)}
         except Exception as e:
             return {"success": False, "status_code": 500, "message": str(e)}
 
@@ -312,7 +354,11 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
         # from the worker after the arm has already been energized.
         if action_series["values"]:
             frame0 = dict(zip(action_series["action_names"], action_series["values"][0], strict=True))
-            missing = set(robot.bus.motors) - set(_bus_keyed(frame0, robot.bus))
+            missing = {
+                f"{label}: {motor}"
+                for arm, label, target in _arm_targets(robot, frame0)
+                for motor in set(arm.bus.motors) - set(target)
+            }
             if missing:
                 _cleanup_after_setup_failure(robot, None, "follower arm", "leader arm")
                 return {
@@ -326,6 +372,9 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
 
         replay_active = True
         _stop_event.clear()
+        # A stale release-now from a previous session's double-stop must not
+        # skip this session's return (same guard as teleoperate.py).
+        _release_now.clear()
         _replay_started_at = time.time()
         _replay_meta = {
             "phase": "easing_in",
@@ -373,13 +422,11 @@ def _connect_can_follower(request: ReplayRequest):
     from lerobot.robots import make_robot_from_config
 
     from .torque import de_energize_can_device
-    from .utils.robot_factory import maker_follower_config, metal_follower_config
 
-    is_metal = request.arm_type == "metal"
-    family = "Metal" if is_metal else "Maker"
-    builder = metal_follower_config if is_metal else maker_follower_config
+    arm_family = arm_registry.get(normalize_arm_type(request.arm_type))
+    family = arm_family.short_label
     follower_id = setup_follower_calibration_file(request.follower_config, request.arm_type)
-    robot = make_robot_from_config(builder(request.follower_port, follower_id))
+    robot = make_robot_from_config(arm_family.single_follower_config(request.follower_port, follower_id))
     try:
         robot.connect(calibrate=False)
     except Exception as e:
@@ -396,13 +443,205 @@ def _connect_can_follower(request: ReplayRequest):
     return robot, []
 
 
+def _disconnect_replay_followers(robot, feetech: bool) -> None:
+    """One failed close must not strand the other follower's bus."""
+    pool = getattr(robot, "_io_pool", None)
+    if pool is not None:
+        pool.shutdown(wait=True)
+    for arm, label in maker_follower_arms(robot):
+        try:
+            if feetech:
+                arm.bus.disconnect(disable_torque=False)
+            else:
+                arm.disconnect()
+        except Exception as exc:
+            logger.warning("Could not disconnect %s after replay: %s", label, exc)
+            if feetech:
+                from .teleoperate import force_disconnect_partial
+
+                force_disconnect_partial(arm, label)
+            else:
+                from .torque import de_energize_can_device
+
+                de_energize_can_device(arm, label)
+
+
+def _validate_bimanual_actions(series: dict, arm_type: str) -> None:
+    """Reject malformed rows and arm-count mismatches before staging or opening."""
+    names = series["action_names"]
+    count = arm_registry.get(normalize_arm_type(arm_type)).joints_per_arm
+    left = {name.removeprefix("left_") for name in names if name.startswith("left_")}
+    right = {name.removeprefix("right_") for name in names if name.startswith("right_")}
+    if len(names) != 2 * count or len(set(names)) != len(names) or len(left) != count or left != right:
+        raise ValueError("This dataset's joints don't match the selected bimanual robot.")
+    if not all(name.endswith(".pos") for name in names) or any(
+        len(frame) != len(names) or not all(math.isfinite(float(value)) for value in frame)
+        for frame in series["values"]
+    ):
+        raise ValueError("This episode contains invalid joint actions.")
+
+
+def _build_bimanual_follower(request: ReplayRequest, action_names: list[str] | None = None):
+    """Validate both slots before staging files or opening either follower."""
+    from lerobot.robots import make_robot_from_config
+
+    from .utils.config import follower_config_path_for
+    from .utils.robot_factory import build_follower_config
+
+    ports = (request.follower_port, request.right_follower_port)
+    configs = (request.follower_config, request.right_follower_config)
+    if not all(ports) or not all(configs):
+        raise ValueError("Bimanual replay requires both follower ports and calibrations.")
+    if ports[0] == ports[1]:
+        raise ValueError("Bimanual replay requires two different follower ports.")
+    library = Path(follower_config_path_for(request.arm_type)).resolve()
+    for side, config in zip(("left", "right"), configs, strict=True):
+        path = (library / f"{config.removesuffix('.json')}.json").resolve()
+        if path.parent != library or not path.is_file():
+            raise ValueError(f"Missing {side} follower calibration: {config}")
+        try:
+            calibration = json.loads(path.read_text())
+            if not isinstance(calibration, dict) or not calibration:
+                raise ValueError("empty calibration")
+        except (ValueError, OSError) as exc:
+            raise ValueError(f"Invalid {side} follower calibration: {config}") from exc
+    if action_names is not None:
+        family = arm_registry.get(normalize_arm_type(request.arm_type))
+        # A disconnected single follower reads the existing selected library
+        # directly; inspect its real feature names before creating staging files.
+        config = family.single_follower_config(
+            request.follower_port, request.follower_config.removesuffix(".json")
+        )
+        config.calibration_dir = library
+        unconnected = make_robot_from_config(config)
+        expected = {f"{side}_{key}" for side in ("left", "right") for key in unconnected.action_features}
+        if set(action_names) != expected:
+            raise ValueError("This dataset's joints don't match the selected bimanual robot.")
+    # The shared factory builds an unused leader CONFIG, never a leader device.
+    fields = dict(request.model_dump(), leader_port="", right_leader_port="")
+    return make_robot_from_config(build_follower_config(SimpleNamespace(**fields)))
+
+
+def _connect_bimanual_follower(robot, request: ReplayRequest) -> list:
+    """Open followers only; clean up both sides if either setup fails."""
+    family = arm_registry.get(normalize_arm_type(request.arm_type))
+    try:
+        if not family.uses_feetech_bus:
+            robot.connect(calibrate=False)
+            return []
+        for arm, _label in maker_follower_arms(robot):
+            arm.bus.connect()
+        warnings = family.verify_identity(
+            ((robot, "follower"),),
+            skip=request.skip_identity_check,
+            config_names=[request.follower_config, request.right_follower_config],
+        )
+        for arm, label in maker_follower_arms(robot):
+            for attempt in range(_CONNECT_ATTEMPTS):
+                try:
+                    arm.bus.write_calibration(arm.calibration)
+                    arm.configure()
+                    break
+                except Exception:
+                    if attempt == _CONNECT_ATTEMPTS - 1:
+                        raise
+                    logger.warning("Retrying replay setup for %s", label)
+                    time.sleep(_CONNECT_RETRY_DELAY_S)
+        return warnings + family.prepare_follower_registers(robot, "follower arms")
+    except Exception:
+        # Connect/configure has issued no replay pose; release any partially
+        # opened side through the existing per-bus best-effort teardown.
+        if family.uses_feetech_bus:
+            from .teleoperate import force_disconnect_partial
+
+            force_disconnect_partial(robot, "follower arms")
+        else:
+            from .torque import de_energize_can_device
+
+            de_energize_can_device(robot, "follower arms")
+            pool = getattr(robot, "_io_pool", None)
+            if pool is not None:
+                pool.shutdown(wait=True)
+        raise
+
+
+def _arm_targets(robot, action: dict[str, float]) -> list[tuple[Any, str, dict[str, float]]]:
+    arms = maker_follower_arms(robot)
+    prefixes = ("left_", "right_") if len(arms) == 2 else ("",)
+    return [
+        (
+            arm,
+            label,
+            _bus_keyed(
+                {key.removeprefix(prefix): value for key, value in action.items() if key.startswith(prefix)},
+                arm.bus,
+            ),
+        )
+        for (arm, label), prefix in zip(arms, prefixes, strict=True)
+    ]
+
+
+def _ease_bimanual(robot, action: dict[str, float], feetech: bool, family=None) -> tuple[bool, str]:
+    """Ease both independent buses concurrently; one failure cancels its peer."""
+    failed = threading.Event()
+
+    class Cancelled:
+        def is_set(self):
+            return _stop_event.is_set() or failed.is_set()
+
+    def ease(item):
+        arm, label, target = item
+        try:
+            if feetech:
+                ok, reason = _rest_pose.return_to_rest_pose(
+                    arm.bus,
+                    target,
+                    abort_event=Cancelled(),
+                    label=label,
+                    normalize=True,
+                    tolerance=EASE_ARRIVE_TOLERANCE,
+                    stall_min_progress=EASE_STALL_MIN_PROGRESS,
+                )
+                if not ok and reason.startswith("settled"):
+                    residual = _ease_in_residual(arm.bus, target)
+                    ok = (
+                        bool(residual)
+                        and set(residual) == set(target)
+                        and max(residual.values()) <= EASE_SETTLED_MAX_RESIDUAL
+                    )
+                    if ok:
+                        logger.warning("%s ease-in settled within the replay residual bound", label)
+            else:
+                ok, reason = return_maker_to_pose(arm, target, abort_event=Cancelled(), label=label)
+                if ok and family is not None:
+                    # This existing hook holds any reached pose, not only zero.
+                    # Metal must clear velocity feedforward while its peer is
+                    # still approaching frame zero. A failed hold fails easing.
+                    family.hold_recording_home([(arm, target)])
+            if not ok:
+                failed.set()
+            return ok, f"{label}: {reason}"
+        except Exception as exc:
+            failed.set()
+            return False, f"{label}: {exc}"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(ease, _arm_targets(robot, action)))
+    if _stop_event.is_set():
+        return False, "cut-short"
+    return all(ok for ok, _reason in results), "; ".join(
+        reason for ok, reason in results if not ok
+    ) or "arrived"
+
+
 def _connect_follower(request: ReplayRequest):
     """Connect and configure the follower for replay — mirrors
     teleoperate.py's single-arm connect sequence (write_calibration →
     configure → reset_torque_limit → clear_goal_velocity), follower-only.
     Raises on a connection or hard identity-mismatch failure; the caller
     (handle_start_replay) is responsible for cleanup on that path."""
-    if not uses_feetech_bus(request.arm_type):
+    family = arm_registry.get(normalize_arm_type(request.arm_type))
+    if not family.uses_feetech_bus:
         return _connect_can_follower(request)
 
     follower_id = setup_follower_calibration_file(request.follower_config, request.arm_type)
@@ -415,7 +654,7 @@ def _connect_follower(request: ReplayRequest):
             "Make sure it's plugged in and powered on, then try again."
         ) from e
 
-    identity_warnings = verify_devices(((robot, "follower"),), skip=request.skip_identity_check)
+    identity_warnings = family.verify_identity(((robot, "follower"),), skip=request.skip_identity_check)
 
     # A dropped serial packet during configure() ("Failed to write 'Lock' ...
     # no status packet") turned roughly one start in twenty into a hard 500,
@@ -438,8 +677,7 @@ def _connect_follower(request: ReplayRequest):
             )
             time.sleep(_CONNECT_RETRY_DELAY_S)
 
-    identity_warnings += reset_torque_limit(robot, FOLLOWER)
-    identity_warnings += clear_goal_velocity(robot, FOLLOWER)
+    identity_warnings += family.prepare_follower_registers(robot)
     return robot, identity_warnings
 
 
@@ -560,17 +798,17 @@ def _replay_worker(
     # gripper, matching what capture_rest_pose does here for the SO-101 —
     # replay drives the gripper from the dataset, so its start width is part of
     # the pose being restored.
-    feetech = uses_feetech_bus(arm_type)
-    if feetech:
-        start_pose = capture_rest_pose(robot.bus, normalize=False)
-    else:
-        start_pose = capture_maker_pose(robot, include_gripper=True)
+    family = arm_registry.get(normalize_arm_type(arm_type))
+    feetech = family.uses_feetech_bus
+    rest_poses = family.capture_rest_poses(robot, include_gripper=True)
 
     try:
         if frames:
             frame0 = dict(zip(action_names, frames[0], strict=True))
-            if feetech:
-                arrived, reason = return_to_rest_pose(
+            if len(maker_follower_arms(robot)) == 2:
+                arrived, reason = _ease_bimanual(robot, frame0, feetech, family)
+            elif feetech:
+                arrived, reason = _rest_pose.return_to_rest_pose(
                     robot.bus,
                     _bus_keyed(frame0, robot.bus),
                     abort_event=_stop_event,
@@ -598,7 +836,12 @@ def _replay_worker(
             # EASE_SETTLED_MAX_RESIDUAL (Feetech only: the CAN return already
             # judges by convergence and has no equivalent verdict).
             settled_too_far: tuple[str, float] | None = None
-            if not arrived and feetech and reason.startswith("settled"):
+            if (
+                not arrived
+                and feetech
+                and reason.startswith("settled")
+                and len(maker_follower_arms(robot)) == 1
+            ):
                 residual = _ease_in_residual(robot.bus, _bus_keyed(frame0, robot.bus))
                 if residual is not None:
                     worst_joint, worst = max(residual.items(), key=lambda item: item[1])
@@ -661,7 +904,8 @@ def _replay_worker(
                 # ease-in writes no such register — it borrows the arm's own
                 # startup sync — so there is nothing to clear.
                 if feetech:
-                    _ensure_uncapped(robot, "follower arm")
+                    for arm, label in maker_follower_arms(robot):
+                        _ensure_uncapped(arm, label)
 
                 with _state_lock:
                     _replay_meta["phase"] = "playing"
@@ -742,31 +986,18 @@ def _replay_worker(
         # Playback is over but the arm is still energized for the return —
         # a phase of this session, not idle yet.
         notify_session_changed("replay", True, phase=_replay_meta.get("phase"))
-        if feetech:
-            return_to_rest_pose(robot.bus, start_pose, label="follower arm")
-        else:
-            return_maker_to_pose(robot, start_pose, abort_event=_stop_event, label="follower arm")
+        # Every family returns to the session-start pose before torque is
+        # released; only a second Stop press (_release_now) cuts it short.
+        # Never _stop_event here — it is already set, see its definition.
+        family.return_to_rest(rest_poses, abort_event=_release_now)
     except Exception as e:
         logger.error(f"Replay worker error: {e}")
         with _state_lock:
             _replay_meta["phase"] = "error"
             _replay_meta["error"] = str(e)
     finally:
-        if feetech:
-            force_disable_torque(robot, "follower arm")
-            try:
-                robot.bus.disconnect(disable_torque=False)
-            except Exception as e:
-                logger.warning(f"Could not disconnect the follower after replay: {e}")
-        else:
-            release_maker_torque(robot, "CAN follower arm")
-            try:
-                # disconnect() (not bus.disconnect(disable_torque=False)):
-                # MakerFollower.disconnect honours disable_torque_on_disconnect,
-                # and a torque-off settle is this arm's documented safe state.
-                robot.disconnect()
-            except Exception as e:
-                logger.warning(f"Could not disconnect the CAN follower after replay: {e}")
+        family.release_torque(robot, "follower arms")
+        _disconnect_replay_followers(robot, feetech)
         with _state_lock:
             replay_active = False
             if _replay_meta.get("phase") not in ("error",):
@@ -801,14 +1032,32 @@ def handle_replay_status() -> dict[str, Any]:
 
 
 def handle_stop_replay() -> dict[str, Any]:
+    """Stop playback; the worker then returns the arm and releases it.
+
+    A SECOND stop while that return is still running (the worker is alive
+    but playback is over) releases the arm now instead — the same two-press
+    contract as teleoperation. A stop with nothing running is a 409.
+    """
     global replay_active
     with _state_lock:
-        if not replay_active:
-            return {"success": False, "status_code": 409, "message": "No replay is active"}
-        replay_active = False
-        _stop_event.set()
-        _replay_meta["phase"] = "stopping"
-    return {"success": True, "message": "Replay stopping"}
+        if replay_active:
+            replay_active = False
+            _stop_event.set()
+            _replay_meta["phase"] = "stopping"
+            return {
+                "success": True,
+                "releasing": True,
+                "message": (
+                    "Replay stopping — the arm returns to its starting position, "
+                    "then goes limp. Press Stop again to release it now."
+                ),
+            }
+        worker = replay_thread
+    if worker is not None and worker.is_alive():
+        logger.info("Second stop during the replay rest-pose return — releasing the arm now")
+        _release_now.set()
+        return {"success": True, "message": "Releasing the arm now"}
+    return {"success": False, "status_code": 409, "message": "No replay is active"}
 
 
 def stop_and_wait(timeout: float = _STOP_AND_WAIT_TIMEOUT_S) -> None:
@@ -822,5 +1071,12 @@ def stop_and_wait(timeout: float = _STOP_AND_WAIT_TIMEOUT_S) -> None:
     if worker is None or not worker.is_alive():
         return
     worker.join(timeout=timeout)
+    if not worker.is_alive():
+        return
+    logger.warning(
+        "Replay worker did not finish its graceful release within %.0fs; forcing release now", timeout
+    )
+    _release_now.set()
+    worker.join(timeout=5.0)
     if worker.is_alive():
-        logger.warning("Replay worker did not finish releasing within %.0fs", timeout)
+        logger.warning("Replay worker still alive after forcing release; giving up the wait")

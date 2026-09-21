@@ -620,24 +620,6 @@ const EMPTY_HUB: HubJobsResponse = {
 };
 
 /**
- * Permanently delete a model repo from the Hugging Face Hub. Scoped to the
- * caller's own namespace on the backend. A repo already gone (404) resolves
- * as success (idempotent), matching the backend semantics.
- */
-export async function deleteHubModel(
-  baseUrl: string,
-  fetcher: Fetcher,
-  repoId: string,
-): Promise<void> {
-  await apiRequest<void>(
-    baseUrl,
-    fetcher,
-    `/api/v1/jobs/hub/models/${repoId}`,
-    { method: "DELETE", action: "Delete hub model" },
-  );
-}
-
-/**
  * Hide a Hub job from the /jobs/hub listing. A local, persisted dismissal on
  * the backend — the HF Jobs API has no delete, so the job record on the Hub
  * itself is untouched.

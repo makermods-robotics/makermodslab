@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -51,10 +51,12 @@ __all__ = [
     "DeleteDatasetResponse",
     "DownloadStartResponse",
     "DownloadStatusResponse",
+    "EpisodeDeleteResponse",
     "EpisodeJointSeriesResponse",
     "EpisodeSummary",
     "ExcludedEpisodesResponse",
     "ImportResponse",
+    "MergeCancelResponse",
     "MergeLogEntry",
     "MergeStartResponse",
     "MergeStatusResponse",
@@ -83,19 +85,31 @@ class DatasetListItem(BaseModel):
 
 
 class DatasetTaskCount(BaseModel):
-    """One entry of /datasets/info `tasks` (datasets.py get_local_dataset_info);
-    num_episodes is 0 when the per-episode count is unavailable."""
+    """One entry of /datasets/info `tasks` (datasets.py get_local_dataset_info
+    / get_hub_dataset_info).
+
+    num_episodes is null when the count is UNKNOWN — episode metadata that
+    could not be read, or a Hub summary where the per-episode files were not
+    fetched. It is 0 only for a task that really is used by no episode. The two
+    were previously indistinguishable, which let an unreadable file silently
+    decide which task a client ranked first; clients must not sort on null."""
 
     task: str
-    num_episodes: int
+    num_episodes: int | None
 
 
 class DatasetInfoResponse(BaseModel):
     """datasets.py get_local_dataset_info / get_hub_dataset_info — both
-    branches carry every key. The hub summary degrades tasks to [] and
-    size_bytes to null (the repo isn't on disk). fps is `int | float` because
+    branches carry every key. The hub summary carries task STRINGS (one small
+    file next to meta/info.json) with null counts, and degrades size_bytes to
+    null (the repo isn't on disk). fps is `int | float` because
     it passes through from meta/info.json — a whole-number fps must stay the
-    integer the file holds, not become 30.0 on the wire."""
+    integer the file holds, not become 30.0 on the wire.
+
+    tasks is null (not []) when the hub summary could not read the task file at
+    all — a blip, an HTTP 5xx. [] is reserved for a dataset that genuinely
+    lists no task. A client must render null as "couldn't read", never as "no
+    task", and must not cache it. get_local_dataset_info always sends a list."""
 
     repo_id: str
     total_episodes: int
@@ -103,7 +117,7 @@ class DatasetInfoResponse(BaseModel):
     fps: int | float | None
     robot_type: str | None
     cameras: list[str]
-    tasks: list[DatasetTaskCount]
+    tasks: list[DatasetTaskCount] | None
     size_bytes: int | None
     source: Literal["local", "hub"]
 
@@ -258,11 +272,19 @@ class MergeStatusResponse(BaseModel):
     """merge.py MergeManager.get_status — error/output_repo_id/log_path are
     null (not absent) outside their states, so None must NOT be excluded."""
 
-    state: Literal["idle", "running", "done", "error"]
+    state: Literal["idle", "running", "done", "error", "cancelled"]
     error: str | None
     output_repo_id: str | None
     log_path: str | None
     logs: list[MergeLogEntry]
+
+
+class MergeCancelResponse(BaseModel):
+    """merge.py MergeManager.cancel — `cancelled` is False (with the reason in
+    `message`) when no merge was running to stop."""
+
+    cancelled: bool
+    message: str
 
 
 class UploadStartResponse(BaseModel):
@@ -293,3 +315,14 @@ class DeleteDatasetResponse(BaseModel):
 
     success: bool
     message: str
+
+
+class EpisodeDeleteResponse(BaseModel):
+    """server.py datasets_episode_delete: {"success": True,
+    **delete_local_episodes()}. `whole_dataset_deleted` is True when every
+    remaining episode was selected — there's nothing left to keep, so the
+    whole directory was removed instead of rewritten (see
+    delete_local_episodes)."""
+
+    success: bool
+    whole_dataset_deleted: bool

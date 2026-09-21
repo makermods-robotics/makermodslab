@@ -39,6 +39,58 @@ export interface RobotArmFields {
   right_follower_config: string;
 }
 
+/**
+ * The arm LAYOUT a robot record describes — what is plugged into THIS
+ * machine. "both" is a leader+follower pair (every record written before
+ * remote teleoperation reads back as this); "follower" is a robot station
+ * that hosts its follower for an operator elsewhere; "leader" is a
+ * controller — a leader arm that drives a remote robot. The values are data
+ * (the record's `arms` field on disk); only their labels localize.
+ */
+export type RobotArms = "both" | "follower" | "leader";
+
+/** Which arm(s) a setup-gap diagnosis should look at. */
+export type SetupScope = "all" | "follower" | "leader";
+
+/**
+ * The scope that matches a layout: a station is ready once its follower
+ * side is, a controller once its leader side is. Surfaces that summarise a
+ * record as a whole (the picker's status dot, the settings footer) use this
+ * so a follower-only station is not nagged about a leader it does not have.
+ */
+export function setupScopeForArms(arms: RobotArms | undefined): SetupScope {
+  if (arms === "follower") return "follower";
+  if (arms === "leader") return "leader";
+  return "all";
+}
+
+/** The readiness flags the listing carries, beside the layout. Structural
+ * for the same reason as RobotArmFields. */
+export interface RobotReadinessFields {
+  arms?: RobotArms;
+  is_clean: boolean;
+  follower_ready: boolean;
+  leader_ready: boolean;
+}
+
+/**
+ * "Is this record set up for what it is?" — the layout-aware readiness a
+ * record-level summary shows. Activity-specific gates keep reading the flag
+ * for the arm they drive (teleop → is_clean, inference → follower_ready,
+ * remote driving → leader_ready); this is only for surfaces describing the
+ * record rather than an activity.
+ */
+export function robotLayoutReady(robot: RobotReadinessFields): boolean {
+  switch (setupScopeForArms(robot.arms)) {
+    case "follower":
+      return robot.follower_ready;
+    case "leader":
+      return robot.leader_ready;
+    default:
+      return robot.is_clean;
+  }
+}
+
 export interface RobotSetupGaps {
   missingCalibration: ArmKey[];
   missingPort: ArmKey[];
@@ -59,12 +111,13 @@ export const ARM_LABEL_EN: Record<ArmKey, string> = {
 
 /**
  * `scope` must match the flag being diagnosed: follower-only surfaces
- * (inference/replay) pass "follower" so the message never blames leader-arm
- * gaps their activity doesn't care about.
+ * (inference/replay/hosting) pass "follower" and leader-only ones (driving a
+ * remote robot) pass "leader", so the message never blames gaps on an arm
+ * their activity doesn't touch.
  */
 export function robotSetupGaps(
   robot: RobotArmFields,
-  scope: "all" | "follower" = "all",
+  scope: SetupScope = "all",
 ): RobotSetupGaps {
   const allArms: {
     key: ArmKey;
@@ -83,7 +136,12 @@ export function robotSetupGaps(
           { key: "leader", port: robot.leader_port, config: robot.leader_config, follower: false },
           { key: "follower", port: robot.follower_port, config: robot.follower_config, follower: true },
         ];
-  const arms = scope === "follower" ? allArms.filter((a) => a.follower) : allArms;
+  const arms =
+    scope === "follower"
+      ? allArms.filter((a) => a.follower)
+      : scope === "leader"
+        ? allArms.filter((a) => !a.follower)
+        : allArms;
   const missingCalibration = arms.filter((a) => !a.config?.trim()).map((a) => a.key);
   const missingPort = arms.filter((a) => !a.port?.trim()).map((a) => a.key);
   return {
@@ -102,7 +160,7 @@ export function robotSetupGaps(
  */
 export function robotSetupGap(
   robot: RobotArmFields,
-  scope: "all" | "follower" = "all",
+  scope: SetupScope = "all",
 ): string {
   const gaps = robotSetupGaps(robot, scope);
   if (gaps.staleConfig) {
@@ -126,7 +184,7 @@ export function robotSetupGap(
 export function formatRobotSetupGap(
   t: TFunction,
   robot: RobotArmFields,
-  scope: "all" | "follower" = "all",
+  scope: SetupScope = "all",
 ): string {
   const gaps = robotSetupGaps(robot, scope);
   if (gaps.staleConfig) return t("robot.setupGap.stale");

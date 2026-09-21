@@ -1,0 +1,69 @@
+"""Settings for local Maker/Metal holding and Metal current limiting."""
+
+import math
+
+DEFAULT_GRIPPER_CURRENT_A = 0.5
+MIN_GRIPPER_CURRENT_A = 0.1
+MAX_GRIPPER_CURRENT_A = 2.0
+GRIPPER_STOP_C = 55.0
+GRIPPER_RESTART_C = 45.0
+DEFAULT_GRIPPER_HOLD_TORQUE_NM = 0.5
+# Widest Maker gripper opening, in calibrated degrees. The Maker closes toward
+# increasing angles, so this raises the lower bound of the pinned driver's
+# (-120.1, -2.5) gripper limit. Both grippers re-zeroed fully closed on
+# 2026-09-18; fully open then measured right -99.2, left -101.7. This keeps
+# the vendor's ~3 deg backoff from the narrower (right) jaw's stop.
+MAKER_GRIPPER_OPEN_LIMIT_DEG = -96.0
+
+
+def supports_gripper_effort_control(arm_type: str) -> bool:
+    from .arms import registry
+
+    try:
+        return registry.get(arm_type).supports_gripper_effort_control
+    except registry.UnknownArmType:
+        return False
+
+
+def supports_gripper_current_control(arm_type: str) -> bool:
+    from .arms import registry
+
+    try:
+        return registry.get(arm_type).supports_gripper_current_control
+    except registry.UnknownArmType:
+        return False
+
+
+def default_gripper_hold_torque(arm_type: str, current_limit: object = None) -> float | None:
+    """Default supported followers without an explicitly selected current mode."""
+    if supports_gripper_effort_control(arm_type) and current_limit is None:
+        return DEFAULT_GRIPPER_HOLD_TORQUE_NM
+    return None
+
+
+def validate_gripper_hold_torque(value: object) -> float | None:
+    """Experimental motor-output holding effort, not an instantaneous limit."""
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or not 0.1 <= value <= 2.0
+    ):
+        raise ValueError("Gripper holding torque must be between 0.1 and 2.0 N·m, or null to disable.")
+    return float(value)
+
+
+def validate_gripper_current(value: object) -> float | None:
+    """None disables the experiment; invalid enabled settings never fail open."""
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or not MIN_GRIPPER_CURRENT_A <= value <= MAX_GRIPPER_CURRENT_A
+    ):
+        raise ValueError("Gripper current limit must be between 0.1 and 2.0 A, or null to disable.")
+    return float(value)

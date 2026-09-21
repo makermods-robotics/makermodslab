@@ -133,10 +133,15 @@ export async function importDataset(
   });
 }
 
-/** One task string with how many episodes use it (0 = count unavailable). */
+/** One task string with how many episodes use it.
+ *
+ * `null` means UNKNOWN — episode metadata that could not be read, or a Hub
+ * summary whose per-episode files were never fetched. `0` means the task is
+ * genuinely used by no episode. Never sort on null: an unreadable file must not
+ * get to decide which task ranks first. */
 export interface DatasetTask {
   task: string;
-  num_episodes: number;
+  num_episodes: number | null;
 }
 
 export interface DatasetInfo {
@@ -146,7 +151,11 @@ export interface DatasetInfo {
   fps: number | null;
   robot_type: string | null;
   cameras: string[];
-  tasks: DatasetTask[];
+  /** `null` (Hub summaries only) means the task file could not be read — a
+   * blip, an HTTP 5xx. `[]` is a dataset that genuinely lists no task. Render
+   * null as "couldn't read", never as "no task", and do not cache it. A local
+   * dataset always sends an array. */
+  tasks: DatasetTask[] | null;
   /** On-disk size for a local dataset; null for a Hub summary (not on disk). */
   size_bytes: number | null;
   /** Carries per-episode sampling weights. Local datasets only; absent means
@@ -446,6 +455,27 @@ export async function deleteDataset(
   });
 }
 
+/**
+ * Permanently delete one or more episodes from a local dataset (no
+ * trash/undo). Deleting every remaining episode removes the whole dataset
+ * instead — `whole_dataset_deleted` tells the caller which happened, since
+ * lerobot refuses to produce a zero-episode dataset. Throws ApiError on a
+ * rejected delete (busy, out-of-range index), with the backend's message in
+ * `.detail`.
+ */
+export async function deleteEpisodes(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  episodeIndices: number[],
+): Promise<{ success: boolean; whole_dataset_deleted: boolean }> {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/episode-delete", {
+    method: "POST",
+    body: { dataset_repo_id: repoId, episode_indices: episodeIndices },
+    action: "Delete episodes",
+  });
+}
+
 /** What happened to the dataset's Hub copy during a rename: "renamed" — the
  * Hub copy was moved to match; "none" — the Hub was reachable and confirmed
  * it has no copy; "skipped" — the Hub step didn't run (offline, logged out,
@@ -475,7 +505,7 @@ export async function renameDataset(
   });
 }
 
-export type MergeState = "idle" | "running" | "done" | "error";
+export type MergeState = "idle" | "running" | "done" | "error" | "cancelled";
 
 export interface MergeStatus {
   state: MergeState;
@@ -545,5 +575,17 @@ export async function getDatasetMergeStatus(
 ): Promise<MergeStatus> {
   return apiRequest<MergeStatus>(baseUrl, fetcher, "/api/v1/datasets/merge/status", {
     action: "Merge status",
+  });
+}
+
+/** Stop the running merge (SIGTERM -> SIGKILL) and reclaim its partial output.
+ * `cancelled` is false when nothing was running to stop. */
+export async function cancelDatasetMerge(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<{ cancelled: boolean; message: string }> {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/merge/cancel", {
+    method: "POST",
+    action: "Cancel merge",
   });
 }

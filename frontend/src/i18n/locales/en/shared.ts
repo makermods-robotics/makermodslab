@@ -11,14 +11,20 @@ export default {
   sessionBusy: {
     message: "The robot is busy — {{activity}} is running. Stop it first.",
     generic: "The robot is busy with another session. Stop it first.",
+    // robot.busy.releasing: the previous session was stopped and is still
+    // finishing (an uninterruptible model download, an arm preflight).
+    releasing: "Still finishing the last session — try again in a moment.",
     activity: {
       teleoperation: "teleoperation",
       recording: "a recording session",
       inference: "an inference run",
+      remote_inference: "a remote inference run",
       replay: "an episode replay",
       calibration: "a calibration",
       auto_calibration: "an auto-calibration",
       wiggle: "a gripper wiggle",
+      hosting: "remote-teleop hosting",
+      remote_teleoperation: "remote teleoperation",
     },
   },
   update: {
@@ -50,6 +56,11 @@ export default {
     turnOff: "Turn off",
   },
   camera: {
+    title: "Cameras",
+    waiting: "Waiting for camera frames…",
+    paused: "Paused — showing the last captured frames.",
+    off: "Camera previews are off.",
+
     retry: "Retry camera feeds",
     retryTitle: "Retry camera feeds (e.g. after reconnecting a camera)",
     loadingRobot: "Loading robot...",
@@ -63,16 +74,17 @@ export default {
     done: "Done",
     leftArm: "Left arm",
     rightArm: "Right arm",
-    // Shown in the 3D viewer's place on a Maker arm, which has no URDF yet.
+    // Shown in the 3D viewer's place on the Metal arm, which has no URDF yet
+    // (the SO-101 and Maker arm both drive the model).
     jointAngles: "Live joint angles",
     waitingForJoints: "Waiting for joint data…",
-    // Family-neutral on purpose: the readout serves every CAN arm (Maker,
-    // Metal), and none of them ships a URDF yet.
+    // Kept arm-neutral: only the Metal arm falls back to the readout today,
+    // but a future arm type without a URDF would land here too.
     noModel: "No 3D model is available for this arm yet.",
   },
   urdf: {
     switchedDefaultTitle: "Switched to default model",
-    switchedDefaultDescription: "The default ARM100 robot model is now displayed.",
+    switchedDefaultDescription: "The default SO-101 robot model is now displayed.",
     loadingTitle: "Loading Urdf model...",
     loadingDescription: "Preparing 3D visualization",
     loadedTitle: "Urdf model loaded successfully",

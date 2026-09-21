@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -138,9 +138,10 @@ def test_two_clients_share_one_capture_last_release_frees_it(
 def test_preview_requests_thumbnail_resolution_before_first_read(
     fake_captures: list[FakeVideoCapture],
 ) -> None:
-    """The open path must ask for PREVIEW_WIDTH x PREVIEW_HEIGHT before a frame
-    is read: cv2 otherwise keeps the camera's default (1080p on the rig's USB
-    cameras) and its USB bandwidth reservation starves a third camera."""
+    """The open path must ask for the MJPG pixel format, then PREVIEW_WIDTH x
+    PREVIEW_HEIGHT, before a frame is read: cv2 otherwise negotiates raw YUYV (or
+    the camera's 1080p default) and its USB bandwidth reservation starves a
+    third camera. The fourcc goes first because V4L2 renegotiates size per format."""
     manager = CameraPreviewManager()
     gen = manager.open_stream(0)
     next(gen)
@@ -148,6 +149,7 @@ def test_preview_requests_thumbnail_resolution_before_first_read(
 
     cap = fake_captures[0]
     assert cap.props == [
+        (camera_preview.cv2.CAP_PROP_FOURCC, camera_preview.cv2.VideoWriter_fourcc(*"MJPG")),
         (camera_preview.cv2.CAP_PROP_FRAME_WIDTH, camera_preview.PREVIEW_WIDTH),
         (camera_preview.cv2.CAP_PROP_FRAME_HEIGHT, camera_preview.PREVIEW_HEIGHT),
     ]
@@ -473,3 +475,11 @@ def test_teleoperation_does_not_touch_camera_previews(monkeypatch: pytest.Monkey
     blank the user's tiles for no reason. Guards the /camera-preview endpoint's
     "allowed while teleoperating" contract from the other side."""
     assert not hasattr(teleoperate, "camera_preview_manager")
+
+
+@pytest.mark.parametrize("state", ["hosting_active", "releasing"])
+def test_camera_preview_refused_while_hosting_owns_camera(client, monkeypatch, state):
+    monkeypatch.setattr(server_mod.remote_host, state, True)
+    response = client.get("/camera-preview/0")
+    assert response.status_code == 409
+    assert "Stop hosting" in response.json()["detail"]

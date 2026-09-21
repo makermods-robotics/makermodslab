@@ -23,6 +23,7 @@ import {
   targetHandlesKey,
 } from "./coachKeys";
 import { phaseCue } from "./coachCues";
+import { PHASE_DOT, PHASE_TEXT, PILL_BG, formatTime } from "./sessionFrame";
 import {
   CoachingPhase,
   CoachingState,
@@ -288,32 +289,10 @@ function tally(results: EpisodeResult[]): Record<EpisodeResult, number> {
   };
 }
 
-const PHASE_DOT: Record<"amber" | "green" | "red", string> = {
-  amber: "bg-warn",
-  green: "bg-ok",
-  red: "bg-destructive",
-};
-
-const PHASE_TEXT: Record<"amber" | "green" | "red", string> = {
-  amber: "text-warn",
-  green: "text-ok",
-  red: "text-destructive",
-};
-
-// Pill (status chip) background + text per tone. Mirrors the dot/text maps so
-// the finished-failed/warning states reuse the same palette as the phases.
-const PILL_BG: Record<"amber" | "green" | "red", string> = {
-  amber: "bg-warn/15 text-warn",
-  green: "bg-ok/15 text-ok",
-  red: "bg-destructive/15 text-destructive",
-};
-
-function formatTime(seconds: number): string {
-  const s = Math.max(0, Math.floor(seconds));
-  const mins = Math.floor(s / 60);
-  const secs = s % 60;
-  return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-}
+// The pill / dot / text palettes and the mm:ss clock now live in
+// `sessionFrame.tsx`, shared with the remote (DRTC) session body so the two
+// dialogs cannot drift apart cosmetically. Nothing about their behaviour
+// changed in the move.
 
 /**
  * The live inference run as a modal dialog over whatever launched it —

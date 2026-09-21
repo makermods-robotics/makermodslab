@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2026 MakerMods. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -700,7 +700,9 @@ def test_start_inference_refuses_on_identity_error(monkeypatch: pytest.MonkeyPat
     )
     # Local-path ref: resolve is instant, no download phase — isolates the
     # identity failure as the first thing the worker hits.
-    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/tmp/model")
+    monkeypatch.setattr(
+        rollout, "_resolve_policy_path", lambda ref, report=None, should_cancel=None: "/tmp/model"
+    )
 
     def _refuse(request):
         raise ArmIdentityError("The follower arm on /dev/f carries calibration 'leader_a' — SWAPPED")
