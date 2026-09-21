@@ -12,9 +12,12 @@ from makermodslab_sdk.resources import (
     JobsResource,
     ModelsResource,
     NodesResource,
+    RecordingResource,
+    RemoteResource,
     Resource,
     RobotsResource,
     SessionsResource,
+    SfuResource,
     SystemResource,
 )
 
@@ -30,9 +33,12 @@ RESOURCE_CLASSES: dict[str, type[Resource]] = {
     "jobs": JobsResource,
     "models": ModelsResource,
     "nodes": NodesResource,
-    # robots is PROVISIONAL: its routes are untagged/untyped server-side at
-    # this snapshot — see resources/robots.py and the ratchet's UNTAGGED set.
+    "recording": RecordingResource,
+    "remote": RemoteResource,
+    # robots is a MIXED namespace: gripper-status is tagged, the record CRUD
+    # is still untagged — see the ratchet's UNTAGGED_NAMESPACES register.
     "robots": RobotsResource,
+    "sfu": SfuResource,
     "sessions": SessionsResource,
     "system": SystemResource,
 }
@@ -66,8 +72,8 @@ class Client:
         'ok'
 
     Namespaces mirror the API tags: ``datasets``, ``inference`` (coaching
-    verbs), ``jobs``, ``models``, ``nodes``, ``robots``, ``sessions``,
-    ``system``.
+    verbs), ``jobs``, ``models``, ``nodes``, ``recording``, ``remote``
+    (remote teleoperation), ``robots``, ``sessions``, ``sfu``, ``system``.
     Every method's docstring carries a usage example, and every error names
     the next call to make; when something fails, read the exception text.
 
@@ -95,7 +101,10 @@ class Client:
         self.jobs = JobsResource(self._transport)
         self.models = ModelsResource(self._transport)
         self.nodes = NodesResource(self._transport)
+        self.recording = RecordingResource(self._transport)
+        self.remote = RemoteResource(self._transport)
         self.robots = RobotsResource(self._transport)
+        self.sfu = SfuResource(self._transport)
         self.sessions = SessionsResource(self._transport)
         self.system = SystemResource(self._transport)
 

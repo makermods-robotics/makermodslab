@@ -268,32 +268,6 @@ class SystemResource(Resource):
             )
         )
 
-    @operation("get_wandb_extra")
-    def wandb_extra(self) -> ExtraStatus:
-        """Whether the Weights & Biases optional dependency is installed."""
-        return ExtraStatus.model_validate(
-            self._transport.request("GET", "/api/v1/system/wandb-extra", action="Get wandb extra")
-        )
-
-    @operation("install_wandb_extra")
-    def install_wandb_extra(self) -> InstallStart:
-        """Start installing the wandb extra (async; poll
-        ``wandb_extra_install_status()``)."""
-        return InstallStart.model_validate(
-            self._transport.request(
-                "POST", "/api/v1/system/wandb-extra/install", action="Install wandb extra"
-            )
-        )
-
-    @operation("install_wandb_extra_status")
-    def wandb_extra_install_status(self) -> InstallStatus:
-        """Progress of the wandb-extra install."""
-        return InstallStatus.model_validate(
-            self._transport.request(
-                "GET", "/api/v1/system/wandb-extra/install-status", action="Wandb extra install status"
-            )
-        )
-
     @operation("get_policy_extra")
     def policy_extra(self, policy_type: str) -> PolicyExtraStatus:
         """Whether the optional dependency for a policy type (e.g. ``"pi0"``)
@@ -434,6 +408,75 @@ class SystemResource(Resource):
             )
         )
 
+    @operation("wiggle_can_gripper_port")
+    def wiggle_can_gripper(
+        self, arm_type: str, device_type: str, port: str, *, leader_kind: str | None = None
+    ) -> CanGripperWiggleResult:
+        """Identify a CAN arm by jogging ONLY its gripper jaws ±10° (the
+        fallback when the protocol probe can't tell arms apart — e.g. a
+        Metal leader setup where every port answers Damiao). Moves hardware,
+        gently and only the gripper; refused while a session holds the bus.
+        ``success=False`` + ``code`` is the soft answer, not an HTTP error.
+        """
+        body: dict[str, Any] = {"arm_type": arm_type, "device_type": device_type, "port": port}
+        if leader_kind is not None:
+            body["leader_kind"] = leader_kind
+        return CanGripperWiggleResult.model_validate(
+            self._transport.request(
+                "POST", "/api/v1/maker/wiggle-gripper", json=body, action="Wiggle CAN gripper"
+            )
+        )
+
+    @operation("list_arm_families")
+    def arms(self) -> ArmFamilies:
+        """The arm-family manifest — every registered family's capabilities
+        (id, joints per arm, calibration kind, telemetry, leader options,
+        who provided it), default family first. THE reference for what an
+        ``arm_type`` can do; entries ride as dicts (see arms/manifest.py).
+
+        Example:
+            >>> [a["id"] for a in client.system.arms().arms]
+            ['so101', 'maker', 'metal']
+        """
+        return ArmFamilies.model_validate(
+            self._transport.request("GET", "/api/v1/arms", action="List arm families")
+        )
+
+    @operation("get_wandb_credentials")
+    def wandb_credentials(self) -> WandbCredentials:
+        """Whether the server machine holds Weights & Biases credentials
+        (``login_hint`` says how to log in when not)."""
+        return WandbCredentials.model_validate(
+            self._transport.request("GET", "/api/v1/system/wandb-credentials", action="Get wandb credentials")
+        )
+
+    @operation("get_remote_extra")
+    def remote_extra(self) -> ExtraStatus:
+        """Whether the [remote] extra (LiveKit Portal + plugins, for remote
+        teleoperation/inference) is installed."""
+        return ExtraStatus.model_validate(
+            self._transport.request("GET", "/api/v1/system/remote-extra", action="Get remote extra")
+        )
+
+    @operation("install_remote_extra")
+    def install_remote_extra(self) -> InstallStart:
+        """Start installing the [remote] extra (async; poll
+        ``remote_extra_install_status()``)."""
+        return InstallStart.model_validate(
+            self._transport.request(
+                "POST", "/api/v1/system/remote-extra/install", action="Install remote extra"
+            )
+        )
+
+    @operation("install_remote_extra_status")
+    def remote_extra_install_status(self) -> InstallStatus:
+        """Progress of the remote-extra install."""
+        return InstallStatus.model_validate(
+            self._transport.request(
+                "GET", "/api/v1/system/remote-extra/install-status", action="Remote extra install status"
+            )
+        )
+
 
 class RestartResult(SdkModel):
     """POST /api/v1/system/restart and the nodes restart proxy."""
@@ -461,3 +504,20 @@ class MakerProbeResult(SdkModel):
     leader_ports: list[str] = []
     unknown_ports: list[str] = []
     message: str = ""
+
+
+class CanGripperWiggleResult(SdkModel):
+    success: bool
+    message: str
+    code: str | None = None
+
+
+class ArmFamilies(SdkModel):
+    """GET /api/v1/arms — the registry manifest, default family first."""
+
+    arms: list[dict[str, Any]]
+
+
+class WandbCredentials(SdkModel):
+    available: bool
+    login_hint: str

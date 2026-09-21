@@ -4,8 +4,11 @@ from makermodslab_sdk.resources.inference import InferenceResource
 from makermodslab_sdk.resources.jobs import JobsResource
 from makermodslab_sdk.resources.models import ModelsResource
 from makermodslab_sdk.resources.nodes import NodesResource
+from makermodslab_sdk.resources.recording import RecordingResource
+from makermodslab_sdk.resources.remote import RemoteResource
 from makermodslab_sdk.resources.robots import RobotsResource
 from makermodslab_sdk.resources.sessions import SessionsResource
+from makermodslab_sdk.resources.sfu import SfuResource
 from makermodslab_sdk.resources.system import SystemResource
 
 __all__ = [
@@ -14,9 +17,12 @@ __all__ = [
     "JobsResource",
     "ModelsResource",
     "NodesResource",
+    "RecordingResource",
+    "RemoteResource",
     "Resource",
     "RobotsResource",
     "SdkModel",
     "SessionsResource",
+    "SfuResource",
     "SystemResource",
 ]

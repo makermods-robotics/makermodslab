@@ -126,6 +126,37 @@ REMEDIATIONS: dict[str, str] = {
     ),
     "node.duplicate": "That peer is already registered — client.nodes.list() shows it.",
     "node.self": "That URL points back at this server itself — register other machines, not this one.",
+    "system.extra_missing": (
+        "This feature needs an optional dependency set the server doesn't have — the .detail names "
+        "it; for remote teleoperation/inference: client.system.install_remote_extra(), then poll "
+        "client.system.remote_extra_install_status()."
+    ),
+    "transport.not_configured": (
+        "Remote inference has no transport — the server must run with --sfu (the bundled LiveKit "
+        "SFU). Check client.sessions.remote_inference_transport(); restart the server with --sfu."
+    ),
+    "sfu.disabled": ("The bundled SFU isn't running — start the server with --sfu, then retry."),
+    "sfu.seat_taken": (
+        "The station's single operator seat is held — one operator at a time. Wait for the seat to "
+        "free (client.remote.hosting_status() shows the active operator), then retry."
+    ),
+    "robot.arm_type.unavailable": (
+        "The record's arm_type isn't in this server's arm registry (client.system.arms() lists what "
+        "is) — install the extension that provides it, or fix the record."
+    ),
+    "robot.leader_kind.unavailable": (
+        "The record's leader kind needs an optional extra this server lacks (e.g. the Metal leader's "
+        "[metal-leader]) — client.system.arms() shows each leader option's availability."
+    ),
+    "gpu.cli_missing": (
+        "The `modal` CLI isn't attached on the server machine — install and authenticate it there, "
+        "then retry client.sessions.gpu_start()."
+    ),
+    "gpu.already_running": (
+        "A GPU container is already up — client.sessions.gpu_status() shows it; gpu_stop() first if "
+        "you need a fresh one."
+    ),
+    "gpu.not_running": "No GPU container is up — client.sessions.gpu_start() launches one.",
     "internal.unexpected": (
         "Server-side bug — the .detail carries the exception text; check the server logs for the traceback."
     ),

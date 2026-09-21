@@ -27,6 +27,10 @@ PLANNED: dict[str, frozenset[str]] = {
     "jobs": frozenset(),
     "models": frozenset(),
     "nodes": frozenset(),
+    "recording": frozenset(),
+    "remote": frozenset(),
+    "robots": frozenset(),
+    "sfu": frozenset(),
     "sessions": frozenset(),
     "system": frozenset(),
 }
@@ -57,6 +61,9 @@ def test_every_tagged_operation_is_implemented_or_planned():
     )
     for tag in sorted(ops):
         implemented = implemented_operations(RESOURCE_CLASSES[tag]) if tag in RESOURCE_CLASSES else set()
+        # A mixed namespace (robots) also implements untagged ops — those are
+        # checked by their own register below, not against the tag.
+        implemented -= set(UNTAGGED_NAMESPACES.get(tag, frozenset()))
         planned = set(PLANNED[tag])
         stale = planned - ops[tag]
         assert stale == set(), f"{tag}: PLANNED entries no longer in the snapshot: {sorted(stale)}"
@@ -120,13 +127,21 @@ def all_v1_operation_ids() -> set[str]:
 
 def test_untagged_namespaces_are_registered_and_real():
     tags = set(tagged_operations())
-    untagged_registered = set(RESOURCE_CLASSES) - tags
-    assert untagged_registered == set(UNTAGGED_NAMESPACES), (
-        "every RESOURCE_CLASSES key must be a snapshot tag or a registered untagged namespace"
+    orphans = set(RESOURCE_CLASSES) - tags - set(UNTAGGED_NAMESPACES)
+    assert orphans == set(), (
+        f"namespaces that are neither a snapshot tag nor registered untagged: {sorted(orphans)}"
     )
     v1_ops = all_v1_operation_ids()
     for namespace, expected in UNTAGGED_NAMESPACES.items():
         implemented = implemented_operations(RESOURCE_CLASSES[namespace])
-        assert implemented == set(expected), namespace
+        # A mixed namespace (robots: tagged gripper-status + untagged CRUD)
+        # checks only its untagged subset here; the tagged rest is the tag
+        # test's job.
+        untagged_implemented = implemented - tags_ops_of(namespace)
+        assert untagged_implemented == set(expected), namespace
         ghosts = expected - v1_ops
         assert ghosts == set(), f"{namespace}: ops not present anywhere in the snapshot: {sorted(ghosts)}"
+
+
+def tags_ops_of(tag: str) -> set[str]:
+    return tagged_operations().get(tag, set())

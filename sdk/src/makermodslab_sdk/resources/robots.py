@@ -2,12 +2,12 @@
 from (sessions start by robot NAME; the record holds ports, arm layout,
 calibration names, cameras, motor power).
 
-PROVISIONAL surface: these routes are untagged and untyped server-side at
-this snapshot (slated for a redesign), so unlike the tagged namespaces their
-errors arrive as plain ApiError with legacy ``{status, message}`` bodies and
-no codes. The SDK exposes them anyway — the web UI can manage records, so
-UI-parity (and beyond) demands the SDK can too. When the server tags them,
-this namespace graduates into the coverage ratchet's tagged set.
+MIXED surface: ``gripper_status`` is a tagged, typed route; the record CRUD
+is still untagged and untyped server-side (legacy ``{status, message}``
+bodies, uncoded errors) — the SDK exposes it anyway, because sessions start
+by robot name and an agent must be able to make records. The CRUD ops are
+pinned in the coverage ratchet's UNTAGGED_NAMESPACES register and graduate
+when the server tags them.
 
 Record semantics worth knowing (server.py upsert_robot):
 - ``mode`` ("single" | "bimanual") is FIXED AT CREATION — changing it on an
@@ -151,8 +151,38 @@ class RobotsResource(Resource):
         robot = body.get("robot")
         return Robot.model_validate(robot) if robot is not None else None
 
+    @operation("get_gripper_status")
+    def gripper_status(self, name: str) -> GripperStatusList:
+        """Live gripper telemetry for a CAN-arm record (per gripper: enable
+        state, current limit and draw, temperature, hold torque, fault).
+        Talks to the hardware — expect a moment, and a refusal while a
+        session holds the bus."""
+        return GripperStatusList.model_validate(
+            self._transport.request(
+                "GET", _robot_path(name, "/gripper-status"), action=f"Get gripper status of {name!r}"
+            )
+        )
+
     @operation("delete_robot")
     def delete(self, name: str) -> None:
         """Delete a record (404 when it doesn't exist). The record only —
         calibration files and datasets stay."""
         self._transport.request("DELETE", _robot_path(name), action=f"Delete robot {name!r}")
+
+
+class GripperInfo(SdkModel):
+    port: str
+    enabled: bool
+    limit_a: float | None = None
+    effective_current_a: float = 0.0
+    temperature_c: float = 0.0
+    fault: str | None = None
+    hold_torque_nm: float | None = None
+    holding: bool = False
+    measured_torque_nm: float | None = None
+
+
+class GripperStatusList(SdkModel):
+    """GET /api/v1/robots/{name}/gripper-status."""
+
+    grippers: list[GripperInfo]

@@ -113,6 +113,92 @@ class SessionCoaching(SdkModel):
     result: dict[str, Any]
 
 
+class RemoteInferenceStatus(SdkModel):
+    """GET /api/v1/remote-inference-status — the local (robot-side) state of
+    a remote-inference run; ``transport``/``stats`` ride as dicts."""
+
+    remote_inference_active: bool
+    phase: str | None = None
+    policy_ref: str | None = None
+    engine: str | None = None
+    started_at: float | None = None
+    elapsed_s: float = 0.0
+    duration_s: int | None = None
+    log_path: str | None = None
+    exited: bool = False
+    exit_code: int | None = None
+    outcome: str | None = None
+    error: str | None = None
+    hint: str | None = None
+    warning: str | None = None
+    returning_to_rest: bool = False
+    shutting_down: bool = False
+    stats: dict[str, Any] | None = None
+    transport: dict[str, Any] | None = None
+
+
+class RemoteInferenceTransport(SdkModel):
+    """GET /api/v1/remote-inference/transport — is the SFU there, is the
+    room resolvable, is an operator present. The pre-flight an agent checks
+    before starting kind remote_inference."""
+
+    extra_installed: bool
+    configured: bool
+    url: str = ""
+    room: str = ""
+    source: str = ""
+    sfu_enabled: bool = False
+    sfu_url: str | None = None
+    sfu_modal_url: str | None = None
+    sfu_external_ip: bool = False
+    sfu_install_hint: str | None = None
+    policy_token: str | None = None
+    endpoint_reachable: bool | None = None
+    operator_present: bool | None = None
+    error_code: str | None = None
+    message: str | None = None
+
+
+class GpuStatus(SdkModel):
+    """The Modal GPU launcher's state (a Lab-level resource BESIDE the
+    session, never inside it — stopping one never stops the other). Only the
+    headline fields are typed; the launch echo rides via extra=allow."""
+
+    state: str
+    phase: str | None = None
+    engine: str | None = None
+    policy_hub_id: str | None = None
+    room: str | None = None
+    app_id: str | None = None
+    gpu: str | None = None
+    log_path: str | None = None
+    started_at: float | None = None
+    elapsed_s: float = 0.0
+    message: str | None = None
+    hint: str | None = None
+    code: str | None = None
+    last_line: str | None = None
+    idle_stop_in_s: float | None = None
+
+
+class GpuLaunch(SdkModel):
+    """POST /api/v1/remote-inference/gpu/start response."""
+
+    started: bool
+    message: str
+    gpu: GpuStatus
+
+
+class GpuTargets(SdkModel):
+    """GET /api/v1/remote-inference/gpu/targets — the attached ``modal``
+    CLI's profiles and environments (shells out; slow, needs the CLI)."""
+
+    profiles: list[dict[str, Any]] = []
+    environments: list[dict[str, Any]] = []
+    profile: str | None = None
+    error: dict[str, Any] | None = None
+
+
 class _HeartbeatEnvelope(SdkModel):
     session: SessionInfo
 
@@ -369,6 +455,9 @@ class ActiveSession:
 # the kind's options model, so a new server kind (or option field) fails the
 # build here, named, until the SDK grows the matching sugar.
 SUGAR_BY_KIND: dict[str, str] = {
+    "hosting": "host",
+    "remote_inference": "remote_infer",
+    "remote_teleoperation": "remote_teleoperate",
     "teleoperation": "teleoperate",
     "recording": "record",
     "inference": "infer",
@@ -630,6 +719,7 @@ class SessionsResource(Resource):
         private: bool | None = None,
         resume: bool | None = None,
         streaming_encoding: bool | None = None,
+        per_episode_task: bool | None = None,
         skip_identity_check: bool | None = None,
         owner: str | None = None,
         lease_timeout_s: float | None = None,
@@ -662,6 +752,7 @@ class SessionsResource(Resource):
                 private=private,
                 resume=resume,
                 streaming_encoding=streaming_encoding,
+                per_episode_task=per_episode_task,
                 skip_identity_check=skip_identity_check,
             ),
             owner,
@@ -820,6 +911,203 @@ class SessionsResource(Resource):
             "auto_calibration",
             robot,
             _options(arms=arms, motor_power=motor_power, overwrite=overwrite),
+            owner,
+            lease_timeout_s,
+        )
+
+    # --- remote inference (kind "remote_inference" + its Lab-side GPU launcher)
+
+    @operation("get_remote_inference_status")
+    def remote_inference_status(self) -> RemoteInferenceStatus:
+        """The robot-side state of a remote-inference run (the arm is driven
+        locally; the policy runs on a remote GPU over the SFU)."""
+        return RemoteInferenceStatus.model_validate(
+            self._transport.request(
+                "GET", "/api/v1/remote-inference-status", action="Get remote inference status"
+            )
+        )
+
+    @operation("get_remote_inference_transport")
+    def remote_inference_transport(self) -> RemoteInferenceTransport:
+        """The transport pre-flight: SFU enabled, room resolvable, operator
+        present. Check this before ``remote_infer`` — a server without
+        ``--sfu`` refuses with transport.not_configured."""
+        return RemoteInferenceTransport.model_validate(
+            self._transport.request(
+                "GET", "/api/v1/remote-inference/transport", action="Get remote inference transport"
+            )
+        )
+
+    @operation("get_remote_inference_gpu")
+    def gpu_status(self) -> GpuStatus:
+        """The Modal GPU launcher's state — a Lab-level resource BESIDE the
+        session (its exit never stops a session, and vice versa; it idles
+        itself off after ~10 minutes)."""
+        return GpuStatus.model_validate(
+            self._transport.request("GET", "/api/v1/remote-inference/gpu", action="Get GPU status")
+        )
+
+    @operation("get_remote_inference_gpu_targets")
+    def gpu_targets(self, profile: str | None = None) -> GpuTargets:
+        """The attached ``modal`` CLI's profiles/environments (shells out —
+        slow; gpu.cli_missing when the CLI isn't attached)."""
+        params = {"profile": profile} if profile is not None else None
+        return GpuTargets.model_validate(
+            self._transport.request(
+                "GET", "/api/v1/remote-inference/gpu/targets", params=params, action="Get GPU targets"
+            )
+        )
+
+    @operation("start_remote_inference_gpu")
+    def gpu_start(self, **fields: Any) -> GpuLaunch:
+        """Launch the remote-inference GPU container on Modal (every field
+        optional; server defaults rule): ``policy_hub_id``, ``gpu``,
+        ``profile``, ``environment``, ``region``, ``engine``, ``task``,
+        ``horizon``, ``fps``, ``video_codec``, ``s_min``, ``slack``,
+        ``tolerance``, ``model_dtype``, ``flow_steps``, ``extra_image_roles``.
+        The room and the GPU side's token resolve through the session's own
+        transport — there is no second credential path.
+
+        Example:
+            >>> client.sessions.gpu_start(policy_hub_id="me/act-pick", gpu="A10G").started
+            True
+        """
+        return GpuLaunch.model_validate(
+            self._transport.request(
+                "POST", "/api/v1/remote-inference/gpu/start", json=fields, action="Start GPU"
+            )
+        )
+
+    @operation("stop_remote_inference_gpu")
+    def gpu_stop(self) -> GpuStatus:
+        """Stop the Modal GPU container (the session, if any, keeps running
+        and simply loses its policy peer)."""
+        return GpuStatus.model_validate(
+            self._transport.request("POST", "/api/v1/remote-inference/gpu/stop", action="Stop GPU")
+        )
+
+    # --- remote kinds' sugar --------------------------------------------------
+
+    def host(
+        self,
+        robot: str,
+        *,
+        fps: int | None = None,
+        video_codec: str | None = None,
+        skip_identity_check: bool | None = None,
+        owner: str | None = None,
+        lease_timeout_s: float | None = None,
+    ) -> ActiveSession:
+        """Host this machine's robot for remote teleoperation (the STATION
+        side): opens the follower(s) + cameras, joins this node's SFU room,
+        and parks (torque off at rest) until an operator takes the seat.
+        Needs the server started with ``--sfu`` and the ``[remote]`` extra
+        (refuses with system.extra_missing otherwise). ``video_codec`` is
+        H264/MJPEG/PNG/RAW.
+
+        Example:
+            >>> with client.sessions.host("bench") as s:
+            ...     print(client.remote.hosting_status().hosting["room"])
+        """
+        return self._start_managed(
+            "hosting",
+            robot,
+            _options(fps=fps, video_codec=video_codec, skip_identity_check=skip_identity_check),
+            owner,
+            lease_timeout_s,
+        )
+
+    def remote_teleoperate(
+        self,
+        robot: str,
+        *,
+        station: str,
+        skip_identity_check: bool | None = None,
+        owner: str | None = None,
+        lease_timeout_s: float | None = None,
+    ) -> ActiveSession:
+        """Drive a remote station's follower with THIS machine's leader (the
+        OPERATOR side). ``robot`` is the local record holding the leader
+        (``arms: "leader"`` records are the expected shape); ``station`` is
+        the hosting peer — its instance id from ``client.nodes.list()``. The
+        station must already be hosting; this side starts nothing there.
+        Drive mid-session with ``client.remote.home()`` / ``.engage()``.
+
+        Example:
+            >>> with client.sessions.remote_teleoperate("laptop-leader", station=peer_id) as s:
+            ...     drive_for_a_while()
+        """
+        return self._start_managed(
+            "remote_teleoperation",
+            robot,
+            _options(station=station, skip_identity_check=skip_identity_check),
+            owner,
+            lease_timeout_s,
+        )
+
+    def remote_infer(
+        self,
+        robot: str,
+        *,
+        policy_ref: str,
+        policy_hub_id: str | None = None,
+        task: str | None = None,
+        camera_bindings: dict[str, str] | None = None,
+        camera_dims: dict[str, dict[str, int]] | None = None,
+        checkpoint_state_dim: int | None = None,
+        duration_s: int | None = None,
+        horizon: int | None = None,
+        fps: int | None = None,
+        video_codec: str | None = None,
+        engine: str | None = None,
+        s_min: int | None = None,
+        video_quality: int | None = None,
+        video_bitrate_kbps: int | None = None,
+        camera_send_hz: float | None = None,
+        latency_k: float | None = None,
+        lpf_hz: float | None = None,
+        lpf_order: int | None = None,
+        skip_identity_check: bool | None = None,
+        owner: str | None = None,
+        lease_timeout_s: float | None = None,
+    ) -> ActiveSession:
+        """Run a policy on a REMOTE GPU while this machine drives the arm
+        (DRTC): the two meet over the SFU room; the session verifies the SFU
+        and that the policy peer is present BEFORE energizing. Launch the GPU
+        beforehand (``gpu_start``, or from another machine) — the session
+        never launches it. Check ``remote_inference_transport()`` first;
+        ``engine`` is "sync" or "rtc"; the ``video_*``/``latency_k``/``lpf_*``
+        knobs shape the camera uplink and action smoothing.
+
+        Example:
+            >>> client.sessions.gpu_start(policy_hub_id="me/act-pick")
+            >>> with client.sessions.remote_infer("bench", policy_ref="me/act-pick") as s:
+            ...     wait_for_rollout()
+        """
+        return self._start_managed(
+            "remote_inference",
+            robot,
+            _options(
+                policy_ref=policy_ref,
+                policy_hub_id=policy_hub_id,
+                task=task,
+                camera_bindings=camera_bindings,
+                camera_dims=camera_dims,
+                checkpoint_state_dim=checkpoint_state_dim,
+                duration_s=duration_s,
+                horizon=horizon,
+                fps=fps,
+                video_codec=video_codec,
+                engine=engine,
+                s_min=s_min,
+                video_quality=video_quality,
+                video_bitrate_kbps=video_bitrate_kbps,
+                camera_send_hz=camera_send_hz,
+                latency_k=latency_k,
+                lpf_hz=lpf_hz,
+                lpf_order=lpf_order,
+                skip_identity_check=skip_identity_check,
+            ),
             owner,
             lease_timeout_s,
         )

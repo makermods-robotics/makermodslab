@@ -107,6 +107,48 @@ class ModelsResource(Resource):
         ['act_pick_place']
     """
 
+    @operation("models_checkpoints")
+    def checkpoints(self, id: str) -> RunCheckpoints:
+        """A local training run's checkpoints with their publish state —
+        what ``publish`` can push to the Hub.
+
+        Example:
+            >>> [c.step for c in client.models.checkpoints("job-1").checkpoints]
+            [1000, 2000]
+        """
+        return RunCheckpoints.model_validate(
+            self._transport.request(
+                "GET", "/api/v1/models/checkpoints", params={"id": id}, action="List run checkpoints"
+            )
+        )
+
+    @operation("models_publish")
+    def publish(self, id: str, *, repo_id: str | None = None, steps: list[int] | None = None) -> PublishStart:
+        """Publish a local run's policy to the Hub (background; one publish
+        at a time — poll ``publish_status()``). ``steps`` narrows to specific
+        checkpoints; omitted, the server picks its default set.
+
+        Example:
+            >>> client.models.publish("job-1", steps=[2000]).started
+            True
+        """
+        body: dict = {"id": id}
+        if repo_id is not None:
+            body["repo_id"] = repo_id
+        if steps is not None:
+            body["steps"] = steps
+        return PublishStart.model_validate(
+            self._transport.request("POST", "/api/v1/models/publish", json=body, action="Publish policy")
+        )
+
+    @operation("models_publish_status")
+    def publish_status(self) -> PublishStatus:
+        """The single publish slot's progress (``url`` points at the pushed
+        repo once done)."""
+        return PublishStatus.model_validate(
+            self._transport.request("GET", "/api/v1/models/publish-status", action="Publish status")
+        )
+
     @operation("skills_list")
     def skills(self) -> Skills:
         """The skills view: every deployable policy across local jobs and the
@@ -362,3 +404,45 @@ class Skills(SdkModel):
 
     skills: list[Skill]
     hub: SkillsHubStatus
+
+
+class RunCheckpoint(SdkModel):
+    """One checkpoint of a training run; ``published`` = already on the Hub."""
+
+    step: int
+    path: str
+    published: bool
+
+
+class RunCheckpoints(SdkModel):
+    """GET /api/v1/models/checkpoints — a local run's publishable checkpoints."""
+
+    id: str
+    default_repo_id: str
+    hf_repo_id: str | None = None
+    legacy_root_checkpoint: bool = False
+    hub_readable: bool = False
+    checkpoints: list[RunCheckpoint] = []
+
+
+class PublishStart(SdkModel):
+    started: bool
+    model_id: str
+    message: str
+
+
+class PublishStatus(SdkModel):
+    """GET /api/v1/models/publish-status — the single publish slot
+    (``state`` walks idle → running → done/error; ``done``/``total`` count
+    checkpoints pushed)."""
+
+    state: str
+    model_id: str | None = None
+    repo_id: str | None = None
+    url: str | None = None
+    message: str | None = None
+    error: str | None = None
+    total: int = 0
+    done: int = 0
+    current_step: int | None = None
+    done_steps: list[int] = []

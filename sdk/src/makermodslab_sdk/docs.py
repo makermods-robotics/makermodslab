@@ -59,6 +59,15 @@ teleoperation, dataset recording, training, inference, replay, calibration).
   nothing moving, that's an answer). client.events() streams typed events;
   control events (jobs_changed/session_changed/...) are REFETCH HINTS,
   never state.
+- REMOTE (over the Lab's bundled SFU; server needs --sfu + the [remote]
+  extra): a STATION hosts its arm (sessions.host(robot), parked until an
+  operator sits) and an OPERATOR machine drives it
+  (sessions.remote_teleoperate(robot, station=peer_id); client.remote.home()/
+  .engage() mid-session). Remote inference = policy on a Modal GPU, arm
+  local: sessions.gpu_start(policy_hub_id=...), then
+  sessions.remote_infer(robot, policy_ref=...); check
+  sessions.remote_inference_transport() first. client.sfu.token() signs
+  role-scoped join tokens.
 - Responses are pydantic models mirroring the server, `extra="allow"` —
   unknown server fields stay readable, never crash.
 

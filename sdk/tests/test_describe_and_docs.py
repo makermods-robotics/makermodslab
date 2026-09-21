@@ -94,5 +94,6 @@ def test_cheatsheet_covers_every_operation_method():
     assert "with client.sessions.teleoperate" in text
     assert "Next step" in text
     assert "REFETCH HINTS" in text
-    # …and the whole thing stays context-budget sized.
-    assert len(text) < 20_000
+    # …and the whole thing stays context-budget sized (~6k tokens; the cap
+    # moved 20k→27k with the remote/recording/sfu surface of 2026-09).
+    assert len(text) < 27_000

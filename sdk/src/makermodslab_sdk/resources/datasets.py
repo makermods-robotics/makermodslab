@@ -612,6 +612,33 @@ class DatasetsResource(Resource):
             sleep_fn=sleep_fn,
         )
 
+    @operation("datasets_episode_delete")
+    def episode_delete(self, repo_id: str, episode_indices: Sequence[int]) -> EpisodeDeleteResult:
+        """PERMANENTLY delete episodes from a local dataset (unlike the
+        exclusion set, which only hides them from training). Deleting every
+        episode deletes the dataset — ``whole_dataset_deleted`` says so.
+
+        Example:
+            >>> client.datasets.episode_delete("maker/pick-place", [3, 17]).success
+            True
+        """
+        return EpisodeDeleteResult.model_validate(
+            self._transport.request(
+                "POST",
+                "/api/v1/datasets/episode-delete",
+                json={"dataset_repo_id": repo_id, "episode_indices": list(episode_indices)},
+                action="Delete episodes",
+            )
+        )
+
+    @operation("datasets_merge_cancel")
+    def merge_cancel(self) -> MergeCancelResult:
+        """Cancel the running merge (``cancelled=False`` + reason when there
+        is nothing to cancel)."""
+        return MergeCancelResult.model_validate(
+            self._transport.request("POST", "/api/v1/datasets/merge/cancel", action="Cancel merge")
+        )
+
     @operation("datasets_excluded_episodes")
     def excluded_episodes(self, repo_id: str) -> ExcludedEpisodes:
         """The episodes marked as excluded from training for one dataset.
@@ -662,3 +689,13 @@ class ExcludedEpisodesSet(SdkModel):
     success: bool
     repo_id: str
     episode_indices: list[int]
+
+
+class EpisodeDeleteResult(SdkModel):
+    success: bool
+    whole_dataset_deleted: bool
+
+
+class MergeCancelResult(SdkModel):
+    cancelled: bool
+    message: str
