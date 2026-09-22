@@ -249,6 +249,19 @@ def test_publish_slot_identity_must_match_even_on_done():
         )
 
 
+@pytest.mark.parametrize("repo_id", [None, "maker/act-pick"])
+def test_publish_slot_repo_must_match_even_when_job_matches(repo_id: str | None):
+    replaced = status("done") | {"repo_id": "other/parallel-publish"}
+    handler, _ = scripted_handler(jobs=(job_body("done"),), statuses=(replaced,))
+    with mock_client(handler) as client, pytest.raises(TrainingFlowError, match="other/parallel-publish"):
+        TrainingFlows(client).train_and_publish(
+            "maker/pick",
+            repo_id=repo_id,
+            train_timeout=5,
+            publish_timeout=5,
+        )
+
+
 def test_publish_rejected_by_busy_slot_is_not_reported_as_success():
     handler, requests = scripted_handler(
         jobs=(job_body("done"),),

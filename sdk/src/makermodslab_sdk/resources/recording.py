@@ -35,6 +35,7 @@ class RecordingStatus(SdkModel):
     outcome: str | None = None
     error: str | None = None
     hint: str | None = None
+    warning: str | None = None
     discarded_empty: bool | None = None
 
 

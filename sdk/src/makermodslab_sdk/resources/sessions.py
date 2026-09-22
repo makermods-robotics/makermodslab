@@ -943,12 +943,14 @@ class SessionsResource(Resource):
         owner: str | None = None,
         lease_timeout_s: float | None = None,
     ) -> ActiveSession:
-        """Run the trained policy ``policy_ref`` on the follower arm.
+        """Run or evaluate the trained policy ``policy_ref`` on the follower arm.
 
         ``camera_bindings`` maps policy-expected camera names to the robot
         record's camera names (the devices themselves come from the record);
         ``camera_dims`` values are ``{"width": ..., "height": ...}``.
         ``inference_engine`` is ``"sync"`` (server default) or ``"rtc"``.
+        ``eval_episodes > 1`` runs an evaluation with that many episodes;
+        call ``s.wait()`` for its natural end.
 
         ``coaching=True`` starts a DAgger coaching run instead of a plain
         rollout: the LEADER arm stands armed for takeover (so unlike plain

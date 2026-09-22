@@ -67,6 +67,23 @@ def test_matching_terminal_status_remains_readable(monkeypatch):
     tracker = sessions.SessionTracker()
     tracker._last_ended = {"id": "old", "kind": "recording"}
     monkeypatch.setattr(sessions, "tracker", tracker)
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "current_phase", "completed")
     monkeypatch.setattr(record, "handle_recording_status", lambda: {"session_ended": True})
 
     assert sessions.handle_recording_status_for_session("old") == {"session_ended": True}
+
+
+def test_previous_session_cannot_read_new_recording_before_tracker_claim(monkeypatch):
+    tracker = sessions.SessionTracker()
+    tracker._last_ended = {"id": "old", "kind": "recording"}
+    monkeypatch.setattr(sessions, "tracker", tracker)
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "current_phase", "preparing")
+    calls = []
+    monkeypatch.setattr(record, "handle_recording_status", lambda: calls.append(True))
+
+    with pytest.raises(ApiError) as error:
+        sessions.handle_recording_status_for_session("old")
+    assert error.value.status_code == 404
+    assert calls == []

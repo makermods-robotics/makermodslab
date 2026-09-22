@@ -90,14 +90,21 @@ class TrainingFlows:
         ``models.checkpoints`` → ``models.publish`` →
         ``models.publish_status``. Both timeout budgets start at their phase;
         neither timeout cancels work. A training timeout is
-        :class:`~makermodslab_sdk.resources.jobs.JobWaitTimeout`, whose
+        ``JobWaitTimeout``, whose
         ``job_id`` can be passed to ``client.jobs.wait`` again. A publish
-        timeout is :class:`PublishWaitTimeout`; use
+        timeout is ``PublishWaitTimeout``; use
         ``client.models.publish_status()`` to resume observing it.
 
         Only local training is supported. ``training_knobs`` are the same
         validated options as ``jobs.create_training``. ``steps`` is the
         training length; ``publish_steps`` selects checkpoints to publish.
+
+        Example:
+            >>> result = client.flows.train_and_publish(
+            ...     "me/pick", repo_id="me/act-pick", steps=20000, train_timeout=14400, publish_timeout=3600
+            ... )
+            >>> result.publish.repo_id
+            'me/act-pick'
         """
         if train_timeout < 0 or publish_timeout < 0:
             raise ValueError("train_timeout and publish_timeout must be nonnegative")
@@ -151,6 +158,7 @@ class TrainingFlows:
                     job_id=job_id,
                 )
 
+        expected_repo_id = repo_id or checkpoints.default_repo_id
         started = self._client.models.publish(job_id, repo_id=repo_id, steps=selected_steps)
         if not started.started or started.model_id != job_id:
             raise TrainingFlowError(
@@ -169,7 +177,20 @@ class TrainingFlows:
                     "this flow cannot confirm the result.",
                     job_id=job_id,
                 )
+            if status.repo_id is not None and status.repo_id != expected_repo_id:
+                raise TrainingFlowError(
+                    f"The publish slot now targets {status.repo_id!r}, not {expected_repo_id!r}. "
+                    "Next step: inspect client.models.publish_status(); this flow cannot confirm the result.",
+                    job_id=job_id,
+                )
             if status.state == "done":
+                if status.repo_id != expected_repo_id:
+                    raise TrainingFlowError(
+                        f"Publish for job {job_id!r} finished without the expected repository "
+                        f"{expected_repo_id!r} (slot repo_id={status.repo_id!r}). "
+                        "Next step: inspect client.models.publish_status(); this flow cannot confirm the result.",
+                        job_id=job_id,
+                    )
                 return TrainAndPublishResult(job=job, publish=status)
             if status.state == "error":
                 raise TrainingFlowError(

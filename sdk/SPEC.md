@@ -147,8 +147,10 @@ marked _(reference)_ name where the Python implementation lives.
   a pending take can leave `saved_episodes` unchanged at the next naming gate.
   Prompts and status use session-id-scoped server operations; a stale caller
   must never prompt or report a later recording. The result returns the
-  server-stamped dataset id.
+  server-stamped dataset id, terminal status (including warning/error detail),
+  and start warnings. An expired flow must not submit another episode prompt.
 - Local train-and-publish composes job creation/wait, checkpoint inspection,
   publish start/status. Training or publish timeout does not cancel server
   work; errors carry the job id for resumption. A failed or interrupted job
-  never starts publishing.
+  never starts publishing. Status must match both the local job id and target
+  repository before a flow reports success.

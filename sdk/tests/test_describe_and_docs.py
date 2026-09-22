@@ -225,6 +225,10 @@ def test_search_hits_carry_the_drill_affordance():
     assert "flows.train_and_publish(" in text
 
 
+def test_evaluation_is_discoverable_by_task_word():
+    assert 'client.docs("sessions.infer")' in search("eval")
+
+
 def test_search_zero_hits_points_back_at_the_index():
     text = search("zzz-no-such-thing")
     assert "client.docs()" in text and "makermodslab_sdk.docs" in text

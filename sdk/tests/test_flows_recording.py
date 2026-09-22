@@ -163,6 +163,17 @@ def test_timeout_stops_owned_recording():
     assert any(r.url.path.endswith("/stop") for r in script.requests)
 
 
+def test_zero_timeout_never_submits_episode_prompt():
+    script_routes = routes(status("naming", 0, episode=1))
+    script_routes[("POST", "/api/v1/sessions/rec-1/stop")] = [
+        (200, {"session": session(), "result": {"success": True}}),
+    ]
+    script = Script(script_routes)
+    with mock_client(script) as client, pytest.raises(RecordingFlowTimeout):
+        client.flows.record_episodes("bench", "me/dataset", task=["pick"], timeout=0)
+    assert not any(r.url.path.endswith("/recording/episode-task") for r in script.requests)
+
+
 def test_timeout_counts_slow_status_request():
     script_routes = routes(status("recording", 1))
     script_routes[("POST", "/api/v1/sessions/rec-1/stop")] = [
@@ -201,6 +212,25 @@ def test_terminal_error_is_not_reported_as_success():
         client.flows.record_episodes("bench", "me/dataset", task="pick", episodes=3)
 
 
+def test_completed_with_warning_preserves_server_detail():
+    terminal_status = status(
+        "completed", 1, ended=True, outcome="ran_with_warning", error="Torque release failed"
+    )
+    terminal_status["hint"] = "Check motor power"
+    terminal_status["warning"] = "Identity was not verified"
+    script_routes = routes(terminal_status)
+    script_routes[("POST", "/api/v1/sessions")] = [
+        (201, {"session": session(), "warnings": ["Camera mapping uncertain"]}),
+    ]
+    script = Script(script_routes)
+    with mock_client(script) as client:
+        result = client.flows.record_episodes("bench", "me/dataset", task="pick", episodes=1)
+    assert result.status.error == "Torque release failed"
+    assert result.status.hint == "Check motor power"
+    assert result.status.warning == "Identity was not verified"
+    assert result.start_warnings == ("Camera mapping uncertain",)
+
+
 def test_normal_early_end_is_partial_result_error():
     script = Script(routes(status("completed", 1, ended=True, outcome="ok")))
     with mock_client(script) as client, pytest.raises(RecordingFlowError, match="1 of 3") as error:
@@ -216,5 +246,5 @@ def test_stale_session_cannot_submit_prompt():
     ]
     script = Script(script_routes)
     with mock_client(script) as client, pytest.raises(RecordingFlowError, match="no longer owns"):
-        client.flows.record_episodes("bench", "me/dataset", task=["pick"], timeout=0)
+        client.flows.record_episodes("bench", "me/dataset", task=["pick"], timeout=1)
     assert not any(r.url.path.endswith("/recording/episode-task") for r in script.requests)

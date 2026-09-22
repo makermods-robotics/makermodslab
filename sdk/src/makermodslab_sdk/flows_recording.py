@@ -52,6 +52,8 @@ class RecordingFlowResult:
     saved_episodes: int
     outcome: str | None
     discarded_empty: bool | None
+    status: RecordingStatus
+    start_warnings: tuple[str, ...]
 
 
 class RecordingFlows:
@@ -85,8 +87,16 @@ class RecordingFlows:
 
         A timeout stops this flow's session and raises RecordingFlowTimeout;
         the error carries the session id, dataset id and last saved count.
-        ``on_progress`` receives each polled status. Inject ``sleep_fn`` and
-        ``clock`` in tests so no test sleeps or touches hardware.
+        ``on_progress`` receives each polled status. The result keeps the
+        terminal status (including warning, error and hint) and any start
+        warnings. Inject ``sleep_fn`` and ``clock`` in tests so no test sleeps
+        or touches hardware.
+
+        Example:
+            >>> result = client.flows.record_episodes("bench", "me/pick", task="pick the cube", episodes=5)
+            >>> result.saved_episodes, result.dataset_repo_id
+            (5, 'me/pick_20260922_120000')
+            >>> result.status.warning  # inspect even when outcome is ran_with_warning
         """
         if timeout < 0 or poll_interval <= 0:
             raise ValueError("timeout must be nonnegative and poll_interval positive")
@@ -182,7 +192,23 @@ class RecordingFlows:
                             saved_episodes=saved,
                         )
                     return RecordingFlowResult(
-                        ended, actual_dataset_id, saved, status.outcome, status.discarded_empty
+                        ended,
+                        actual_dataset_id,
+                        saved,
+                        status.outcome,
+                        status.discarded_empty,
+                        status,
+                        tuple(session.warnings),
+                    )
+                elapsed = max(0.0, clock() - started_at)
+                if elapsed >= timeout:
+                    raise RecordingFlowTimeout(
+                        f"Recording {session.id} is still {status.current_phase!r} after {elapsed:g}s "
+                        f"(timeout={timeout:g}); its session is being stopped. "
+                        "Next step: client.recording.status() shows how many episodes were saved.",
+                        session_id=session.id,
+                        dataset_repo_id=actual_dataset_id,
+                        saved_episodes=saved,
                     )
                 if tasks is not None and status.current_phase == "naming":
                     current = self._client.sessions.current().session

@@ -1233,7 +1233,9 @@ def handle_recording_status_for_session(session_id: str) -> dict[str, Any]:
 
     The legacy status store is global. Holding the recording claim lock and
     tracker lock together prevents a replacement recording from being
-    attributed to the caller during this read.
+    attributed to the caller during this read. A new run can claim the global
+    recording flag before the tracker receives its start hint, so terminal
+    reads also require the global recorder to have ended.
     """
     from . import record
 
@@ -1245,6 +1247,8 @@ def handle_recording_status_for_session(session_id: str) -> dict[str, Any]:
             and ended is not None
             and ended["id"] == session_id
             and ended["kind"] == "recording"
+            and not record.recording_active
+            and record.current_phase in ("completed", "error")
         )
         if not (owns_live or owns_terminal):
             raise ApiError(
