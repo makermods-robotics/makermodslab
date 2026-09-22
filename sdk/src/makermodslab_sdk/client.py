@@ -159,7 +159,31 @@ class Client:
 
         return snapshot(self)
 
+    def docs(self, topic: str | None = None, *, search: str | None = None) -> str:
+        """The SDK's own manual, disclosed progressively — the natural second
+        call after ``describe()``: describe() says where things stand, docs()
+        says what you can do about it.
+
+        Pure local introspection — never makes an HTTP request, works offline.
+
+        - ``client.docs()`` — the tier-0 index: rules + namespace map (~1k tokens)
+        - ``client.docs("jobs")`` — one namespace's pattern + method reference
+        - ``client.docs("jobs.create_training")`` — one method, full docstring
+        - ``client.docs(search="publish")`` — find methods by name/one-liner
+
+        Unknown topics return a helpful pointer (never raise). The same text
+        is on the CLI: ``python -m makermodslab_sdk.docs [topic|--search q|--all]``.
+        """
+        from makermodslab_sdk import docs as _docs
+
+        if search is not None:
+            return _docs.search(search)
+        if topic is None:
+            return _docs.index()
+        return _docs.render_topic(topic)
+
     def close(self) -> None:
+        """Close the HTTP transport (or use ``Client`` as a context manager)."""
         self._transport.close()
 
     def __enter__(self) -> Client:

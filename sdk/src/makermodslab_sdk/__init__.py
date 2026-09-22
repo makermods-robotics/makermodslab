@@ -9,6 +9,8 @@ Quickstart:
 
 Everything hangs off ``Client``; namespaces mirror the server's API tags.
 When a call fails, the exception text names the next call to make — read it.
+``client.docs()`` (or ``python -m makermodslab_sdk.docs``) is the built-in
+progressive-disclosure manual: index -> namespace card -> method detail.
 """
 
 from makermodslab_sdk.client import Client, CompatibilityWarning

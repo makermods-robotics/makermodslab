@@ -1,117 +1,279 @@
-"""The shipped cheatsheet: the whole SDK surface in a few thousand tokens.
+"""Progressive-disclosure docs for the SDK — three tiers plus search.
 
-``python -m makermodslab_sdk.docs`` prints it. Load it into an agent's
-context (or a human's terminal) and the SDK is drivable without reading
-source: the patterns are hand-written, the per-namespace method reference is
-INTROSPECTED from the live classes, so it can never drift from the code.
+A flat catalog degrades agent accuracy, so the docs disclose progressively:
+
+* Tier 0 — :func:`index`: identity, the core rules, a one-line-per-namespace
+  map, and how to drill down. Under ~1k tokens; the default everywhere.
+* Tier 1 — :func:`namespace_card`: one namespace's pattern intro (the
+  resource MODULE docstring — the single source of pattern prose) plus its
+  introspected method reference.
+* Tier 2 — :func:`method_detail`: one method's full signature and full
+  docstring.
+* :func:`search`: case-insensitive substring match over method names and
+  their docstring one-liners ONLY (never full bodies — deliberate).
+* :func:`cheatsheet`: the old full dump (index + every card), kept only
+  behind the CLI's ``--all``.
+
+``python -m makermodslab_sdk.docs [topic|--search q|--all]`` prints any of
+them; ``client.docs(...)`` is the in-process door. Everything but the index's
+rule list is introspected from the live classes, so it can never drift from
+the code.
 """
 
 from __future__ import annotations
 
+import difflib
 import inspect
+import sys
+from collections.abc import Callable
 
-HEADER = """\
-# makermodslab-sdk cheatsheet
+# The two pseudo-namespaces that exist beside RESOURCE_CLASSES: the client's
+# own top-level methods, and the realtime module's pure helpers.
+CLIENT_TAG = "client"
+REALTIME_TAG = "realtime"
 
-Agent-first Python SDK for a MakerMods Lab robot server (SO-101 arms:
-teleoperation, dataset recording, training, inference, replay, calibration).
-
-    from makermodslab_sdk import Client
-    client = Client("http://localhost:8000")   # the app's single port
-    print(client.describe().summary())          # ALWAYS a good first call
-
-## The rules that matter
-
-- ERRORS ARE THE MANUAL. Every failure's text ends with "Next step: <the
-  literal call to make>". Read it. Branch on `err.code` (e.g.
-  "session.held") or exception type — never on the prose.
-- SESSIONS HOLD THE ARM. One robot flow runs at a time. Start flows through
-  the `with` form so the lease heartbeat + stop are automatic:
-
-      with client.sessions.teleoperate("bench") as s:   # robot RECORD name
-          print(s.id, s.warnings)      # warnings: warn-but-allow findings
-          ...                          # arm is live inside the block
-      # leaving the block stops the session; a lost lease raises
-      # SessionLostError. Robot busy? -> SessionHeldError tells you the
-      # holder; client.sessions.stop_current() is the (never owner-gated)
-      # hammer, then retry.
-
-  Other kinds: .record(robot, dataset_repo_id=..., single_task=...),
-  .infer(robot, policy_ref=...), .replay(robot, repo_id=..., episode_index=...),
-  .calibrate(robot, device_type="robot"|"teleop"), .auto_calibrate(robot, arms=[...]).
-- NEVER WRITE POLLING LOOPS. Long-running work has blocking waiters:
-  client.jobs.wait(job_id), client.datasets.wait_for_download(repo_id), ...
-  All take timeout=; on timeout the error says how to keep waiting.
-- COACHING (DAgger): infer(robot, policy_ref=..., coaching=True,
-  coaching_dataset_name=...) runs the policy with the LEADER armed for
-  takeover; drive it with s.coaching_command("takeover"/"handback"/"hold"/
-  "resume"/"reset"/"recovered"/"cancel"/"drop_last") — corrections record
-  as episodes until target_corrections. client.inference.* are the same
-  verbs unscoped. success=False + message = soft refusal, not an error.
-- FULL BACKEND POWER, wider than the web UI. create_training(...) accepts
-  EVERY server training knob as a kwarg (help(makermodslab_sdk.TrainingOptions)
-  is the catalog: wandb_*, optimizer_*, resume/fine-tune lineage, eval,
-  device/AMP, hf_job_timeout, ...); a typo'd knob fails client-side with the
-  fix named. client.robots manages the saved robot records sessions start
-  from (create/update/rename/delete; mode is fixed at creation).
-- REALTIME (optional extra `makermodslab-sdk[realtime]`):
-  client.sample_joints(duration_s=2.0) -> bounded LIST of frames (empty =
-  nothing moving, that's an answer). client.events() streams typed events;
-  control events (jobs_changed/session_changed/...) are REFETCH HINTS,
-  never state.
-- REMOTE (over the Lab's bundled SFU; server needs --sfu + the [remote]
-  extra): a STATION hosts its arm (sessions.host(robot), parked until an
-  operator sits) and an OPERATOR machine drives it
-  (sessions.remote_teleoperate(robot, station=peer_id); client.remote.home()/
-  .engage() mid-session). Remote inference = policy on a Modal GPU, arm
-  local: sessions.gpu_start(policy_hub_id=...), then
-  sessions.remote_infer(robot, policy_ref=...); check
-  sessions.remote_inference_transport() first. client.sfu.token() signs
-  role-scoped join tokens.
-- Responses are pydantic models mirroring the server, `extra="allow"` —
-  unknown server fields stay readable, never crash.
-
-## Exceptions (all subclass MakerModsError)
-
-ConnectionFailedError (server unreachable) / ApiError (any non-2xx; has
-.status/.code/.detail/.details/.suggestion) with subclasses NotFoundError,
-InvalidRequestError, RobotBusyError (.busy_with), SessionHeldError (.holder)
-— plus JobWaitTimeout, WaitTimeoutError, OperationFailedError,
-SessionLostError from the ergonomics layer.
-"""
+# Client methods worth documenting (the rest are dunder/context-manager glue).
+_CLIENT_METHODS = ("describe", "docs", "events", "sample_joints", "stream_joints", "close")
 
 
-def _method_reference() -> str:
-    from makermodslab_sdk.client import RESOURCE_CLASSES
+def _signature(member: Callable) -> str:
+    try:
+        text = str(inspect.signature(member))
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return "(...)"
+    return text.replace("(self, ", "(").replace("(self)", "()")
 
-    lines: list[str] = ["## Method reference (introspected — always current)"]
+
+def _first_line(member: object) -> str:
+    doc = inspect.getdoc(member)
+    return doc.splitlines()[0] if doc else ""
+
+
+def _resource_members(cls: type) -> dict[str, Callable]:
+    return {
+        name: member
+        for name, member in sorted(vars(cls).items())
+        if not name.startswith("_") and callable(member)
+    }
+
+
+def _client_members() -> dict[str, Callable]:
+    from makermodslab_sdk.client import Client
+
+    return {name: vars(Client)[name] for name in _CLIENT_METHODS if name in vars(Client)}
+
+
+def _realtime_members() -> dict[str, Callable]:
+    from makermodslab_sdk import realtime
+
+    return {
+        name: member
+        for name, member in sorted(vars(realtime).items())
+        if not name.startswith("_") and inspect.isfunction(member) and member.__module__ == realtime.__name__
+    }
+
+
+def _exception_lines() -> list[str]:
+    """The error taxonomy, introspected from the package's public exceptions."""
+    import makermodslab_sdk
+
+    lines = []
+    for name in sorted(makermodslab_sdk.__all__):
+        member = getattr(makermodslab_sdk, name)
+        if isinstance(member, type) and issubclass(member, BaseException):
+            lines.append(f"- {name} — {_first_line(member)}")
+    return lines
+
+
+def _namespaces() -> dict[str, tuple[str, dict[str, Callable]]]:
+    """tag -> (pattern intro, {method name: callable}) for every card."""
+    from makermodslab_sdk.client import RESOURCE_CLASSES, Client
+
+    spaces: dict[str, tuple[str, dict[str, Callable]]] = {}
     for tag in sorted(RESOURCE_CLASSES):
         cls = RESOURCE_CLASSES[tag]
-        lines.append(f"\n### client.{tag}")
-        for name, member in sorted(vars(cls).items()):
-            if name.startswith("_") or not callable(member):
-                continue
-            try:
-                signature = str(inspect.signature(member)).replace("(self, ", "(").replace("(self)", "()")
-            except (TypeError, ValueError):  # pragma: no cover - defensive
-                signature = "(...)"
-            doc = inspect.getdoc(member)
-            first_line = doc.splitlines()[0] if doc else ""
-            lines.append(f"- {name}{signature} — {first_line}")
+        module = inspect.getmodule(cls)
+        intro = inspect.getdoc(module) if module else ""
+        spaces[tag] = (intro or "", _resource_members(cls))
+    spaces[CLIENT_TAG] = (inspect.getdoc(Client) or "", _client_members())
+
+    from makermodslab_sdk import realtime
+
+    spaces[REALTIME_TAG] = (inspect.getdoc(realtime) or "", _realtime_members())
+    return spaces
+
+
+def _map_line(tag: str, intro: str, members: dict[str, Callable], cls: type | None) -> str:
+    one_liner = _first_line(cls) if cls is not None else intro.splitlines()[0] if intro else ""
+    prefix = f"``client.{tag}`` — "
+    if one_liner.startswith(prefix):
+        one_liner = one_liner[len(prefix) :]
+    return f"- client.{tag} — {one_liner} ({len(members)} methods)"
+
+
+def index() -> str:
+    """Tier 0: identity, the core rules, the namespace map, how to drill down."""
+    from makermodslab_sdk.client import RESOURCE_CLASSES
+
+    lines = [
+        "# makermodslab-sdk — start here (tier 0 of 3)",
+        "",
+        "Agent-first Python SDK for a MakerMods Lab robot server (SO-101 /",
+        "Maker / Metal arms: teleoperation, recording, training, inference,",
+        "replay, calibration).",
+        "",
+        "    from makermodslab_sdk import Client",
+        '    client = Client("http://localhost:8000")   # the app\'s single port',
+        "    print(client.describe().summary())          # ALWAYS a good first call",
+        "",
+        "## The rules that matter",
+        "",
+        "- ERRORS ARE THE MANUAL. Every failure's text ends \"Next step: <the",
+        '  literal call to make>". Branch on err.code (e.g. "session.held") or',
+        "  exception type — never on the prose.",
+        "- SESSIONS HOLD THE ARM. One robot flow at a time; start flows through",
+        '  the with-form (with client.sessions.teleoperate("bench") as s: ...)',
+        "  so the lease heartbeat + stop are automatic. Busy? SessionHeldError",
+        "  names the holder; sessions.stop_current() is the hammer.",
+        "- NEVER WRITE POLLING LOOPS. Long-running work has blocking waiters:",
+        "  jobs.wait(job_id), datasets.wait_for_download(repo_id), ... All take",
+        "  timeout=; on timeout the error says how to keep waiting.",
+        "- STREAMS ARE BOUNDED OR URL-ONLY. sample_joints() returns a LIST",
+        "  (empty = nothing moving, that's an answer); cameras come as URLs.",
+        "- FULL BACKEND POWER, wider than the web UI: jobs.create_training(...)",
+        '  accepts EVERY server training knob — see client.docs("jobs").',
+        "- REMOTE needs the server started with --sfu plus the [remote] extra —",
+        '  see client.docs("remote").',
+        '- Responses are pydantic models with extra="allow" — unknown server',
+        "  fields stay readable, never crash.",
+        "",
+        '## Namespaces — drill down with client.docs("<tag>")',
+        "",
+    ]
+    spaces = _namespaces()
+    for tag in sorted(RESOURCE_CLASSES):
+        intro, members = spaces[tag]
+        lines.append(_map_line(tag, intro, members, RESOURCE_CLASSES[tag]))
     lines.append(
-        "\n### client (top level)\n"
-        "- describe() — one-call orientation snapshot; print(.summary())\n"
-        "- events(kinds=None) / sample_joints(duration_s=2.0, max_frames=None) / "
-        "stream_joints() — realtime extra\n"
-        "- close() — or use Client as a context manager"
+        f"- client — top level: describe() / docs() / realtime reads ({len(spaces[CLIENT_TAG][1])} methods)"
     )
-    return "\n".join(lines)
+    lines += [
+        "",
+        "## Drill down (tiers 1-2 + search)",
+        "",
+        '- client.docs("jobs")                 -> one namespace: pattern + methods',
+        '- client.docs("jobs.create_training") -> one method: full signature + docstring',
+        '- client.docs(search="publish")       -> find methods by name/one-liner',
+        "- CLI: python -m makermodslab_sdk.docs [topic|--search q|--all]",
+        "  (--all is the full dump; the tiers above are always the better start)",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def namespace_card(tag: str) -> str:
+    """Tier 1: one namespace's pattern intro + introspected method reference."""
+    spaces = _namespaces()
+    if tag not in spaces:
+        return _unknown_tag(tag, spaces)
+    intro, members = spaces[tag]
+    title = "client (top level)" if tag == CLIENT_TAG else f"client.{tag}"
+    if tag == REALTIME_TAG:
+        title = "realtime (module helpers; socket methods live on client)"
+    lines = [f"## {title} — tier 1", ""]
+    if intro:
+        lines += [intro, ""]
+    lines.append("### Methods")
+    for name, member in members.items():
+        lines.append(f"- {name}{_signature(member)} — {_first_line(member)}")
+    if tag == CLIENT_TAG:
+        lines += ["", "### Exceptions (branch on type or err.code, never prose)"]
+        lines += _exception_lines()
+    lines += ["", f'Full docstring of one method: client.docs("{tag}.<method>")']
+    return "\n".join(lines) + "\n"
+
+
+def method_detail(path: str) -> str:
+    """Tier 2: "tag.method" -> full signature + full docstring (never raises)."""
+    spaces = _namespaces()
+    tag, sep, name = path.partition(".")
+    if not sep:
+        return _unknown_tag(path, spaces)
+    if tag not in spaces:
+        return _unknown_tag(tag, spaces)
+    _intro, members = spaces[tag]
+    if name not in members:
+        close = difflib.get_close_matches(name, members, n=3)
+        hint = (
+            "did you mean " + " / ".join(f'"{tag}.{match}"' for match in close) + "?"
+            if close
+            else f'client.docs("{tag}") lists them all.'
+        )
+        return f'No method "{name}" in client.{tag} — {hint}\n'
+    member = members[name]
+    doc = inspect.getdoc(member) or "(no docstring)"
+    return f"{tag}.{name}{_signature(member)}\n\n{doc}\n"
+
+
+def search(query: str) -> str:
+    """Substring search over method NAMES and docstring one-liners only."""
+    needle = query.lower()
+    hits: list[str] = []
+    for tag, (_intro, members) in _namespaces().items():
+        if tag == REALTIME_TAG:
+            continue  # the socket-facing twins live on the client card
+        for name, member in members.items():
+            one_liner = _first_line(member)
+            if needle in name.lower() or needle in one_liner.lower():
+                signature = _signature(member)
+                if len(signature) > 60:
+                    signature = signature[:57] + "...)"
+                hits.append(f'{tag}.{name}{signature} — {one_liner}  [drill: client.docs("{tag}.{name}")]')
+    if not hits:
+        return (
+            f'No method name or one-liner contains "{query}". Search covers names\n'
+            "and first docstring lines only — try a shorter term, or start from\n"
+            "the namespace map: client.docs() (or python -m makermodslab_sdk.docs).\n"
+        )
+    return "\n".join(hits) + "\n"
 
 
 def cheatsheet() -> str:
-    """The full cheatsheet text (header + introspected method reference)."""
-    return HEADER + "\n" + _method_reference() + "\n"
+    """The full dump (--all): the index plus every namespace card."""
+    parts = [index()]
+    parts.extend(namespace_card(tag) for tag in _namespaces())
+    return "\n".join(parts)
+
+
+def render_topic(topic: str) -> str:
+    """Dispatch a CLI/client topic string to the right tier (never raises)."""
+    return method_detail(topic) if "." in topic else namespace_card(topic)
+
+
+def _unknown_tag(tag: str, spaces: dict[str, tuple[str, dict[str, Callable]]]) -> str:
+    close = difflib.get_close_matches(tag, spaces, n=3)
+    hint = f" Did you mean {' / '.join(close)}?" if close else ""
+    return (
+        f'Unknown namespace "{tag}".{hint} Valid topics: '
+        + ", ".join(sorted(spaces))
+        + '\n(or "tag.method" for one method; client.docs() prints the index).\n'
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI: no args -> index; [topic] -> card/detail; --search q; --all."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    if "--all" in args:
+        print(cheatsheet())
+    elif "--search" in args:
+        position = args.index("--search")
+        query = args[position + 1] if position + 1 < len(args) else ""
+        print(search(query) if query else 'Usage: python -m makermodslab_sdk.docs --search "query"')
+    elif args:
+        print(render_topic(args[0]))
+    else:
+        print(index())
+    return 0
 
 
 if __name__ == "__main__":
-    print(cheatsheet())
+    raise SystemExit(main())

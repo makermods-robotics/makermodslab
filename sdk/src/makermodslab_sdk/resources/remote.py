@@ -13,6 +13,15 @@ streaming, listening) until an operator takes the single seat, then
 ``engage()``); ending the operator session releases the seat and parks. The
 verb routes answer ``{success, message}`` — ``success=False`` carries the
 reason, not an HTTP error.
+
+Remote INFERENCE (the policy on a remote GPU, the arm local) rides the
+sessions surface, not this one: check
+``client.sessions.remote_inference_transport()`` first, launch a Modal GPU
+with ``client.sessions.gpu_start(policy_hub_id=...)``, then
+``client.sessions.remote_infer(robot, policy_ref=...)``. Both remote shapes
+need the server started with ``--sfu`` plus the ``[remote]`` extra (without
+them: ``transport.not_configured`` / ``system.extra_missing``);
+``client.sfu.token()`` signs the role-scoped join tokens everything rides on.
 """
 
 from __future__ import annotations

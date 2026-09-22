@@ -11,6 +11,24 @@ a session whose owner goes silent (crashed process, dead network) so an arm
 is never left energized. Stopping is deliberately never owner-gated — safety
 outranks ownership, so anyone who can reach the API can stop the arm.
 
+Start flows through the ``with`` form so the lease heartbeat + stop are
+automatic::
+
+    with client.sessions.teleoperate("bench") as s:  # robot RECORD name
+        print(s.id, s.warnings)  # warnings: warn-but-allow findings
+        ...  # arm is live inside the block
+    # leaving the block stops the session; a lost lease raises
+    # SessionLostError.
+
+Robot busy? ``SessionHeldError`` names the holder;
+``client.sessions.stop_current()`` is the (never owner-gated) hammer, then
+retry. The other kinds: ``record(robot, dataset_repo_id=..., single_task=...)``,
+``infer(robot, policy_ref=...)`` (``coaching=True`` for DAgger — see the
+``inference`` namespace), ``replay(robot, repo_id=..., episode_index=...)``,
+``calibrate(robot, device_type="robot"|"teleop")``,
+``auto_calibrate(robot, arms=[...])``, plus the remote kinds ``host``,
+``remote_teleoperate`` and ``remote_infer`` (see the ``remote`` namespace).
+
 Response models mirror makermodslab/schemas/sessions.py. SDK models are
 ``extra="allow"`` everywhere — an older SDK against a newer server must keep
 working, and the extra keys stay readable on the object.

@@ -1,6 +1,13 @@
 """The ``jobs`` namespace: training-job lifecycle, logs/metrics/checkpoints,
 Hub jobs and models, runner hardware.
 
+FULL BACKEND POWER, deliberately wider than the web UI's form:
+``create_training(...)`` accepts EVERY server training knob as a kwarg —
+``help(makermodslab_sdk.TrainingOptions)`` is the catalog (wandb_*,
+optimizer_*, resume/fine-tune lineage, eval, device/AMP, hf_job_timeout,
+...); a typo'd knob fails client-side with the fix named, before any request
+is sent. Never poll a run: ``wait(job_id)`` blocks to a terminal state.
+
 Response models mirror makermodslab/schemas/jobs.py (whose registry shapes are
 the wire models in makermodslab/jobs.py). Enum-like server fields (``state``,
 ``runner``, checkpoint ``source``) are typed ``str`` on purpose: an older SDK

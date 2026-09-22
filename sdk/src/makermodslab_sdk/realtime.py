@@ -18,6 +18,12 @@ event self-heals on your next fetch. Joint frames are telemetry samples, fine
 to read directly, but the same caveat applies: frames are droppable, not a
 lossless recording.
 
+The bounded, agent-friendly read is ``client.sample_joints(duration_s=2.0)``
+— it always returns a LIST of frames; an empty list means no hardware flow
+is streaming right now, which is an answer, not an error.
+``client.events()`` / ``client.stream_joints()`` are the open-ended
+generators for humans and dashboards.
+
 Unknown message types parse to :class:`UnknownEvent` (raw payload preserved)
 so an older SDK keeps working against a newer server; malformed bodies of a
 known type are downgraded the same way rather than raising.
