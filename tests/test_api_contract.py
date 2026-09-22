@@ -225,6 +225,10 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # Per-episode task naming: the "naming" phase control verb. Born
         # versioned — the flat mount was frozen long before this feature.
         "POST /api/v1/recording-episode-task",
+        # Agent flows need an id-checked prompt, so a stale caller cannot
+        # command whichever recording happens to be current now.
+        "POST /api/v1/sessions/{session_id}/recording/episode-task",
+        "GET /api/v1/sessions/{session_id}/recording/status",
         # Multi-checkpoint publish: the training view's picker + background queue.
         # Legacy POST /models/upload stays the single-checkpoint synchronous push.
         "GET /api/v1/models/checkpoints",

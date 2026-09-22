@@ -6,6 +6,7 @@ import httpx
 
 from makermodslab_sdk._transport import DEFAULT_TIMEOUT, Transport
 from makermodslab_sdk.errors import ApiError
+from makermodslab_sdk.flows import Flows
 from makermodslab_sdk.resources import (
     DatasetsResource,
     InferenceResource,
@@ -76,6 +77,7 @@ class Client:
     (remote teleoperation), ``robots``, ``sessions``, ``sfu``, ``system``.
     Every method's docstring carries a usage example, and every error names
     the next call to make; when something fails, read the exception text.
+    ``flows`` groups common multi-call sequences over those namespaces.
 
     The first request lazily fetches ``/api/v1/health`` and warns (never
     fails) when the server predates what this SDK supports — pass
@@ -107,6 +109,7 @@ class Client:
         self.sfu = SfuResource(self._transport)
         self.sessions = SessionsResource(self._transport)
         self.system = SystemResource(self._transport)
+        self.flows = Flows(self)
 
     @property
     def base_url(self) -> str:

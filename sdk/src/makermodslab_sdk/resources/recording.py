@@ -22,6 +22,22 @@ class RecordingControlResult(SdkModel):
     message: str
 
 
+class RecordingStatus(SdkModel):
+    """Live or terminal recording progress from the provisional status route."""
+
+    recording_active: bool
+    current_phase: str
+    session_ended: bool
+    dataset_repo_id: str | None = None
+    saved_episodes: int = 0
+    current_episode: int | None = None
+    total_episodes: int | None = None
+    outcome: str | None = None
+    error: str | None = None
+    hint: str | None = None
+    discarded_empty: bool | None = None
+
+
 class RecordingResource(Resource):
     """``client.recording`` — live-recording extras.
 
@@ -31,6 +47,17 @@ class RecordingResource(Resource):
         ... ) as s:
         ...     client.recording.set_episode_task("pick the red cube")
     """
+
+    def status(self) -> RecordingStatus:
+        """Recording phase, episode progress and terminal outcome.
+
+        This v1 route is still untagged and global. For an owned recording,
+        use ``client.sessions.recording_status(session_id)`` so a replacement
+        session cannot be mistaken for yours.
+        """
+        return RecordingStatus.model_validate(
+            self._transport.request("GET", "/api/v1/recording-status", action="Get recording status")
+        )
 
     @operation("recording_episode_task")
     def set_episode_task(self, task: str) -> RecordingControlResult:

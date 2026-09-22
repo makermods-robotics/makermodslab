@@ -5408,6 +5408,113 @@
         "title": "RecordingRequest",
         "type": "object"
       },
+      "RecordingStatusResponse": {
+        "additionalProperties": true,
+        "description": "Core progress fields; preserve the legacy status payload's extras.",
+        "properties": {
+          "current_episode": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Episode"
+          },
+          "current_phase": {
+            "title": "Current Phase",
+            "type": "string"
+          },
+          "dataset_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Repo Id"
+          },
+          "discarded_empty": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discarded Empty"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "recording_active": {
+            "title": "Recording Active",
+            "type": "boolean"
+          },
+          "saved_episodes": {
+            "default": 0,
+            "title": "Saved Episodes",
+            "type": "integer"
+          },
+          "session_ended": {
+            "title": "Session Ended",
+            "type": "boolean"
+          },
+          "total_episodes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Episodes"
+          }
+        },
+        "required": [
+          "recording_active",
+          "current_phase",
+          "session_ended"
+        ],
+        "title": "RecordingStatusResponse",
+        "type": "object"
+      },
       "ReleaseCanTorqueRequest": {
         "properties": {
           "arm_type": {
@@ -13303,6 +13410,102 @@
           }
         },
         "summary": "Heartbeat Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session_id}/recording/episode-task": {
+      "post": {
+        "description": "Submit a recording prompt only if this id still owns the live session.\n\nA stale client gets 404 session.not_found rather than prompting whichever\nrecording replaced it. Phase refusals keep the existing soft 200 shape.",
+        "operationId": "recording_episode_task_for_session",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EpisodeTaskBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordingControlResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recording Episode Task For Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session_id}/recording/status": {
+      "get": {
+        "description": "Recording progress and terminal outcome for this exact session id.\n\nA replacement recording cannot be mistaken for this one; stale ids get\n404 session.not_found instead of another run's global status.",
+        "operationId": "recording_status_for_session",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordingStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recording Status For Session",
         "tags": [
           "sessions"
         ]

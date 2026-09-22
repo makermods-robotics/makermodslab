@@ -215,6 +215,18 @@ def test_heartbeat_gone_raises_not_found():
     assert excinfo.value.code == "session.not_found"
 
 
+def test_stale_recording_prompt_refused_before_hardware_end_to_end(sdk_client):
+    with pytest.raises(NotFoundError) as excinfo:
+        sdk_client.sessions.recording_episode_task("__sdk_missing_session__", "pick")
+    assert excinfo.value.code == "session.not_found"
+
+
+def test_stale_recording_status_refused_before_hardware_end_to_end(sdk_client):
+    with pytest.raises(NotFoundError) as excinfo:
+        sdk_client.sessions.recording_status("__sdk_missing_session__")
+    assert excinfo.value.code == "session.not_found"
+
+
 def test_stop_returns_result_verbatim():
     script = Script().add(
         "POST",
@@ -304,6 +316,22 @@ def heartbeat_404():
     return (404, {"detail": "No active session with id 'sess-1'.", "code": "session.not_found"})
 
 
+def ended(*, kind="teleoperation", phase="completed", reason=None):
+    return (
+        200,
+        {
+            "session": None,
+            "last_ended": {
+                "id": "sess-1",
+                "kind": kind,
+                "ended_at": 1001.0,
+                "phase": phase,
+                "reason": reason,
+            },
+        },
+    )
+
+
 def stop_ok(phase="released"):
     return (200, {"session": session_body(phase=phase), "result": {"success": True}})
 
@@ -340,11 +368,76 @@ def test_tick_renewed_updates_info():
 
 
 def test_tick_gone_records_loss():
-    script = Script().add("POST", "/api/v1/sessions/sess-1/heartbeat", heartbeat_404())
+    script = (
+        Script()
+        .add("POST", "/api/v1/sessions/sess-1/heartbeat", heartbeat_404())
+        .add("GET", "/api/v1/sessions/current", (200, {"session": None, "last_ended": None}))
+    )
     s, _ = make_active(script)
     assert s._tick() == "gone"
     assert not s.alive
     assert s.lost_reason == "session.not_found"
+
+
+def test_tick_recording_natural_completion_does_not_lose_lease():
+    from makermodslab_sdk.resources.sessions import ActiveSession
+
+    script = (
+        Script()
+        .add("POST", "/api/v1/sessions/sess-1/heartbeat", heartbeat_404())
+        .add("GET", "/api/v1/sessions/current", ended(kind="recording"))
+        .add("POST", "/api/v1/sessions/sess-1/stop", heartbeat_404())
+    )
+    client = mock_client(script)
+    started = StartedSession.model_validate({"session": session_body(kind="recording")})
+    s = ActiveSession(client.sessions, started, owner=OWNER, auto_heartbeat=False)
+    with s:
+        assert s._tick() == "completed"
+        assert not s.alive
+        assert s.lost_reason is None
+        assert s.ended is not None and s.ended.phase == "completed"
+    assert len(script.calls("GET", "/api/v1/sessions/current")) == 1
+    client.close()
+
+
+def test_tick_expired_release_is_still_a_loss():
+    script = (
+        Script()
+        .add("POST", "/api/v1/sessions/sess-1/heartbeat", heartbeat_404())
+        .add("GET", "/api/v1/sessions/current", ended(reason="session.lease_expired"))
+    )
+    s, client = make_active(script)
+    assert s._tick() == "lost"
+    assert s.lost_reason == "session.lease_expired"
+    client.close()
+
+
+def test_wait_returns_matching_natural_completion_without_sleeping():
+    script = Script().add(
+        "GET",
+        "/api/v1/sessions/current",
+        (200, {"session": session_body(kind="recording"), "last_ended": None}),
+        ended(kind="recording"),
+    )
+    s, client = make_active(script)
+    pauses = []
+    result = s.wait(timeout=10, poll_interval=2, sleep_fn=pauses.append)
+    assert result.id == s.id and result.phase == "completed"
+    assert pauses == [2]
+    assert not s.alive
+    client.close()
+
+
+def test_wait_after_deliberate_stop_exits_without_polling():
+    from makermodslab_sdk import SessionStoppedError
+
+    script = Script().add("POST", "/api/v1/sessions/sess-1/stop", stop_ok())
+    s, client = make_active(script)
+    s.stop()
+    with pytest.raises(SessionStoppedError):
+        s.wait(timeout=10, sleep_fn=lambda _: None)
+    assert script.calls("GET", "/api/v1/sessions/current") == []
+    client.close()
 
 
 @pytest.mark.parametrize("code", ["session.not_owner", "session.lease_expired"])
@@ -425,6 +518,7 @@ def test_exit_raises_session_lost_after_loss():
     script = (
         Script()
         .add("POST", "/api/v1/sessions/sess-1/heartbeat", heartbeat_404())
+        .add("GET", "/api/v1/sessions/current", (200, {"session": None, "last_ended": None}))
         .add("POST", "/api/v1/sessions/sess-1/stop", heartbeat_404())
     )
     s, _ = make_active(script)
@@ -443,6 +537,7 @@ def test_exit_never_masks_the_body_exception():
     script = (
         Script()
         .add("POST", "/api/v1/sessions/sess-1/heartbeat", heartbeat_404())
+        .add("GET", "/api/v1/sessions/current", (200, {"session": None, "last_ended": None}))
         .add("POST", "/api/v1/sessions/sess-1/stop", heartbeat_404())
     )
     s, _ = make_active(script)

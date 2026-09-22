@@ -732,6 +732,7 @@ class JobsResource(Resource):
         timeout: float | None = None,
         poll_interval: float = 2.0,
         sleep_fn: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> Job:
         """Block until the job ends; returns the final record.
 
@@ -741,20 +742,24 @@ class JobsResource(Resource):
         ``.error_message``) yourself — a failed run is a normal return, not an
         exception. Raises :class:`JobWaitTimeout` when ``timeout`` seconds of
         polling pass first (None = wait forever), and an unknown ``job_id``
-        raises the same error ``get`` would. ``sleep_fn`` is injectable so
-        tests can wait without sleeping.
+        raises the same error ``get`` would. ``sleep_fn`` and ``clock`` are
+        injectable so tests can wait without sleeping, while slow requests
+        count toward the real timeout.
 
         Example:
             >>> job = client.jobs.wait(job.id, timeout=3600)
             >>> job.state, job.error_message
             ('done', None)
         """
-        waited = 0.0
+        if poll_interval <= 0 or (timeout is not None and timeout < 0):
+            raise ValueError("poll_interval must be positive and timeout nonnegative")
+        started = clock()
         while True:
             job = self.get(job_id)  # a missing job surfaces get's error as-is
             if job.state in TERMINAL_STATES:
                 return job
-            if timeout is not None and waited + poll_interval > timeout:
+            waited = max(0.0, clock() - started)
+            if timeout is not None and waited >= timeout:
                 raise JobWaitTimeout(
                     f"Job {job_id!r} is still {job.state!r} after {waited:.0f}s "
                     f"(timeout={timeout}). The run may simply need longer — call "
@@ -765,5 +770,4 @@ class JobsResource(Resource):
                     waited=waited,
                     last_state=job.state,
                 )
-            sleep_fn(poll_interval)
-            waited += poll_interval
+            sleep_fn(min(poll_interval, timeout - waited) if timeout is not None else poll_interval)

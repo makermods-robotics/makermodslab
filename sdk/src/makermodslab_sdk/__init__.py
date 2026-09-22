@@ -23,9 +23,11 @@ from makermodslab_sdk.errors import (
     RobotBusyError,
     SessionHeldError,
 )
+from makermodslab_sdk.flows_recording import RecordingFlowError, RecordingFlowResult, RecordingFlowTimeout
+from makermodslab_sdk.flows_training import PublishWaitTimeout, TrainAndPublishResult, TrainingFlowError
 from makermodslab_sdk.resources._waiting import OperationFailedError, WaitTimeoutError
 from makermodslab_sdk.resources.jobs import JobWaitTimeout, TrainingOptions
-from makermodslab_sdk.resources.sessions import SessionLostError
+from makermodslab_sdk.resources.sessions import SessionLostError, SessionStoppedError, SessionWaitTimeout
 
 __version__ = "0.0.1"
 
@@ -39,10 +41,18 @@ __all__ = [
     "MakerModsError",
     "NotFoundError",
     "OperationFailedError",
+    "PublishWaitTimeout",
+    "RecordingFlowError",
+    "RecordingFlowResult",
+    "RecordingFlowTimeout",
     "RobotBusyError",
     "SessionHeldError",
     "SessionLostError",
+    "SessionStoppedError",
+    "SessionWaitTimeout",
+    "TrainAndPublishResult",
     "TrainingOptions",
+    "TrainingFlowError",
     "WaitTimeoutError",
     "__version__",
 ]

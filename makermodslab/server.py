@@ -303,6 +303,8 @@ from .sessions import (
     handle_coaching_command_for_session,
     handle_current_session,
     handle_heartbeat_session,
+    handle_recording_episode_task_for_session,
+    handle_recording_status_for_session,
     handle_start_session,
     handle_stop_session,
     held_by,
@@ -2347,6 +2349,39 @@ class RecordingControlResponse(BaseModel):
     message: str
 
 
+class RecordingStatusResponse(BaseModel):
+    """Core progress fields; preserve the legacy status payload's extras."""
+
+    model_config = ConfigDict(extra="allow")
+
+    recording_active: bool
+    current_phase: str
+    session_ended: bool
+    dataset_repo_id: str | None = None
+    saved_episodes: int = 0
+    current_episode: int | None = None
+    total_episodes: int | None = None
+    outcome: str | None = None
+    error: str | None = None
+    hint: str | None = None
+    discarded_empty: bool | None = None
+
+
+@v1_router.get(
+    "/sessions/{session_id}/recording/status",
+    response_model=RecordingStatusResponse,
+    response_model_exclude_unset=True,
+    tags=["sessions"],
+)
+def recording_status_for_session(session_id: str):
+    """Recording progress and terminal outcome for this exact session id.
+
+    A replacement recording cannot be mistaken for this one; stale ids get
+    404 session.not_found instead of another run's global status.
+    """
+    return handle_recording_status_for_session(session_id)
+
+
 @v1_router.post(
     "/recording-episode-task",
     response_model=RecordingControlResponse,
@@ -2357,6 +2392,20 @@ def recording_episode_task(body: EpisodeTaskBody):
     reset. An empty description or a submission outside the naming phase
     comes back 200 + {success: false}."""
     return handle_submit_episode_task(body.task)
+
+
+@v1_router.post(
+    "/sessions/{session_id}/recording/episode-task",
+    response_model=RecordingControlResponse,
+    tags=["sessions"],
+)
+def recording_episode_task_for_session(session_id: str, body: EpisodeTaskBody):
+    """Submit a recording prompt only if this id still owns the live session.
+
+    A stale client gets 404 session.not_found rather than prompting whichever
+    recording replaced it. Phase refusals keep the existing soft 200 shape.
+    """
+    return handle_recording_episode_task_for_session(session_id, body.task)
 
 
 # Tagged "datasets": handled in record.py for historical reasons, but this is a

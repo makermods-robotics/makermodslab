@@ -426,22 +426,62 @@ def test_wait_polls_until_terminal(final):
 def test_wait_timeout_raises_with_keep_waiting_guidance():
     handler, calls = scripted_states(["running"])
     sleeps: list[float] = []
+    now = [0.0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
     with pytest.raises(JobWaitTimeout) as excinfo:
         call_via(
             handler,
-            lambda c: c.jobs.wait("j1", timeout=5.0, poll_interval=2.0, sleep_fn=sleeps.append),
+            lambda c: c.jobs.wait(
+                "j1",
+                timeout=5.0,
+                poll_interval=2.0,
+                sleep_fn=fake_sleep,
+                clock=lambda: now[0],
+            ),
         )
     err = excinfo.value
-    # Budget accounting is deterministic: polls at 0s, 2s, 4s; a third sleep
-    # would cross 5s, so it raises after three checks and two sleeps.
-    assert calls["n"] == 3
-    assert sleeps == [2.0, 2.0]
+    # Polls at 0s, 2s, 4s, then uses the remaining second before timing out.
+    assert calls["n"] == 4
+    assert sleeps == [2.0, 2.0, 1.0]
     assert isinstance(err, MakerModsError)
     assert isinstance(err, TimeoutError)
     assert err.job_id == "j1"
     assert err.last_state == "running"
     assert "wait(" in str(err)  # says how to keep waiting
     assert "stop(" in str(err)
+
+
+def test_wait_timeout_counts_slow_status_requests():
+    base_handler, calls = scripted_states(["running"])
+    now = [0.0]
+    sleeps = []
+
+    def slow_handler(request: httpx.Request) -> httpx.Response:
+        now[0] += 3.0
+        return base_handler(request)
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    with pytest.raises(JobWaitTimeout) as error:
+        call_via(
+            slow_handler,
+            lambda c: c.jobs.wait(
+                "j1",
+                timeout=5.0,
+                poll_interval=2.0,
+                sleep_fn=fake_sleep,
+                clock=lambda: now[0],
+            ),
+        )
+    assert calls["n"] == 2
+    assert sleeps == [2.0]
+    assert error.value.waited == 8.0
 
 
 def test_wait_zero_timeout_still_checks_once():

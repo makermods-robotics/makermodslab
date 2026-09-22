@@ -40,12 +40,15 @@ import os
 import secrets
 import socket
 import threading
+import time
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
 
 from makermodslab_sdk._operations import operation
 from makermodslab_sdk.errors import ApiError, MakerModsError, NotFoundError
 from makermodslab_sdk.resources._base import Resource, SdkModel
+from makermodslab_sdk.resources.recording import RecordingControlResult, RecordingStatus
 
 # Mirrors the server's lease/owner constraints (makermodslab/schemas/sessions.py).
 # The SDK never imports the server package, so the numbers live here too.
@@ -259,6 +262,19 @@ class SessionLostError(MakerModsError):
         self.reason = reason
 
 
+class SessionWaitTimeout(MakerModsError, TimeoutError):  # noqa: N818 - matches builtins.TimeoutError
+    """The session is still live after wait()'s timeout; call wait() again."""
+
+    def __init__(self, message: str, *, session_id: str, waited: float) -> None:
+        super().__init__(message)
+        self.session_id = session_id
+        self.waited = waited
+
+
+class SessionStoppedError(MakerModsError):
+    """The session was deliberately stopped while wait() was observing it."""
+
+
 class ActiveSession:
     """A started session plus the daemon heartbeat that keeps its lease alive.
 
@@ -297,6 +313,7 @@ class ActiveSession:
         self.warnings: list[str] = list(started.warnings or [])
         self._lost_reason: str | None = None
         self._lost_detail: str | None = None
+        self._ended: EndedSessionInfo | None = None
         self._stop_requested = False
         self._stop_result: StoppedSession | None = None
         self._stop_event = threading.Event()
@@ -330,9 +347,9 @@ class ActiveSession:
     @property
     def alive(self) -> bool:
         """True while the session is believed live and the lease held —
-        False after :meth:`stop` or once a heartbeat discovered a loss."""
+        False after :meth:`stop`, a natural end, or a heartbeat-discovered loss."""
         with self._lock:
-            return self._lost_reason is None and not self._stop_requested
+            return self._lost_reason is None and self._ended is None and not self._stop_requested
 
     @property
     def lost_reason(self) -> str | None:
@@ -341,24 +358,46 @@ class ActiveSession:
         with self._lock:
             return self._lost_reason
 
+    @property
+    def ended(self) -> EndedSessionInfo | None:
+        """Matching server end summary, if this session ended on its own."""
+        with self._lock:
+            return self._ended
+
     # --- the heartbeat: one TICK (testable) + the timing loop ----------------
 
     def _tick(self) -> str:
         """One renewal attempt; classification, no timing.
 
         Returns ``"renewed"``, ``"stopped"`` (a deliberate stop is in
-        progress — nothing recorded), ``"gone"`` (the session no longer
-        exists), ``"lost"`` (unrenewable: not owner / expiry in flight), or
+        progress — nothing recorded), ``"completed"`` (matching natural end),
+        ``"gone"`` (the session no longer exists), ``"lost"``
+        (unrenewable: not owner / expiry in flight), or
         ``"transient"`` (network blip or unexpected server error — the
         session is NOT declared lost; the next tick retries).
         """
         with self._lock:
             if self._stop_requested:
                 return "stopped"
+            if self._ended is not None:
+                return "completed"
             session_id, owner = self._info.id, self._owner
         try:
             renewed = self._sessions.heartbeat(session_id, owner)
         except NotFoundError as exc:
+            # A finite recording, replay, inference, or calibration may finish
+            # between renewals. The server's last_ended identity and reason
+            # distinguish that from a lost lease.
+            try:
+                snapshot = self._sessions.current()
+            except MakerModsError:
+                return "transient"
+            if snapshot.last_ended is not None and snapshot.last_ended.id == session_id:
+                if snapshot.last_ended.reason is None:
+                    return self._record_completion(snapshot.last_ended)
+                return self._record_loss(snapshot.last_ended.reason, exc.detail)
+            if snapshot.session is not None and snapshot.session.id == session_id:
+                return "transient"
             return self._record_loss("session.not_found", exc.detail)
         except ApiError as exc:
             if exc.code in ("session.not_owner", "session.lease_expired"):
@@ -390,6 +429,14 @@ class ActiveSession:
                 self._lost_detail = detail
         return "gone" if reason == "session.not_found" else "lost"
 
+    def _record_completion(self, ended: EndedSessionInfo) -> str:
+        with self._lock:
+            if self._stop_requested:
+                return "stopped"
+            self._ended = ended
+        self._stop_event.set()
+        return "completed"
+
     def _start_heartbeat_thread(self) -> None:
         self._thread = threading.Thread(
             target=self._heartbeat_loop,
@@ -402,8 +449,74 @@ class ActiveSession:
         # Event.wait(interval) so stop() interrupts a wait immediately —
         # wait-first, because the lease was just attached at full timeout.
         while not self._stop_event.wait(self.heartbeat_interval_s):
-            if self._tick() in ("stopped", "gone", "lost"):
+            if self._tick() in ("stopped", "completed", "gone", "lost"):
                 return
+
+    def wait(
+        self,
+        *,
+        timeout: float | None = None,
+        poll_interval: float = 2.0,
+        sleep_fn: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> EndedSessionInfo:
+        """Wait for this session's natural end via ``sessions.current()``.
+
+        Returns its matching ``last_ended`` summary, including ``phase``; a
+        phase of "error" is a completed session whose work failed. A lease
+        loss raises :class:`SessionLostError`. Timeout leaves the session
+        running; a surrounding ``with`` block will stop it on exit.
+        ``sleep_fn`` and ``clock`` make tests deterministic without sleeping.
+        """
+        if poll_interval <= 0 or (timeout is not None and timeout < 0):
+            raise ValueError("poll_interval must be positive and timeout nonnegative")
+        started = clock()
+        while True:
+            with self._lock:
+                ended, lost, detail, stopped = (
+                    self._ended,
+                    self._lost_reason,
+                    self._lost_detail,
+                    self._stop_requested,
+                )
+            if ended is not None:
+                return ended
+            if stopped:
+                raise SessionStoppedError(
+                    f"Session {self.id} was stopped while waiting. "
+                    "Next step: client.sessions.current().last_ended shows the final phase."
+                )
+            if lost is not None:
+                raise SessionLostError(
+                    f"Session {self.id} was lost while waiting ({lost}): {detail or 'no server detail'}. "
+                    "Next step: client.sessions.current().last_ended says how it ended.",
+                    session_id=self.id,
+                    kind=self.kind,
+                    reason=lost,
+                )
+            snapshot = self._sessions.current()
+            if snapshot.last_ended is not None and snapshot.last_ended.id == self.id:
+                if snapshot.last_ended.reason is None:
+                    self._record_completion(snapshot.last_ended)
+                else:
+                    self._record_loss(snapshot.last_ended.reason, snapshot.last_ended.phase)
+                continue
+            if snapshot.session is None or snapshot.session.id != self.id:
+                self._record_loss("session.not_found", "no matching last_ended summary")
+                continue
+            with self._lock:
+                if not self._stop_requested:
+                    self._info = snapshot.session
+            waited = max(0.0, clock() - started)
+            if timeout is not None and waited >= timeout:
+                raise SessionWaitTimeout(
+                    f"Session {self.id} is still {snapshot.session.phase!r} after {waited:g}s "
+                    f"(timeout={timeout:g}). Next step: call s.wait(timeout=<more seconds>) "
+                    "to keep waiting, or s.stop() to end it.",
+                    session_id=self.id,
+                    waited=waited,
+                )
+            sleep_fn(min(poll_interval, timeout - waited) if timeout is not None else poll_interval)
 
     def coaching_command(self, command: str) -> SessionCoaching:
         """Send a coaching (DAgger) verb to THIS session — ``"takeover"``,
@@ -463,7 +576,7 @@ class ActiveSession:
             )
 
     def __repr__(self) -> str:
-        state = "alive" if self.alive else (self.lost_reason or "stopped")
+        state = "alive" if self.alive else (self.lost_reason or ("completed" if self.ended else "stopped"))
         return f"<ActiveSession {self.kind} {self.id} {state}>"
 
 
@@ -651,6 +764,39 @@ class SessionsResource(Resource):
                 f"/api/v1/sessions/{quote(session_id, safe='')}/coaching",
                 json={"command": command},
                 action=f"Coaching command {command!r}",
+            )
+        )
+
+    @operation("recording_episode_task_for_session")
+    def recording_episode_task(self, session_id: str, task: str) -> RecordingControlResult:
+        """Set this recording session's next episode task by id.
+
+        The server refuses a stale id with 404 session.not_found, so a prompt
+        cannot reach a later recording. A prompt at the wrong phase returns
+        ``success=False`` with the reason in ``message``.
+        """
+        return RecordingControlResult.model_validate(
+            self._transport.request(
+                "POST",
+                f"/api/v1/sessions/{quote(session_id, safe='')}/recording/episode-task",
+                json={"task": task},
+                action="Set recording episode task for session",
+            )
+        )
+
+    @operation("recording_status_for_session")
+    def recording_status(self, session_id: str) -> RecordingStatus:
+        """Progress and terminal result for this exact recording session.
+
+        The id check prevents attributing a replacement recording's dataset
+        or episode count to this one. Terminal status remains readable until
+        another session starts; a stale id then gets 404 session.not_found.
+        """
+        return RecordingStatus.model_validate(
+            self._transport.request(
+                "GET",
+                f"/api/v1/sessions/{quote(session_id, safe='')}/recording/status",
+                action="Get recording status for session",
             )
         )
 

@@ -25,6 +25,8 @@ task needs — everything below the index is introspected from the code:
   namespace map, drill-down instructions (~1k tokens; start here)
 - `client.docs("jobs")` / `... docs jobs` — one namespace's pattern intro
   (the resource module docstring) + method reference
+- `client.docs("flows")` — short recording and training-to-publish sequences;
+  each method names the primitive calls it composes
 - `client.docs("jobs.create_training")` / `... docs jobs.create_training` —
   one method's full signature and docstring
 - `client.docs(search="publish")` / `... docs --search publish` — find
@@ -57,6 +59,17 @@ idiomatically and transcribes layers 2–3:
 2. **Resource namespaces** (`resources/`) — one module per API tag, thin and
    declarative; each method is tagged with the v1 `operationId` it covers.
 3. **Ergonomics** — the leased-session context manager, waiters, realtime.
+   `client.flows` lives here: compositions have no operation IDs and do not
+   change the per-operation coverage ratchet.
+
+For a fixed task, `client.flows.record_episodes("bench", "me/demo",
+task="pick the cube", episodes=5)` starts a leased recording, reports
+progress, and waits for all five saved episodes. Pass a list of task strings
+to prompt separately for each episode. For a completed local run and Hub
+publication in one call, use
+`client.flows.train_and_publish("me/demo", steps=20000,
+train_timeout=14400, publish_timeout=3600)`. Both methods expose their full
+signatures at `client.docs("flows.<method>")`.
 
 The contract is `docs/api/openapi.json` at the repo root plus `SPEC.md`
 (behavior semantics — leases, hints, error taxonomy; written alongside the

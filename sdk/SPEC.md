@@ -81,6 +81,11 @@ marked _(reference)_ name where the Python implementation lives.
 - A 201 start response may carry `warnings` (warn-but-allow findings, e.g.
   arm identity). The session RUNS; the warnings must be surfaced verbatim
   (server prose, never localized/reworded).
+- A heartbeat 404 after a finite session can mean normal completion. Read
+  `sessions.current().last_ended`: a matching id with null `reason` is an end
+  (including `phase="error"`), while `session.lease_expired` is a loss. A
+  mismatched or absent end summary remains a loss. A blocking session waiter
+  confirms terminal state by matching this id, not merely by seeing idle.
 
 ## 6. Realtime hints
 
@@ -130,3 +135,20 @@ marked _(reference)_ name where the Python implementation lives.
   fixtures generated from the same snapshot.
 - Tests never sleep, never touch the network, and NEVER call endpoints that
   energize hardware, write servo EEPROM, or start subprocesses.
+
+## 10. Client-side flows
+
+- `client.flows` composes existing methods; its methods have no operation IDs
+  and are outside the tagged-operation coverage ratchet. Each docstring names
+  its primitives, and the docs index points to a separate flows card.
+- Recording a requested episode count owns a leased session. Its timeout
+  stops that session; a normal early end with fewer saved episodes is a
+  partial-result error. Per-episode prompts follow `current_episode`, because
+  a pending take can leave `saved_episodes` unchanged at the next naming gate.
+  Prompts and status use session-id-scoped server operations; a stale caller
+  must never prompt or report a later recording. The result returns the
+  server-stamped dataset id.
+- Local train-and-publish composes job creation/wait, checkpoint inspection,
+  publish start/status. Training or publish timeout does not cancel server
+  work; errors carry the job id for resumption. A failed or interrupted job
+  never starts publishing.

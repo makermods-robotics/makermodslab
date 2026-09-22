@@ -57,6 +57,15 @@ def _resource_members(cls: type) -> dict[str, Callable]:
     }
 
 
+def _flow_members(cls: type) -> dict[str, Callable]:
+    """The flows facade inherits its public methods from implementation modules."""
+    return {
+        name: member
+        for name, member in inspect.getmembers(cls)
+        if not name.startswith("_") and callable(member)
+    }
+
+
 def _client_members() -> dict[str, Callable]:
     from makermodslab_sdk.client import Client
 
@@ -107,6 +116,10 @@ def _namespaces() -> dict[str, tuple[str, dict[str, Callable]]]:
         spaces[tag] = (intro or "", _resource_members(cls))
     spaces[CLIENT_TAG] = (inspect.getdoc(Client) or "", _client_members())
 
+    from makermodslab_sdk import flows
+
+    spaces["flows"] = (inspect.getdoc(flows) or "", _flow_members(flows.Flows))
+
     from makermodslab_sdk import realtime
 
     spaces[REALTIME_TAG] = (inspect.getdoc(realtime) or "", _realtime_members())
@@ -125,6 +138,7 @@ def _map_line(tag: str, members: dict[str, Callable], cls: type) -> str:
 def index() -> str:
     """Tier 0: identity, the core rules, the namespace map, how to drill down."""
     from makermodslab_sdk.client import RESOURCE_CLASSES
+    from makermodslab_sdk.flows import Flows
 
     lines = [
         "# makermodslab-sdk — start here (tier 0 of 3)",
@@ -162,9 +176,10 @@ def index() -> str:
         "",
     ]
     spaces = _namespaces()
-    for tag in sorted(RESOURCE_CLASSES):
+    for tag in sorted([*RESOURCE_CLASSES, "flows"]):
         _intro, members = spaces[tag]
-        lines.append(_map_line(tag, members, RESOURCE_CLASSES[tag]))
+        cls = Flows if tag == "flows" else RESOURCE_CLASSES[tag]
+        lines.append(_map_line(tag, members, cls))
     lines.append(
         f"- client — top level: describe() / docs() / realtime reads ({len(spaces[CLIENT_TAG][1])} methods)"
     )

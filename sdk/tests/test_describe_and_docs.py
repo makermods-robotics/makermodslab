@@ -104,6 +104,7 @@ def test_index_names_every_namespace_and_the_drilldowns():
     text = index()
     for tag in RESOURCE_CLASSES:
         assert f"client.{tag} — " in text, f"index missing namespace {tag}"
+    assert "client.flows — " in text
     assert "- client — top level" in text
     # The drill-down affordances an agent needs to go deeper:
     assert 'client.docs("jobs")' in text
@@ -128,14 +129,15 @@ def test_index_names_every_namespace_and_the_drilldowns():
 #   .venv/bin/python -c "from makermodslab_sdk import docs;
 #     print({t: len(docs.namespace_card(t)) for t in docs._namespaces()})"
 CARD_BUDGETS_CHARS = {
-    "client": 3600,  # measured 2959
+    "client": 4300,  # measured 3561 after flow exceptions
     "datasets": 5100,  # measured 4196
+    "flows": 1900,  # measured 1521
     "inference": 2300,  # measured 1858
     "jobs": 3900,  # measured 3247
     "models": 3200,  # measured 2587
     "nodes": 2400,  # measured 1991
     "realtime": 3700,  # measured 3059
-    "recording": 900,  # measured 691
+    "recording": 1000,  # measured 781
     "remote": 2800,  # measured 2263
     "robots": 2400,  # measured 1956
     "sessions": 8700,  # measured 7204
@@ -169,6 +171,9 @@ def test_cards_carry_the_module_docstring_as_pattern_intro():
     assert "--sfu" in namespace_card("remote")
     assert "refetch hints" in namespace_card("realtime")
     assert "empty list means no hardware flow" in namespace_card("realtime")
+    assert "client.sessions" in namespace_card("flows")
+    assert "record_episodes(" in namespace_card("flows")
+    assert "train_and_publish(" in namespace_card("flows")
     # The client card carries the exception taxonomy:
     client_card = namespace_card("client")
     assert "SessionHeldError" in client_card and "RobotBusyError" in client_card
@@ -192,6 +197,8 @@ def test_method_detail_returns_the_full_docstring():
     text = method_detail("jobs.wait")
     assert text.startswith("jobs.wait(")
     assert inspect.getdoc(JobsResource.wait) in text  # FULL docstring, not the one-liner
+    assert "sessions.record" in method_detail("flows.record_episodes")
+    assert "models.publish_status" in method_detail("flows.train_and_publish")
 
 
 def test_method_detail_unknown_namespace_is_helpful_not_raised():
@@ -215,6 +222,7 @@ def test_search_hits_carry_the_drill_affordance():
     text = search("publish")
     assert "models.publish(" in text
     assert 'client.docs("models.publish")' in text
+    assert "flows.train_and_publish(" in text
 
 
 def test_search_zero_hits_points_back_at_the_index():

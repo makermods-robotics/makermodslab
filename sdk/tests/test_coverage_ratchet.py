@@ -85,6 +85,16 @@ def test_no_duplicate_operation_ids_across_namespaces():
             seen[op] = tag
 
 
+def test_flows_are_composites_not_wire_operations():
+    from makermodslab_sdk.flows import Flows
+
+    assert {name for name in dir(Flows) if not name.startswith("_")} == {
+        "record_episodes",
+        "train_and_publish",
+    }
+    assert implemented_operations(Flows) == set()
+
+
 def test_client_exposes_every_registered_namespace():
     http = httpx.Client(
         transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})),
