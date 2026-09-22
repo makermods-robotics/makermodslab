@@ -949,8 +949,10 @@ class SessionsResource(Resource):
         record's camera names (the devices themselves come from the record);
         ``camera_dims`` values are ``{"width": ..., "height": ...}``.
         ``inference_engine`` is ``"sync"`` (server default) or ``"rtc"``.
-        ``eval_episodes > 1`` runs an evaluation with that many episodes;
-        call ``s.wait()`` for its natural end.
+        ``eval_episodes > 1`` starts a supervised evaluation. The operator
+        must mark successful episodes and advance after each scene reset;
+        those controls are currently legacy server routes, not SDK methods.
+        ``s.wait()`` only observes the session's eventual end.
 
         ``coaching=True`` starts a DAgger coaching run instead of a plain
         rollout: the LEADER arm stands armed for takeover (so unlike plain
