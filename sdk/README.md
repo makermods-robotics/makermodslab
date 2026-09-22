@@ -16,9 +16,36 @@ with client.sessions.teleoperate("bench") as s:  # lease heartbeats + stop, auto
     print(s.id, s.warnings)
 ```
 
-`python -m makermodslab_sdk.docs` prints the full cheatsheet (~4k tokens,
-method reference introspected from the code) — made to be loaded into an
-agent's context. `SPEC.md` is the language-agnostic behavior contract.
+## Docs: progressive disclosure
+
+The built-in docs disclose in three tiers so an agent loads only what the
+task needs — everything below the index is introspected from the code:
+
+- `client.docs()` / `python -m makermodslab_sdk.docs` — the index: rules,
+  namespace map, drill-down instructions (~1k tokens; start here)
+- `client.docs("jobs")` / `... docs jobs` — one namespace's pattern intro
+  (the resource module docstring) + method reference
+- `client.docs("jobs.create_training")` / `... docs jobs.create_training` —
+  one method's full signature and docstring
+- `client.docs(search="publish")` / `... docs --search publish` — find
+  methods by name or docstring one-liner
+- `python -m makermodslab_sdk.docs --all` — the full flat dump (unbudgeted;
+  the tiers are the better start)
+
+We deliberately ship no agent skill; a consumer can point one at the CLI in
+five lines, e.g. `.claude/skills/makermodslab/SKILL.md`:
+
+```markdown
+---
+name: makermodslab
+description: Drive a MakerMods Lab robot server via the makermodslab-sdk Python SDK
+---
+
+Run `python -m makermodslab_sdk.docs` and follow its drill-down instructions
+(`docs <tag>`, `docs <tag>.<method>`, `docs --search <q>`) before writing code.
+```
+
+`SPEC.md` is the language-agnostic behavior contract.
 
 ## Layering (port guide)
 
