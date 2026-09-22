@@ -121,17 +121,40 @@ def test_index_names_every_namespace_and_the_drilldowns():
 
 # --- Tier 1: namespace_card() ------------------------------------------------
 
-# Per-card budget: measured 2026-09-22 (largest was sessions at 7233 chars),
-# cap = largest * ~1.2 rounded up. Re-derive the same way if a card outgrows
-# it legitimately: print max(len(namespace_card(t)) for t in docs._namespaces())
-# and set the cap ~20% above the new largest. Asserted PER TAG so the failure
-# names the namespace that ballooned.
-CARD_BUDGET_CHARS = 8_700
+# Per-NAMESPACE budgets (measured 2026-09-22, cap = measured * ~1.2 rounded up
+# to the nearest 100) so a single namespace ballooning is flagged BY NAME and
+# a small card can't grow 10x under a shared cap. Re-derive an entry when its
+# card legitimately outgrows it:
+#   .venv/bin/python -c "from makermodslab_sdk import docs;
+#     print({t: len(docs.namespace_card(t)) for t in docs._namespaces()})"
+CARD_BUDGETS_CHARS = {
+    "client": 3600,  # measured 2959
+    "datasets": 5100,  # measured 4196
+    "inference": 2300,  # measured 1858
+    "jobs": 3900,  # measured 3247
+    "models": 3200,  # measured 2587
+    "nodes": 2400,  # measured 1991
+    "realtime": 3700,  # measured 3059
+    "recording": 900,  # measured 691
+    "remote": 2800,  # measured 2263
+    "robots": 2400,  # measured 1956
+    "sessions": 8700,  # measured 7204
+    "sfu": 1000,  # measured 754
+    "system": 4100,  # measured 3364
+}
+
+
+def test_budget_table_matches_the_namespace_set():
+    from makermodslab_sdk import docs as docs_module
+
+    assert set(CARD_BUDGETS_CHARS) == set(docs_module._namespaces()), (
+        "a namespace was added or removed — measure its card and update CARD_BUDGETS_CHARS"
+    )
 
 
 @pytest.mark.parametrize("tag", sorted([*RESOURCE_CLASSES, "client", "realtime"]))
-def test_every_namespace_card_stays_under_the_card_budget(tag):
-    assert len(namespace_card(tag)) < CARD_BUDGET_CHARS, f"card {tag} ballooned"
+def test_every_namespace_card_stays_under_its_budget(tag):
+    assert len(namespace_card(tag)) < CARD_BUDGETS_CHARS[tag], f"card {tag} ballooned"
 
 
 def test_cards_carry_the_module_docstring_as_pattern_intro():
@@ -280,3 +303,37 @@ def test_cli_unknown_topic_exits_zero_with_the_helpful_string(capsys):
     # Agents read output, not exit codes — an unknown topic is an answer.
     assert main(["bogus"]) == 0
     assert "Unknown namespace" in capsys.readouterr().out
+
+
+# --- review follow-ups (2026-09-22) -------------------------------------------
+
+
+def test_client_card_teaches_exception_attributes():
+    """An agent planning a try/except from docs alone must discover the
+    attribute affordances — the errors MODULE docstring is the source."""
+    card = namespace_card("client")
+    for affordance in ("suggestion", ".busy_with", ".holder", "isinstance"):
+        assert affordance in card, f"exceptions section lost {affordance}"
+    # …and the ergonomics-layer errors the module docstring doesn't name.
+    for name in ("JobWaitTimeout", "SessionLostError", "WaitTimeoutError"):
+        assert name in card
+
+
+def test_index_advertises_realtime_and_its_extra():
+    text = index()
+    assert "realtime" in text
+    assert "[realtime]" in text
+
+
+def test_search_reaches_realtime_only_helpers_without_twin_duplicates():
+    hits = search("parse_message")
+    assert "realtime.parse_message" in hits
+    # The socket-facing twins surface once, via the client card, not twice.
+    sample_hits = [line for line in search("sample_joints").splitlines() if line.strip()]
+    assert any(line.startswith("client.sample_joints") for line in sample_hits)
+    assert not any(line.startswith("realtime.sample_joints") for line in sample_hits)
+
+
+def test_map_lines_pluralize():
+    assert "(1 method)" in index()  # sfu
+    assert "(1 methods)" not in index()

@@ -73,14 +73,24 @@ def _realtime_members() -> dict[str, Callable]:
     }
 
 
-def _exception_lines() -> list[str]:
-    """The error taxonomy, introspected from the package's public exceptions."""
-    import makermodslab_sdk
+def _exceptions_section() -> list[str]:
+    """The error taxonomy for the client card.
 
-    lines = []
+    The errors MODULE docstring is the single source for the base hierarchy —
+    it is what documents the attribute affordances (.status/.code/.detail/
+    .details/.suggestion, RobotBusyError.busy_with, SessionHeldError.holder)
+    an agent needs to plan a try/except. Ergonomics-layer exceptions it does
+    not name (JobWaitTimeout, SessionLostError, …) are appended as
+    introspected one-liners.
+    """
+    import makermodslab_sdk
+    from makermodslab_sdk import errors
+
+    module_doc = inspect.getdoc(errors) or ""
+    lines = [module_doc, ""]
     for name in sorted(makermodslab_sdk.__all__):
         member = getattr(makermodslab_sdk, name)
-        if isinstance(member, type) and issubclass(member, BaseException):
+        if isinstance(member, type) and issubclass(member, BaseException) and name not in module_doc:
             lines.append(f"- {name} — {_first_line(member)}")
     return lines
 
@@ -103,12 +113,13 @@ def _namespaces() -> dict[str, tuple[str, dict[str, Callable]]]:
     return spaces
 
 
-def _map_line(tag: str, intro: str, members: dict[str, Callable], cls: type | None) -> str:
-    one_liner = _first_line(cls) if cls is not None else intro.splitlines()[0] if intro else ""
+def _map_line(tag: str, members: dict[str, Callable], cls: type) -> str:
+    one_liner = _first_line(cls)
     prefix = f"``client.{tag}`` — "
     if one_liner.startswith(prefix):
         one_liner = one_liner[len(prefix) :]
-    return f"- client.{tag} — {one_liner} ({len(members)} methods)"
+    plural = "method" if len(members) == 1 else "methods"
+    return f"- client.{tag} — {one_liner} ({len(members)} {plural})"
 
 
 def index() -> str:
@@ -152,11 +163,12 @@ def index() -> str:
     ]
     spaces = _namespaces()
     for tag in sorted(RESOURCE_CLASSES):
-        intro, members = spaces[tag]
-        lines.append(_map_line(tag, intro, members, RESOURCE_CLASSES[tag]))
+        _intro, members = spaces[tag]
+        lines.append(_map_line(tag, members, RESOURCE_CLASSES[tag]))
     lines.append(
         f"- client — top level: describe() / docs() / realtime reads ({len(spaces[CLIENT_TAG][1])} methods)"
     )
+    lines.append("- realtime — WS helpers (parse_message, ws_url, …; needs the [realtime] extra)")
     lines += [
         "",
         "## Drill down (tiers 1-2 + search)",
@@ -186,8 +198,8 @@ def namespace_card(tag: str) -> str:
     for name, member in members.items():
         lines.append(f"- {name}{_signature(member)} — {_first_line(member)}")
     if tag == CLIENT_TAG:
-        lines += ["", "### Exceptions (branch on type or err.code, never prose)"]
-        lines += _exception_lines()
+        lines += ["", "### Exceptions"]
+        lines += _exceptions_section()
     lines += ["", f'Full docstring of one method: client.docs("{tag}.<method>")']
     return "\n".join(lines) + "\n"
 
@@ -217,11 +229,13 @@ def method_detail(path: str) -> str:
 def search(query: str) -> str:
     """Substring search over method NAMES and docstring one-liners only."""
     needle = query.lower()
+    spaces = _namespaces()
+    client_names = set(spaces[CLIENT_TAG][1])
     hits: list[str] = []
-    for tag, (_intro, members) in _namespaces().items():
-        if tag == REALTIME_TAG:
-            continue  # the socket-facing twins live on the client card
+    for tag, (_intro, members) in spaces.items():
         for name, member in members.items():
+            if tag == REALTIME_TAG and name in client_names:
+                continue  # socket-facing twins (events, sample_joints) hit via the client card
             one_liner = _first_line(member)
             if needle in name.lower() or needle in one_liner.lower():
                 signature = _signature(member)
