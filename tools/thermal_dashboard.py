@@ -32,7 +32,7 @@ from makermodslab.thermal_limits import (  # noqa: E402
 )
 
 
-def prepare_loop(series, limits):
+def prepare_loop(series, limits, *, prepare_recorded_loop=False):
     """Make a logged, limited copy; bridge endpoints without modifying the dataset."""
     from makermodslab.thermal_replay import validate_thermal_series
 
@@ -50,19 +50,24 @@ def prepare_loop(series, limits):
                 worst = max(worst, abs(clipped - value))
                 count += 1
                 row[index] = clipped
-        if worst > 1:
+        allowed_clip = 30 if prepare_recorded_loop and name == "gripper.pos" else 1
+        if worst > allowed_clip:
             raise ValueError(f"{name}: targets exceed configured limits by {worst:.2f} degrees")
         if count:
             changes[name] = {"clipped_frames": count, "max_adjustment_deg": worst}
     first, last = data["values"][0], data["values"][-1]
     # A large mismatch deserves a new recording, not an invented return route.
     for name, a, b in zip(data["action_names"], first, last, strict=True):
-        bound = 10 if name == "gripper.pos" else 2
+        bound = 10 if prepare_recorded_loop or name == "gripper.pos" else 2
         if abs(a - b) > bound:
             raise ValueError(f"{name}: end/start mismatch {abs(a - b):.2f} degrees exceeds {bound}")
     # Smoothstep closes the loop with zero slope at both endpoints. Its maximum
     # slope is 1.5, included in the duration calculation to stay <=20 deg/s.
-    duration = max(1.0, 1.5 * max(abs(a - b) for a, b in zip(first, last, strict=True)) / 20.0)
+    speed = 10.0 if prepare_recorded_loop else 20.0
+    duration = max(
+        2.0 if prepare_recorded_loop else 1.0,
+        1.5 * max(abs(a - b) for a, b in zip(first, last, strict=True)) / speed,
+    )
     steps = math.ceil(duration * 30)
     end = data["timestamps"][-1]
     for step in range(1, steps + 1):
@@ -76,6 +81,11 @@ def prepare_loop(series, limits):
         "reset_duration_s": duration,
         "original_duration_s": end,
         "loop_duration_s": end + duration,
+        "preparation_explicitly_requested": prepare_recorded_loop,
+        "return_max_speed_deg_s": speed,
+        "endpoint_delta_deg": dict(
+            zip(data["action_names"], [a - b for a, b in zip(first, last, strict=True)], strict=True)
+        ),
     }
 
 
@@ -216,7 +226,9 @@ def load_test(args):
     original = get_episode_action_series(args.dataset, args.episode)
     if not original or not original["values"]:
         raise ValueError("Episode not found")
-    series, preparation = prepare_loop(original, config.joint_limits)
+    series, preparation = prepare_loop(
+        original, config.joint_limits, prepare_recorded_loop=args.prepare_recorded_loop
+    )
     return config, series, preparation
 
 
@@ -226,6 +238,7 @@ def run_hardware(args, dashboard, config, series, preparation):
 
     robot = None
     trial = None
+    diagnostics = None
     try:
         # The standalone runner must not race the web app for the same bus.
         with socket.socket() as probe:
@@ -239,6 +252,9 @@ def run_hardware(args, dashboard, config, series, preparation):
         if dashboard.stop.wait(3):
             raise RuntimeError("Cancelled before motor connection")
         robot = make_robot_from_config(config)
+        from makermodslab.thermal_diagnostics import ThermalDiagnostics
+
+        diagnostics = ThermalDiagnostics(robot.bus)
         robot.connect(calibrate=False)
         trial = ThermalTrial(
             robot,
@@ -292,6 +308,10 @@ def run_hardware(args, dashboard, config, series, preparation):
         if robot is not None:
             with suppress(Exception):
                 robot.disconnect()
+        if diagnostics is not None:
+            if trial is not None:
+                (trial.root / "diagnostics.json").write_text(json.dumps(diagnostics.snapshot(), indent=2))
+            diagnostics.close()
 
 
 def main():
@@ -304,6 +324,11 @@ def main():
         help="Show the new settings without loading an episode or connecting motors",
     )
     parser.add_argument("--episode", type=int, default=0)
+    parser.add_argument(
+        "--prepare-recorded-loop",
+        action="store_true",
+        help="Explicitly allow gripper clipping up to 30 degrees and endpoint bridging up to 10 degrees at <=10 deg/s",
+    )
     parser.add_argument("--duration", type=float, default=DEFAULT_TEST_DURATION_S)
     parser.add_argument("--experiment", choices=["baseline", "shoulder_kp_85"], default="shoulder_kp_85")
     parser.add_argument("--port", type=int, default=8092)

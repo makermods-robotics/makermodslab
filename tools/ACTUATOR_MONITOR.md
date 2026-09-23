@@ -39,8 +39,9 @@ does not open the adapter, and does not alter torque, gains, motor power, or tra
 It copies the driver's cache on existing MakerLab preview ticks (~20 Hz teleop, ~10 Hz
 recording). It therefore does not capture every CAN sample or guarantee capture of brief
 torque peaks. Paused/stopped control or a disconnected link becomes stale, never a fresh
-zero. The temperature is the driver's `temp_mos` feedback field; it is not asserted to
-be winding temperature. An incompatible packed-status decoder is flagged rather than
+zero. The temperature is the driver's `temp_mos` feedback field. The July 2026
+RobStride MIT manual labels this field winding temperature; no separate board reading
+is exposed here. An incompatible packed-status decoder is flagged rather than
 silently masking bits and claiming a safe reading. This integration covers local
 MakerLab teleop/recording; separate inference subprocesses need the same telemetry tap.
 

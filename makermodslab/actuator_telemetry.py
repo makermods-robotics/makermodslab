@@ -36,7 +36,8 @@ def cached_maker_telemetry(robot, now: float | None = None) -> dict:
 
     Call from the same thread that owns the robot, after an existing observation.
     An uninitialized cache is NOT a zero-temperature sample. The driver reports
-    feedback temperature as temp_mos; its physical sensor location is not inferred.
+    feedback temperature as temp_mos; the RS02 July 2026 MIT manual labels this
+    field winding temperature. No separate board temperature is available here.
     """
     now = time.time() if now is None else now
     bimanual = hasattr(robot, "left_arm") and hasattr(robot, "right_arm")

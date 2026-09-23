@@ -75,3 +75,25 @@ def test_dashboard_controls_require_same_origin_and_stop_does_not_release():
         server.shutdown()
         server.server_close()
         thread.join(2)
+
+
+def test_explicit_test_copy_clamps_gripper_and_smoothly_bridges_arm():
+    source = recording()
+    source["values"][1][1] = -120
+    source["values"][-1][0] = -10.9
+    before = copy.deepcopy(source)
+    limits = {"shoulder_lift": (-175.3, -3.2), "gripper": (-96, -2.5)}
+    data, report = prepare_loop(source, limits, prepare_recorded_loop=True)
+    assert source == before
+    assert min(row[1] for row in data["values"]) == -96
+    assert report["target_adjustments"]["gripper.pos"]["max_adjustment_deg"] == 24
+    assert report["reset_duration_s"] >= 2
+    assert data["values"][0] == data["values"][-1]
+    for i in range(3, len(data["values"])):
+        dt = data["timestamps"][i] - data["timestamps"][i - 1]
+        assert (
+            max(abs(a - b) / dt for a, b in zip(data["values"][i], data["values"][i - 1], strict=True)) <= 10
+        )
+    source["values"][-1][0] = -30
+    with pytest.raises(ValueError, match="end/start mismatch"):
+        prepare_loop(source, limits, prepare_recorded_loop=True)

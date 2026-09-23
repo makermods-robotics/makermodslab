@@ -191,6 +191,12 @@ class ThermalTrial:
         if fault:
             raise TrialEndedError("feedback_fault", fault)
         if not returning:
+            diagnostics = getattr(self.robot.bus, "thermal_diagnostics", None)
+            if diagnostics is not None and diagnostics.faults:
+                raise TrialEndedError(
+                    "firmware_fault",
+                    "Actuator firmware fault reported; see stop_event.json and raw CAN journal",
+                )
             if self.hot:
                 raise TrialEndedError("overheated", self.hot)
             if self.stop.is_set():
@@ -267,6 +273,9 @@ class ThermalTrial:
         """Return a result. Caller must retain bus ownership if rest_reached is false."""
         try:
             self.root.mkdir(parents=True, exist_ok=False)
+            diagnostics = getattr(self.robot.bus, "thermal_diagnostics", None)
+            if diagnostics is not None:
+                diagnostics.open(self.root)
             self.log = (self.root / "samples.jsonl").open("w", buffering=1)
             self.sample(returning=True)
             self.rest = {f"{n}.pos": self.observation[f"{n}.pos"] for n in self.names}
@@ -351,6 +360,24 @@ class ThermalTrial:
         except Exception as exc:
             self.status.update(result="error", message=str(exc))
         finally:
+            diagnostics = getattr(self.robot.bus, "thermal_diagnostics", None)
+            if diagnostics is not None and self.root.is_dir():
+                try:
+                    (self.root / "stop_event.json").write_text(
+                        json.dumps(
+                            {
+                                "timestamp": time.time(),
+                                "trigger": dict(self.status),
+                                "positions_deg": dict(self.observation),
+                                "last_action": dict(self.last_action),
+                                "gains": getattr(self.robot.bus, "_gains", {}),
+                                "diagnostics": diagnostics.snapshot(),
+                            },
+                            indent=2,
+                        )
+                    )
+                except (OSError, TypeError, ValueError) as exc:
+                    self.status["diagnostics_write_error"] = str(exc)
             self.returning = True
             self.publish("stopping")
             try:

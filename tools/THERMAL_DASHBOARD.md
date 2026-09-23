@@ -78,9 +78,28 @@ critical reference at **135°C or higher**, and **1800 seconds** by default. His
 run files retain their original thresholds. Temperatures can rise during return;
 this cutoff cannot promise an absolute peak below 100°C.
 
-The 135°C number is user-reported manufacturer guidance, not a firmware readback.
-RobStride's [published RS02 manual](https://www.robstride.com/assets/product_manual_robStride02-e7f9f7c4.pdf)
-distinguishes a 135°C winding limit from an 80°C control-board maximum. The user has
-not confirmed which sensor/hardware revision the guidance refers to and requested
-keeping the 100°C software limit. The driver labels the reported field `temp_mos`;
-its physical sensor location is not inferred. No firmware protection value is changed.
+The 135°C reference is not a firmware threshold readback. The newer official
+[RS02 July 2026 manual](https://github.com/RobStride/Product_Information/blob/main/Product%20Literature/RS02/RS02User%20Manual260713.pdf)
+identifies MIT feedback bytes 6–7 as winding temperature, with mode/fault/warning
+bits in the upper nibble. Our installed driver calls that field `temp_mos`; this
+name does not identify it as a board sensor. The standalone diagnostic adapter
+preserves the raw word and separates these flags before the legacy decoder.
+The current MIT stream exposes no separate board temperature. Manuals differ by
+revision, so neither a board limit nor the actual firmware cutoff is read back here.
+No firmware protection value is changed.
+
+For a recording whose gripper requests were already clamped by the driver during
+teleop, `--prepare-recorded-loop` explicitly allows up to 30° of gripper clipping
+and up to 10° endpoint mismatch per joint. It preserves the source and logs every
+adjustment; other joints retain the 1° clipping allowance. A smooth return of at
+least two seconds is appended, capped at 10°/s. This requires a clear return path.
+
+Each standalone trial also saves `can_frames.jsonl` (raw RX/TX after the bus's initial
+handshake), `stop_event.json` (trigger, all latest measurements, positions, gains and
+fault evidence **before** return), and `diagnostics.json` (final latched evidence).
+The normal `samples.jsonl` includes all sampled temperatures, torques and positions
+through return. Separate board temperature and firmware threshold readback are
+explicitly unavailable, not zero. Firmware fault flags stop repetition; a latched
+fault blocks automatic fault-clear requests. A failed return still requires support
+and explicit release. Fault-status-shaped frames retain raw bytes and the heuristic
+classification, because firmware versions can vary.

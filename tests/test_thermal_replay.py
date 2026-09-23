@@ -418,3 +418,29 @@ def test_closed_connection_does_not_report_energized_motors():
     assert result["motor_connection_closed"]
     assert "Motors remain energized" not in result["message"]
     assert "return was not confirmed" in result["message"]
+
+
+def test_stop_diagnostics_capture_threshold_before_return(trial):
+    runner, robot, _, _ = trial
+    robot.temperature = lambda _: 100
+    robot.bus.thermal_diagnostics = SimpleNamespace(
+        faults={}, open=lambda root: None, snapshot=lambda: {"board_temperature_c": None}
+    )
+    result = runner.run()
+    event = json.loads((runner.root / "stop_event.json").read_text())
+    assert event["trigger"]["result"] == "overheated"
+    assert event["trigger"]["actuators"][0]["temperature_c"] == 100
+    assert event["diagnostics"]["board_temperature_c"] is None
+    assert result["rest_reached"]
+
+
+def test_diagnostic_write_failure_does_not_skip_return(trial):
+    runner, robot, _, _ = trial
+
+    def unavailable():
+        raise OSError("disk unavailable")
+
+    robot.bus.thermal_diagnostics = SimpleNamespace(faults={}, open=lambda root: None, snapshot=unavailable)
+    result = runner.run()
+    assert result["rest_reached"]
+    assert result["diagnostics_write_error"] == "disk unavailable"
