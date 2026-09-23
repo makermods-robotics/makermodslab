@@ -22,7 +22,7 @@ Two flows, because the two procedures differ in who does the work:
   ``calibration.auto_batch_status`` into a plain poll-to-terminal.
 * :meth:`CalibrationFlows.calibrate_zero` — the CAN families' step wizard.
   The human poses the arm and confirms; the flow only relays. Composes
-  ``sessions.calibrate``, ``calibration.status`` and
+  ``robots.get``, ``sessions.calibrate``, ``calibration.status`` and
   ``calibration.complete_step``.
 
 The SO-101 MANUAL sweep has no flow on purpose: the human sweeps every joint
@@ -206,8 +206,8 @@ class CalibrationFlows:
         session that uses this calibration. Returning False declines: the
         session stops, nothing is saved, and StepNotConfirmedError is raised.
 
-        Composes ``sessions.calibrate``, ``calibration.status`` and
-        ``calibration.complete_step``. Torque stays off throughout (the arm is
+        Composes ``robots.get``, ``sessions.calibrate``, ``calibration.status``
+        and ``calibration.complete_step``. Torque stays off throughout (the arm is
         posed by hand), so there is nothing to return to rest. The Maker and
         Metal families publish exactly one step today; this loop handles more.
 
@@ -225,6 +225,10 @@ class CalibrationFlows:
         started_at = clock()
         confirmed = 0
         last_step: int | None = None
+        # The wizard's session releases the moment the zero is written, and
+        # the server reads a released wizard back as idle unless the status
+        # call names the family — without it this loop never sees "completed".
+        arm_type = self._client.robots.get(robot).arm_type
         with self._client.sessions.calibrate(
             robot,
             device_type=device_type,
@@ -234,7 +238,7 @@ class CalibrationFlows:
             overwrite=overwrite,
         ) as session:
             while True:
-                status = self._client.calibration.status()
+                status = self._client.calibration.status(arm_type=arm_type)
                 if status.finished:
                     if status.status == "error":
                         raise CalibrationFlowError(

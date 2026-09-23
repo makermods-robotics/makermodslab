@@ -61,7 +61,7 @@ def ended_body(session_id: str = "cal-1", kind: str = "calibration", phase: str 
 def scripted(statuses, *, kind="calibration", status_path, extra=None):
     """A handler serving a session start, a scripted status sequence, the
     session stop, and the end summary. Records what was sent."""
-    seen = {"steps": [], "starts": 0, "stops": 0}
+    seen = {"steps": [], "starts": 0, "stops": 0, "status_params": []}
     remaining = list(statuses)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -79,7 +79,11 @@ def scripted(statuses, *, kind="calibration", status_path, extra=None):
             seen["steps"].append(json.loads(request.read()))
             answer = (extra or {}).get("step_answer", {"success": True, "message": "Step confirmed"})
             return httpx.Response(200, json=answer)
+        if path == "/api/v1/robots/bench":
+            arm_type = (extra or {}).get("arm_type", "maker")
+            return httpx.Response(200, json={"robot": {"name": "bench", "arm_type": arm_type}})
         if path == status_path:
+            seen["status_params"].append(dict(request.url.params))
             return httpx.Response(200, json=remaining.pop(0) if remaining else statuses[-1])
         return httpx.Response(500, json={"detail": f"unexpected {path}"})
 
@@ -273,3 +277,35 @@ def test_a_multi_step_family_is_asked_once_per_step():
     assert shown == [1, 2]
     assert seen["steps"] == [{"step": 1}, {"step": 2}]
     assert result.steps_confirmed == 2
+
+
+def test_a_released_wizard_is_read_through_its_arm_type():
+    """The server reads a FINISHED step wizard back as idle unless the
+    status call names the arm family — the session releases the moment the
+    zero is written, so a flow polling without arm_type never sees
+    "completed" and spins until its timeout on a calibration that succeeded."""
+    idle = {"calibration_active": False, "status": "idle", "step": 0}
+    remaining = [AWAITING]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/calibration-status":
+            if remaining:
+                return httpx.Response(200, json=remaining.pop(0))
+            released = COMPLETED if request.url.params.get("arm_type") == "maker" else idle
+            return httpx.Response(200, json=released)
+        return inner(request)
+
+    inner, seen = scripted([AWAITING], status_path="/api/v1/calibration-status")
+    ticks = iter([0.0] * 4 + [600.0] * 10)
+
+    with mock_client(handler) as client:
+        result = client.flows.calibrate_zero(
+            "bench",
+            device_type="robot",
+            confirm=lambda _status: True,
+            timeout=300.0,
+            sleep_fn=lambda _s: None,
+            clock=lambda: next(ticks),
+        )
+    assert result.status.status == "completed"
+    assert seen["steps"] == [{"step": 1}]
