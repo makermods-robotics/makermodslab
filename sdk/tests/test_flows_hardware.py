@@ -141,7 +141,10 @@ def test_inspect_hardware_builds_passive_context_and_literal_next_actions():
         "may_energize",
         "moves_hardware",
     )
-    assert "3 visible ports" in context.summary()
+    # The summary names the FIELDS it counts, so a reader's next reach is
+    # context.visible_ports rather than a guess like context.ports.
+    assert "visible_ports=3" in context.summary()
+    assert "visible_cameras=1" in context.summary()
     assert "/dev/missing" in context.summary()
 
 
@@ -181,7 +184,7 @@ def test_inspect_hardware_keeps_other_sections_when_reads_fail():
     assert context.errors[2].detail == "robot registry exploded"
     summary = context.summary()
     assert "Partial errors" in summary
-    assert "cameras: 1 visible" in summary
+    assert "visible_cameras=1" in summary
 
 
 def test_inspect_hardware_does_not_suggest_active_fallback_without_free_ports():

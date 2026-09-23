@@ -6,10 +6,10 @@ Response models mirror makermodslab/schemas/system.py; SdkModel keeps them
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 from makermodslab_sdk._operations import operation
-from makermodslab_sdk.resources._base import Resource, SdkModel
+from makermodslab_sdk.resources._base import RecordList, Resource, SdkModel
 
 
 class HealthCapabilities(SdkModel):
@@ -481,7 +481,7 @@ class SystemResource(Resource):
         ``arm_type`` can do; entries ride as dicts (see arms/manifest.py).
 
         Example:
-            >>> [a["id"] for a in client.system.arms().arms]
+            >>> [family.id for family in client.system.arms()]
             ['so101', 'maker', 'metal']
         """
         return ArmFamilies.model_validate(
@@ -558,10 +558,76 @@ class CanGripperWiggleResult(SdkModel):
     code: str | None = None
 
 
-class ArmFamilies(SdkModel):
+class ArmCalibrationInfo(SdkModel):
+    """How a family calibrates: ``range_sweep`` (the SO-101's Feetech sweep),
+    ``steps`` (a wizard the SDK relays), or ``panel`` (the family serves its
+    own page at ``panel_url``). ``summary`` is the pre-start briefing."""
+
+    kind: str
+    summary: Any = None
+    panel_url: str | None = None
+
+
+class ArmCapabilities(SdkModel):
+    """What a family's hardware can actually do. ``supports_dagger`` False is
+    a HARDWARE limit, not a missing feature; ``motion_identify_energizes_follower``
+    is the Damiao fact that makes motion identify unsafe for that family."""
+
+    uses_feetech_bus: bool = False
+    supports_auto_calibration: bool = False
+    supports_dagger: bool = False
+    supports_remote_inference: bool = False
+    supports_port_probe: bool = False
+    motion_identify_energizes_follower: bool = False
+    supports_gripper_wiggle: bool = False
+
+
+class LeaderOption(SdkModel):
+    """One leader choice for a family. ``available`` False means the server
+    lacks its optional extra; ``energized`` marks a leader that is powered
+    while the human moves it, so it needs a follower's return-to-rest care."""
+
+    id: str
+    label: str = ""
+    available: bool = True
+    unavailable_reason: str | None = None
+    energized: bool = False
+    calibration_summary: Any = None
+
+
+class ArmFamily(SdkModel):
+    """One registered arm family (mirrors makermodslab/arms/manifest.py).
+
+    ``id`` is the value a robot record's ``arm_type`` carries. ``provided_by``
+    is "builtin" or the extension that registered it.
+    """
+
+    # Only the id is required: the SDK's rule is to tolerate what a server
+    # sends, and an older or extension-provided manifest may omit the rest.
+    # A partial entry still reads as a usable record instead of raising.
+    id: str
+    label: str = ""
+    short_label: str = ""
+    provided_by: str = ""
+    joints_per_arm: int | None = None
+    supports_bimanual: bool = False
+    image_url: str | None = None
+    calibration: ArmCalibrationInfo = ArmCalibrationInfo(kind="")
+    telemetry_kind: str = ""
+    capabilities: ArmCapabilities = ArmCapabilities()
+    robot_types: list[str] = []
+    robot_type_markers: list[str] = []
+    calibration_name_suffix: str = ""
+    default_leader_kind: str = ""
+    leader_options: list[LeaderOption] = []
+
+
+class ArmFamilies(RecordList):
     """GET /api/v1/arms — the registry manifest, default family first."""
 
-    arms: list[dict[str, Any]]
+    RECORDS_FIELD: ClassVar[str] = "arms"
+
+    arms: list[ArmFamily]
 
 
 class WandbCredentials(SdkModel):

@@ -19,7 +19,7 @@ from __future__ import annotations
 import difflib
 import time
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import quote
 
 import pydantic
@@ -27,7 +27,7 @@ from pydantic import ConfigDict
 
 from makermodslab_sdk._operations import operation
 from makermodslab_sdk.errors import InvalidRequestError, MakerModsError
-from makermodslab_sdk.resources._base import Resource, SdkModel
+from makermodslab_sdk.resources._base import RecordList, Resource, SdkModel
 
 # The server's job lifecycle (makermodslab/jobs.py):
 #   JobState = Literal["queued", "running", "done", "failed", "interrupted"]
@@ -228,8 +228,10 @@ class Job(SdkModel):
     queued_resume_ref: str | None = None
 
 
-class JobList(SdkModel):
+class JobList(RecordList):
     """GET /api/v1/jobs — records newest first."""
+
+    RECORDS_FIELD: ClassVar[str] = "jobs"
 
     jobs: list[Job]
 
@@ -271,8 +273,10 @@ class Checkpoint(SdkModel):
     ref: str
 
 
-class JobCheckpoints(SdkModel):
+class JobCheckpoints(RecordList):
     """GET /api/v1/jobs/{job_id}/checkpoints — ascending by step."""
+
+    RECORDS_FIELD: ClassVar[str] = "checkpoints"
 
     checkpoints: list[Checkpoint]
 

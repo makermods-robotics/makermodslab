@@ -45,10 +45,10 @@ graduate when the server tags them.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 from makermodslab_sdk._operations import operation
-from makermodslab_sdk.resources._base import Resource, SdkModel
+from makermodslab_sdk.resources._base import RecordList, Resource, SdkModel
 
 #: ``status`` values that mean the run is over, either way.
 TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "error"})
@@ -171,7 +171,7 @@ class CalibrationConfig(SdkModel):
     modified: float = 0.0
 
 
-class CalibrationConfigList(SdkModel):
+class CalibrationConfigList(RecordList):
     """A device type's calibration library.
 
     ``success=False`` carries the reason in ``message`` (still HTTP 200) —
@@ -179,6 +179,9 @@ class CalibrationConfigList(SdkModel):
     """
 
     success: bool
+
+    RECORDS_FIELD: ClassVar[str] = "configs"
+
     configs: list[CalibrationConfig] = []
     device_type: str | None = None
     message: str | None = None

@@ -134,21 +134,21 @@ def test_index_names_every_namespace_and_the_drilldowns():
 CARD_HEADROOM = 1.2
 CARD_SHRINK_FLOOR = 0.7
 CARD_SIZES_CHARS = {
-    "calibration": 2191,
-    "client": 3630,
-    "datasets": 3070,
-    "flows": 1285,
-    "inference": 1656,
-    "jobs": 2537,
-    "models": 1966,
-    "nodes": 1619,
-    "realtime": 2570,
-    "recording": 723,
-    "remote": 2109,
-    "robots": 1786,
-    "sessions": 4106,
-    "sfu": 635,
-    "system": 2785,
+    "calibration": 2312,
+    "client": 3908,
+    "datasets": 3581,
+    "flows": 1428,
+    "inference": 1856,
+    "jobs": 2764,
+    "models": 2244,
+    "nodes": 1779,
+    "realtime": 2686,
+    "recording": 775,
+    "remote": 2242,
+    "robots": 1854,
+    "sessions": 4523,
+    "sfu": 647,
+    "system": 3286,
 }
 
 

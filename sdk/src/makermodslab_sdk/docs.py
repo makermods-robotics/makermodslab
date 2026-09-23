@@ -82,7 +82,25 @@ def _card_signature(member: Callable) -> str:
         required.append(name)
     shown = [*required, "…"] if optional else required
     text = f"({', '.join(shown)})"
-    return text if len(text) <= _CARD_SIGNATURE_LIMIT else "(…)"
+    if len(text) > _CARD_SIGNATURE_LIMIT:
+        text = "(…)"
+    return f"{text}{_return_type(signature)}"
+
+
+def _return_type(signature: inspect.Signature) -> str:
+    """The rendered ``-> Type`` suffix, or "" when unannotated.
+
+    Return types stay on the card even though argument annotations do not:
+    they are short, and they are what tells a caller whether a listing hands
+    back a plain list or an envelope to reach into. Eliding them once cost an
+    agent a runtime AttributeError that the card could have prevented.
+    """
+    annotation = signature.return_annotation
+    if annotation is inspect.Signature.empty:
+        return ""
+    text = annotation if isinstance(annotation, str) else getattr(annotation, "__name__", str(annotation))
+    text = text.strip("'\"").replace("makermodslab_sdk.", "")
+    return "" if text in ("None", "inspect._empty") else f" -> {text}"
 
 
 def _first_line(member: object) -> str:

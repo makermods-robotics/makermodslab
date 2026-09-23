@@ -97,9 +97,11 @@ def test_rename_and_delete_paths():
 
 
 def test_list_end_to_end(sdk_client):
-    listing = sdk_client.robots.list()
-    assert listing.status == "success"
-    assert isinstance(listing.robots, list)
+    records = sdk_client.robots.list()
+    assert isinstance(records, list)
+    # A plain list of typed records: the obvious loop must work, because an
+    # agent writes it without reading anything.
+    assert all(isinstance(record, Robot) for record in records)
 
 
 def test_get_missing_end_to_end(sdk_client):
@@ -150,6 +152,7 @@ def test_readiness_is_none_when_an_older_server_omits_it():
 
 def test_readiness_flags_survive_end_to_end(sdk_client):
     """The real app computes these; if the key names ever drift, this fails."""
-    listing = sdk_client.robots.list()
-    for record in listing.robots:
-        assert "is_clean" in record and "arm_available" in record
+    for record in sdk_client.robots.list():
+        assert record.is_clean is not None
+        assert record.arm_available is not None
+        assert record.name

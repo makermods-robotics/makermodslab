@@ -21,11 +21,12 @@ Record semantics worth knowing (server.py upsert_robot):
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import quote
 
 from makermodslab_sdk._operations import operation
-from makermodslab_sdk.resources._base import Resource, SdkModel
+from makermodslab_sdk.errors import ApiError
+from makermodslab_sdk.resources._base import RecordList, Resource, SdkModel
 
 
 class Robot(SdkModel):
@@ -69,15 +70,6 @@ class Robot(SdkModel):
     motor_power: int | None = None
 
 
-class RobotsList(SdkModel):
-    """GET /api/v1/robots. NOTE: an internal listing failure is a 200 with
-    status="error" and message set (legacy shape) — check status."""
-
-    status: str
-    robots: list[dict[str, Any]] = []
-    message: str | None = None
-
-
 class RobotEnvelope(SdkModel):
     """The {status, robot} shape of the single-record routes. ``robot`` is
     None on update's no-op path (record didn't exist)."""
@@ -94,23 +86,43 @@ class RobotsResource(Resource):
     """``client.robots`` — create, edit, and inspect saved robot records.
 
     Example:
-        >>> [r["name"] for r in client.robots.list().robots]
+        >>> [robot.name for robot in client.robots.list()]
         ['bench']
         >>> client.robots.get("bench").follower_port
         '/dev/tty.usbmodem123'
     """
 
     @operation("get_robots")
-    def list(self) -> RobotsList:
-        """All saved robot records (each a dict including its ``name``).
+    def list(self) -> list[Robot]:
+        """Every saved robot record, as typed records.
+
+        A plain list, like ``client.datasets.list()`` and
+        ``client.nodes.list()`` — iterate it directly. The server wraps the
+        rows in a legacy ``{status, robots, message}`` envelope whose only
+        other job is reporting a listing failure; that failure is raised
+        here instead, because a call that cannot return the records has
+        failed, whatever status code carried it.
 
         Example:
-            >>> client.robots.list().robots
-            [{'name': 'bench', 'mode': 'single', ...}]
+            >>> [robot.name for robot in client.robots.list()]
+            ['bench']
+            >>> [r.name for r in client.robots.list() if r.follower_ready]
+            ['bench']
         """
-        return RobotsList.model_validate(
-            self._transport.request("GET", "/api/v1/robots", action="List robots")
-        )
+        body = self._transport.request("GET", "/api/v1/robots", action="List robots")
+        if isinstance(body, dict) and body.get("status") == "error":
+            message = body.get("message") or "no detail"
+            raise ApiError(
+                f"List robots failed: the server could not read its robot records ({message})",
+                status=200,
+                detail=str(message),
+                suggestion=(
+                    "The records live under MAKERMODSLAB_HOME/robots/*.json on the server — "
+                    "check that directory is readable and its files are valid JSON."
+                ),
+            )
+        rows = body.get("robots", []) if isinstance(body, dict) else []
+        return [Robot.model_validate(row) for row in rows]
 
     @operation("get_robot")
     def get(self, name: str) -> Robot:
@@ -206,7 +218,9 @@ class GripperInfo(SdkModel):
     measured_torque_nm: float | None = None
 
 
-class GripperStatusList(SdkModel):
+class GripperStatusList(RecordList):
     """GET /api/v1/robots/{name}/gripper-status."""
+
+    RECORDS_FIELD: ClassVar[str] = "grippers"
 
     grippers: list[GripperInfo]

@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import Field
 
 from makermodslab_sdk._operations import operation
-from makermodslab_sdk.resources._base import Resource, SdkModel
+from makermodslab_sdk.resources._base import RecordList, Resource, SdkModel
 from makermodslab_sdk.resources._waiting import wait_for_repo_operation
 from makermodslab_sdk.resources.datasets import (
     DownloadStart,
@@ -403,12 +403,14 @@ class Policy(SdkModel):
     job_id: str | None = None
 
 
-class Policies(SdkModel):
+class Policies(RecordList):
     """GET /api/v1/skills — the deployable-policies view over models + jobs.
 
     The wire path keeps its pre-rename name ("skill" is retired vocabulary,
     but renaming a v1 route would break the API contract); the SDK's own
     grammar is policy-first."""
+
+    RECORDS_FIELD: ClassVar[str] = "policies"
 
     policies: list[Policy] = Field(validation_alias="skills")
     hub: PoliciesHubStatus
@@ -422,7 +424,7 @@ class RunCheckpoint(SdkModel):
     published: bool
 
 
-class RunCheckpoints(SdkModel):
+class RunCheckpoints(RecordList):
     """GET /api/v1/models/checkpoints — a local run's publishable checkpoints."""
 
     id: str
@@ -430,6 +432,9 @@ class RunCheckpoints(SdkModel):
     hf_repo_id: str | None = None
     legacy_root_checkpoint: bool = False
     hub_readable: bool = False
+
+    RECORDS_FIELD: ClassVar[str] = "checkpoints"
+
     checkpoints: list[RunCheckpoint] = []
 
 

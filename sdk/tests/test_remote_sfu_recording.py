@@ -214,7 +214,7 @@ def test_remote_status_routes_end_to_end(sdk_client):
     assert sdk_client.sessions.remote_inference_status().remote_inference_active is False
     transport = sdk_client.sessions.remote_inference_transport()
     assert transport.configured is False  # no --sfu in the test app
-    assert isinstance(sdk_client.system.arms().arms[0]["id"], str)
+    assert isinstance(sdk_client.system.arms()[0].id, str)  # typed records, list-like envelope
 
 
 def test_sfu_token_refuses_coded_without_sfu_end_to_end(sdk_client):

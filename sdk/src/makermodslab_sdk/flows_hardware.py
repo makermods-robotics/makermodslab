@@ -27,7 +27,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from makermodslab_sdk.resources.system import CameraInfo
+from makermodslab_sdk.resources.robots import Robot
+from makermodslab_sdk.resources.system import ArmFamily, CameraInfo
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -159,10 +160,12 @@ class HardwareContext:
     def summary(self) -> str:
         """Compact agent-readable snapshot; structured fields hold detail."""
         lines = [
+            # Field names, not prose labels: whatever the summary counts, the
+            # reader's next move is reaching for that attribute by name.
             (
-                f"Hardware: {len(self.visible_ports)} visible ports; "
-                f"cameras: {len(self.visible_cameras)} visible; "
-                f"{len(self.robots)} saved robots; {len(self.arm_families)} arm families."
+                f"Hardware: visible_ports={len(self.visible_ports)}; "
+                f"visible_cameras={len(self.visible_cameras)}; "
+                f"robots={len(self.robots)}; arm_families={len(self.arm_families)}."
             )
         ]
         for robot in self.robots[:6]:
@@ -210,14 +213,34 @@ class HardwareContext:
 
 
 def _flag(record: Any, key: str) -> bool | None:
-    """A server-computed readiness flag, or None when it wasn't reported."""
-    value = record.get(key)
+    """A server-computed readiness flag, or None when it wasn't reported.
+
+    An older server omits these; the typed field then reads None and the flag
+    stays unknown rather than being reported as False.
+    """
+    value = getattr(record, key, None)
     return value if isinstance(value, bool) else None
 
 
 def _detail(exc: Exception) -> str:
     value = getattr(exc, "detail", None)
     return str(value if value else exc)
+
+
+def _soft_status(section: Section, result: Any | None, errors: list[HardwareSectionError]) -> Any | None:
+    """Drop a legacy ``{status: "error"}`` envelope into the section errors.
+
+    The ports and cameras listings report failure in a 200 body rather than
+    raising, so they need this to land beside the sections that do raise.
+    """
+    if result is None:
+        return None
+    if getattr(result, "status", "success") != "success":
+        errors.append(
+            HardwareSectionError(section, getattr(result, "message", None) or f"{section} listing failed")
+        )
+        return None
+    return result
 
 
 def _read_section(
@@ -253,20 +276,16 @@ def _camera_assignment(
     return CameraAssignment(name=name, index=index, unique_id=unique_id, present=present)
 
 
-def _manifest_entry(entry: dict[str, Any]) -> ArmDiscoveryCapability:
-    capabilities = entry.get("capabilities")
-    caps = capabilities if isinstance(capabilities, dict) else {}
-    calibration = entry.get("calibration")
-    calibration_kind = calibration.get("kind") if isinstance(calibration, dict) else None
-    joints = entry.get("joints_per_arm")
+def _manifest_entry(entry: ArmFamily) -> ArmDiscoveryCapability:
+    caps = entry.capabilities
     return ArmDiscoveryCapability(
-        arm_type=str(entry.get("id") or "unknown"),
-        label=str(entry.get("label") or entry.get("id") or "Unknown"),
-        joints_per_arm=joints if isinstance(joints, int) else None,
-        calibration_kind=str(calibration_kind) if calibration_kind else None,
-        supports_port_probe=bool(caps.get("supports_port_probe")),
-        motion_identify_energizes_follower=bool(caps.get("motion_identify_energizes_follower")),
-        supports_gripper_wiggle=bool(caps.get("supports_gripper_wiggle")),
+        arm_type=entry.id or "unknown",
+        label=entry.label or entry.id or "Unknown",
+        joints_per_arm=entry.joints_per_arm,
+        calibration_kind=entry.calibration.kind or None,
+        supports_port_probe=bool(caps.supports_port_probe),
+        motion_identify_energizes_follower=bool(caps.motion_identify_energizes_follower),
+        supports_gripper_wiggle=bool(caps.supports_gripper_wiggle),
     )
 
 
@@ -343,52 +362,44 @@ class HardwareFlows:
             ('/dev/tty.usbmodem3',)
         """
         errors: list[HardwareSectionError] = []
+        # Sections are read, and their failures recorded, in this order — a
+        # raising read (robots) and a soft {status: "error"} envelope (ports,
+        # cameras) both land their section error at the point of the read, so
+        # `errors` always reads in section order.
         arms_result = _read_section("arms", self._client.system.arms, errors)
-        ports_result = _read_section("ports", self._client.system.available_ports, errors)
-        cameras_result = _read_section("cameras", self._client.system.available_cameras, errors)
+        ports_result = _soft_status(
+            "ports", _read_section("ports", self._client.system.available_ports, errors), errors
+        )
+        cameras_result = _soft_status(
+            "cameras", _read_section("cameras", self._client.system.available_cameras, errors), errors
+        )
         robots_result = _read_section("robots", self._client.robots.list, errors)
 
-        arm_families = (
-            tuple(_manifest_entry(item) for item in arms_result.arms) if arms_result is not None else ()
-        )
+        arm_families = tuple(_manifest_entry(item) for item in arms_result) if arms_result is not None else ()
 
         visible_ports: tuple[str, ...] = ()
-        ports_known = False
+        ports_known = ports_result is not None
         if ports_result is not None:
-            if ports_result.status != "success":
-                errors.append(HardwareSectionError("ports", ports_result.message or "port listing failed"))
-            else:
-                visible_ports = tuple(ports_result.ports or ())
-                ports_known = True
+            visible_ports = tuple(ports_result.ports or ())
 
         visible_cameras: tuple[CameraInfo, ...] = ()
-        cameras_known = False
+        cameras_known = cameras_result is not None
         if cameras_result is not None:
-            if cameras_result.status != "success":
-                errors.append(
-                    HardwareSectionError("cameras", cameras_result.message or "camera listing failed")
-                )
-            else:
-                visible_cameras = tuple(cameras_result.cameras)
-                cameras_known = True
+            visible_cameras = tuple(cameras_result.cameras)
 
-        records: list[dict[str, Any]] = []
-        robots_known = False
-        if robots_result is not None:
-            if robots_result.status != "success":
-                errors.append(HardwareSectionError("robots", robots_result.message or "robot listing failed"))
-            else:
-                records = robots_result.robots
-                robots_known = True
+        # robots.list() returns typed records and RAISES on a listing failure,
+        # which _read_section already turns into a section error.
+        records: list[Robot] = list(robots_result) if robots_result is not None else []
+        robots_known = robots_result is not None
 
         robots: list[SavedRobotHardware] = []
         references: dict[str, list[str]] = defaultdict(list)
         missing: list[PortAssignment] = []
         for record in records:
-            name = str(record.get("name") or "unnamed")
+            name = str(record.name or "unnamed")
             ports: list[PortAssignment] = []
             for slot in PORT_SLOTS:
-                value = record.get(slot)
+                value = getattr(record, slot, None)
                 if not isinstance(value, str) or not value:
                     continue
                 assignment = PortAssignment(
@@ -398,7 +409,7 @@ class HardwareFlows:
                 references[value].append(f"{name}.{slot}")
                 if assignment.present is False:
                     missing.append(assignment)
-            raw_cameras = record.get("cameras")
+            raw_cameras = record.cameras
             cameras = tuple(
                 _camera_assignment(item, visible_cameras, cameras_known=cameras_known)
                 for item in (raw_cameras if isinstance(raw_cameras, list) else [])
@@ -406,8 +417,8 @@ class HardwareFlows:
             robots.append(
                 SavedRobotHardware(
                     name=name,
-                    arm_type=str(record.get("arm_type") or "so101"),
-                    mode=str(record["mode"]) if record.get("mode") else None,
+                    arm_type=str(record.arm_type or "so101"),
+                    mode=str(record.mode) if record.mode else None,
                     ports=tuple(ports),
                     cameras=cameras,
                     is_clean=_flag(record, "is_clean"),
