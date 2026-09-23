@@ -110,3 +110,12 @@ The `00` requests status; `FF` in that byte would clear faults and is not used b
 this read. Replies or timeouts are saved in `diagnostics.json`; the read is bounded
 to 40 ms per motor and never runs during playback. It does not expose board
 temperature or read back thermal threshold settings.
+
+When the operator asks the runner to move to the recorded starting pose, add
+`--home-at-recorded-start`. This explicitly uses the bounded first recorded frame
+as the supported return target. It logs the measured initial pose separately,
+requires every starting joint within 10° of that target and no more than 2° outside
+its command limits, and approaches over at least two seconds with a 5°/s ramp.
+All commands remain inside joint limits; a small initial out-of-limit measurement
+is clamped on the first command. Arrival must still be measured within 2°.
+The default continues to capture the current pose as home without this option.

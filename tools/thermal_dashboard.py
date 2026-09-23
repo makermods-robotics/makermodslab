@@ -266,6 +266,7 @@ def run_hardware(args, dashboard, config, series, preparation):
             dashboard.release,
             dashboard.update,
             output=args.output,
+            home_at_recorded_start=args.home_at_recorded_start,
             source={
                 "repo_id": args.dataset,
                 "episode_index": args.episode,
@@ -326,6 +327,11 @@ def main():
         help="Show the new settings without loading an episode or connecting motors",
     )
     parser.add_argument("--episode", type=int, default=0)
+    parser.add_argument(
+        "--home-at-recorded-start",
+        action="store_true",
+        help="Explicitly choose the recording start as supported home; approach slowly within 10 degrees",
+    )
     parser.add_argument(
         "--prepare-recorded-loop",
         action="store_true",

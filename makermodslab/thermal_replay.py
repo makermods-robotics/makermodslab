@@ -74,7 +74,17 @@ class ThermalTrial:
     """Run on the replay worker thread; all I/O remains serialized on that thread."""
 
     def __init__(
-        self, robot, series, options, stop, release, update, broadcast=None, output=None, source=None
+        self,
+        robot,
+        series,
+        options,
+        stop,
+        release,
+        update,
+        broadcast=None,
+        output=None,
+        source=None,
+        home_at_recorded_start=False,
     ):
         self.robot, self.series, self.options = robot, series, options
         self.stop, self.release, self.update, self.broadcast = stop, release, update, broadcast
@@ -82,6 +92,8 @@ class ThermalTrial:
             time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
         )
         self.source = source or {}
+        self.home_at_recorded_start = home_at_recorded_start
+        self.initial_pose = {}
         self.names = list(robot.bus.motors)
         self.rest = {}
         self.observation = {}
@@ -228,11 +240,11 @@ class ThermalTrial:
                 json.dumps({"type": "action", "timestamp": time.time(), "positions": action}) + "\n"
             )
 
-    def move_to(self, pose, *, returning=True):
+    def move_to(self, pose, *, returning=True, speed_deg_s=20.0, minimum_duration_s=0.0):
         """Controlled return at <=20 deg/s. Require fresh feedback and <=2° arrival."""
         self.sample(returning=returning)
         start = {k: self.observation[k] for k in pose}
-        duration = max(abs(start[k] - v) for k, v in pose.items()) / 20.0
+        duration = max(minimum_duration_s, max(abs(start[k] - v) for k, v in pose.items()) / speed_deg_s)
         t0 = time.monotonic()
         deadline = t0 + max(10.0, duration + 3.0)
         while time.monotonic() < deadline:
@@ -279,6 +291,7 @@ class ThermalTrial:
             self.log = (self.root / "samples.jsonl").open("w", buffering=1)
             self.sample(returning=True)
             self.rest = {f"{n}.pos": self.observation[f"{n}.pos"] for n in self.names}
+            self.initial_pose = dict(self.rest)
             if set(self.rest) != set(self.series["action_names"]):
                 raise TrialEndedError("invalid_setup", "Dataset does not cover every actuator")
             # Reject an uncommandable home before any trajectory command. This
@@ -286,7 +299,8 @@ class ThermalTrial:
             # command limit, farther apart than the 2° arrival tolerance.
             for key, position in self.rest.items():
                 bounds = self.robot.config.joint_limits.get(key.removesuffix(".pos"))
-                if bounds is None or not bounds[0] <= position <= bounds[1]:
+                allowance = 2.0 if self.home_at_recorded_start else 0.0
+                if bounds is None or not bounds[0] - allowance <= position <= bounds[1] + allowance:
                     raise TrialEndedError(
                         "invalid_setup",
                         f"Captured rest {key}={position:.2f}° is outside configured limits {bounds}. "
@@ -301,10 +315,15 @@ class ThermalTrial:
                         )
             self.sample()
             first = dict(zip(self.series["action_names"], self.series["values"][0], strict=True))
-            if any(abs(first[k] - v) > 5 for k, v in self.rest.items()):
+            approach_limit = 10 if self.home_at_recorded_start else 5
+            if any(abs(first[k] - v) > approach_limit for k, v in self.rest.items()):
                 raise TrialEndedError(
-                    "invalid_setup", "Place the supported arm within 5° of the recorded starting pose"
+                    "invalid_setup", f"Arm is more than {approach_limit}° from the recorded starting pose"
                 )
+            if self.home_at_recorded_start:
+                # Explicit operator choice: the bounded recording's first frame
+                # is home, not the arbitrary pose measured on connection.
+                self.rest = dict(first)
             (self.root / "run.json").write_text(
                 json.dumps(
                     {
@@ -312,6 +331,8 @@ class ThermalTrial:
                         "source": self.source,
                         "initial_gains": getattr(self.robot.bus, "_gains", {}),
                         "rest_pose": self.rest,
+                        "initial_pose": self.initial_pose,
+                        "home_at_recorded_start": self.home_at_recorded_start,
                         "series": self.series,
                         **thermal_policy(),
                         "feedback_max_age_s": 0.25,
@@ -321,7 +342,11 @@ class ThermalTrial:
             )
             # Use nominal gains for the initial alignment and return. No claimed
             # torque limit: this only changes the driver's local MIT Kp value.
-            self.move_to(first, returning=False)
+            if self.home_at_recorded_start:
+                self.status["message"] = "Slowly approaching the recorded starting pose"
+                self.move_to(first, returning=False, speed_deg_s=5.0, minimum_duration_s=2.0)
+            else:
+                self.move_to(first, returning=False)
             self.sample()
             if self.options.experiment == "shoulder_kp_85":
                 kp = finite_number(getattr(self.robot.bus, "_gains", {}).get("shoulder_lift", {}).get("kp"))
@@ -387,7 +412,7 @@ class ThermalTrial:
                     raise TrialEndedError("return_failed", "No valid rest pose was captured")
                 if not self.motion_commanded:
                     self.sample(returning=True)
-                    if any(abs(self.observation[k] - v) > 2 for k, v in self.rest.items()):
+                    if any(abs(self.observation[k] - v) > 2 for k, v in self.initial_pose.items()):
                         raise TrialEndedError(
                             "return_failed", "Arm moved from the supported pose during setup"
                         )

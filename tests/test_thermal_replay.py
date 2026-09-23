@@ -444,3 +444,39 @@ def test_diagnostic_write_failure_does_not_skip_return(trial):
     result = runner.run()
     assert result["rest_reached"]
     assert result["diagnostics_write_error"] == "disk unavailable"
+
+
+def test_explicit_recorded_home_allows_small_rest_limit_offset_and_slow_approach(trial):
+    runner, robot, clock, _ = trial
+    runner.home_at_recorded_start = True
+    robot.pos["shoulder_lift.pos"] = -6.7
+    robot.pos["elbow_flex.pos"] = -1.4
+    robot.config.joint_limits["elbow_flex"] = (0, 100)
+    start = clock.now
+    result = runner.run()
+    assert result["result"] == "completed"
+    assert result["rest_reached"]
+    assert runner.rest == {"shoulder_lift.pos": 0, "elbow_flex.pos": 0}
+    assert runner.started - start == pytest.approx(2, abs=1 / 30)
+    assert all(0 <= command["elbow_flex.pos"] <= 100 for _, command in robot.commands)
+    run = json.loads((runner.root / "run.json").read_text())
+    assert run["initial_pose"]["elbow_flex.pos"] == -1.4
+    assert run["home_at_recorded_start"] is True
+
+
+@pytest.mark.parametrize("initial", [-10.1, -20])
+def test_recorded_home_refuses_large_approach_before_motion(trial, initial):
+    runner, robot, _, _ = trial
+    runner.home_at_recorded_start = True
+    robot.pos["shoulder_lift.pos"] = initial
+    assert runner.run()["result"] == "invalid_setup"
+    assert not robot.commands
+
+
+def test_recorded_home_refuses_large_outside_limit_pose(trial):
+    runner, robot, _, _ = trial
+    runner.home_at_recorded_start = True
+    robot.config.joint_limits["elbow_flex"] = (0, 100)
+    robot.pos["elbow_flex.pos"] = -2.1
+    assert runner.run()["result"] == "invalid_setup"
+    assert not robot.commands
