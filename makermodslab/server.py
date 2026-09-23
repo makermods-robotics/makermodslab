@@ -1076,8 +1076,8 @@ def start_replay(request: ReplayRequest):
 
 
 @router.post("/stop-replay")
-def stop_replay():
-    result = handle_stop_replay()
+def stop_replay(release_now: bool = False):
+    result = handle_stop_replay(release_now=True) if release_now else handle_stop_replay()
     if not result.get("success"):
         raise ApiError(
             status_code=result.get("status_code", 500),

@@ -8,6 +8,24 @@ import { Fetcher, apiRequest } from "./apiClient";
 
 export type ReplayPhase = "idle" | "easing_in" | "playing" | "stopping" | "done" | "error";
 
+export interface ThermalReplayStatus {
+  result: string;
+  message: string;
+  experiment: "baseline" | "shoulder_kp_85";
+  elapsed_s: number;
+  duration_s: number;
+  cycles: number;
+  critical: boolean;
+  rest_reached: boolean;
+  log_dir: string;
+  actuators: Array<{
+    actuator: string;
+    temperature_c: number | null;
+    torque_nm: number | null;
+    status: string;
+  }>;
+}
+
 export interface ReplayStatus {
   replay_active: boolean;
   phase: ReplayPhase;
@@ -16,13 +34,15 @@ export interface ReplayStatus {
   duration_s: number | null;
   error?: string | null;
   hint?: string | null;
+  thermal_test?: ThermalReplayStatus | null;
 }
 
 export async function stopReplay(
   baseUrl: string,
   fetcher: Fetcher,
+  releaseNow = false,
 ): Promise<{ message: string }> {
-  return apiRequest(baseUrl, fetcher, "/api/v1/stop-replay", {
+  return apiRequest(baseUrl, fetcher, `/api/v1/stop-replay${releaseNow ? "?release_now=true" : ""}`, {
     method: "POST",
     action: "Stop replay",
   });

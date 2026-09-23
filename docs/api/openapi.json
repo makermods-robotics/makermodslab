@@ -6271,6 +6271,16 @@
             "default": false,
             "title": "Skip Identity Check",
             "type": "boolean"
+          },
+          "thermal_test": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ThermalReplayOptions"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -7407,6 +7417,37 @@
           "follower_config"
         ],
         "title": "TeleoperateRequest",
+        "type": "object"
+      },
+      "ThermalReplayOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "duration_s": {
+            "default": 300,
+            "maximum": 600.0,
+            "minimum": 10.0,
+            "title": "Duration S",
+            "type": "number"
+          },
+          "experiment": {
+            "default": "baseline",
+            "enum": [
+              "baseline",
+              "shoulder_kp_85"
+            ],
+            "title": "Experiment",
+            "type": "string"
+          },
+          "rest_pose_confirmed": {
+            "const": true,
+            "title": "Rest Pose Confirmed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "rest_pose_confirmed"
+        ],
+        "title": "ThermalReplayOptions",
         "type": "object"
       },
       "TrainingMetrics": {
@@ -13809,6 +13850,18 @@
     "/api/v1/stop-replay": {
       "post": {
         "operationId": "stop_replay",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "release_now",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Release Now",
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -13817,6 +13870,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Stop Replay"
@@ -17867,6 +17930,18 @@
     "/stop-replay": {
       "post": {
         "operationId": "stop_replay_stop_replay_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "release_now",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Release Now",
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -17875,6 +17950,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Stop Replay"

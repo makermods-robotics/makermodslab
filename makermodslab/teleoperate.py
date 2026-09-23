@@ -29,6 +29,7 @@ from lerobot.teleoperators.bi_so_leader import BiSOLeader
 from lerobot.teleoperators.so_leader import SO101Leader
 from lerobot.utils.errors import DeviceNotConnectedError
 
+from .actuator_telemetry import cached_maker_telemetry
 from .api_errors import ErrorCode
 from .arm_capabilities import require_known_arm_type
 from .arms import registry as arm_registry
@@ -419,6 +420,10 @@ def get_can_joint_data(robot, family, is_bimanual: bool, timestamp: float, *, ob
         degrees = _can_joint_degrees(observation, prefix)
         data[f"joints_deg{suffix}"] = degrees
         data[f"joints{suffix}"] = family.urdf_joint_positions(degrees)
+    if getattr(family, "id", None) == "maker":
+        # Cached feedback only: no additional CAN traffic or serial-port owner.
+        # This function is also used by the recording observation tap.
+        data["actuator_telemetry"] = cached_maker_telemetry(robot)
     return data
 
 

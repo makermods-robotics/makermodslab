@@ -56,6 +56,7 @@ from .rest_pose import (
 )
 from .session_events import notify_session_changed
 from .teleoperate import _cleanup_after_setup_failure
+from .thermal_replay import ThermalReplayOptions, ThermalTrial, validate_thermal_series
 from .utils.config import get_robot_record, normalize_arm_type, setup_follower_calibration_file
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,7 @@ class ReplayRequest(BaseModel):
     # Selects the follower config class and calibration library.
     arm_type: str = "so101"
     skip_identity_check: bool = False
+    thermal_test: ThermalReplayOptions | None = None
 
 
 replay_active: bool = False
@@ -301,6 +303,12 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
                 "message": "Could not read this episode's recorded actions — it may not be downloaded locally yet.",
             }
 
+        if request.thermal_test is not None:
+            try:
+                validate_thermal_series(action_series, request.arm_type, request.mode)
+            except ValueError as exc:
+                return {"success": False, "status_code": 400, "message": str(exc)}
+
         # Joint NAMES can match while the arm family doesn't: Maker and Metal
         # share all seven, and only their units differ, so neither the
         # action_features comparison below nor the frame-0 bus keying can tell
@@ -378,6 +386,9 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
         _replay_started_at = time.time()
         _replay_meta = {
             "phase": "easing_in",
+            "thermal_pending": request.thermal_test is not None,
+            "repo_id": request.repo_id,
+            "robot_name": request.robot_name,
             "episode_index": request.episode_index,
             "duration_s": action_series["timestamps"][-1] if action_series["timestamps"] else 0.0,
             "error": None,
@@ -389,8 +400,9 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
     notify_session_changed("replay", True, phase="easing_in")
 
     worker = threading.Thread(
-        target=_replay_worker,
-        args=(robot, action_series, websocket_manager, request.arm_type),
+        target=_thermal_replay_worker if request.thermal_test else _replay_worker,
+        args=(robot, action_series, websocket_manager, request.arm_type)
+        + ((request.thermal_test,) if request.thermal_test else ()),
         name="replay-worker",
         daemon=True,
     )
@@ -1007,6 +1019,71 @@ def _replay_worker(
         notify_session_changed("replay", False, phase=final_phase)
 
 
+def _thermal_replay_worker(robot, series, websocket_manager, arm_type, options):
+    """Separate experimental worker; ordinary replay keeps its existing behavior."""
+    global replay_active
+    family = arm_registry.get(arm_type)
+
+    def update(phase, status):
+        with _state_lock:
+            _replay_meta.update(phase=phase, thermal_test=status)
+
+    def broadcast(payload):
+        if websocket_manager is not None and getattr(websocket_manager, "active_connections", None):
+            try:
+                websocket_manager.broadcast_joint_data_sync(payload)
+            except Exception:
+                logger.debug("Thermal telemetry broadcast failed", exc_info=True)
+
+    with _state_lock:
+        source = {key: _replay_meta.get(key) for key in ("repo_id", "episode_index", "robot_name")}
+    trial = ThermalTrial(robot, series, options, _stop_event, _release_now, update, broadcast, source=source)
+    try:
+        result = trial.run()
+    except Exception as exc:
+        logger.exception("Thermal experiment failed")
+        result = {**trial.status, "result": "error", "message": str(exc)}
+    try:
+        update("stopping", result)
+        if not result["rest_reached"] and not _release_now.is_set():
+            # Do not automatically cut torque on an unsupported arm. Arrest at
+            # measured positions only if all feedback is still valid. A bus fault
+            # may prevent even that; surface the failure instead of claiming safety.
+            try:
+                trial.sample(returning=True)
+                robot.send_action({f"{n}.pos": trial.observation[f"{n}.pos"] for n in trial.names})
+            except Exception:
+                logger.exception("Could not hold measured pose after failed thermal return")
+            result["message"] = (
+                "Return failed. Support the arm, then Release now. Motors remain energized. "
+                + result["message"]
+            )
+            update("stopping", result)
+            notify_session_changed("replay", True, phase="stopping")
+            while not _release_now.wait(0.1):
+                # Keep status temperatures visible while awaiting operator help.
+                try:
+                    trial.sample(returning=True)
+                    result["actuators"] = trial.status["actuators"]
+                    result["critical"] = trial.status["critical"]
+                except Exception:
+                    result["actuators"] = trial.status["actuators"]
+                update("stopping", result)
+        family.release_torque(robot, "follower arm")
+    finally:
+        _disconnect_replay_followers(robot, False)
+        phase = "done" if result["result"] in {"completed", "stopped"} and result["rest_reached"] else "error"
+        with _state_lock:
+            replay_active = False
+            _replay_meta.update(
+                phase=phase,
+                thermal_test=result,
+                played_s=result.get("elapsed_s", 0),
+                error=result["message"] if phase == "error" else None,
+            )
+        notify_session_changed("replay", False, phase=phase)
+
+
 def handle_replay_status() -> dict[str, Any]:
     with _state_lock:
         # Freeze once the session ends: computing this unconditionally made a
@@ -1028,10 +1105,11 @@ def handle_replay_status() -> dict[str, Any]:
             # recorded motion, which otherwise looks identical to success.
             "frames_dropped": _replay_meta.get("frames_dropped"),
             "played_s": _replay_meta.get("played_s"),
+            "thermal_test": _replay_meta.get("thermal_test"),
         }
 
 
-def handle_stop_replay() -> dict[str, Any]:
+def handle_stop_replay(*, release_now: bool = False) -> dict[str, Any]:
     """Stop playback; the worker then returns the arm and releases it.
 
     A SECOND stop while that return is still running (the worker is alive
@@ -1040,7 +1118,23 @@ def handle_stop_replay() -> dict[str, Any]:
     """
     global replay_active
     with _state_lock:
+        thermal = _replay_meta.get("thermal_test") or _replay_meta.get("thermal_pending")
+        if thermal and replay_active:
+            if release_now:
+                _release_now.set()
+                _stop_event.set()
+                return {"success": True, "message": "Releasing the arm now"}
+            if _replay_meta.get("phase") == "stopping":
+                return {
+                    "success": True,
+                    "message": "Return in progress; explicit release required to cut power",
+                }
         if replay_active:
+            if thermal:
+                # Keep the session lease/UI alive through the measured return.
+                _stop_event.set()
+                _replay_meta["phase"] = "stopping"
+                return {"success": True, "message": "Thermal test stopping and returning to rest"}
             replay_active = False
             _stop_event.set()
             _replay_meta["phase"] = "stopping"

@@ -19,6 +19,8 @@ import {
   stopReplay,
 } from "@/lib/replayHardwareApi";
 
+import { ThermalReplayStatus } from "./ThermalReplayStatus";
+
 const POLL_MS = 1000;
 
 // Catalog KEYS, not resolved copy: this map is built once at import time, so
@@ -49,11 +51,18 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
   const { toast } = useToast();
   const { selectedRecord } = useRobots();
   const [status, setStatus] = useState<ReplayStatus | null>(null);
+  const [thermalEnabled, setThermalEnabled] = useState(false);
+  const [restConfirmed, setRestConfirmed] = useState(false);
+  const [experiment, setExperiment] = useState<"baseline" | "shoulder_kp_85">("baseline");
+  const thermalAlertRef = useRef("");
+  const thermalAvailable = selectedRecord?.arm_type === "maker" && selectedRecord.mode === "single";
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
   // Identity of the session THIS panel started (POST /api/v1/sessions).
   const [sessionId, setSessionId] = useState<string | null>(null);
   const doneRef = useRef(false);
+  const startPendingRef = useRef(false);
+  const generationRef = useRef(0);
   const localT0Ref = useRef<number | null>(null);
 
   const { joints: liveJoints } = useLiveJointReadout(status?.replay_active === true);
@@ -69,16 +78,28 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
   useEffect(() => {
     doneRef.current = false;
     localT0Ref.current = null;
-  }, [repoId, episodeIndex]);
+    setRestConfirmed(false);
+  }, [repoId, episodeIndex, selectedRecord?.name]);
 
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
-      if (doneRef.current) return;
+      if (doneRef.current || startPendingRef.current) return;
+      const generation = generationRef.current;
       try {
         const next = await getReplayStatus(baseUrl, fetchWithHeaders);
-        if (cancelled) return;
+        if (cancelled || startPendingRef.current || generation !== generationRef.current) return;
         setStatus(next);
+        const trial = next.thermal_test;
+        if (trial && trial.result !== "running" && (trial.result !== "completed" || trial.rest_reached) && trial.message !== thermalAlertRef.current) {
+          thermalAlertRef.current = trial.message;
+          toast({
+            title: trial.result === "completed" ? "Thermal test completed" : "Thermal test stopped",
+            description: trial.message,
+            variant: ["completed", "stopped"].includes(trial.result) ? "default" : "destructive",
+            duration: 15000,
+          });
+        }
         if (next.phase === "playing" && localT0Ref.current === null) {
           localT0Ref.current = performance.now() / 1000;
         }
@@ -86,12 +107,14 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
           localT0Ref.current = null;
         }
         const elapsed =
-          next.phase === "playing" && localT0Ref.current !== null
+          next.thermal_test && next.phase === "playing" && next.duration_s
+            ? next.thermal_test.elapsed_s % next.duration_s
+            : next.phase === "playing" && localT0Ref.current !== null
             ? performance.now() / 1000 - localT0Ref.current
             : next.elapsed_s;
         onElapsedChange?.(elapsed, next.phase);
         if (!next.replay_active && (next.phase === "done" || next.phase === "error")) {
-          if (next.phase === "error") {
+          if (next.phase === "error" && !next.thermal_test) {
             toast({
               title: t("dialogs.replay.toast.failedTitle"),
               // The backend's hint/error is prose we don't translate; only the
@@ -125,7 +148,11 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
   const handleStart = async () => {
     if (!selectedRecord) return;
     setStarting(true);
+    startPendingRef.current = true;
+    generationRef.current += 1;
     doneRef.current = false;
+    thermalAlertRef.current = "";
+    localT0Ref.current = null;
     try {
       // Robot NAME + episode selection only — the follower port/config
       // resolve server-side from the saved record. The owner attaches the
@@ -137,9 +164,15 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
         options: {
           repo_id: repoId,
           episode_index: episodeIndex,
+          ...(thermalEnabled && thermalAvailable ? {
+            thermal_test: { duration_s: 300, experiment, rest_pose_confirmed: restConfirmed },
+          } : {}),
         },
       });
       setSessionId(session.id);
+      setStatus({ replay_active: true, phase: "easing_in", episode_index: episodeIndex,
+        elapsed_s: 0, duration_s: null });
+      doneRef.current = false;
       if (warnings?.length) {
         // Warn-but-allow arm-identity finding: the replay RUNS, but the user
         // should see it. Backend prose, rendered verbatim.
@@ -160,6 +193,7 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
         variant: "destructive",
       });
     } finally {
+      startPendingRef.current = false;
       setStarting(false);
     }
   };
@@ -169,7 +203,9 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
     try {
       // Stop by session id (a 404 means the replay already ended — fine);
       // fall back to the kind-level stop when this panel never started one.
-      if (sessionId) {
+      if (status?.phase === "stopping") {
+        await stopReplay(baseUrl, fetchWithHeaders, true);
+      } else if (sessionId) {
         try {
           await stopSession(baseUrl, fetchWithHeaders, sessionId);
         } catch (e) {
@@ -217,8 +253,29 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
 
   if (!active) {
     return (
-      <div className="flex items-center gap-3 rounded-md border border-border bg-muted/40 p-3">
-        <Button onClick={handleStart} disabled={starting} size="sm" className="gap-2">
+      <div className="space-y-3 rounded-md border border-border bg-muted/40 p-3">
+        {thermalAvailable && <div className="space-y-2 text-xs">
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={thermalEnabled} onChange={(event) => { setThermalEnabled(event.target.checked); setRestConfirmed(false); }} />
+            Repeat as a 5-minute thermal test (experimental)
+          </label>
+          {thermalEnabled && <>
+            <label className="flex items-center gap-2">Experiment
+              <select aria-label="Thermal experiment" value={experiment} onChange={(event) => setExperiment(event.target.value as typeof experiment)} className="rounded border bg-background p-1">
+                <option value="baseline">Baseline — unchanged gains</option>
+                <option value="shoulder_kp_85">Shoulder stiffness −15%</option>
+              </select>
+            </label>
+            <p className="text-muted-foreground">Record a motion that starts and ends at the same supported rest pose. The test returns there above 65°C; above 70°C is critical. Feedback or tracking faults also stop the test.</p>
+            {experiment === "shoulder_kp_85" && <p className="text-amber-700">Lower stiffness can increase position error. This is not a torque cap; recorded timing stays unchanged.</p>}
+            <label className="flex items-start gap-2">
+              <input type="checkbox" checked={restConfirmed} onChange={(event) => setRestConfirmed(event.target.checked)} />
+              The arm is at its supported rest pose, the gripper is empty, and the motion and direct return path are clear. I will supervise the test.
+            </label>
+          </>}
+        </div>}
+        <ThermalReplayStatus status={status?.thermal_test} />
+        <Button onClick={handleStart} disabled={starting || (thermalEnabled && thermalAvailable && !restConfirmed)} size="sm" className="gap-2">
           {starting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
           {t("dialogs.replay.start")}
         </Button>
@@ -244,6 +301,7 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
           {status?.phase === "stopping" ? t("dialogs.replay.releaseNow") : t("dialogs.replay.stop")}
         </Button>
       </div>
+      <ThermalReplayStatus status={status?.thermal_test} />
       {jointGroups.filter(({ entries }) => entries.length > 0).map(({ label, entries }) => (
         <section key={label} aria-label={label || undefined}>
           {label ? <h4 className="mb-1 text-xs font-medium">{label}</h4> : null}

@@ -651,6 +651,7 @@ def _build_replay_request(record: dict, opts: ReplayOptions):
         robot_name=record["name"],
         arm_type=record["arm_type"],
         skip_identity_check=opts.skip_identity_check,
+        thermal_test=opts.thermal_test,
     )
 
 

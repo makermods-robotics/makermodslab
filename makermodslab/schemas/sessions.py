@@ -35,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # The frame-size model the inference launch flow already speaks — reused, not
 # duplicated, so the sessions surface can never drift from InferenceRequest.
 from makermodslab.rollout import PolicyCameraDims
+from makermodslab.thermal_replay import ThermalReplayOptions
 
 from .action_filter import ActionFilterOptions
 
@@ -264,6 +265,7 @@ class ReplayOptions(BaseModel):
     repo_id: str
     episode_index: int
     skip_identity_check: bool = False
+    thermal_test: ThermalReplayOptions | None = None
 
 
 class CalibrationOptions(BaseModel):
