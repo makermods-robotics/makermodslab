@@ -114,9 +114,8 @@ _state_lock = threading.Lock()
 # no longer hold: the servos already hold their last goal on their own in
 # position mode, so the stop drives the follower straight back to its
 # session-start pose (see makermodslab/rest_pose.py) — same behavior as the
-# auto-calibration stop — then releases. Error paths (an exception in the
-# control loop — e.g. an unplugged bus) skip everything and attempt the
-# release immediately: you can't hold what you can't reach.
+# auto-calibration stop — then releases. CAN error paths also attempt the
+# return and require a successful verdict before automatic torque release.
 TORQUE_RELEASE_GRACE_S = 5.0
 # True while the worker is driving the follower back to its rest pose (and on
 # through the release). The session is no longer "active" (the control loop
@@ -124,8 +123,11 @@ TORQUE_RELEASE_GRACE_S = 5.0
 # energized — surfaced in the status payload so the UI isn't lying about the
 # arm's state.
 releasing = False
-# Cuts the post-stop return short: set by a second stop request ("release
-# now") or by a new start request that needs the serial ports. Cleared on start.
+# Retain ownership after a failed CAN landing. Only explicit release_now may bypass it.
+rest_failed = False
+_requires_verified_rest = False
+# Explicit release aborts a CAN return. SO-101 also retains its second-stop
+# and pending-start release behavior. Cleared on start.
 _release_now = threading.Event()
 
 # --- Follower power telemetry ---
@@ -225,6 +227,9 @@ def finish_pending_release(timeout: float = 10.0) -> bool:
     worker = teleoperation_thread
     if worker is None or not worker.is_alive():
         return True
+    if _requires_verified_rest:
+        # Starting another session must not turn a pending/failed landing into torque-off.
+        return False
     if teleoperation_active:
         # A live session, not a pending release — the caller's mutex check
         # will report "already active".
@@ -269,6 +274,11 @@ def stop_and_wait(timeout: float = _STOP_AND_WAIT_TIMEOUT_S) -> None:
         return
     worker.join(timeout=timeout)
     if not worker.is_alive():
+        return
+    if _requires_verified_rest:
+        logger.error(
+            "CAN teleoperation has not landed; automatic torque release is blocked. Support the arm."
+        )
         return
     logger.warning(
         "Teleoperation worker did not finish its graceful release within %.0fs; forcing release now",
@@ -704,6 +714,8 @@ def _connect_can(request: TeleoperateRequest):
 
         install_metal_gripper(robot, request.robot_name)
 
+    arm_family.prepare_teleoperation(robot)
+
     try:
         logger.info(f"Connecting to {family} follower arm(s)...")
         try:
@@ -753,7 +765,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
     success. Only the teleoperation loop runs in the background thread.
     """
     global teleoperation_active, teleoperation_thread, current_robot, current_teleop, last_cleanup_error
-    global releasing, last_session_outcome, last_session_error
+    global releasing, rest_failed, _requires_verified_rest, last_session_outcome, last_session_error
 
     from . import (
         auto_calibrate as _auto_calibrate,
@@ -866,6 +878,8 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         last_session_outcome = None
         last_session_error = None
         releasing = False
+        rest_failed = False
+        _requires_verified_rest = arm_registry.get(request.arm_type).requires_verified_rest
         _release_now.clear()
 
     # The claim above is the real state transition — broadcast the hint so
@@ -984,7 +998,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
 
         def teleoperation_worker():
             global teleoperation_active, current_robot, current_teleop, last_cleanup_error, releasing
-            global last_session_outcome, last_session_error
+            global last_session_outcome, last_session_error, rest_failed
 
             logger.info("Starting teleoperation loop...")
             stopped_normally = False
@@ -1051,18 +1065,25 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 telemetry_summary = telemetry.summary()
                 if telemetry_summary:
                     logger.info(telemetry_summary)
-                if stopped_normally and not _release_now.is_set():
-                    # User-initiated stop: no timed hold — the servos hold
-                    # their last goal on their own — so drive the follower(s)
-                    # straight back to their session-start pose, then release
-                    # (same behavior as the auto-calibration stop). A second
-                    # stop (release-now) skips/aborts the return; error exits
-                    # skip this — the bus may be gone, release ASAP.
+                teleoperation_active = False
+                if (stopped_normally or family.requires_verified_rest) and not _release_now.is_set():
                     releasing = True
-                    # Still energized and holding the ports — a phase of this
-                    # session, not idle yet (mirrors the status payload).
                     notify_session_changed("teleoperation", True, phase="releasing")
-                    family.return_to_rest(rest_poses, _release_now)
+                    return_problem = _return_before_release(family, rest_poses, _release_now)
+                    if return_problem:
+                        last_cleanup_error = return_problem
+                        last_session_error = loop_error or return_problem
+                        rest_failed = True
+                        logger.error(return_problem)
+                        notify_session_changed("teleoperation", True, phase="rest_failed")
+                        # Do not disconnect, disable, clear faults, or re-enable motors.
+                        # The controller retains its last commanded rest target. A
+                        # firmware fault/bus loss can still prevent physical holding.
+                        while not _release_now.wait(1 / 30):
+                            for arm, _pose in rest_poses:
+                                guard = getattr(arm, "teleop_safety", None)
+                                if guard is not None:
+                                    guard.hold()
                 # Belt and braces: disable torque explicitly before disconnect.
                 # disconnect() disables torque too, but if it fails partway the
                 # error is swallowed here and the arm stays energized (rigid) —
@@ -1081,6 +1102,8 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                     error = _safe_disconnect(device, label)
                     if error:
                         problems.append(error)
+                if last_cleanup_error:
+                    problems.insert(0, last_cleanup_error)
                 last_cleanup_error = " ".join(problems) if problems else None
                 # Catch-site classification: the loop exception (if any) is the
                 # session's error and means "failed" — the loop was cut short.
@@ -1092,6 +1115,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 logger.info("Teleoperation stopped")
                 teleoperation_active = False
                 releasing = False
+                rest_failed = False
                 current_robot = None
                 current_teleop = None
                 # Final release: cleanup (including error paths) is done and
@@ -1147,7 +1171,34 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         return response
 
 
-def handle_stop_teleoperation() -> dict[str, Any]:
+def _return_before_release(family, rest_poses, abort_event) -> str | None:
+    """Require an explicit successful verdict from every brake-less CAN arm."""
+    try:
+        if family.requires_verified_rest:
+            for device, pose in rest_poses:
+                expected = set(getattr(getattr(device, "bus", None), "motors", {})) - {"gripper"}
+                if not expected.issubset(pose):
+                    raise ValueError("The captured rest pose is missing joints")
+        recovery_poses = [
+            (guard.recovery_drive() if (guard := getattr(device, "teleop_safety", None)) else device, pose)
+            for device, pose in rest_poses
+        ]
+        results = family.return_to_rest(recovery_poses, abort_event)
+        if not family.requires_verified_rest:
+            return None
+        if results and len(results) == len(rest_poses) and all(ok for ok, _ in results):
+            return None
+        reasons = "; ".join(reason for ok, reason in (results or []) if not ok)
+        reason = reasons or "No complete return-to-rest confirmation"
+    except Exception as exc:
+        reason = format_exception(exc)
+    return (
+        f"Return to rest failed: {reason.rstrip('.')}. Automatic torque release is blocked. "
+        "Support the arm, then explicitly release torque. Motor holding cannot be guaranteed after a hardware fault."
+    )
+
+
+def handle_stop_teleoperation(*, release_now: bool = False) -> dict[str, Any]:
     """Handle stop teleoperation request.
 
     First stop: signals the worker via `teleoperation_active = False`. The
@@ -1155,7 +1206,9 @@ def handle_stop_teleoperation() -> dict[str, Any]:
     their session-start pose (no timed hold — the servos hold their last goal
     on their own in position mode), then releases torque — reported
     immediately via `releasing: true` rather than blocking through the return.
-    Second stop during the return: aborts it (release now) and waits for the
+    CAN stops are idempotent, including lease expiry: a failed landing keeps
+    ownership until release_now=True explicitly requests torque-off. SO-101
+    retains its second-stop release behavior. Explicit release waits for
     cleanup so any release problem is surfaced. The worker owns the disconnect
     call either way, so this never races the serial bus from the request
     thread.
@@ -1163,6 +1216,9 @@ def handle_stop_teleoperation() -> dict[str, Any]:
     global teleoperation_active, teleoperation_thread
 
     worker = teleoperation_thread
+    if release_now and worker is not None and worker.is_alive():
+        logger.warning("Operator explicitly requested torque release; the arm must be supported")
+        _release_now.set()
     if teleoperation_active:
         logger.info("Stop teleoperation triggered from web interface")
         teleoperation_active = False
@@ -1187,11 +1243,23 @@ def handle_stop_teleoperation() -> dict[str, Any]:
             "releasing": True,
             "message": (
                 "Teleoperation stopped — the arm returns to its starting position, "
+                "then releases torque only after a successful return."
+                if _requires_verified_rest
+                else "Teleoperation stopped — the arm returns to its starting position, "
                 "then goes limp. Press Stop again to release it now."
             ),
         }
 
     if worker is not None and worker.is_alive():
+        if _requires_verified_rest and not release_now:
+            return {
+                "success": True,
+                "releasing": True,
+                "rest_failed": rest_failed,
+                "message": last_cleanup_error
+                or "Returning to rest; automatic release requires a successful return.",
+                **({"warning": last_cleanup_error} if last_cleanup_error else {}),
+            }
         # Second stop while the return (or the release cleanup) is still
         # running: release immediately and wait so problems can be surfaced.
         logger.info("Second stop during the rest-pose return — releasing the arms now")
@@ -1225,18 +1293,23 @@ def handle_stop_teleoperation() -> dict[str, Any]:
 def handle_teleoperation_status() -> dict[str, Any]:
     """Handle teleoperation status request"""
     message = (
-        "Returning the arm to its rest position…"
-        if releasing
-        else "Teleoperation status retrieved successfully"
+        last_cleanup_error
+        if rest_failed
+        else (
+            "Returning the arm to its rest position…"
+            if releasing
+            else "Teleoperation status retrieved successfully"
+        )
     )
     return {
         "teleoperation_active": teleoperation_active,
         "available_controls": {
-            "stop_teleoperation": teleoperation_active,
+            "stop_teleoperation": teleoperation_active or releasing,
         },
         # True during the post-stop rest-pose return: the session is over but
         # the arm is still energized and the port is still held.
         "releasing": releasing,
+        "rest_failed": rest_failed,
         # Non-None when the last session's cleanup could not release an arm
         # (torque may still be enabled); cleared when a new session starts.
         "last_cleanup_error": last_cleanup_error,

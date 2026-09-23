@@ -294,7 +294,7 @@ def test_can_stop_path_is_the_mit_machinery(family_id: str, monkeypatch: pytest.
     monkeypatch.setattr(
         maker_rest_pose,
         "return_maker_arms_to_rest",
-        lambda poses, abort: calls.append(("return", poses, abort)),
+        lambda poses, abort, **kwargs: calls.append(("return", poses, abort)),
     )
     monkeypatch.setattr(
         torque, "release_maker_torque", lambda device, label: calls.append(("release", device, label)) or []

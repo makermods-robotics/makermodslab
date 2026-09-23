@@ -117,6 +117,7 @@ class CanArmFamily(ArmFamily):
     follower_zero_pose: str
 
     uses_feetech_bus = False
+    requires_verified_rest = True
     supports_auto_calibration = False
     # The zero-pose procedure below, run as the generic step wizard.
     calibration_kind = "steps"
@@ -424,16 +425,17 @@ class CanArmFamily(ArmFamily):
                 continue
             drive = maker_rest_pose.EnergizedLeaderDrive(arm)
             pose = maker_rest_pose.capture_maker_pose(drive, include_gripper=False)
-            if pose:
-                poses.append((drive, pose))
+            poses.append((drive, pose))
         return poses
 
-    def return_to_rest(self, rest_poses: list[tuple[Any, dict]], abort_event: Any = None) -> None:
+    def return_to_rest(
+        self, rest_poses: list[tuple[Any, dict]], abort_event: Any = None
+    ) -> list[tuple[bool, str]]:
         # The MIT setpoint interpolated at a bounded rate, arrival judged by
         # CONVERGENCE (a loaded joint holds a standing error), all arms at once.
         from .. import maker_rest_pose
 
-        maker_rest_pose.return_maker_arms_to_rest(rest_poses, abort_event)
+        return maker_rest_pose.return_maker_arms_to_rest(rest_poses, abort_event, ensure_target=True)
 
     def release_torque(self, device: Any, label: str = "device") -> list[str]:
         # One whole-bus disable per bus; the Star leader has no motors and is

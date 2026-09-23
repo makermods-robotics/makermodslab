@@ -289,12 +289,18 @@ class ArmFamily(ABC):
     joints_per_arm: int
     supports_bimanual: bool
 
+    def prepare_teleoperation(self, robot: Any) -> None:
+        """Install family-specific control safeguards before connecting."""
+        return None
+
     def urdf_joint_positions(self, degrees: dict[str, float]) -> dict[str, float]:
         """Map CAN motor degrees to this family's viewer joints, if it ships a model."""
         return {}
 
     # --- capability flags -------------------------------------------------
     uses_feetech_bus: bool
+    # A failed landing must retain bus ownership until an explicit torque release.
+    requires_verified_rest: bool = False
     supports_auto_calibration: bool
     supports_dagger: bool
     # The current DRTC robot entrypoints can safely drive this family. False
@@ -684,7 +690,9 @@ class ArmFamily(ABC):
         return []
 
     @abstractmethod
-    def return_to_rest(self, rest_poses: list[tuple[Any, dict]], abort_event: Any = None) -> None:
+    def return_to_rest(
+        self, rest_poses: list[tuple[Any, dict]], abort_event: Any = None
+    ) -> list[tuple[bool, str]] | None:
         """Drive every captured arm back to its pose, concurrently, then return.
 
         Runs on a NORMAL stop, immediately before release_torque, and returns
@@ -692,7 +700,8 @@ class ArmFamily(ABC):
         ceiling, or been cut short). ``abort_event`` (a second stop press)
         cuts every arm's return short promptly, leaving it nearer rest than it
         started. Best-effort, never raises: every outcome falls through to
-        the unconditional release.
+        the release. Families with requires_verified_rest return one verdict per
+        captured arm; teleoperation retains ownership when any verdict fails.
         """
 
     @abstractmethod
