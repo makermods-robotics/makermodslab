@@ -526,9 +526,28 @@ def gripper_status(robot_name: str) -> list[dict]:
             "effective_current_a": b.effective_current_a,
             "temperature_c": b.temperature_c,
             "fault": b._error,
+            "fault_word": getattr(b, "_fault_word", None),
+            "legacy_firmware": getattr(b, "_legacy_firmware", None),
             "hold_torque_nm": b.controller.torque_nm if hasattr(b, "controller") else None,
             "holding": b._enabled and b.controller.holding if hasattr(b, "controller") else False,
             "measured_torque_nm": b._base._last_known_states.get("gripper", {}).get("torque"),
+            # Cached values only: status polling must not contend for the CAN bus.
+            # Positions here are raw motor degrees, except the explicitly named
+            # leader target (the follower's calibrated command frame).
+            "goal_position_deg": b._goal,
+            "measured_position_deg": b._base._last_known_states.get("gripper", {}).get("position"),
+            "command_position_deg": getattr(b, "_last_mit_target", None)[2]
+            if getattr(b, "_last_mit_target", None) is not None
+            else None,
+            "command_kp": getattr(b, "_last_mit_target", None)[0]
+            if getattr(b, "_last_mit_target", None) is not None
+            else None,
+            "command_kd": getattr(b, "_last_mit_target", None)[1]
+            if getattr(b, "_last_mit_target", None) is not None
+            else None,
+            "leader_target_deg": getattr(
+                getattr(getattr(b, "_arm", None), "teleop_safety", None), "last_requested", {}
+            ).get("gripper.pos"),
         }
         for b in buses
     ]

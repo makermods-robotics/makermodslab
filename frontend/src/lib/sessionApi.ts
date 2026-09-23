@@ -312,12 +312,13 @@ export async function heartbeatSession(
 export async function stopSession(
   baseUrl: string,
   fetcher: Fetcher,
-  sessionId: string
+  sessionId: string,
+  releaseNow = false
 ): Promise<{ session: SessionInfo; result: Record<string, unknown> }> {
   return apiRequest(
     baseUrl,
     fetcher,
-    `/api/v1/sessions/${encodeURIComponent(sessionId)}/stop`,
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/stop${releaseNow ? "?release_now=true" : ""}`,
     { method: "POST", action: "Stop session" }
   );
 }

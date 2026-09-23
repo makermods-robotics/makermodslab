@@ -1189,7 +1189,7 @@ def _dispatch_stop(kind: str) -> dict[str, Any]:
     )
 
 
-def handle_stop_session(session_id: str) -> dict[str, Any]:
+def handle_stop_session(session_id: str, *, release_now: bool = False) -> dict[str, Any]:
     """Stop the current session, but only under its own id.
 
     The id-match is the operation-identity guarantee: a stop aimed at a
@@ -1213,7 +1213,12 @@ def handle_stop_session(session_id: str) -> dict[str, Any]:
             detail=f"No active session with id {session_id!r}.",
             code=ErrorCode.SESSION_NOT_FOUND,
         )
-    result = _dispatch_stop(before["kind"])
+    if release_now and before["kind"] == "teleoperation":
+        from .teleoperate import handle_stop_teleoperation
+
+        result = handle_stop_teleoperation(release_now=True)
+    else:
+        result = _dispatch_stop(before["kind"])
 
     after = tracker.current()
     if after is not None and after["id"] == before["id"]:
