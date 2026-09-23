@@ -24,6 +24,11 @@ from makermodslab_sdk.errors import (
     SessionHeldError,
 )
 from makermodslab_sdk.flows_recording import RecordingFlowError, RecordingFlowResult, RecordingFlowTimeout
+from makermodslab_sdk.flows_remote_inference import (
+    RemoteInferenceFlowError,
+    RemoteInferenceRun,
+    RemoteInferenceStartupTimeout,
+)
 from makermodslab_sdk.flows_training import PublishWaitTimeout, TrainAndPublishResult, TrainingFlowError
 from makermodslab_sdk.resources._waiting import OperationFailedError, WaitTimeoutError
 from makermodslab_sdk.resources.jobs import JobWaitTimeout, TrainingOptions
@@ -45,6 +50,9 @@ __all__ = [
     "RecordingFlowError",
     "RecordingFlowResult",
     "RecordingFlowTimeout",
+    "RemoteInferenceFlowError",
+    "RemoteInferenceRun",
+    "RemoteInferenceStartupTimeout",
     "RobotBusyError",
     "SessionHeldError",
     "SessionLostError",

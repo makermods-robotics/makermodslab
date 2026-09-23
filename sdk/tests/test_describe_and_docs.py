@@ -131,7 +131,7 @@ def test_index_names_every_namespace_and_the_drilldowns():
 CARD_BUDGETS_CHARS = {
     "client": 4300,  # measured 3561 after flow exceptions
     "datasets": 5100,  # measured 4196
-    "flows": 1900,  # measured 1521
+    "flows": 2800,  # measured 2265 after remote inference flow
     "inference": 2300,  # measured 1858
     "jobs": 3900,  # measured 3247
     "models": 3200,  # measured 2587
@@ -154,7 +154,7 @@ def test_budget_table_matches_the_namespace_set():
     )
 
 
-@pytest.mark.parametrize("tag", sorted([*RESOURCE_CLASSES, "client", "realtime"]))
+@pytest.mark.parametrize("tag", sorted([*RESOURCE_CLASSES, "client", "flows", "realtime"]))
 def test_every_namespace_card_stays_under_its_budget(tag):
     assert len(namespace_card(tag)) < CARD_BUDGETS_CHARS[tag], f"card {tag} ballooned"
 
@@ -173,6 +173,7 @@ def test_cards_carry_the_module_docstring_as_pattern_intro():
     assert "empty list means no hardware flow" in namespace_card("realtime")
     assert "client.sessions" in namespace_card("flows")
     assert "record_episodes(" in namespace_card("flows")
+    assert "remote_inference(" in namespace_card("flows")
     assert "train_and_publish(" in namespace_card("flows")
     # The client card carries the exception taxonomy:
     client_card = namespace_card("client")
@@ -198,6 +199,8 @@ def test_method_detail_returns_the_full_docstring():
     assert text.startswith("jobs.wait(")
     assert inspect.getdoc(JobsResource.wait) in text  # FULL docstring, not the one-liner
     assert "sessions.record" in method_detail("flows.record_episodes")
+    assert "sessions.remote_inference_transport" in method_detail("flows.remote_inference")
+    assert "gpu_stop(launch_id=...)" in method_detail("flows.remote_inference")
     assert "models.publish_status" in method_detail("flows.train_and_publish")
 
 

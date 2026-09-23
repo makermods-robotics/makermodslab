@@ -166,3 +166,12 @@ marked _(reference)_ name where the Python implementation lives.
   The server reserves its singleton slot atomically before spawning so two
   concurrent starts cannot create an untracked billed process. Launch IDs are
   in-memory attribution only: no history endpoint and no restart recovery.
+- The managed remote-inference flow is side-effect-free until its context is
+  entered. Startup checks the transport, starts one GPU launch, matches its id
+  on every readiness read, then starts the leased robot session. Shared wire
+  options (engine, task, horizon, fps, codec and s_min) come from one argument
+  set and are sent identically to both halves. GPU readiness is only a hint;
+  the server's room probe remains the authority before arm energization. A
+  startup failure or timeout conditionally stops the owned launch. Context
+  exit always attempts the robot-session stop before the conditional GPU stop,
+  and a cleanup failure never masks an exception from the context body.

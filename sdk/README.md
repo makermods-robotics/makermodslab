@@ -25,7 +25,8 @@ task needs — everything below the index is introspected from the code:
   namespace map, drill-down instructions (~1k tokens; start here)
 - `client.docs("jobs")` / `... docs jobs` — one namespace's pattern intro
   (the resource module docstring) + method reference
-- `client.docs("flows")` — short recording and training-to-publish sequences;
+- `client.docs("flows")` — short recording, training-to-publish and managed
+  remote-inference sequences;
   each method names the primitive calls it composes
 - `client.docs("jobs.create_training")` / `... docs jobs.create_training` —
   one method's full signature and docstring
@@ -68,8 +69,29 @@ progress, and waits for all five saved episodes. Pass a list of task strings
 to prompt separately for each episode. For a completed local run and Hub
 publication in one call, use
 `client.flows.train_and_publish("me/demo", steps=20000,
-train_timeout=14400, publish_timeout=3600)`. Both methods expose their full
-signatures at `client.docs("flows.<method>")`.
+train_timeout=14400, publish_timeout=3600)`. Every flow exposes its full
+signature at `client.docs("flows.<method>")`.
+
+For remote inference, one context owns both the exact transient GPU launch and
+the leased robot session. It sends the wire-shaping options to both halves from
+one argument set, waits for that launch's readiness hint, then lets the
+server's room probe make the authoritative decision before the arm energizes:
+
+```python
+with client.flows.remote_inference(
+    "bench",
+    policy_ref="me/act-pick",
+    gpu="A10G",
+    startup_timeout=180,
+) as run:
+    print(run.session_id, run.launch_id, run.start_warnings)
+    run.session.wait(timeout=300)
+```
+
+Exiting stops the robot session before conditionally stopping the GPU by its
+`launch_id`; it cannot stop a replacement launch. Use the primitive
+`client.sessions` methods when the GPU is launched elsewhere or should remain
+available across multiple robot sessions.
 
 The contract is `docs/api/openapi.json` at the repo root plus `SPEC.md`
 (behavior semantics — leases, hints, error taxonomy; written alongside the

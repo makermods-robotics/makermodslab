@@ -24,8 +24,9 @@ results are explicit; no flow retries a side-effecting start automatically.
 from __future__ import annotations
 
 from makermodslab_sdk.flows_recording import RecordingFlows
+from makermodslab_sdk.flows_remote_inference import RemoteInferenceFlows
 from makermodslab_sdk.flows_training import TrainingFlows
 
 
-class Flows(RecordingFlows, TrainingFlows):
-    """``client.flows`` — recording and training-to-publish compositions."""
+class Flows(RecordingFlows, RemoteInferenceFlows, TrainingFlows):
+    """``client.flows`` — common recording, training and remote-run sequences."""

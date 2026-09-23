@@ -90,6 +90,7 @@ def test_flows_are_composites_not_wire_operations():
 
     assert {name for name in dir(Flows) if not name.startswith("_")} == {
         "record_episodes",
+        "remote_inference",
         "train_and_publish",
     }
     assert implemented_operations(Flows) == set()
