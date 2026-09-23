@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 import time
 
+from .thermal_limits import CRITICAL_AT_C, STOP_AT_C, thermal_policy
+
 STALE_AFTER_S = 1.0
 
 
@@ -19,12 +21,12 @@ def finite_number(value) -> float | None:
 
 
 def temperature_status(temperature: float | None) -> str:
-    """User thresholds are strictly ABOVE 65 and ABOVE 70 degrees C."""
+    """Classify at the software cutoff and the manufacturer-reported reference."""
     if temperature is None:
         return "NO DATA"
-    if temperature > 70:
+    if temperature >= CRITICAL_AT_C:
         return "CRITICAL"
-    if temperature > 65:
+    if temperature >= STOP_AT_C:
         return "OVERHEATING"
     return "OK"
 
@@ -77,4 +79,4 @@ def cached_maker_telemetry(robot, now: float | None = None) -> dict:
                     "reason": reason,
                 }
             )
-    return {"timestamp": now, "stale_after_s": STALE_AFTER_S, "actuators": samples}
+    return {"timestamp": now, "stale_after_s": STALE_AFTER_S, "actuators": samples, **thermal_policy()}

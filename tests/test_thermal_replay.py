@@ -106,9 +106,11 @@ def test_repeats_for_requested_duration_returns_captured_pose_and_logs(trial):
     "temperature, expected, critical",
     [
         (65, "completed", False),
-        (65.01, "overheated", False),
-        (70, "overheated", False),
-        (70.01, "overheated", True),
+        (70, "completed", False),
+        (99.99, "completed", False),
+        (100, "overheated", False),
+        (134.99, "overheated", False),
+        (135, "overheated", True),
     ],
 )
 def test_temperature_boundaries_and_return(trial, temperature, expected, critical):
@@ -126,7 +128,7 @@ def test_temperature_boundaries_and_return(trial, temperature, expected, critica
 
 def test_already_hot_never_starts_motion_cycle(trial):
     runner, robot, _, _ = trial
-    robot.temperature = lambda _: 66
+    robot.temperature = lambda _: 101
     result = runner.run()
     assert result["result"] == "overheated"
     assert result["cycles"] == 0
@@ -174,7 +176,7 @@ def test_overheat_during_return_invalidates_completed_run(trial):
 
     def move(pose, **kwargs):
         if runner.status["result"] == "completed":
-            robot.temperature = lambda _: 66
+            robot.temperature = lambda _: 101
         original(pose, **kwargs)
 
     runner.move_to = move
@@ -330,7 +332,7 @@ def test_session_options_forward_thermal_configuration():
         {"name": "arm", "arm_type": "maker", "follower_port": "can0", "follower_config": "arm"}, options
     )
     assert request.thermal_test.experiment == "shoulder_kp_85"
-    assert request.thermal_test.duration_s == 300
+    assert request.thermal_test.duration_s == 1800
 
 
 def test_loop_boundary_uses_bounded_alignment(trial):
@@ -348,3 +350,71 @@ def test_loop_boundary_uses_bounded_alignment(trial):
     assert result["result"] == "completed"
     assert sum(not returning for _, returning in moves) > 2
     assert moves[-1] == (runner.rest, True)
+
+
+def test_return_commands_respect_limits_but_arrival_uses_captured_pose(trial):
+    runner, robot, _, _ = trial
+    robot.config.joint_limits["shoulder_lift"] = (-100.0, 0.0)
+    robot.pos["shoulder_lift.pos"] = 0.8
+    runner.move_to({"shoulder_lift.pos": 0.8, "elbow_flex.pos": 0.0})
+    assert all(action["shoulder_lift.pos"] <= 0 for _, action in robot.commands)
+    assert abs(robot.pos["shoulder_lift.pos"] - 0.8) <= 2
+
+
+def test_return_cannot_claim_arrival_to_unreachable_rest(trial):
+    from makermodslab.thermal_replay import TrialEndedError
+
+    runner, robot, _, _ = trial
+    robot.config.joint_limits["shoulder_lift"] = (-100.0, 0.0)
+    with pytest.raises(TrialEndedError, match="rest pose"):
+        runner.move_to({"shoulder_lift.pos": 5.0, "elbow_flex.pos": 0.0})
+
+
+def test_new_default_and_maximum_duration_are_thirty_minutes():
+    assert ThermalReplayOptions(rest_pose_confirmed=True).duration_s == 1800
+    assert ThermalReplayOptions(rest_pose_confirmed=True, duration_s=1800).duration_s == 1800
+    with pytest.raises(ValidationError):
+        ThermalReplayOptions(rest_pose_confirmed=True, duration_s=1800.01)
+
+
+def test_uncommandable_home_is_rejected_without_motion(trial):
+    runner, robot, _, _ = trial
+    # Same failure class as the old gripper: feedback outside command limits.
+    robot.config.joint_limits["elbow_flex"] = (2.8, 236.1)
+    result = runner.run()
+    assert result["result"] == "invalid_setup"
+    assert "Captured rest elbow_flex.pos" in result["message"]
+    assert result["rest_reached"]  # Still at its observed supported starting pose.
+    assert not robot.commands
+    assert not robot.writes
+
+
+def test_simulated_full_thirty_minute_run_uses_new_policy(trial):
+    runner, robot, _, _ = trial
+    runner.options.duration_s = 1800
+    validate_thermal_series(runner.series, "maker", "single")
+    robot.temperature = lambda _: 99.9
+    result = runner.run()
+    assert result["result"] == "completed"
+    assert result["elapsed_s"] == 1800
+    assert result["cycles"] >= 1790
+    assert result["stop_at_c"] == 100
+    assert result["critical_at_c"] == 135
+    assert result["rest_reached"]
+    summary = json.loads((runner.root / "summary.json").read_text())
+    assert summary["stop_at_c"] == 100
+    assert summary["threshold_comparison"] == ">="
+
+
+def test_closed_connection_does_not_report_energized_motors():
+    from makermodslab.thermal_replay import mark_connection_closed
+
+    result = mark_connection_closed(
+        {
+            "rest_reached": False,
+            "message": "Return failed: gripper. Support the arm, then Release now. Motors remain energized.",
+        }
+    )
+    assert result["motor_connection_closed"]
+    assert "Motors remain energized" not in result["message"]
+    assert "return was not confirmed" in result["message"]

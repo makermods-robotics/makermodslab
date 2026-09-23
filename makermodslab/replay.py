@@ -56,7 +56,12 @@ from .rest_pose import (
 )
 from .session_events import notify_session_changed
 from .teleoperate import _cleanup_after_setup_failure
-from .thermal_replay import ThermalReplayOptions, ThermalTrial, validate_thermal_series
+from .thermal_replay import (
+    ThermalReplayOptions,
+    ThermalTrial,
+    mark_connection_closed,
+    validate_thermal_series,
+)
 from .utils.config import get_robot_record, normalize_arm_type, setup_follower_calibration_file
 
 logger = logging.getLogger(__name__)
@@ -1072,6 +1077,7 @@ def _thermal_replay_worker(robot, series, websocket_manager, arm_type, options):
         family.release_torque(robot, "follower arm")
     finally:
         _disconnect_replay_followers(robot, False)
+        result = mark_connection_closed(result)
         phase = "done" if result["result"] in {"completed", "stopped"} and result["rest_reached"] else "error"
         with _state_lock:
             replay_active = False

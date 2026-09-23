@@ -15,7 +15,7 @@ from makermodslab.actuator_telemetry import cached_maker_telemetry, temperature_
 from tools.actuator_monitor import Monitor
 
 
-def arm(temperature=66, torque=7, stamp=100):
+def arm(temperature=101, torque=7, stamp=100):
     bus = SimpleNamespace(
         motors={"shoulder_lift": object()},
         _last_known_states={"shoulder_lift": {"temp_mos": temperature, "torque": torque}},
@@ -28,9 +28,17 @@ def arm(temperature=66, torque=7, stamp=100):
 
 @pytest.mark.parametrize(
     "temperature,status",
-    [(None, "NO DATA"), (65, "OK"), (65.01, "OVERHEATING"), (70, "OVERHEATING"), (70.01, "CRITICAL")],
+    [
+        (None, "NO DATA"),
+        (65, "OK"),
+        (70, "OK"),
+        (99.99, "OK"),
+        (100, "OVERHEATING"),
+        (134.99, "OVERHEATING"),
+        (135, "CRITICAL"),
+    ],
 )
-def test_strict_user_thresholds(temperature, status):
+def test_inclusive_user_thresholds(temperature, status):
     assert temperature_status(temperature) == status
 
 
@@ -87,7 +95,7 @@ def test_teleop_and_recording_share_the_cache_only_payload(monkeypatch):
     robot.bus.read.assert_not_called()
 
 
-def packet(stamp, torque=3, temp=66):
+def packet(stamp, torque=3, temp=101):
     return {
         "actuators": [
             {
@@ -105,11 +113,11 @@ def test_monitor_deduplicates_recomputes_thresholds_and_expires_disconnected_dat
     monitor = Monitor()
     assert len(monitor.ingest(packet(100), now=100)) == 1
     assert monitor.ingest(packet(100), now=100.1) == []
-    monitor.ingest(packet(100.5, torque=4, temp=71), now=100.5)
+    monitor.ingest(packet(100.5, torque=4, temp=135), now=100.5)
     stats = monitor.summary()["left.shoulder_lift"]
     assert stats["samples"] == 2
     assert stats["rms_torque_nm"] == pytest.approx(math.sqrt(12.5))
-    assert stats["samples_above_65"] == 2 and stats["samples_above_70"] == 1
+    assert stats["samples_at_or_above_100"] == 2 and stats["samples_at_or_above_135"] == 1
     assert monitor.rows(now=100.6)[0]["status"] == "CRITICAL"
     assert monitor.rows(now=102)[0]["status"] == "STALE"
     assert monitor.rows(now=131)[0]["rms_30s_nm"] is None
@@ -150,7 +158,7 @@ def test_demo_cli_exports_seven_actuators_and_explicit_simulation_metadata(tmp_p
     assert "SIMULATED DEMO" in result.stdout
 
 
-def test_original_overheating_data_can_be_classified_without_counting_65_as_overheat():
+def test_original_66c_reading_is_below_the_new_software_limit():
     # Regression fixture: measured shoulder values in the episode reviewed with the user.
     temperatures = [56, 57, 61, 61, 62, 64, 61, 66]
     monitor = Monitor()
@@ -158,4 +166,4 @@ def test_original_overheating_data_can_be_classified_without_counting_65_as_over
         monitor.ingest(packet(100 + i * 10, temp=temp), now=100 + i * 10)
     stats = monitor.summary()["left.shoulder_lift"]
     assert stats["max_temperature_c"] == 66
-    assert stats["samples_above_65"] == 1 and stats["samples_above_70"] == 0
+    assert stats["samples_at_or_above_100"] == 0 and stats["samples_at_or_above_135"] == 0

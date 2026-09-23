@@ -5,13 +5,13 @@ import type { ThermalReplayStatus as Status } from "@/lib/replayHardwareApi";
 
 afterEach(cleanup);
 const status: Status = {
-  result: "overheated", message: "shoulder_lift reached 66°C", experiment: "baseline",
-  elapsed_s: 10, duration_s: 300, cycles: 1, critical: false, rest_reached: true, log_dir: "/run",
-  actuators: [{ actuator: "follower.shoulder_lift", temperature_c: 66, torque_nm: 6.2, status: "OVERHEATING" }],
+  result: "overheated", message: "shoulder_lift reached 100°C", experiment: "baseline",
+  elapsed_s: 10, duration_s: 1800, cycles: 1, critical: false, rest_reached: true, log_dir: "/run",
+  actuators: [{ actuator: "follower.shoulder_lift", temperature_c: 100, torque_nm: 6.2, status: "OVERHEATING" }],
 };
 it("shows the thermal alert and temperature and torque together", () => {
   render(<ThermalReplayStatus status={status} />);
-  expect(screen.getByRole("alert")).toHaveTextContent("66°C");
+  expect(screen.getByRole("alert")).toHaveTextContent("100°C");
   expect(screen.getByText(/6.20 Nm/)).toHaveClass("text-red-800");
 });
 it("does not show PASS until rest arrival is confirmed", () => {

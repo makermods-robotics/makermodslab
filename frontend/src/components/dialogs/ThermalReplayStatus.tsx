@@ -6,7 +6,7 @@ export function ThermalReplayStatus({ status }: { status?: Status | null }) {
   return (
     <section aria-label="Thermal test" className="space-y-2 text-xs">
       <p role={failed ? "alert" : "status"} className={failed ? "font-semibold text-red-600" : "font-medium"}>
-        {status.critical ? "CRITICAL — above 70°C. " : ""}
+        {status.critical ? "CRITICAL — at or above 135°C. " : ""}
         {status.result === "completed" && status.rest_reached ? "PASS — " : ""}
         {status.message}
       </p>

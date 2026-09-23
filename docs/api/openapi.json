@@ -7423,8 +7423,8 @@
         "additionalProperties": false,
         "properties": {
           "duration_s": {
-            "default": 300,
-            "maximum": 600.0,
+            "default": 1800,
+            "maximum": 1800.0,
             "minimum": 10.0,
             "title": "Duration S",
             "type": "number"

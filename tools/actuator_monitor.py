@@ -22,6 +22,7 @@ from pathlib import Path
 # Permit direct execution from any current directory, without installing a package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from makermodslab.actuator_telemetry import STALE_AFTER_S, finite_number, temperature_status  # noqa: E402
+from makermodslab.thermal_limits import CRITICAL_AT_C, STOP_AT_C, thermal_policy  # noqa: E402
 
 JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_yaw", "wrist_roll", "gripper")
 VALID = {"OK", "OVERHEATING", "CRITICAL"}
@@ -89,8 +90,8 @@ class Monitor:
                     "max_abs_torque_nm": 0.0,
                     "start_temperature_c": temperature,
                     "max_temperature_c": temperature,
-                    "samples_above_65": 0,
-                    "samples_above_70": 0,
+                    "samples_at_or_above_100": 0,
+                    "samples_at_or_above_135": 0,
                     "first_feedback_ts": stamp,
                     "last_feedback_ts": stamp,
                     "first_overheat_ts": None,
@@ -104,9 +105,9 @@ class Monitor:
             stats["max_abs_torque_nm"] = max(stats["max_abs_torque_nm"], abs(torque))
             stats["max_temperature_c"] = max(stats["max_temperature_c"], temperature)
             stats["last_feedback_ts"] = stamp
-            for threshold, label in ((65, "overheat"), (70, "critical")):
-                if temperature > threshold:
-                    stats[f"samples_above_{threshold}"] += 1
+            for threshold, label in ((STOP_AT_C, "overheat"), (CRITICAL_AT_C, "critical")):
+                if temperature >= threshold:
+                    stats[f"samples_at_or_above_{threshold}"] += 1
                     if stats[f"first_{label}_ts"] is None:
                         stats[f"first_{label}_ts"] = stamp
             if previous is not None and stamp - previous > STALE_AFTER_S:
@@ -146,7 +147,7 @@ def draw(monitor, message, *, color, elapsed, bell, previous):
     lines = [
         "MAKER ARM — LIVE TEMPERATURE + TORQUE",
         message,
-        "Above 65°C: OVERHEATING  |  Above 70°C: CRITICAL  |  Alerts only; does not stop motors.",
+        f"At {STOP_AT_C}°C: OVERHEATING  |  At {CRITICAL_AT_C}°C: CRITICAL reference  |  Alerts only; does not stop motors.",
         f"Run elapsed: {elapsed:.1f}s  |  RMS: distinct feedback samples in the last 30s",
         "",
         f"{'Actuator':<29} {'Temp °C':>8} {'Torque Nm':>10} {'RMS Nm':>8} {'Peak °C':>8}  State",
@@ -191,7 +192,9 @@ def demo_packet(elapsed, now):
             {
                 "actuator": f"follower.{name}",
                 "feedback_ts": now,
-                "temperature_c": min(73, 60 + elapsed) if name == "shoulder_lift" else 30 + i,
+                "temperature_c": min(CRITICAL_AT_C + 3, STOP_AT_C - 5 + elapsed * 4)
+                if name == "shoulder_lift"
+                else 30 + i,
                 "torque_nm": 6 + math.sin(elapsed * 3) if name == "shoulder_lift" else 0.15 * (i + 1),
                 "status": "OK",
             }
@@ -230,8 +233,7 @@ def main(argv=None):
         "source": "SIMULATED" if args.demo else args.url,
         "started_at": datetime.now().astimezone().isoformat(),
         "requested_duration_s": args.duration,
-        "overheat_above_c": 65,
-        "critical_above_c": 70,
+        **thermal_policy(),
         "stale_after_s": STALE_AFTER_S,
         "note": "Observer only. Records the MakerLab preview sampling rate (~20 Hz teleop/~10 Hz recording), not every CAN frame. No trajectory playback or automatic motor stop.",
     }
@@ -348,8 +350,10 @@ def main(argv=None):
                 "error": error,
                 "actuators": stats,
                 "final_states": {r["actuator"]: r["status"] for r in monitor.rows()},
-                "overheated_actuators": [k for k, v in stats.items() if v["max_temperature_c"] > 65],
-                "critical_actuators": [k for k, v in stats.items() if v["max_temperature_c"] > 70],
+                "overheated_actuators": [k for k, v in stats.items() if v["max_temperature_c"] >= STOP_AT_C],
+                "critical_actuators": [
+                    k for k, v in stats.items() if v["max_temperature_c"] >= CRITICAL_AT_C
+                ],
             }
             (run_dir / "summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")
     print(f"\nMonitor stopped. Motor control was not changed. Results: {run_dir.resolve()}")

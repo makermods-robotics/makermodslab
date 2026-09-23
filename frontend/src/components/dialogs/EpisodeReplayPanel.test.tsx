@@ -79,7 +79,7 @@ describe("hardware replay", () => {
 it("requires rest setup and sends an explicit baseline thermal experiment", async () => {
   mocks.record.mode = "single";
   render(<EpisodeReplayPanel repoId="owner/dataset" episodeIndex={2} />);
-  fireEvent.click(screen.getByRole("checkbox", { name: /Repeat as a 5-minute/ }));
+  fireEvent.click(screen.getByRole("checkbox", { name: /Repeat as a 30-minute/ }));
   const start = screen.getByRole("button", { name: "Replay on hardware" });
   expect(start).toBeDisabled();
   fireEvent.click(screen.getByRole("checkbox", { name: /The arm is at its supported rest pose/ }));
@@ -87,13 +87,13 @@ it("requires rest setup and sends an explicit baseline thermal experiment", asyn
   fireEvent.click(start);
   await waitFor(() => expect(mocks.start).toHaveBeenCalledOnce());
   expect(mocks.start.mock.calls[0][2]).toMatchObject({
-    options: { thermal_test: { duration_s: 300, experiment: "baseline", rest_pose_confirmed: true } },
+    options: { thermal_test: { duration_s: 1800, experiment: "baseline", rest_pose_confirmed: true } },
   });
 });
 
 it("does not offer thermal mode for bimanual replay", () => {
   render(<EpisodeReplayPanel repoId="owner/dataset" episodeIndex={2} />);
-  expect(screen.queryByRole("checkbox", { name: /Repeat as a 5-minute/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("checkbox", { name: /Repeat as a 30-minute/ })).not.toBeInTheDocument();
 });
 
 it("uses explicit release for the release-now button", async () => {

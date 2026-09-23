@@ -4,13 +4,13 @@ Run MakerLab from this checkout, then use a second terminal:
 
 ```bash
 cd /Users/isaac/Documents/GitHub/MakerLab
-.venv/bin/python tools/actuator_monitor.py --duration 600 --label baseline --bell
+.venv/bin/python tools/actuator_monitor.py --duration 1800 --label baseline --bell
 ```
 
 Start teleop or recording in MakerLab as usual. If MakerLab was already running before
 these changes, restart it **after ending any active session normally** so it loads the
 new telemetry field. The monitor waits for feedback; it never starts teleop itself.
-The 600-second timer begins at the first fresh motor sample. At 600 seconds only the
+The 1800-second timer begins at the first fresh motor sample. At 1800 seconds only the
 monitor stops; the robot remains under MakerLab's control.
 
 The monitor uses `ws://127.0.0.1:8000/api/v1/ws/joint-data`. Set `--url` if your backend
@@ -22,9 +22,9 @@ Each row shows current temperature, signed motor-reported torque in N·m, rollin
 
 | Reading                                                        | State                  |
 | -------------------------------------------------------------- | ---------------------- |
-| Temperature ≤65°C                                              | OK                     |
-| Temperature >65°C and ≤70°C                                    | OVERHEATING, red       |
-| Temperature >70°C                                              | CRITICAL, white on red |
+| Temperature <100°C                                             | OK                     |
+| Temperature ≥100°C and <135°C                                  | OVERHEATING, red       |
+| Temperature ≥135°C                                             | CRITICAL, white on red |
 | Feedback more than 1 second old                                | STALE, yellow          |
 | No feedback timestamp                                          | NO DATA, yellow        |
 | Nonfinite/invalid feedback or unsupported temperature decoding | INVALID, yellow        |
@@ -80,8 +80,8 @@ thresholds. It never connects to MakerLab or the CAN adapter.
    mount, cooling configuration, room temperature, starting motor temperatures, and
    software revision with the experiment notes. Use a new monitor `--label` per change.
 2. Compare the same trajectory, pace, number of cycles and starting thermal condition.
-   Target ten minutes, but stop/unload using the established operator procedure if an
-   actuator exceeds 65°C; record time to crossing instead of pushing toward 70°C.
+   Target thirty minutes, but stop/unload using the established operator procedure if an
+   actuator reaches 100°C; record time to crossing. The 135°C reference is not a test target.
 3. Change one thing at a time: cooling, payload/reach, rest pose, then controller tuning.
    Compare temperature rise, first threshold crossing, RMS torque, and task/tracking
    quality. A cooler run that drops the payload or no longer tracks is not a successful fix.
@@ -104,7 +104,7 @@ stiffness and can cause sag; gravity feedforward improves tracking but does not 
 the current needed to support weight. A limit below the required gravity torque may
 lose position even if the requested speed is unchanged.
 
-No gains or torque limits have been changed by this work. The downloaded experiment's
+This observer does not change gains or torque limits. The separate test runner can reduce shoulder-lift Kp by 15%; that is not a torque cap. The downloaded experiment's
 left shoulder was about 5.94 N·m sample RMS, with a 16.89 N·m observed peak. Do not copy
 the 6–7 N·m catalog rating directly into a sustained holding limit: published ratings
 depend on cooling, speed and product revision.

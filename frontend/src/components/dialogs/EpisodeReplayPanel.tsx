@@ -165,7 +165,7 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
           repo_id: repoId,
           episode_index: episodeIndex,
           ...(thermalEnabled && thermalAvailable ? {
-            thermal_test: { duration_s: 300, experiment, rest_pose_confirmed: restConfirmed },
+            thermal_test: { duration_s: 1800, experiment, rest_pose_confirmed: restConfirmed },
           } : {}),
         },
       });
@@ -257,7 +257,7 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
         {thermalAvailable && <div className="space-y-2 text-xs">
           <label className="flex items-center gap-2">
             <input type="checkbox" checked={thermalEnabled} onChange={(event) => { setThermalEnabled(event.target.checked); setRestConfirmed(false); }} />
-            Repeat as a 5-minute thermal test (experimental)
+            Repeat as a 30-minute thermal test (experimental)
           </label>
           {thermalEnabled && <>
             <label className="flex items-center gap-2">Experiment
@@ -266,7 +266,7 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
                 <option value="shoulder_kp_85">Shoulder stiffness −15%</option>
               </select>
             </label>
-            <p className="text-muted-foreground">Record a motion that starts and ends at the same supported rest pose. The test returns there above 65°C; above 70°C is critical. Feedback or tracking faults also stop the test.</p>
+            <p className="text-muted-foreground">Record a motion that starts and ends at the same supported rest pose. The test returns there at 100°C; 135°C is a manufacturer-reported critical reference. Feedback or tracking faults also stop the test.</p>
             {experiment === "shoulder_kp_85" && <p className="text-amber-700">Lower stiffness can increase position error. This is not a torque cap; recorded timing stays unchanged.</p>}
             <label className="flex items-start gap-2">
               <input type="checkbox" checked={restConfirmed} onChange={(event) => setRestConfirmed(event.target.checked)} />

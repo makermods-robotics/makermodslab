@@ -16,12 +16,21 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from .actuator_telemetry import cached_maker_telemetry, finite_number
+from .thermal_limits import (
+    CRITICAL_AT_C,
+    DEFAULT_TEST_DURATION_S,
+    MAX_TEST_DURATION_S,
+    STOP_AT_C,
+    thermal_policy,
+)
 
 
 class ThermalReplayOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    duration_s: float = Field(default=300, ge=10, le=600, allow_inf_nan=False)
+    duration_s: float = Field(
+        default=DEFAULT_TEST_DURATION_S, ge=10, le=MAX_TEST_DURATION_S, allow_inf_nan=False
+    )
     experiment: Literal["baseline", "shoulder_kp_85"] = "baseline"
     # Capturing an arbitrary pose does not make it safe to de-energize there.
     rest_pose_confirmed: Literal[True]
@@ -52,6 +61,15 @@ class TrialEndedError(Exception):
         super().__init__(message)
 
 
+def mark_connection_closed(result):
+    """Call only after disconnect returns; do not leave an energized warning latched."""
+    result = dict(result, motor_connection_closed=True)
+    if not result.get("rest_reached"):
+        detail = result.get("message", "").split("Support the arm, then Release now.")[0].strip()
+        result["message"] = detail + " Motor connection closed after release; return was not confirmed."
+    return result
+
+
 class ThermalTrial:
     """Run on the replay worker thread; all I/O remains serialized on that thread."""
 
@@ -68,6 +86,7 @@ class ThermalTrial:
         self.rest = {}
         self.observation = {}
         self.last_action = {}
+        self.motion_commanded = False
         self.original_kp = None
         self.started = None
         self.returning = False
@@ -87,6 +106,8 @@ class ThermalTrial:
             "rest_reached": False,
             "log_dir": str(self.root.resolve()),
             "critical": False,
+            "motor_connection_closed": False,
+            **thermal_policy(),
         }
 
     def publish(self, phase):
@@ -132,6 +153,9 @@ class ThermalTrial:
                             {
                                 "type": "sample",
                                 **row,
+                                "position_deg": self.observation.get(
+                                    row["actuator"].split(".", 1)[1] + ".pos"
+                                ),
                                 "returning": self.returning,
                                 "phase": "return"
                                 if self.returning
@@ -142,9 +166,9 @@ class ThermalTrial:
                         )
                         + "\n"
                     )
-            if temp > 65 and self.hot is None:
-                self.hot = f"{name} reached {temp:.1f}°C (above 65°C)"
-            if temp > 70:
+            if temp >= STOP_AT_C and self.hot is None:
+                self.hot = f"{name} reached {temp:.1f}°C (at or above {STOP_AT_C}°C)"
+            if temp >= CRITICAL_AT_C:
                 self.status["critical"] = True
         for name in self.names:
             if finite_number(self.observation.get(f"{name}.pos")) is None:
@@ -183,6 +207,7 @@ class ThermalTrial:
                 raise TrialEndedError("completed", "Test duration completed below the temperature threshold")
 
     def send(self, action):
+        self.motion_commanded = True
         applied = self.robot.send_action(action)
         self.last_action = dict(action)
         # Clipping or startup synchronization changes the benchmark trajectory.
@@ -208,15 +233,30 @@ class ThermalTrial:
             if self.release.is_set():
                 raise TrialEndedError("released", "Immediate release requested")
             self.sample(returning=returning)
+            if returning:
+                self.status["return_error_deg"] = {k: abs(self.observation[k] - v) for k, v in pose.items()}
             fraction = min(1.0, (time.monotonic() - t0 + 1 / 30) / max(duration, 1 / 30))
-            self.send({k: start[k] + (v - start[k]) * fraction for k, v in pose.items()})
+            action = {k: start[k] + (v - start[k]) * fraction for k, v in pose.items()}
+            # Feedback can sit just outside a configured command limit (rounding
+            # or a supported mechanical rest). Keep approach/return setpoints
+            # within limits; still judge arrival against the captured pose below.
+            # Recorded playback targets remain strict and are never altered here.
+            for key, value in action.items():
+                low, high = self.robot.config.joint_limits[key.removesuffix(".pos")]
+                action[key] = max(low, min(high, value))
+            self.send(action)
             if fraction == 1 and all(abs(self.observation[k] - v) <= 2 for k, v in pose.items()):
                 # Confirm after the final command; never infer arrival from goals.
                 self.sample(returning=returning)
                 if all(abs(self.observation[k] - v) <= 2 for k, v in pose.items()):
                     return
             time.sleep(1 / 30)
-        raise TrialEndedError("return_failed", "Arm did not reach the captured rest pose within 2°")
+        errors = {k: abs(self.observation[k] - v) for k, v in pose.items()}
+        self.status["return_error_deg"] = errors
+        detail = ", ".join(f"{k}: {error:.2f}°" for k, error in errors.items() if error > 2)
+        raise TrialEndedError(
+            "return_failed", f"Arm did not reach the captured rest pose within 2° ({detail})"
+        )
 
     def restore_gains(self):
         if self.original_kp is not None:
@@ -232,6 +272,17 @@ class ThermalTrial:
             self.rest = {f"{n}.pos": self.observation[f"{n}.pos"] for n in self.names}
             if set(self.rest) != set(self.series["action_names"]):
                 raise TrialEndedError("invalid_setup", "Dataset does not cover every actuator")
+            # Reject an uncommandable home before any trajectory command. This
+            # caught the previous trial's gripper home: -0.16° versus a -2.5°
+            # command limit, farther apart than the 2° arrival tolerance.
+            for key, position in self.rest.items():
+                bounds = self.robot.config.joint_limits.get(key.removesuffix(".pos"))
+                if bounds is None or not bounds[0] <= position <= bounds[1]:
+                    raise TrialEndedError(
+                        "invalid_setup",
+                        f"Captured rest {key}={position:.2f}° is outside configured limits {bounds}. "
+                        "Choose a supported, commandable home before starting the test.",
+                    )
             for frame in self.series["values"]:
                 for key, v in zip(self.series["action_names"], frame, strict=True):
                     bounds = self.robot.config.joint_limits.get(key.removesuffix(".pos"))
@@ -253,8 +304,7 @@ class ThermalTrial:
                         "initial_gains": getattr(self.robot.bus, "_gains", {}),
                         "rest_pose": self.rest,
                         "series": self.series,
-                        "stop_above_c": 65,
-                        "critical_above_c": 70,
+                        **thermal_policy(),
                         "feedback_max_age_s": 0.25,
                     },
                     indent=2,
@@ -271,7 +321,7 @@ class ThermalTrial:
                 self.original_kp = kp
                 self.robot.bus.write("Kp", "shoulder_lift", kp * 0.85)
             self.started = time.monotonic()
-            self.status["message"] = "Repeating recorded motion; stop threshold >65°C"
+            self.status["message"] = f"Repeating recorded motion; return threshold ≥{STOP_AT_C}°C"
             while True:
                 cycle_start = time.monotonic()
                 for stamp, frame in zip(self.series["timestamps"], self.series["values"], strict=True):
@@ -308,8 +358,16 @@ class ThermalTrial:
                 if not self.rest:
                     # No motion was requested; still cannot assert a measured return.
                     raise TrialEndedError("return_failed", "No valid rest pose was captured")
-                self.move_to(self.rest)
+                if not self.motion_commanded:
+                    self.sample(returning=True)
+                    if any(abs(self.observation[k] - v) > 2 for k, v in self.rest.items()):
+                        raise TrialEndedError(
+                            "return_failed", "Arm moved from the supported pose during setup"
+                        )
+                else:
+                    self.move_to(self.rest)
                 self.status["rest_reached"] = True
+                self.status["final_pose"] = dict(self.observation)
                 if self.hot:
                     self.status.update(result="overheated", message=self.hot)
             except Exception as exc:
