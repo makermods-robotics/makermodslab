@@ -122,41 +122,55 @@ def test_index_names_every_namespace_and_the_drilldowns():
 
 # --- Tier 1: namespace_card() ------------------------------------------------
 
-# Per-NAMESPACE budgets (measured 2026-09-22, cap = measured * ~1.2 rounded up
-# to the nearest 100) so a single namespace ballooning is flagged BY NAME and
-# a small card can't grow 10x under a shared cap. Re-derive an entry when its
-# card legitimately outgrows it:
-#   .venv/bin/python -c "from makermodslab_sdk import docs;
-#     print({t: len(docs.namespace_card(t)) for t in docs._namespaces()})"
-CARD_BUDGETS_CHARS = {
-    "client": 4300,  # measured 3561 after flow exceptions
-    "datasets": 5100,  # measured 4196
-    "flows": 2900,  # measured 2375 after hardware inspection flow
-    "inference": 2300,  # measured 1858
-    "jobs": 3900,  # measured 3247
-    "models": 3200,  # measured 2587
-    "nodes": 2400,  # measured 1991
-    "realtime": 3700,  # measured 3059
-    "recording": 1000,  # measured 781
-    "remote": 2800,  # measured 2263
-    "robots": 2400,  # measured 1956
-    "sessions": 8700,  # measured 7204
-    "sfu": 1000,  # measured 754
-    "system": 4100,  # measured 3364
+# RECORDED card sizes, in chars. This table is DATA, not a claim in prose: the
+# budget is derived from it (recorded * CARD_HEADROOM), so a stale row cannot
+# quietly coexist with a passing test the way a "# measured N" comment could.
+# Growth past the headroom AND shrinkage past the floor both fail, each naming
+# the tag and handing you the exact number to paste back — so the table tracks
+# reality in both directions instead of ratcheting permissive.
+# Regenerate every row with:
+#   .venv/bin/python -c "from makermodslab_sdk import docs; \
+#     print({t: len(docs.namespace_card(t)) for t in sorted(docs._namespaces())})"
+CARD_HEADROOM = 1.2
+CARD_SHRINK_FLOOR = 0.7
+CARD_SIZES_CHARS = {
+    "client": 3630,
+    "datasets": 3070,
+    "flows": 1059,
+    "inference": 1656,
+    "jobs": 2537,
+    "models": 1966,
+    "nodes": 1619,
+    "realtime": 2570,
+    "recording": 723,
+    "remote": 2109,
+    "robots": 1786,
+    "sessions": 4106,
+    "sfu": 635,
+    "system": 2603,
 }
 
 
-def test_budget_table_matches_the_namespace_set():
+def test_size_table_matches_the_namespace_set():
     from makermodslab_sdk import docs as docs_module
 
-    assert set(CARD_BUDGETS_CHARS) == set(docs_module._namespaces()), (
-        "a namespace was added or removed — measure its card and update CARD_BUDGETS_CHARS"
+    assert set(CARD_SIZES_CHARS) == set(docs_module._namespaces()), (
+        "a namespace was added or removed — measure its card and update CARD_SIZES_CHARS"
     )
 
 
 @pytest.mark.parametrize("tag", sorted([*RESOURCE_CLASSES, "client", "flows", "realtime"]))
-def test_every_namespace_card_stays_under_its_budget(tag):
-    assert len(namespace_card(tag)) < CARD_BUDGETS_CHARS[tag], f"card {tag} ballooned"
+def test_every_namespace_card_tracks_its_recorded_size(tag):
+    recorded = CARD_SIZES_CHARS[tag]
+    actual = len(namespace_card(tag))
+    assert actual < recorded * CARD_HEADROOM, (
+        f"card {tag} ballooned to {actual} chars (recorded {recorded}); trim it, "
+        f'or record the growth deliberately: "{tag}": {actual}'
+    )
+    assert actual > recorded * CARD_SHRINK_FLOOR, (
+        f"card {tag} shrank to {actual} chars (recorded {recorded}); re-record it as "
+        f'"{tag}": {actual} so its budget stays tight'
+    )
 
 
 def test_cards_carry_the_module_docstring_as_pattern_intro():

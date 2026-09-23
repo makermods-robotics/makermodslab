@@ -44,6 +44,47 @@ def _signature(member: Callable) -> str:
     return text.replace("(self, ", "(").replace("(self)", "()")
 
 
+# Parameters that exist only so tests can drive a loop without sleeping. They
+# are noise on a browsing card (and render as "<built-in function monotonic>"),
+# so tier 1 elides them; tier 2 still shows the true, complete signature.
+_TEST_SEAM_PARAMS = frozenset({"sleep_fn", "clock", "poll_interval"})
+
+# A card is for BROWSING: past this many chars a signature stops informing and
+# starts crowding out the other methods, so the card points at tier 2 instead.
+_CARD_SIGNATURE_LIMIT = 160
+
+
+def _card_signature(member: Callable) -> str:
+    """The tier-1 signature: what you MUST pass, names only.
+
+    A browsing agent needs the required arguments to choose a method; the
+    optional tail, the annotations and the test seams (sleep_fn/clock) are
+    noise at this tier and are replaced by a trailing "…" so the elision is
+    visible. Tier 2 prints the true, complete, annotated signature.
+    """
+    try:
+        signature = inspect.signature(member)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return "(...)"
+    required: list[str] = []
+    optional = False
+    for name, parameter in signature.parameters.items():
+        if name == "self":
+            continue
+        if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+            optional = True
+            continue
+        if parameter.default is not parameter.empty or name in _TEST_SEAM_PARAMS:
+            optional = True
+            continue
+        if parameter.kind is parameter.KEYWORD_ONLY and "*" not in required:
+            required.append("*")
+        required.append(name)
+    shown = [*required, "…"] if optional else required
+    text = f"({', '.join(shown)})"
+    return text if len(text) <= _CARD_SIGNATURE_LIMIT else "(…)"
+
+
 def _first_line(member: object) -> str:
     doc = inspect.getdoc(member)
     return doc.splitlines()[0] if doc else ""
@@ -211,11 +252,14 @@ def namespace_card(tag: str) -> str:
         lines += [intro, ""]
     lines.append("### Methods")
     for name, member in members.items():
-        lines.append(f"- {name}{_signature(member)} — {_first_line(member)}")
+        lines.append(f"- {name}{_card_signature(member)} — {_first_line(member)}")
     if tag == CLIENT_TAG:
         lines += ["", "### Exceptions"]
         lines += _exceptions_section()
-    lines += ["", f'Full docstring of one method: client.docs("{tag}.<method>")']
+    lines += [
+        "",
+        f'Full signature and docstring of one method: client.docs("{tag}.<method>")',
+    ]
     return "\n".join(lines) + "\n"
 
 

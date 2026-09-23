@@ -366,6 +366,14 @@ class ActiveSession:
         with self._lock:
             return self._ended
 
+    @property
+    def stop_result(self) -> StoppedSession | None:
+        """The server's answer to this session's stop, once it has been
+        stopped — None while still live, and None when the stop found the
+        session already gone (for a stop, already-gone is success)."""
+        with self._lock:
+            return self._stop_result
+
     # --- the heartbeat: one TICK (testable) + the timing loop ----------------
 
     def _tick(self) -> str:

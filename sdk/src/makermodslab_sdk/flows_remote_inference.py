@@ -373,7 +373,7 @@ class RemoteInferenceRun:
                     # ActiveSession's exit preserves lease-loss classification
                     # while stopping the robot session.
                     self._session.__exit__(exc_type, exc, tb)
-                    self.session_stop = self._session._stop_result
+                    self.session_stop = self._session.stop_result
                 except BaseException as stop_error:
                     session_error = stop_error
         finally:
