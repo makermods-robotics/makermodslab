@@ -16,6 +16,8 @@ from makermodslab_sdk.resources.models import (
     ModelInfo,
     ModelListItem,
     ModelUploadResult,
+    PublishStart,
+    PublishStatus,
 )
 
 MODEL_ID = "act_pick_place"
@@ -137,6 +139,43 @@ def test_upload_with_and_without_target_repo():
 
     request, _ = call_one(body, lambda c: c.models.upload(MODEL_ID, repo_id=REPO))
     assert body_of(request) == {"id": MODEL_ID, "repo_id": REPO}
+
+
+def test_publish_start_and_status_expose_the_transient_attempt_id():
+    request, started = call_one(
+        {
+            "started": True,
+            "publish_id": "publish-123",
+            "model_id": MODEL_ID,
+            "message": "Publish started",
+        },
+        lambda c: c.models.publish(MODEL_ID),
+    )
+    assert (request.method, request.url.path) == ("POST", "/api/v1/models/publish")
+    assert isinstance(started, PublishStart)
+    assert "publish_id" in type(started).model_fields
+    assert started.publish_id == "publish-123"
+
+    request, status = call_one(
+        {
+            "publish_id": "publish-123",
+            "state": "running",
+            "model_id": MODEL_ID,
+            "repo_id": REPO,
+            "url": None,
+            "message": "Publishing",
+            "error": None,
+            "total": 1,
+            "done": 0,
+            "current_step": 100,
+            "done_steps": [],
+        },
+        lambda c: c.models.publish_status(),
+    )
+    assert request.url.path == "/api/v1/models/publish-status"
+    assert isinstance(status, PublishStatus)
+    assert "publish_id" in type(status).model_fields
+    assert status.publish_id == "publish-123"
 
 
 def test_delete():

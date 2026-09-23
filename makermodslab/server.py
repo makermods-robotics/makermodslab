@@ -2561,7 +2561,8 @@ def models_publish(body: ModelPublishBody):
     """START publishing a local run's checkpoints to the Hub as ONE PUBLIC,
     MakerModsLab-tagged model repo. MUTATES the Hub (creates/updates the repo).
 
-    Returns immediately with {started, model_id, message} — the queue runs
+    Returns immediately with {started, publish_id, model_id, message} — the
+    transient publish_id identifies this attempt in publish-status. The queue runs
     sequentially in a background thread (a run's worth of checkpoints is
     gigabytes, far past what an inline request should hold open) and
     GET /api/v1/models/publish-status reports progress. 409 when a publish is
@@ -2581,9 +2582,10 @@ def models_publish(body: ModelPublishBody):
 @v1_router.get("/models/publish-status", response_model=ModelPublishStatusResponse, tags=["models"])
 def models_publish_status():
     """Poll the single background publish: state (idle/running/done/error),
-    target repo + url, `done`/`total`/`current_step` for the queue position, and
-    `done_steps` — the steps already on the Hub, which stay meaningful after an
-    error because a failed queue keeps everything it published before it died."""
+    transient publish_id, target repo + url, `done`/`total`/`current_step` for
+    the queue position, and `done_steps` — the steps already on the Hub, which
+    stay meaningful after an error because a failed queue keeps everything it
+    published before it died."""
     return model_browser.model_upload_manager.get_status()
 
 

@@ -43,15 +43,16 @@ class TrainingFlowError(MakerModsError):
 
 
 class PublishWaitTimeout(TrainingFlowError, TimeoutError):  # noqa: N818
-    """Publishing is still running; poll the slot again with ``job_id``."""
+    """Publishing is still running; ``publish_id`` identifies its slot attempt."""
 
-    def __init__(self, *, job_id: str, waited: float, last_state: str) -> None:
+    def __init__(self, *, job_id: str, publish_id: str, waited: float, last_state: str) -> None:
         super().__init__(
             f"Publish for job {job_id!r} is still {last_state!r} after {waited:g}s. "
             "The publish remains active; call client.models.publish_status() to keep checking it "
-            f"and confirm .model_id == {job_id!r}. Next step: client.models.publish_status().",
+            f"and confirm .publish_id == {publish_id!r}. Next step: client.models.publish_status().",
             job_id=job_id,
         )
+        self.publish_id = publish_id
         self.waited = waited
         self.last_state = last_state
 
@@ -170,6 +171,14 @@ class TrainingFlows:
         started_at = clock()
         while True:
             status = self._client.models.publish_status()
+            if status.publish_id != started.publish_id:
+                raise TrainingFlowError(
+                    f"The publish slot now belongs to attempt {status.publish_id!r}, not "
+                    f"{started.publish_id!r} for job {job_id!r}. Next step: inspect "
+                    f"client.models.publish_status() and client.models.checkpoints({job_id!r}); "
+                    "this flow cannot confirm the result.",
+                    job_id=job_id,
+                )
             if status.model_id != job_id:
                 raise TrainingFlowError(
                     f"The publish slot now belongs to {status.model_id!r}, not job {job_id!r}. "
@@ -207,5 +216,10 @@ class TrainingFlows:
                 )
             waited = max(0.0, clock() - started_at)
             if waited >= publish_timeout:
-                raise PublishWaitTimeout(job_id=job_id, waited=waited, last_state=status.state)
+                raise PublishWaitTimeout(
+                    job_id=job_id,
+                    publish_id=started.publish_id,
+                    waited=waited,
+                    last_state=status.state,
+                )
             sleep_fn(min(poll_interval, publish_timeout - waited))

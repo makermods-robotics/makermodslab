@@ -145,8 +145,8 @@ class ModelsResource(Resource):
 
     @operation("models_publish_status")
     def publish_status(self) -> PublishStatus:
-        """The single publish slot's progress (``url`` points at the pushed
-        repo once done)."""
+        """The single publish slot's progress. ``publish_id`` identifies its
+        current attempt; ``url`` points at the pushed repo once done."""
         return PublishStatus.model_validate(
             self._transport.request("GET", "/api/v1/models/publish-status", action="Publish status")
         )
@@ -435,6 +435,7 @@ class RunCheckpoints(SdkModel):
 
 class PublishStart(SdkModel):
     started: bool
+    publish_id: str
     model_id: str
     message: str
 
@@ -444,6 +445,7 @@ class PublishStatus(SdkModel):
     (``state`` walks idle → running → done/error; ``done``/``total`` count
     checkpoints pushed)."""
 
+    publish_id: str | None = None
     state: str
     model_id: str | None = None
     repo_id: str | None = None

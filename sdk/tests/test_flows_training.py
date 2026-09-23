@@ -30,6 +30,7 @@ from makermodslab_sdk.flows_training import (
 from makermodslab_sdk.resources.jobs import JobWaitTimeout
 
 JOB_ID = "act_pick_001"
+PUBLISH_ID = "publish-001"
 
 
 def job_body(state: str = "running", *, runner: str = "local", error_message: str | None = None) -> dict:
@@ -59,8 +60,15 @@ def checkpoint_body(steps: tuple[int, ...] = (1000, 2000)) -> dict:
     }
 
 
-def status(state: str, *, model_id: str | None = JOB_ID, error: str | None = None) -> dict:
+def status(
+    state: str,
+    *,
+    publish_id: str | None = PUBLISH_ID,
+    model_id: str | None = JOB_ID,
+    error: str | None = None,
+) -> dict:
     return {
+        "publish_id": publish_id,
         "state": state,
         "model_id": model_id,
         "repo_id": "maker/act-pick",
@@ -99,7 +107,12 @@ def scripted_handler(
                 200,
                 json=publish_start
                 if publish_start is not None
-                else {"started": True, "model_id": JOB_ID, "message": "Publish started"},
+                else {
+                    "started": True,
+                    "publish_id": PUBLISH_ID,
+                    "model_id": JOB_ID,
+                    "message": "Publish started",
+                },
             )
         if path == "/api/v1/models/publish-status":
             return httpx.Response(200, json=status_queue.pop(0))
@@ -204,6 +217,7 @@ def test_publish_timeout_leaves_publish_running_and_exposes_id():
             "maker/pick", train_timeout=5, publish_timeout=0, sleep_fn=lambda _: None
         )
     assert exc.value.job_id == JOB_ID
+    assert exc.value.publish_id == PUBLISH_ID
     assert "client.models.publish_status()" in str(exc.value)
     assert paths(requests)[-1] == "/api/v1/models/publish-status"
 
@@ -249,6 +263,15 @@ def test_publish_slot_identity_must_match_even_on_done():
         )
 
 
+def test_publish_attempt_identity_must_match_when_job_and_repo_match():
+    replaced = status("done", publish_id="publish-002")
+    handler, _ = scripted_handler(jobs=(job_body("done"),), statuses=(replaced,))
+    with mock_client(handler) as client, pytest.raises(TrainingFlowError, match="publish-002"):
+        TrainingFlows(client).train_and_publish(
+            "maker/pick", train_timeout=5, publish_timeout=5, sleep_fn=lambda _: None
+        )
+
+
 @pytest.mark.parametrize("repo_id", [None, "maker/act-pick"])
 def test_publish_slot_repo_must_match_even_when_job_matches(repo_id: str | None):
     replaced = status("done") | {"repo_id": "other/parallel-publish"}
@@ -265,7 +288,12 @@ def test_publish_slot_repo_must_match_even_when_job_matches(repo_id: str | None)
 def test_publish_rejected_by_busy_slot_is_not_reported_as_success():
     handler, requests = scripted_handler(
         jobs=(job_body("done"),),
-        publish_start={"started": False, "model_id": "other", "message": "Already publishing"},
+        publish_start={
+            "started": False,
+            "publish_id": "publish-other",
+            "model_id": "other",
+            "message": "Already publishing",
+        },
     )
     with mock_client(handler) as client, pytest.raises(TrainingFlowError, match="not accepted"):
         TrainingFlows(client).train_and_publish(

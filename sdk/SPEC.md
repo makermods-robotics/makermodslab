@@ -153,4 +153,8 @@ marked _(reference)_ name where the Python implementation lives.
   publish start/status. Training or publish timeout does not cancel server
   work; errors carry the job id for resumption. A failed or interrupted job
   never starts publishing. Status must match both the local job id and target
-  repository before a flow reports success.
+  repository before a flow reports success. Each accepted publish gets a
+  transient server-generated UUID; the flow must also match that publish id
+  on every status poll, so a later attempt for the same job and repository
+  cannot be mistaken for the attempt the flow started. The server retains only
+  the current in-memory slot; publish ids are not a durable history API.
