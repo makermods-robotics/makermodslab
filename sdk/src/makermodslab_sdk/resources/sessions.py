@@ -185,6 +185,7 @@ class GpuStatus(SdkModel):
     session, never inside it — stopping one never stops the other). Only the
     headline fields are typed; the launch echo rides via extra=allow."""
 
+    launch_id: str | None = None
     state: str
     phase: str | None = None
     engine: str | None = None
@@ -206,6 +207,7 @@ class GpuLaunch(SdkModel):
     """POST /api/v1/remote-inference/gpu/start response."""
 
     started: bool
+    launch_id: str
     message: str
     gpu: GpuStatus
 
@@ -1134,10 +1136,12 @@ class SessionsResource(Resource):
         ``horizon``, ``fps``, ``video_codec``, ``s_min``, ``slack``,
         ``tolerance``, ``model_dtype``, ``flow_steps``, ``extra_image_roles``.
         The room and the GPU side's token resolve through the session's own
-        transport — there is no second credential path.
+        transport — there is no second credential path. The returned
+        ``launch_id`` scopes later flow cleanup to this launch.
 
         Example:
-            >>> client.sessions.gpu_start(policy_hub_id="me/act-pick", gpu="A10G").started
+            >>> launch = client.sessions.gpu_start(policy_hub_id="me/act-pick", gpu="A10G")
+            >>> launch.started and launch.gpu.launch_id == launch.launch_id
             True
         """
         return GpuLaunch.model_validate(
@@ -1147,11 +1151,22 @@ class SessionsResource(Resource):
         )
 
     @operation("stop_remote_inference_gpu")
-    def gpu_stop(self) -> GpuStatus:
+    def gpu_stop(self, *, launch_id: str | None = None) -> GpuStatus:
         """Stop the Modal GPU container (the session, if any, keeps running
-        and simply loses its policy peer)."""
+        and simply loses its policy peer).
+
+        Pass the ID returned by :meth:`gpu_start` for ownership-safe cleanup:
+        a replacement launch is left running and raises ``gpu.launch_replaced``.
+        Omit it for the explicit operator action "stop whichever GPU is up".
+        """
+        params = {"launch_id": launch_id} if launch_id is not None else None
         return GpuStatus.model_validate(
-            self._transport.request("POST", "/api/v1/remote-inference/gpu/stop", action="Stop GPU")
+            self._transport.request(
+                "POST",
+                "/api/v1/remote-inference/gpu/stop",
+                params=params,
+                action="Stop GPU",
+            )
         )
 
     # --- remote kinds' sugar --------------------------------------------------

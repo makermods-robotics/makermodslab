@@ -198,8 +198,10 @@ class ErrorCode(StrEnum):
     # `cli_missing`: the binary isn't on PATH (remedy: `uv tool install modal`).
     # `unauthenticated`: Modal rejected this machine (remedy: `modal token new`;
     # the Lab never touches ~/.modal.toml). `already_running`/`not_running`: a
-    # start against a live launcher, a stop against a dead one — the GPU is a
-    # Lab-level resource, so these are its own, not `robot.busy.*`.
+    # start against a live launcher, a stop against a dead one. `launch_replaced`
+    # is a conditional stop whose transient launch id no longer owns the slot;
+    # it leaves the replacement untouched. The GPU is a Lab-level resource, so
+    # these are its own, not `robot.busy.*`.
     # `targets_unavailable`: the `modal profile list` / `modal environment
     # list` listing behind the profile+environment pickers did not answer (a
     # non-zero exit, a timeout, output that is not the JSON this build parses,
@@ -211,6 +213,10 @@ class ErrorCode(StrEnum):
     GPU_UNAUTHENTICATED = "gpu.unauthenticated"
     GPU_ALREADY_RUNNING = "gpu.already_running"
     GPU_NOT_RUNNING = "gpu.not_running"
+    # A conditional stop named the launch it owns, but the one-slot launcher
+    # now represents a later attempt. The current launch is deliberately left
+    # running; refetch status and decide whether it should be stopped.
+    GPU_LAUNCH_REPLACED = "gpu.launch_replaced"
     GPU_LAUNCH_FAILED = "gpu.launch_failed"
     GPU_TARGETS_UNAVAILABLE = "gpu.targets_unavailable"
 

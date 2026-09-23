@@ -158,3 +158,11 @@ marked _(reference)_ name where the Python implementation lives.
   on every status poll, so a later attempt for the same job and repository
   cannot be mistaken for the attempt the flow started. The server retains only
   the current in-memory slot; publish ids are not a durable history API.
+- Each accepted Modal GPU start similarly returns a transient UUID in both the
+  start response and current status. Flow cleanup passes that UUID to the stop
+  operation; a changed slot raises 409 `gpu.launch_replaced` and the current
+  GPU remains running. An omitted UUID means the explicit operator action
+  "stop whichever GPU is current", preserving the UI and emergency control.
+  The server reserves its singleton slot atomically before spawning so two
+  concurrent starts cannot create an untracked billed process. Launch IDs are
+  in-memory attribution only: no history endpoint and no restart recovery.

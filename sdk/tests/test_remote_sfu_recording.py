@@ -173,14 +173,39 @@ def test_gpu_start_body_passthrough():
         seen["body"] = json.loads(request.read())
         return httpx.Response(
             200,
-            json={"started": True, "message": "launching", "gpu": {"state": "starting", "elapsed_s": 0.0}},
+            json={
+                "started": True,
+                "launch_id": "a" * 32,
+                "message": "launching",
+                "gpu": {"launch_id": "a" * 32, "state": "starting", "elapsed_s": 0.0},
+            },
         )
 
     with mock_client(handler) as client:
         launch = client.sessions.gpu_start(policy_hub_id="me/act-pick", gpu="A10G")
     assert seen["path"] == "/api/v1/remote-inference/gpu/start"
     assert seen["body"] == {"policy_hub_id": "me/act-pick", "gpu": "A10G"}
+    assert launch.launch_id == "a" * 32
+    assert launch.gpu.launch_id == launch.launch_id
     assert launch.gpu.state == "starting"
+
+
+def test_gpu_stop_can_be_scoped_to_the_launch_it_owns():
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={"launch_id": "a" * 32, "state": "stopping", "elapsed_s": 1.0},
+        )
+
+    with mock_client(handler) as client:
+        assert client.sessions.gpu_stop(launch_id="a" * 32).launch_id == "a" * 32
+        client.sessions.gpu_stop()
+
+    assert seen[0].endswith("/api/v1/remote-inference/gpu/stop?launch_id=" + "a" * 32)
+    assert seen[1].endswith("/api/v1/remote-inference/gpu/stop")
 
 
 def test_remote_status_routes_end_to_end(sdk_client):

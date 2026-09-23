@@ -157,6 +157,10 @@ REMEDIATIONS: dict[str, str] = {
         "you need a fresh one."
     ),
     "gpu.not_running": "No GPU container is up — client.sessions.gpu_start() launches one.",
+    "gpu.launch_replaced": (
+        "The launch this caller owned is no longer current, so the replacement was left running — "
+        "inspect client.sessions.gpu_status() before deciding whether to stop it explicitly."
+    ),
     "internal.unexpected": (
         "Server-side bug — the .detail carries the exception text; check the server logs for the traceback."
     ),

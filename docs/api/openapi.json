@@ -1656,10 +1656,14 @@
         "type": "object"
       },
       "GpuLaunchResponse": {
-        "description": "POST /api/v1/remote-inference/gpu/start — shape authority:\nmodal_launcher.start().\n\n`started` is always true here (every refusal is a coded ApiError raised\nbefore the spawn), and it is kept so the shape matches the install-manager\nsurface this one is modelled on. `gpu` is the status as of the spawn.",
+        "description": "POST /api/v1/remote-inference/gpu/start — shape authority:\nmodal_launcher.start().\n\n`started` is always true here (every refusal is a coded ApiError raised\nbefore the spawn), and it is kept so the shape matches the install-manager\nsurface this one is modelled on. `launch_id` identifies this transient\nattempt even if its pump finishes quickly; `gpu` is the status as of the\nspawn.",
         "properties": {
           "gpu": {
             "$ref": "#/components/schemas/GpuStatusResponse"
+          },
+          "launch_id": {
+            "title": "Launch Id",
+            "type": "string"
           },
           "message": {
             "title": "Message",
@@ -1672,6 +1676,7 @@
         },
         "required": [
           "started",
+          "launch_id",
           "message",
           "gpu"
         ],
@@ -1981,6 +1986,17 @@
             ],
             "title": "Last Line"
           },
+          "launch_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Launch Id"
+          },
           "log_path": {
             "anyOf": [
               {
@@ -2145,6 +2161,7 @@
           }
         },
         "required": [
+          "launch_id",
           "state",
           "phase",
           "engine",
@@ -12765,8 +12782,26 @@
     },
     "/api/v1/remote-inference/gpu/stop": {
       "post": {
-        "description": "Stop the GPU policy server (SIGTERM→SIGKILL over its process group).\n\nReturns while the group is still going down, in state `stopping`; the\nlauncher's own stdout pump lands it in `idle`. 409 `gpu.not_running` when\nthere is nothing to stop. Never touches the arm — a live remote-inference\nsession keeps running and its watchdogs report the empty room, which is a\nbetter diagnosis than a stop the user did not ask for.",
+        "description": "Stop the GPU policy server (SIGTERM→SIGKILL over its process group).\n\n`launch_id` makes an SDK-owned cleanup conditional: if another launch has\nreplaced it, the server returns 409 `gpu.launch_replaced` and leaves the\nreplacement running. Omitting it preserves this endpoint's explicit\noperator control: stop whichever GPU is current.\n\nReturns while the group is still going down, in state `stopping`; the\nlauncher's own stdout pump lands it in `idle`. 409 `gpu.not_running` when\nthere is nothing to stop. Never touches the arm — a live remote-inference\nsession keeps running and its watchdogs report the empty room, which is a\nbetter diagnosis than a stop the user did not ask for.",
         "operationId": "stop_remote_inference_gpu",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "launch_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Launch Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -12777,6 +12812,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Stop Remote Inference Gpu",

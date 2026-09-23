@@ -1455,15 +1455,20 @@ def start_remote_inference_gpu(body: GpuStartBody):
     response_model=GpuStatusResponse,
     tags=["sessions"],
 )
-def stop_remote_inference_gpu():
+def stop_remote_inference_gpu(launch_id: str | None = None):
     """Stop the GPU policy server (SIGTERM→SIGKILL over its process group).
+
+    `launch_id` makes an SDK-owned cleanup conditional: if another launch has
+    replaced it, the server returns 409 `gpu.launch_replaced` and leaves the
+    replacement running. Omitting it preserves this endpoint's explicit
+    operator control: stop whichever GPU is current.
 
     Returns while the group is still going down, in state `stopping`; the
     launcher's own stdout pump lands it in `idle`. 409 `gpu.not_running` when
     there is nothing to stop. Never touches the arm — a live remote-inference
     session keeps running and its watchdogs report the empty room, which is a
     better diagnosis than a stop the user did not ask for."""
-    return modal_launcher.stop()
+    return modal_launcher.stop(launch_id=launch_id)
 
 
 @v1_router.get(
