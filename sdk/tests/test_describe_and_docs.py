@@ -137,7 +137,7 @@ CARD_SIZES_CHARS = {
     "calibration": 2191,
     "client": 3630,
     "datasets": 3070,
-    "flows": 1059,
+    "flows": 1285,
     "inference": 1656,
     "jobs": 2537,
     "models": 1966,

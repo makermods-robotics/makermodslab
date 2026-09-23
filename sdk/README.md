@@ -72,6 +72,17 @@ publication in one call, use
 train_timeout=14400, publish_timeout=3600)`. Every flow exposes its full
 signature at `client.docs("flows.<method>")`.
 
+Setup runs through the same layering. `client.flows.auto_calibrate("bench",
+arms=[{"device_type": "robot"}])` drives SO-101 auto-calibration to
+completion — the arm moves itself, so nobody is in the loop — and reports
+every arm's outcome rather than raising on a partial failure. The CAN
+families' zero-pose wizard is a conversation instead:
+`client.flows.calibrate_zero("bench", device_type="robot", confirm=ask)`
+relays each instruction to `confirm`, which is required and has no default:
+only a human can attest that the arm is physically posed, and confirming an
+unposed arm records a wrong zero. The SO-101 manual sweep has no flow on
+purpose — watch `client.calibration.status()` and narrate, or use the UI.
+
 Before choosing a robot or discovery operation, get one passive snapshot:
 
 ```python

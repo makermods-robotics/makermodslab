@@ -24,11 +24,12 @@ start automatically.
 
 from __future__ import annotations
 
+from makermodslab_sdk.flows_calibration import CalibrationFlows
 from makermodslab_sdk.flows_hardware import HardwareFlows
 from makermodslab_sdk.flows_recording import RecordingFlows
 from makermodslab_sdk.flows_remote_inference import RemoteInferenceFlows
 from makermodslab_sdk.flows_training import TrainingFlows
 
 
-class Flows(HardwareFlows, RecordingFlows, RemoteInferenceFlows, TrainingFlows):
+class Flows(CalibrationFlows, HardwareFlows, RecordingFlows, RemoteInferenceFlows, TrainingFlows):
     """``client.flows`` — hardware context and common multi-call sequences."""

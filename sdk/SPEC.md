@@ -141,6 +141,14 @@ marked _(reference)_ name where the Python implementation lives.
 - `client.flows` composes existing methods; its methods have no operation IDs
   and are outside the tagged-operation coverage ratchet. Each docstring names
   its primitives, and the docs index points to a separate flows card.
+- A flow that needs a HUMAN act (posing an arm before a calibration step is
+  recorded) takes a REQUIRED confirmation callback with no default. An
+  automatic confirmation would let a client assert a physical fact it cannot
+  observe; declining is a valid answer that writes nothing.
+- A journey whose loop is continuous and visual — the SO-101 range sweep,
+  episode-by-episode recording judgement — gets no flow. The client exposes
+  the status so an agent can narrate, and says plainly that the UI is the
+  better tool.
 - Hardware inspection composes the arm manifest, visible serial ports,
   visible cameras, and saved robot records. It is passive: it never probes an
   arm bus, opens a motor, moves hardware, or mutates a record. A failed read is
