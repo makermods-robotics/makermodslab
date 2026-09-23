@@ -29,9 +29,33 @@ from makermodslab_sdk.resources._base import Resource, SdkModel
 
 
 class Robot(SdkModel):
-    """One saved robot record. Every field is optional server-side (records
-    are free-form merged dicts); unknown keys ride along via extra="allow"."""
+    """One saved robot record, plus the readiness flags the server computes
+    on every read (server.py ``_record_with_clean``).
 
+    READINESS IS THE FIELD THAT MATTERS FOR SETUP. ``is_clean`` folds every
+    arm of the mode (what teleoperation and recording need, since they drive
+    leaders AND followers); ``follower_ready`` scopes to the follower side,
+    so inference, replay and hosting are not blocked by a leader arm they
+    never open; ``leader_ready`` is the mirror for remote teleoperation.
+    ``arm_available`` is False when the record names an ``arm_type`` this
+    install has no family for — the record still lists, but cannot start
+    hardware. A record is clean only when every operational field for its
+    mode is populated AND every referenced calibration file exists on disk.
+
+    Every other field is optional server-side (records are free-form merged
+    dicts); unknown keys ride along via extra="allow".
+    """
+
+    name: str | None = None
+    arm_type: str | None = None
+    leader_kind: str | None = None
+    #: Which sides this machine has: "both" | "follower" | "leader".
+    arms: str | None = None
+    #: Readiness, computed server-side on every record read.
+    is_clean: bool | None = None
+    follower_ready: bool | None = None
+    leader_ready: bool | None = None
+    arm_available: bool | None = None
     mode: str | None = None  # "single" | "bimanual"
     leader_port: str | None = None
     follower_port: str | None = None

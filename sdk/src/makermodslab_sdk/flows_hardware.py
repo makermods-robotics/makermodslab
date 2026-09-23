@@ -70,13 +70,44 @@ class CameraAssignment:
 
 @dataclass(frozen=True)
 class SavedRobotHardware:
-    """The hardware-facing portion of one saved robot record."""
+    """The hardware-facing portion of one saved robot record, with the
+    readiness the server computed for it.
+
+    ``is_clean`` gates teleoperation and recording (leader AND follower);
+    ``follower_ready`` gates inference, replay and hosting; ``leader_ready``
+    gates remote teleoperation. ``arm_available`` is False when no installed
+    family claims this record's ``arm_type``. Each is None when the server
+    did not report it, so an older server degrades to "unknown" rather than
+    to a confident False.
+    """
 
     name: str
     arm_type: str
     mode: str | None
     ports: tuple[PortAssignment, ...]
     cameras: tuple[CameraAssignment, ...]
+    is_clean: bool | None = None
+    follower_ready: bool | None = None
+    leader_ready: bool | None = None
+    arm_available: bool | None = None
+
+    def readiness_summary(self) -> str:
+        """One phrase naming what this record can start right now."""
+        if self.arm_available is False:
+            return f"arm type {self.arm_type!r} not installed"
+        if self.is_clean:
+            return "ready"
+        able = [
+            label
+            for label, ready in (
+                ("inference/replay", self.follower_ready),
+                ("remote teleop", self.leader_ready),
+            )
+            if ready
+        ]
+        if able:
+            return "not ready for teleop/recording; can still run " + " and ".join(able)
+        return "unknown readiness" if self.is_clean is None else "not ready"
 
 
 @dataclass(frozen=True)
@@ -141,7 +172,8 @@ class HardwareContext:
                 for item in robot.ports
             )
             lines.append(
-                f"- {robot.name} [{robot.arm_type}/{robot.mode or 'unspecified'}]: {slots or 'no ports'}"
+                f"- {robot.name} [{robot.arm_type}/{robot.mode or 'unspecified'}] "
+                f"{robot.readiness_summary()}: {slots or 'no ports'}"
             )
         if len(self.robots) > 6:
             lines.append(f"- ... {len(self.robots) - 6} more saved robots")
@@ -175,6 +207,12 @@ class HardwareContext:
                 "Partial errors: " + "; ".join(f"{item.section}: {item.detail}" for item in self.errors)
             )
         return "\n".join(lines)
+
+
+def _flag(record: Any, key: str) -> bool | None:
+    """A server-computed readiness flag, or None when it wasn't reported."""
+    value = record.get(key)
+    return value if isinstance(value, bool) else None
 
 
 def _detail(exc: Exception) -> str:
@@ -372,6 +410,10 @@ class HardwareFlows:
                     mode=str(record["mode"]) if record.get("mode") else None,
                     ports=tuple(ports),
                     cameras=cameras,
+                    is_clean=_flag(record, "is_clean"),
+                    follower_ready=_flag(record, "follower_ready"),
+                    leader_ready=_flag(record, "leader_ready"),
+                    arm_available=_flag(record, "arm_available"),
                 )
             )
 

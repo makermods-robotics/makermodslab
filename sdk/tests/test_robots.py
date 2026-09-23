@@ -106,3 +106,50 @@ def test_get_missing_end_to_end(sdk_client):
     with pytest.raises(ApiError) as excinfo:
         sdk_client.robots.get("sdk-test-no-such-robot")
     assert excinfo.value.status == 404
+
+
+def test_record_exposes_the_servers_readiness_flags():
+    """Readiness is what setup turns on; the server computes it on every read
+    (server.py _record_with_clean) so the model must declare it."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "status": "success",
+                "robot": {
+                    **RECORD,
+                    "arm_type": "metal",
+                    "leader_kind": "star",
+                    "arms": "both",
+                    "is_clean": False,
+                    "follower_ready": True,
+                    "leader_ready": False,
+                    "arm_available": True,
+                },
+            },
+        )
+
+    with mock_client(handler) as client:
+        robot = client.robots.get("bench")
+    assert robot.is_clean is False
+    assert robot.follower_ready is True
+    assert robot.leader_ready is False
+    assert robot.arm_available is True
+    assert robot.arm_type == "metal" and robot.leader_kind == "star" and robot.arms == "both"
+
+
+def test_readiness_is_none_when_an_older_server_omits_it():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "success", "robot": RECORD})
+
+    with mock_client(handler) as client:
+        robot = client.robots.get("bench")
+    assert robot.is_clean is None and robot.arm_available is None
+
+
+def test_readiness_flags_survive_end_to_end(sdk_client):
+    """The real app computes these; if the key names ever drift, this fails."""
+    listing = sdk_client.robots.list()
+    for record in listing.robots:
+        assert "is_clean" in record and "arm_available" in record

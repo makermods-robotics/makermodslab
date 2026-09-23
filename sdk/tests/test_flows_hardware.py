@@ -296,3 +296,77 @@ def test_summary_caps_detail_while_structured_results_stay_complete():
     assert "4 more ports" in summary
     assert "more next actions" in summary
     assert len(summary) < 2_000
+
+
+# --- readiness the server already computes ------------------------------------
+
+
+def _context_with_robots(records: list[dict]):
+    """A context whose only interesting input is the saved robot records."""
+    responses = {
+        "/api/v1/arms": ARM_FAMILIES,
+        "/api/v1/available-ports": {"status": "success", "ports": []},
+        "/api/v1/available-cameras": {"status": "success", "cameras": []},
+        "/api/v1/robots": {"status": "success", "robots": records},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=responses[request.url.path])
+
+    with mock_client(handler) as client:
+        return client.flows.inspect_hardware()
+
+
+def test_saved_robot_carries_server_readiness_flags():
+    """_record_with_clean returns these on every read; the flow must keep them
+    — "is this robot usable?" is the whole point of a setup snapshot."""
+    context = _context_with_robots(
+        [
+            {
+                "name": "bench",
+                "arm_type": "metal",
+                "mode": "single",
+                "follower_port": "/dev/ttyA",
+                "is_clean": False,
+                "follower_ready": True,
+                "leader_ready": False,
+                "arm_available": True,
+            }
+        ]
+    )
+    robot = context.robots[0]
+    assert robot.is_clean is False
+    assert robot.follower_ready is True
+    assert robot.leader_ready is False
+    assert robot.arm_available is True
+    assert "inference/replay" in robot.readiness_summary()
+    assert "inference/replay" in context.summary()
+
+
+def test_readiness_degrades_to_unknown_on_an_older_server():
+    context = _context_with_robots([{"name": "bench", "arm_type": "so101", "mode": "single"}])
+    robot = context.robots[0]
+    assert robot.is_clean is None and robot.arm_available is None
+    assert robot.readiness_summary() == "unknown readiness"
+
+
+def test_unknown_arm_type_reads_as_unavailable_not_merely_unready():
+    context = _context_with_robots(
+        [
+            {
+                "name": "bench",
+                "arm_type": "someext",
+                "mode": "single",
+                "is_clean": False,
+                "arm_available": False,
+            }
+        ]
+    )
+    assert "not installed" in context.robots[0].readiness_summary()
+
+
+def test_clean_record_reads_ready():
+    context = _context_with_robots(
+        [{"name": "bench", "arm_type": "so101", "mode": "single", "is_clean": True, "arm_available": True}]
+    )
+    assert context.robots[0].readiness_summary() == "ready"
