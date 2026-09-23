@@ -131,7 +131,7 @@ def test_index_names_every_namespace_and_the_drilldowns():
 CARD_BUDGETS_CHARS = {
     "client": 4300,  # measured 3561 after flow exceptions
     "datasets": 5100,  # measured 4196
-    "flows": 2800,  # measured 2265 after remote inference flow
+    "flows": 2900,  # measured 2375 after hardware inspection flow
     "inference": 2300,  # measured 1858
     "jobs": 3900,  # measured 3247
     "models": 3200,  # measured 2587
@@ -172,6 +172,7 @@ def test_cards_carry_the_module_docstring_as_pattern_intro():
     assert "refetch hints" in namespace_card("realtime")
     assert "empty list means no hardware flow" in namespace_card("realtime")
     assert "client.sessions" in namespace_card("flows")
+    assert "inspect_hardware(" in namespace_card("flows")
     assert "record_episodes(" in namespace_card("flows")
     assert "remote_inference(" in namespace_card("flows")
     assert "train_and_publish(" in namespace_card("flows")
@@ -202,6 +203,7 @@ def test_method_detail_returns_the_full_docstring():
     assert "sessions.remote_inference_transport" in method_detail("flows.remote_inference")
     assert "gpu_stop(launch_id=...)" in method_detail("flows.remote_inference")
     assert "models.publish_status" in method_detail("flows.train_and_publish")
+    assert "system.available_ports" in method_detail("flows.inspect_hardware")
 
 
 def test_method_detail_unknown_namespace_is_helpful_not_raised():

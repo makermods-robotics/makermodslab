@@ -25,8 +25,8 @@ task needs — everything below the index is introspected from the code:
   namespace map, drill-down instructions (~1k tokens; start here)
 - `client.docs("jobs")` / `... docs jobs` — one namespace's pattern intro
   (the resource module docstring) + method reference
-- `client.docs("flows")` — short recording, training-to-publish and managed
-  remote-inference sequences;
+- `client.docs("flows")` — passive hardware context plus short recording,
+  training-to-publish and managed remote-inference sequences;
   each method names the primitive calls it composes
 - `client.docs("jobs.create_training")` / `... docs jobs.create_training` —
   one method's full signature and docstring
@@ -71,6 +71,19 @@ publication in one call, use
 `client.flows.train_and_publish("me/demo", steps=20000,
 train_timeout=14400, publish_timeout=3600)`. Every flow exposes its full
 signature at `client.docs("flows.<method>")`.
+
+Before choosing a robot or discovery operation, get one passive snapshot:
+
+```python
+hardware = client.flows.inspect_hardware()
+print(hardware.summary())
+```
+
+It combines the arm manifest, visible ports and cameras, and saved robot
+records without opening an arm bus or changing a record. Missing assignments,
+free ports, and shared record references remain structured on the result.
+Suggested active discovery steps are literal SDK calls labelled
+`read_only`, `may_energize`, or `moves_hardware`; the flow never runs them.
 
 For remote inference, one context owns both the exact transient GPU launch and
 the leased robot session. It sends the wire-shaping options to both halves from

@@ -366,10 +366,12 @@ class SystemResource(Resource):
         arm_type: str | None = None,
         ports: list[str] | None = None,
     ) -> MakerIdentifyResult:
-        """Find which port holds a CAN-family arm of the given role
-        (``device_type``: "teleop" = leader, "robot" = follower) by probing —
-        the CAN arms have no hand-motion detection. ``ports`` narrows the
-        probe; omitted, every candidate port is tried.
+        """Find which port holds an arm of the given role by asking the user
+        to move it (``device_type``: "teleop" = leader, "robot" = follower).
+        Despite the historical ``maker`` method/route name, ``arm_type`` may
+        be any registered family. ``ports`` narrows the watched candidates;
+        omitted, every candidate port is tried. Families whose bus handshake
+        energizes this side may refuse and direct you to a safer fallback.
 
         Example:
             >>> client.system.identify_maker_arm("robot", arm_type="maker").port

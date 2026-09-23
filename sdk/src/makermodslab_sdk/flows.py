@@ -15,18 +15,20 @@
 """The ``flows`` layer: short, deterministic sequences built from SDK primitives.
 
 Start here when the whole sequence fits; each method names the underlying
-``client.sessions``, ``client.jobs`` and ``client.models``
-calls so an agent can drop down a level for a custom workflow. Flows are
-client-side composition, not new server operations. Timeouts and partial
-results are explicit; no flow retries a side-effecting start automatically.
+``client.system``, ``client.robots``, ``client.sessions``, ``client.jobs`` and
+``client.models`` calls so an agent can drop down a level for a custom
+workflow. Flows are client-side composition, not new server operations.
+Timeouts and partial results are explicit; no flow retries a side-effecting
+start automatically.
 """
 
 from __future__ import annotations
 
+from makermodslab_sdk.flows_hardware import HardwareFlows
 from makermodslab_sdk.flows_recording import RecordingFlows
 from makermodslab_sdk.flows_remote_inference import RemoteInferenceFlows
 from makermodslab_sdk.flows_training import TrainingFlows
 
 
-class Flows(RecordingFlows, RemoteInferenceFlows, TrainingFlows):
-    """``client.flows`` — common recording, training and remote-run sequences."""
+class Flows(HardwareFlows, RecordingFlows, RemoteInferenceFlows, TrainingFlows):
+    """``client.flows`` — hardware context and common multi-call sequences."""

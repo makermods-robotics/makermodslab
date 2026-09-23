@@ -141,6 +141,15 @@ marked _(reference)_ name where the Python implementation lives.
 - `client.flows` composes existing methods; its methods have no operation IDs
   and are outside the tagged-operation coverage ratchet. Each docstring names
   its primitives, and the docs index points to a separate flows card.
+- Hardware inspection composes the arm manifest, visible serial ports,
+  visible cameras, and saved robot records. It is passive: it never probes an
+  arm bus, opens a motor, moves hardware, or mutates a record. A failed read is
+  retained as a section error without discarding successful sections. The
+  typed result identifies missing saved port assignments, unassigned visible
+  ports, and shared references without declaring aliases invalid. Active
+  discovery is returned only as an existing literal SDK call with explicit
+  `read_only`, `may_energize`, and/or `moves_hardware` effects; the flow never
+  executes an active fallback.
 - Recording a requested episode count owns a leased session. Its timeout
   stops that session; a normal early end with fewer saved episodes is a
   partial-result error. Per-episode prompts follow `current_episode`, because

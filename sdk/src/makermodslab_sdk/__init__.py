@@ -23,6 +23,16 @@ from makermodslab_sdk.errors import (
     RobotBusyError,
     SessionHeldError,
 )
+from makermodslab_sdk.flows_hardware import (
+    ArmDiscoveryCapability,
+    CameraAssignment,
+    HardwareContext,
+    HardwareNextAction,
+    HardwareObservation,
+    HardwareSectionError,
+    PortAssignment,
+    SavedRobotHardware,
+)
 from makermodslab_sdk.flows_recording import RecordingFlowError, RecordingFlowResult, RecordingFlowTimeout
 from makermodslab_sdk.flows_remote_inference import (
     RemoteInferenceFlowError,
@@ -38,15 +48,22 @@ __version__ = "0.0.1"
 
 __all__ = [
     "ApiError",
+    "ArmDiscoveryCapability",
+    "CameraAssignment",
     "Client",
     "CompatibilityWarning",
     "ConnectionFailedError",
     "InvalidRequestError",
+    "HardwareContext",
+    "HardwareNextAction",
+    "HardwareObservation",
+    "HardwareSectionError",
     "JobWaitTimeout",
     "MakerModsError",
     "NotFoundError",
     "OperationFailedError",
     "PublishWaitTimeout",
+    "PortAssignment",
     "RecordingFlowError",
     "RecordingFlowResult",
     "RecordingFlowTimeout",
@@ -58,6 +75,7 @@ __all__ = [
     "SessionLostError",
     "SessionStoppedError",
     "SessionWaitTimeout",
+    "SavedRobotHardware",
     "TrainAndPublishResult",
     "TrainingOptions",
     "TrainingFlowError",

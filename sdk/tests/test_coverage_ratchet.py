@@ -89,6 +89,7 @@ def test_flows_are_composites_not_wire_operations():
     from makermodslab_sdk.flows import Flows
 
     assert {name for name in dir(Flows) if not name.startswith("_")} == {
+        "inspect_hardware",
         "record_episodes",
         "remote_inference",
         "train_and_publish",
