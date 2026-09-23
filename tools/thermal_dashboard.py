@@ -292,6 +292,8 @@ def run_hardware(args, dashboard, config, series, preparation):
             trial.log.close()
             trial.log = None
         result = dict(trial.status)
+        if result["rest_reached"] and not dashboard.release.is_set():
+            diagnostics.read_fault_status()
         robot.disconnect()
         robot = None
         result = mark_connection_closed(result)

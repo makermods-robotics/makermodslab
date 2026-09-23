@@ -1,4 +1,4 @@
-"""Passive CAN journal for standalone trials; no extra CAN queries or mode changes."""
+"""CAN journal and post-return fault read; no extra queries during playback."""
 
 from __future__ import annotations
 
@@ -55,6 +55,8 @@ class ThermalDiagnostics:
         self.log = None
         self.clear_requests = 0
         self.events = deque(maxlen=1000)
+        self.fault_status_reads = {}
+        self.pending_fault_read = None
         self.bus.thermal_diagnostics = self
         original_connect = self.bus.connect
         original_decode = self.bus._decode_motor_state
@@ -120,7 +122,7 @@ class ThermalDiagnostics:
         }
         name = self.bus._id_to_name.get(data[0]) if data else None
         if direction == "rx" and name and len(data) == 8 and not msg.is_extended_id:
-            if self.is_fault_frame(data):
+            if self.is_fault_frame(data) or (name == self.pending_fault_read and not any(data[5:8])):
                 bits = int.from_bytes(data[1:5], "little")
                 item = {
                     "timestamp": stamp,
@@ -129,7 +131,8 @@ class ThermalDiagnostics:
                     "classification": "possible MIT fault-status frame (driver shape heuristic)",
                     "raw_hex": data.hex(),
                 }
-                self.faults[name] = item
+                if bits:
+                    self.faults[name] = item
                 row["fault_status"] = item
             else:
                 item = {"timestamp": stamp, **decode_feedback(data)}
@@ -159,12 +162,58 @@ class ThermalDiagnostics:
             "latched_firmware_faults": dict(self.faults),
             "warning_fault_events": list(self.events),
             "fault_clear_requests_observed": self.clear_requests,
+            "fault_status_reads": dict(self.fault_status_reads),
             "board_temperature_c": None,
             "board_temperature_status": "not available in current MIT stream",
             "firmware_protection_threshold_readback": None,
             "manual": MANUAL,
             "capture_scope": "raw RX/TX after initial bus handshake, including return and disconnect",
         }
+
+    def read_fault_status(self):
+        """Bounded post-return read using F_CMD=0; NEVER the F_CMD=255 clear.
+
+        Called only once the trial has verified rest, not in the playback loop.
+        Older firmware may not support this; preserve the reply or timeout instead
+        of mistaking a normal status response for a fault word.
+        """
+        import can
+
+        for name in self.bus.motors:
+            target = self.bus._get_motor_id(name)
+            recv_id = self.bus._get_motor_recv_id(name)
+            try:
+                self.pending_fault_read = name
+                self.bus.canbus.send(
+                    can.Message(arbitration_id=target, data=[255] * 6 + [0, 251], is_extended_id=False)
+                )
+                deadline = time.monotonic() + 0.04
+                item = {"status": "no fault-status response", "fault_word": None}
+                while time.monotonic() < deadline:
+                    msg = self.bus.canbus.recv(timeout=max(0, deadline - time.monotonic()))
+                    if msg is None:
+                        break
+                    data = bytes(msg.data)
+                    if msg.is_extended_id or len(data) != 8 or data[0] != recv_id:
+                        continue
+                    if any(data[5:8]):
+                        item["other_response_hex"] = data.hex()
+                        continue
+                    bits = int.from_bytes(data[1:5], "little")
+                    item = {
+                        "status": "fault-status response",
+                        "timestamp": time.time(),
+                        "raw_hex": data.hex(),
+                        "fault_word": bits,
+                        "fault_names": [v for k, v in FAULT_BITS.items() if bits & (1 << k)],
+                        "request_hex": "ffffffffffff00fb",
+                    }
+                    break
+                self.fault_status_reads[name] = item
+            except Exception as exc:
+                self.fault_status_reads[name] = {"status": "read unavailable", "error": str(exc)}
+            finally:
+                self.pending_fault_read = None
 
     def close(self):
         if self.log:

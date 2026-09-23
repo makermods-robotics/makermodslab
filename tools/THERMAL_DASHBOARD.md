@@ -103,3 +103,10 @@ explicitly unavailable, not zero. Firmware fault flags stop repetition; a latche
 fault blocks automatic fault-clear requests. A failed return still requires support
 and explicit release. Fault-status-shaped frames retain raw bytes and the heuristic
 classification, because firmware versions can vary.
+
+After a verified return (unless immediate release was requested), the runner also
+requests each motor's fault status using MIT command `FF FF FF FF FF FF 00 FB`.
+The `00` requests status; `FF` in that byte would clear faults and is not used by
+this read. Replies or timeouts are saved in `diagnostics.json`; the read is bounded
+to 40 ms per motor and never runs during playback. It does not expose board
+temperature or read back thermal threshold settings.

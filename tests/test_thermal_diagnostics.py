@@ -58,3 +58,30 @@ def test_fault_status_word_preserved_without_decoding_as_temperature():
     assert not diag.latest
     with pytest.raises(RuntimeError, match="Firmware fault frame"):
         bus._decode_motor_state(data)
+
+
+def test_post_return_fault_read_never_clears_or_overwrites_temperature():
+    sent = []
+    messages = [frame([1, 0, 0, 0, 0, 0, 0, 0])]
+    transport = SimpleNamespace(
+        send=lambda msg: sent.append(bytes(msg.data)),
+        recv=lambda **kwargs: messages.pop() if messages else None,
+    )
+    bus = SimpleNamespace(
+        connect=lambda: None,
+        canbus=transport,
+        _id_to_name={1: "shoulder_lift"},
+        motors={"shoulder_lift": 1},
+        _get_motor_id=lambda n: 1,
+        _get_motor_recv_id=lambda n: 1,
+        _decode_motor_state=lambda d: None,
+    )
+    diag = ThermalDiagnostics(bus)
+    bus.connect()
+    diag.record("rx", frame([1, 128, 0, 0, 0, 1, 3, 232]))
+    diag.read_fault_status()
+    assert sent == [bytes.fromhex("ffffffffffff00fb")]
+    assert diag.fault_status_reads["shoulder_lift"]["fault_word"] == 0
+    assert diag.latest["shoulder_lift"]["winding_temperature_c"] == 100
+    assert diag.clear_requests == 0
+    assert not diag.faults
