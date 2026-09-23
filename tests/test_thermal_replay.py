@@ -109,8 +109,8 @@ def test_repeats_for_requested_duration_returns_captured_pose_and_logs(trial):
         (70, "completed", False),
         (99.99, "completed", False),
         (100, "completed", False),
-        (129.99, "completed", False),
-        (130, "overheated", False),
+        (109.99, "completed", False),
+        (110, "overheated", False),
         (134.99, "overheated", False),
         (135, "overheated", True),
     ],
@@ -130,7 +130,7 @@ def test_temperature_boundaries_and_return(trial, temperature, expected, critica
 
 def test_already_hot_never_starts_motion_cycle(trial):
     runner, robot, _, _ = trial
-    robot.temperature = lambda _: 131
+    robot.temperature = lambda _: 111
     result = runner.run()
     assert result["result"] == "overheated"
     assert result["cycles"] == 0
@@ -178,7 +178,7 @@ def test_overheat_during_return_invalidates_completed_run(trial):
 
     def move(pose, **kwargs):
         if runner.status["result"] == "completed":
-            robot.temperature = lambda _: 131
+            robot.temperature = lambda _: 111
         original(pose, **kwargs)
 
     runner.move_to = move
@@ -395,16 +395,16 @@ def test_simulated_full_thirty_minute_run_uses_new_policy(trial):
     runner, robot, _, _ = trial
     runner.options.duration_s = 1800
     validate_thermal_series(runner.series, "maker", "single")
-    robot.temperature = lambda _: 129.9
+    robot.temperature = lambda _: 109.9
     result = runner.run()
     assert result["result"] == "completed"
     assert result["elapsed_s"] == 1800
     assert result["cycles"] >= 1790
-    assert result["stop_at_c"] == 130
+    assert result["stop_at_c"] == 110
     assert result["critical_at_c"] == 135
     assert result["rest_reached"]
     summary = json.loads((runner.root / "summary.json").read_text())
-    assert summary["stop_at_c"] == 130
+    assert summary["stop_at_c"] == 110
     assert summary["threshold_comparison"] == ">="
 
 
@@ -424,14 +424,14 @@ def test_closed_connection_does_not_report_energized_motors():
 
 def test_stop_diagnostics_capture_threshold_before_return(trial):
     runner, robot, _, _ = trial
-    robot.temperature = lambda _: 130
+    robot.temperature = lambda _: 110
     robot.bus.thermal_diagnostics = SimpleNamespace(
         faults={}, open=lambda root: None, snapshot=lambda: {"board_temperature_c": None}
     )
     result = runner.run()
     event = json.loads((runner.root / "stop_event.json").read_text())
     assert event["trigger"]["result"] == "overheated"
-    assert event["trigger"]["actuators"][0]["temperature_c"] == 130
+    assert event["trigger"]["actuators"][0]["temperature_c"] == 110
     assert event["diagnostics"]["board_temperature_c"] is None
     assert result["rest_reached"]
 

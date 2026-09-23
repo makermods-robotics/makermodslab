@@ -22,8 +22,8 @@ Each row shows current temperature, signed motor-reported torque in N·m, rollin
 
 | Reading                                                        | State                  |
 | -------------------------------------------------------------- | ---------------------- |
-| Temperature <130°C                                             | OK                     |
-| Temperature ≥130°C and <135°C                                  | OVERHEATING, red       |
+| Temperature <110°C                                             | OK                     |
+| Temperature ≥110°C and <135°C                                  | OVERHEATING, red       |
 | Temperature ≥135°C                                             | CRITICAL, white on red |
 | Feedback more than 1 second old                                | STALE, yellow          |
 | No feedback timestamp                                          | NO DATA, yellow        |
@@ -82,7 +82,7 @@ thresholds. It never connects to MakerLab or the CAN adapter.
    software revision with the experiment notes. Use a new monitor `--label` per change.
 2. Compare the same trajectory, pace, number of cycles and starting thermal condition.
    Target thirty minutes, but stop/unload using the established operator procedure if an
-   actuator reaches 130°C; record time to crossing. The 135°C reference is not a test target.
+   actuator reaches 110°C; record time to crossing. The 135°C reference is not a test target.
 3. Change one thing at a time: cooling, payload/reach, rest pose, then controller tuning.
    Compare temperature rise, first threshold crossing, RMS torque, and task/tracking
    quality. A cooler run that drops the payload or no longer tracks is not a successful fix.

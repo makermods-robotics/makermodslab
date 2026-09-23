@@ -5,7 +5,7 @@ this arm's shutdown setting. The RS02 July 2026 manual identifies the MIT
 feedback field as winding temperature; the legacy driver calls it temp_mos.
 """
 
-STOP_AT_C = 130
+STOP_AT_C = 110
 CRITICAL_AT_C = 135
 DEFAULT_TEST_DURATION_S = 1800
 MAX_TEST_DURATION_S = 1800

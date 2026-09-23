@@ -15,7 +15,7 @@ from makermodslab.actuator_telemetry import cached_maker_telemetry, temperature_
 from tools.actuator_monitor import Monitor
 
 
-def arm(temperature=131, torque=7, stamp=100):
+def arm(temperature=111, torque=7, stamp=100):
     bus = SimpleNamespace(
         motors={"shoulder_lift": object()},
         _last_known_states={"shoulder_lift": {"temp_mos": temperature, "torque": torque}},
@@ -34,8 +34,8 @@ def arm(temperature=131, torque=7, stamp=100):
         (70, "OK"),
         (99.99, "OK"),
         (100, "OK"),
-        (129.99, "OK"),
-        (130, "OVERHEATING"),
+        (109.99, "OK"),
+        (110, "OVERHEATING"),
         (134.99, "OVERHEATING"),
         (135, "CRITICAL"),
     ],
@@ -97,7 +97,7 @@ def test_teleop_and_recording_share_the_cache_only_payload(monkeypatch):
     robot.bus.read.assert_not_called()
 
 
-def packet(stamp, torque=3, temp=131):
+def packet(stamp, torque=3, temp=111):
     return {
         "actuators": [
             {
@@ -119,7 +119,7 @@ def test_monitor_deduplicates_recomputes_thresholds_and_expires_disconnected_dat
     stats = monitor.summary()["left.shoulder_lift"]
     assert stats["samples"] == 2
     assert stats["rms_torque_nm"] == pytest.approx(math.sqrt(12.5))
-    assert stats["samples_at_or_above_130"] == 2 and stats["samples_at_or_above_135"] == 1
+    assert stats["samples_at_or_above_110"] == 2 and stats["samples_at_or_above_135"] == 1
     assert monitor.rows(now=100.6)[0]["status"] == "CRITICAL"
     assert monitor.rows(now=102)[0]["status"] == "STALE"
     assert monitor.rows(now=131)[0]["rms_30s_nm"] is None
@@ -168,4 +168,4 @@ def test_original_66c_reading_is_below_the_new_software_limit():
         monitor.ingest(packet(100 + i * 10, temp=temp), now=100 + i * 10)
     stats = monitor.summary()["left.shoulder_lift"]
     assert stats["max_temperature_c"] == 66
-    assert stats["samples_at_or_above_130"] == 0 and stats["samples_at_or_above_135"] == 0
+    assert stats["samples_at_or_above_110"] == 0 and stats["samples_at_or_above_135"] == 0

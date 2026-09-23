@@ -266,7 +266,7 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
                 <option value="shoulder_kp_85">Shoulder stiffness −15%</option>
               </select>
             </label>
-            <p className="text-muted-foreground">Record a motion that starts and ends at the same supported rest pose. The test returns there at 130°C; 135°C is a manufacturer-reported critical reference. Feedback or tracking faults also stop the test.</p>
+            <p className="text-muted-foreground">Record a motion that starts and ends at the same supported rest pose. The test returns there at 110°C; 135°C is a manufacturer-reported critical reference. Feedback or tracking faults also stop the test.</p>
             {experiment === "shoulder_kp_85" && <p className="text-amber-700">Lower stiffness can increase position error. This is not a torque cap; recorded timing stays unchanged.</p>}
             <label className="flex items-start gap-2">
               <input type="checkbox" checked={restConfirmed} onChange={(event) => setRestConfirmed(event.target.checked)} />

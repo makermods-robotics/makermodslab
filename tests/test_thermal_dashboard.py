@@ -55,10 +55,10 @@ def test_dashboard_controls_require_same_origin_and_stop_does_not_release():
         assert dashboard.seen.is_set()
         with urllib.request.urlopen(base + "/") as response:
             html = response.read().decode()
-        assert "130°C stop / 135°C reference" in html
+        assert "110°C stop / 135°C reference" in html
         assert "0:00 / 30:00" in html
         assert "__STOP_AT_C__" not in html
-        assert dashboard.snapshot(0)["status"]["stop_at_c"] == 130
+        assert dashboard.snapshot(0)["status"]["stop_at_c"] == 110
         with pytest.raises(urllib.error.HTTPError) as exc:
             urllib.request.urlopen(urllib.request.Request(base + "/api/stop", method="POST"))
         assert exc.value.code == 403

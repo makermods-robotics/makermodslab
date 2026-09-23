@@ -16,7 +16,7 @@ existing replay session and CAN connection. Ordinary replay is unchanged.
 3. Open that episode's **Replay on hardware** panel. Select **Repeat as a 30-minute
    thermal test**, choose **Baseline**, and confirm the physical setup.
 4. Start and supervise. The UI shows each motor's temperature, signed torque, and
-   status. At 130°C is red; 135°C is a manufacturer-reported critical reference. A persistent message and toast
+   status. At 110°C is red; 135°C is a manufacturer-reported critical reference. A persistent message and toast
    identify the result. Keep the page open so the session heartbeat continues.
 5. Let the arm cool to a comparable initial temperature. Repeat the same episode
    with **Shoulder stiffness −15%**. Keep load, environment, and starting pose the
@@ -31,7 +31,7 @@ has been verified or written. Baseline is the default.
 
 ## Stop and result behavior
 
-- Any fresh actuator temperature **≥130°C** ends repeated motion and requests a
+- Any fresh actuator temperature **≥110°C** ends repeated motion and requests a
   controlled return to the captured rest pose at up to 20 degrees/second. Thermal
   readings continue during return; crossing **≥135°C** also raises the critical flag.
 - A run completes after 1800 seconds of repeated playback, excluding initial
