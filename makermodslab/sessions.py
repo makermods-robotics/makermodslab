@@ -1228,6 +1228,58 @@ def handle_stop_session(session_id: str) -> dict[str, Any]:
     return {"session": _public_session(session), "result": result}
 
 
+def handle_recording_status_for_session(session_id: str) -> dict[str, Any]:
+    """Read recording progress only while this id is current or last ended.
+
+    The legacy status store is global. Holding the recording claim lock and
+    tracker lock together prevents a replacement recording from being
+    attributed to the caller during this read. A new run can claim the global
+    recording flag before the tracker receives its start hint, so terminal
+    reads also require the global recorder to have ended.
+    """
+    from . import record
+
+    with record._state_lock, tracker._lock:
+        current, ended = tracker._current, tracker._last_ended
+        owns_live = current is not None and current["id"] == session_id and current["kind"] == "recording"
+        owns_terminal = (
+            current is None
+            and ended is not None
+            and ended["id"] == session_id
+            and ended["kind"] == "recording"
+            and not record.recording_active
+            and record.current_phase in ("completed", "error")
+        )
+        if not (owns_live or owns_terminal):
+            raise ApiError(
+                status_code=404,
+                detail=f"No current or last-ended recording session with id {session_id!r}.",
+                code=ErrorCode.SESSION_NOT_FOUND,
+            )
+        return record.handle_recording_status()
+
+
+def handle_recording_episode_task_for_session(session_id: str, task: str) -> dict[str, Any]:
+    """Submit a prompt only to the recording session named by ``session_id``.
+
+    Take the recording claim lock before the tracker lock (the same order as
+    recording start) so a new recording cannot claim the active flag between
+    the id check and the prompt. The handler still owns phase validation and
+    its existing ``success: false`` soft refusal.
+    """
+    from . import record
+
+    with record._state_lock, tracker._lock:
+        current = tracker._current
+        if current is None or current["id"] != session_id or current["kind"] != "recording":
+            raise ApiError(
+                status_code=404,
+                detail=f"No active recording session with id {session_id!r}.",
+                code=ErrorCode.SESSION_NOT_FOUND,
+            )
+        return record.handle_submit_episode_task(task)
+
+
 def handle_coaching_command_for_session(session_id: str, command: str) -> dict[str, Any]:
     """Forward one coaching (DAgger) command to the current inference session.
 

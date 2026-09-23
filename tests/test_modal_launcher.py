@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import signal
 import subprocess
+import threading
 import types
+import uuid
 
 import pytest
 
@@ -998,6 +1000,7 @@ def test_the_status_dict_always_carries_every_key(spawned, fake_clock):
     """`response_model` with no exclusion mode materializes absent optionals as
     null, so the payload must really always carry them (GpuStatusResponse)."""
     expected = {
+        "launch_id",
         "state",
         "phase",
         "engine",
@@ -1044,6 +1047,126 @@ def test_a_second_start_is_refused(spawned, fake_clock):
         ml.start(engine="sync", policy_hub_id="someone/p")
     assert excinfo.value.code == ErrorCode.GPU_ALREADY_RUNNING
     assert excinfo.value.status_code == 409
+
+
+def test_each_accepted_launch_has_one_uuid_identity_in_start_and_status(spawned):
+    result = ml.start(engine="sync", policy_hub_id="someone/p")
+
+    launch_id = result["launch_id"]
+    assert uuid.UUID(launch_id).hex == launch_id
+    assert result["gpu"]["launch_id"] == launch_id
+    assert ml.status()["launch_id"] == launch_id
+
+
+def test_start_returns_its_own_id_even_if_the_pump_replaces_the_slot(spawned, monkeypatch):
+    replacement: dict[str, object] = {}
+    first_proc = spawned["proc"]
+
+    def finish_then_replace(proc, _log_handle):
+        if proc is first_proc:
+            ml._handle_exit(proc, 1)
+            fresh = FakePopen()
+            spawned["popen_result"] = fresh
+            replacement.update(ml.start(engine="rtc", policy_hub_id="someone/replacement"))
+
+    monkeypatch.setattr(ml, "_start_pump", finish_then_replace)
+    first = ml.start(engine="sync", policy_hub_id="someone/first")
+
+    assert first["launch_id"] == first["gpu"]["launch_id"]
+    assert first["launch_id"] != replacement["launch_id"]
+    assert ml.status()["launch_id"] == replacement["launch_id"]
+
+
+def test_conditional_stop_refuses_a_replaced_launch_without_touching_it(spawned):
+    result = ml.start(engine="sync", policy_hub_id="someone/p")
+    current_id = result["launch_id"]
+
+    with pytest.raises(ApiError) as excinfo:
+        ml.stop(launch_id="0" * 32)
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.code == ErrorCode.GPU_LAUNCH_REPLACED
+    assert excinfo.value.details == {
+        "expected_launch_id": "0" * 32,
+        "current_launch_id": current_id,
+    }
+    assert ml.status()["state"] == "starting"
+    assert spawned["terminated"] == []
+
+
+def test_conditional_and_operator_stops_keep_distinct_contracts(spawned):
+    launch_id = ml.start(engine="sync", policy_hub_id="someone/p")["launch_id"]
+    assert ml.stop(launch_id=launch_id)["state"] == "stopping"
+    assert spawned["terminated"] == [spawned["proc"]]
+
+    ml._go_idle_locked()
+    spawned["terminated"].clear()
+    ml.start(engine="sync", policy_hub_id="someone/p")
+    assert ml.stop()["state"] == "stopping"
+    assert spawned["terminated"] == [spawned["proc"]]
+
+
+def test_concurrent_starts_reserve_before_spawn_and_create_no_orphan(spawned, monkeypatch):
+    """Only one request may cross the spawn seam.
+
+    The old check released the state lock before validation and `_popen`, so
+    two requests could both see idle, both spawn a billed process, and the last
+    claimant made the first process unreachable from the launcher.
+    """
+    entered_spawn = threading.Event()
+    release_spawn = threading.Event()
+    calls: list[FakePopen] = []
+    first = FakePopen()
+
+    def blocking_popen(_argv, _env):
+        calls.append(first)
+        entered_spawn.set()
+        assert release_spawn.wait(timeout=2)
+        return first
+
+    monkeypatch.setattr(ml, "_popen", blocking_popen)
+    result: dict[str, object] = {}
+
+    def launch_first():
+        try:
+            result["value"] = ml.start(engine="sync", policy_hub_id="someone/first")
+        except Exception as exc:  # pragma: no cover - asserted below
+            result["error"] = exc
+
+    thread = threading.Thread(target=launch_first)
+    thread.start()
+    assert entered_spawn.wait(timeout=2)
+    try:
+        with pytest.raises(ApiError) as excinfo:
+            ml.start(engine="sync", policy_hub_id="someone/second")
+        assert excinfo.value.code == ErrorCode.GPU_ALREADY_RUNNING
+    finally:
+        release_spawn.set()
+        thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert "error" not in result
+    assert len(calls) == 1
+    assert ml.status()["policy_hub_id"] == "someone/first"
+
+
+def test_failed_spawn_releases_the_start_reservation(spawned, monkeypatch):
+    attempts = 0
+
+    def fail_once(_argv, _env):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("spawn failed")
+        return spawned["proc"]
+
+    monkeypatch.setattr(ml, "_popen", fail_once)
+    with pytest.raises(ApiError):
+        ml.start(engine="sync", policy_hub_id="someone/first")
+
+    result = ml.start(engine="sync", policy_hub_id="someone/second")
+    assert result["started"] is True
+    assert attempts == 2
 
 
 @pytest.mark.parametrize("engine", ["rtc", "sync"])
@@ -1452,7 +1575,7 @@ def test_a_wedged_pump_cannot_write_into_the_next_launch(spawned, fake_clock):
     # A second launch claims the slot with its own process.
     fresh = FakePopen()
     spawned["popen_result"] = fresh
-    ml.start(engine="rtc", policy_hub_id="someone/other")
+    fresh_launch = ml.start(engine="rtc", policy_hub_id="someone/other")
     ml._handle_line(fresh, "[policy] loading 'someone/other' on cuda ...\n")
     assert ml.status()["phase"] == "loading"
 
@@ -1463,6 +1586,7 @@ def test_a_wedged_pump_cannot_write_into_the_next_launch(spawned, fake_clock):
     assert status["state"] == "starting"
     assert status["phase"] == "loading"
     assert status["policy_hub_id"] == "someone/other"
+    assert status["launch_id"] == fresh_launch["launch_id"]
 
 
 def test_the_drain_is_armed_only_after_the_kill_returns(monkeypatch, spawned, fake_clock):

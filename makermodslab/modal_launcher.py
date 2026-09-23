@@ -197,6 +197,7 @@ import signal
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -1367,6 +1368,15 @@ def classify_failure(
 _state_lock = threading.Lock()
 _state: str = STATE_IDLE
 _proc: subprocess.Popen | None = None
+# A start reserves the one launcher slot immediately before crossing the spawn
+# seam. Validation stays outside the reservation (and can therefore fail
+# synchronously without changing visible state), but two validated requests can
+# no longer both create a billed process before either claims `_proc`.
+_start_reserved = False
+# Opaque identity for the current in-memory launch slot. It deliberately has no
+# persistence or history: its only job is letting an SDK stop the same launch it
+# started instead of a replacement that happens to target the same room/policy.
+_launch_id: str | None = None
 _phase: str | None = None
 _engine: str | None = None
 _policy_hub_id: str | None = None
@@ -1471,7 +1481,7 @@ def _go_idle_locked() -> None:
     is here" line is the most useful thing left after a run that failed, and
     the next start replaces it.
     """
-    global _state, _proc, _phase, _engine, _policy_hub_id, _room
+    global _state, _proc, _start_reserved, _launch_id, _phase, _engine, _policy_hub_id, _room
     global _started_at, _started_mono, _idle_since, _last_line, _drain_deadline, _stop_client_exited
     global _profile, _environment, _app_id
     global _task, _horizon, _fps, _video_codec, _s_min, _slack, _model_dtype, _gpu, _region, _tolerance
@@ -1479,6 +1489,8 @@ def _go_idle_locked() -> None:
     global _extra_image_roles, _extra_image_roles_applied
     _state = STATE_IDLE
     _proc = None
+    _start_reserved = False
+    _launch_id = None
     _phase = None
     _engine = None
     _policy_hub_id = None
@@ -1949,7 +1961,7 @@ def start(
     on the container's refusal. That read is the one network call this function
     makes before the listing, it is a few KB, and it cannot fail the launch.
     """
-    global _state, _proc, _phase, _engine, _policy_hub_id, _room
+    global _state, _proc, _start_reserved, _launch_id, _phase, _engine, _policy_hub_id, _room
     global _started_at, _started_mono, _log_path, _message, _hint, _last_line, _idle_since
     global _stop_outcome, _code, _drain_deadline, _profile, _environment, _app_id, _stop_client_exited
     global _task, _horizon, _fps, _video_codec, _s_min, _slack, _model_dtype, _gpu, _region, _tolerance
@@ -1957,10 +1969,11 @@ def start(
     global _extra_image_roles, _extra_image_roles_applied
 
     with _state_lock:
-        if _state in (STATE_STARTING, STATE_READY, STATE_STOPPING):
+        if _start_reserved or _state in (STATE_STARTING, STATE_READY, STATE_STOPPING):
+            activity = STATE_STARTING if _start_reserved else _state
             raise ApiError(
                 409,
-                f"A GPU policy server is already {_state}. Stop it first.",
+                f"A GPU policy server is already {activity}. Stop it first.",
                 code=ErrorCode.GPU_ALREADY_RUNNING,
             )
 
@@ -2049,12 +2062,32 @@ def start(
         flow_steps=plan_knobs.flow_steps,
         extra_image_roles=plan_knobs.extra_image_roles,
     )
-    log_handle, path = _open_log()
+    # Atomically reserve the only spawn slot after every preflight has passed,
+    # and before opening the log or creating a process. The initial check above
+    # gives fast refusals; this second check closes the race between concurrent
+    # requests that validated together.
+    launch_id = uuid.uuid4().hex
+    with _state_lock:
+        if _start_reserved or _state in (STATE_STARTING, STATE_READY, STATE_STOPPING):
+            activity = STATE_STARTING if _start_reserved else _state
+            raise ApiError(
+                409,
+                f"A GPU policy server is already {activity}. Stop it first.",
+                code=ErrorCode.GPU_ALREADY_RUNNING,
+            )
+        _start_reserved = True
+
     try:
-        proc = _popen(argv, child_env(plan, profile=want_profile, gpu=want_gpu, region=network.region))
+        log_handle, path = _open_log()
+        try:
+            proc = _popen(argv, child_env(plan, profile=want_profile, gpu=want_gpu, region=network.region))
+        except Exception:
+            with contextlib.suppress(Exception):
+                log_handle.close()
+            raise
     except Exception as exc:
-        with contextlib.suppress(Exception):
-            log_handle.close()
+        with _state_lock:
+            _start_reserved = False
         logger.exception("Failed to spawn `modal run`")
         raise ApiError(
             400,
@@ -2063,8 +2096,10 @@ def start(
         ) from exc
 
     with _state_lock:
+        _start_reserved = False
         _tail.clear()
         _proc = proc
+        _launch_id = launch_id
         _state = STATE_STARTING
         _phase = None
         _engine = engine
@@ -2139,13 +2174,21 @@ def start(
     _start_pump(proc, log_handle)
     return {
         "started": True,
+        # Use the local value rather than reading the mutable slot after the
+        # pump starts. A very fast failure and replacement must not make this
+        # start response claim another request's identity.
+        "launch_id": launch_id,
         "message": f"Starting the {engine} policy server on Modal. Cold start is usually 1-3 minutes.",
         "gpu": payload,
     }
 
 
-def stop() -> dict[str, Any]:
+def stop(*, launch_id: str | None = None) -> dict[str, Any]:
     """Stop the GPU policy server. Returns the status after the request.
+
+    When `launch_id` is set, the stop is conditional: a replacement launch is
+    left untouched and refused with `gpu.launch_replaced`. Omitting it retains
+    the operator/safety control's unconditional stop semantics.
 
     Returns while cleanup is still underway (`stopping`); client EOF and
     successful remote cleanup together land it in `idle`. A `failed` launcher has nothing
@@ -2159,6 +2202,16 @@ def stop() -> dict[str, Any]:
                 409,
                 "No GPU policy server is running.",
                 code=ErrorCode.GPU_NOT_RUNNING,
+            )
+        if launch_id is not None and launch_id != _launch_id:
+            raise ApiError(
+                409,
+                "The GPU launch changed before it could be stopped. The current launch was left running.",
+                code=ErrorCode.GPU_LAUNCH_REPLACED,
+                details={
+                    "expected_launch_id": launch_id,
+                    "current_launch_id": _launch_id,
+                },
             )
         if _state == STATE_STOPPING:
             return _status_locked()
@@ -2306,6 +2359,7 @@ def _status_locked() -> dict[str, Any]:
     if _state == STATE_READY and _idle_since is not None:
         idle_in = max(0.0, _GPU_IDLE_STOP_S - (now - _idle_since))
     return {
+        "launch_id": _launch_id,
         "state": _state,
         "phase": _phase,
         "engine": _engine,

@@ -619,6 +619,10 @@ class GpuStatusResponse(BaseModel):
     free.
     """
 
+    # Opaque identity of the current transient launch slot. Null while idle;
+    # retained through failed/stopping so callers can still attribute the
+    # terminal status. It is intentionally lost on restart and replacement.
+    launch_id: str | None
     # idle | starting | ready | failed | stopping.
     state: str
     # The container's own progress, parsed from its stdout: tailscale_up |
@@ -821,9 +825,12 @@ class GpuLaunchResponse(BaseModel):
 
     `started` is always true here (every refusal is a coded ApiError raised
     before the spawn), and it is kept so the shape matches the install-manager
-    surface this one is modelled on. `gpu` is the status as of the spawn."""
+    surface this one is modelled on. `launch_id` identifies this transient
+    attempt even if its pump finishes quickly; `gpu` is the status as of the
+    spawn."""
 
     started: bool
+    launch_id: str
     message: str
     gpu: GpuStatusResponse
 
