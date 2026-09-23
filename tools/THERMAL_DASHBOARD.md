@@ -45,7 +45,7 @@ return segment of at least one second. Non-gripper endpoints must differ by no m
 than two degrees, and the empty gripper by no more than ten. Larger differences are
 refused. All adjustments and the exact tested trajectory are stored in `run.json`.
 
-Reaching 100°C on any motor ends repetition and requests a bounded return to captured
+Reaching 130°C on any motor ends repetition and requests a bounded return to captured
 rest. Reaching 135°C raises the critical-reference flag. Stale/invalid feedback, sustained tracking error and
 playback timing faults also stop the test. See [guard details](THERMAL_REPLAY.md).
 
@@ -73,10 +73,10 @@ The 2° measured-arrival tolerance is unchanged. Return errors now identify the 
 that missed home, and logs include measured positions. A released connection is labeled
 closed rather than continuing to say the motors are energized.
 
-All live tools use `makermodslab/thermal_limits.py`: return/alert at **100°C or higher**,
+All live tools use `makermodslab/thermal_limits.py`: return/alert at **130°C or higher**,
 critical reference at **135°C or higher**, and **1800 seconds** by default. Historical
 run files retain their original thresholds. Temperatures can rise during return;
-this cutoff cannot promise an absolute peak below 100°C.
+this cutoff cannot promise an absolute peak below 130°C.
 
 The 135°C reference is not a firmware threshold readback. The newer official
 [RS02 July 2026 manual](https://github.com/RobStride/Product_Information/blob/main/Product%20Literature/RS02/RS02User%20Manual260713.pdf)
