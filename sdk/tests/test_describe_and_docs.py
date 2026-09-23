@@ -134,6 +134,7 @@ def test_index_names_every_namespace_and_the_drilldowns():
 CARD_HEADROOM = 1.2
 CARD_SHRINK_FLOOR = 0.7
 CARD_SIZES_CHARS = {
+    "calibration": 2191,
     "client": 3630,
     "datasets": 3070,
     "flows": 1059,
@@ -147,7 +148,7 @@ CARD_SIZES_CHARS = {
     "robots": 1786,
     "sessions": 4106,
     "sfu": 635,
-    "system": 2603,
+    "system": 2785,
 }
 
 

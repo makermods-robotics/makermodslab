@@ -114,6 +114,20 @@ def test_client_exposes_every_registered_namespace():
 # tags them, the namespace joins the tagged flow above and its entry here is
 # DELETED in the same commit.
 UNTAGGED_NAMESPACES: dict[str, frozenset[str]] = {
+    # The whole calibration observe-and-advance surface: starting is a leased
+    # session, but the wizard's status/step routes never got tagged.
+    "calibration": frozenset(
+        {
+            "auto_calibration_batch_status",
+            "auto_calibration_status",
+            "calibration_status",
+            "complete_calibration_step",
+            "get_calibration_configs",
+        }
+    ),
+    # system is MIXED: the SO-101 identify/wiggle pair is untagged while its
+    # CAN equivalents (identify_maker_arm, wiggle_can_gripper_port) are tagged.
+    "system": frozenset({"identify_arm", "wiggle"}),
     "robots": frozenset(
         {
             "delete_robot",

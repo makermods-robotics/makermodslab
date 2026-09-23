@@ -1,4 +1,5 @@
 from makermodslab_sdk.resources._base import Resource, SdkModel
+from makermodslab_sdk.resources.calibration import CalibrationResource
 from makermodslab_sdk.resources.datasets import DatasetsResource
 from makermodslab_sdk.resources.inference import InferenceResource
 from makermodslab_sdk.resources.jobs import JobsResource
@@ -12,6 +13,7 @@ from makermodslab_sdk.resources.sfu import SfuResource
 from makermodslab_sdk.resources.system import SystemResource
 
 __all__ = [
+    "CalibrationResource",
     "DatasetsResource",
     "InferenceResource",
     "JobsResource",

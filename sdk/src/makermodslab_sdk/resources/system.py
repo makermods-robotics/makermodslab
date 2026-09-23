@@ -388,6 +388,50 @@ class SystemResource(Resource):
             )
         )
 
+    @operation("identify_arm")
+    def identify_arm(self, ports: list[str] | None = None) -> IdentifyResult:
+        """Find an SO-101's port by watching for HAND motion — the user swings
+        the arm's base by hand and the port that saw it is reported.
+
+        Read-only: no motor writes, nothing energizes. ``ports`` narrows the
+        watch; omitted, every detected arm port is watched. The CAN families
+        answer a protocol probe instead (``probe_maker_arm_ports``), because
+        their halves speak different protocols and need no gesture.
+
+        ``success=False`` with ``message`` is the soft answer when no motion
+        was seen — not an HTTP error. ``skipped`` names ports that could not
+        be opened.
+
+        Example:
+            >>> client.system.identify_arm().port
+            '/dev/tty.usbmodem123'
+        """
+        body: dict[str, Any] = {}
+        if ports is not None:
+            body["ports"] = ports
+        return IdentifyResult.model_validate(
+            self._transport.request(
+                "POST", "/api/v1/identify-arm", json=body, action="Identify arm by motion"
+            )
+        )
+
+    @operation("wiggle")
+    def wiggle_gripper(self, port: str) -> WiggleResult:
+        """Wiggle an SO-101 gripper so the user can SEE which arm is on a port.
+
+        The inverse of ``identify_arm``: this one MOVES the gripper, so it is
+        refused while a session holds the bus (``robot.busy.*``). The CAN
+        families have their own (``wiggle_can_gripper``), which opens the bus
+        without its energizing handshake.
+
+        Example:
+            >>> client.system.wiggle_gripper("/dev/tty.usbmodem123").success
+            True
+        """
+        return WiggleResult.model_validate(
+            self._transport.request("POST", "/api/v1/wiggle", json={"port": port}, action="Wiggle gripper")
+        )
+
     @operation("probe_maker_arm_ports")
     def probe_maker_arm_ports(
         self, *, arm_type: str | None = None, ports: list[str] | None = None
@@ -523,3 +567,25 @@ class ArmFamilies(SdkModel):
 class WandbCredentials(SdkModel):
     available: bool
     login_hint: str
+
+
+class IdentifyResult(SdkModel):
+    """POST /api/v1/identify-arm — the port that saw hand motion, if any.
+
+    ``success=False`` with ``message`` means no motion was seen (or no ports
+    were detected); ``skipped`` names ports that could not be opened.
+    """
+
+    success: bool
+    message: str = ""
+    port: str | None = None
+    skipped: list[str] = []
+
+
+class WiggleResult(SdkModel):
+    """POST /api/v1/wiggle — a soft refusal carries ``code`` (e.g.
+    ``robot.busy.wiggle``) beside the message."""
+
+    success: bool
+    message: str = ""
+    code: str | None = None

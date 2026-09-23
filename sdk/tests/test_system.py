@@ -225,3 +225,73 @@ def test_restart_shape():
 
     with mock_client(handler) as client:
         assert client.system.restart().restarting is True
+
+
+def test_so101_identify_arm_omits_ports_when_unset():
+    """The SO-101's motion gesture is read-only; the CAN families answer a
+    protocol probe instead (probe_maker_arm_ports)."""
+    import httpx
+    from helpers import mock_client
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.read())
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "port": "/dev/ttyA",
+                "message": "Detected motion on /dev/ttyA.",
+                "skipped": [],
+            },
+        )
+
+    with mock_client(handler) as client:
+        result = client.system.identify_arm()
+        assert seen["body"] == {}
+        assert result.port == "/dev/ttyA"
+        client.system.identify_arm(ports=["/dev/ttyA", "/dev/ttyB"])
+    assert seen["path"] == "/api/v1/identify-arm"
+    assert seen["body"] == {"ports": ["/dev/ttyA", "/dev/ttyB"]}
+
+
+def test_so101_identify_no_motion_is_a_soft_answer():
+    import httpx
+    from helpers import mock_client
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"success": False, "message": "No motion detected.", "skipped": ["/dev/busy"]}
+        )
+
+    with mock_client(handler) as client:
+        result = client.system.identify_arm()
+    assert result.success is False and result.port is None
+    assert result.skipped == ["/dev/busy"]
+
+
+def test_so101_wiggle_sends_the_port_and_relays_a_busy_code():
+    import httpx
+    from helpers import mock_client
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.read())
+        return httpx.Response(
+            200,
+            json={
+                "success": False,
+                "message": "A gripper wiggle is already in progress.",
+                "code": "robot.busy.wiggle",
+            },
+        )
+
+    with mock_client(handler) as client:
+        result = client.system.wiggle_gripper("/dev/ttyA")
+    assert seen["path"] == "/api/v1/wiggle"
+    assert seen["body"] == {"port": "/dev/ttyA"}
+    assert result.success is False and result.code == "robot.busy.wiggle"
