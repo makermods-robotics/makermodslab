@@ -204,10 +204,12 @@ class GpuStatus(SdkModel):
 
 
 class GpuLaunch(SdkModel):
-    """POST /api/v1/remote-inference/gpu/start response."""
+    """POST /api/v1/remote-inference/gpu/start response. ``launch_id`` is
+    ``None`` from a server that predates launch ids — such a server also
+    ignores ``gpu_stop(launch_id=...)``, so cleanup cannot be scoped."""
 
     started: bool
-    launch_id: str
+    launch_id: str | None = None
     message: str
     gpu: GpuStatus
 

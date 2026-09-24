@@ -235,6 +235,23 @@ class RemoteInferenceRun:
             )
         return status
 
+    def _check_launch_identity(self) -> None:
+        # A server that predates launch ids omits the key even while idle (a
+        # current one reports it as null), and it ignores ?launch_id= on stop.
+        # This flow's cleanup would then be an unscoped stop that can hit a
+        # replacement launch, so refuse before anything is billed.
+        status = self._client.sessions.gpu_status()
+        if "launch_id" not in status.model_fields_set:
+            raise self._flow_error(
+                f"The server at {self._client.base_url} predates GPU launch ids (no launch_id in "
+                "its GPU status), so this flow could not scope its GPU cleanup to its own launch; "
+                "nothing was started. Update the server, or compose the primitives yourself and "
+                "own the stop decision (gpu_stop() without an id stops whichever GPU is up).",
+                last_state=status.state,
+                last_phase=status.phase,
+                recovery_call="client.sessions.gpu_start()",
+            )
+
     def _start_gpu(self) -> GpuLaunch:
         fields: dict[str, object] = {
             "policy_hub_id": self._policy_hub_id,
@@ -255,6 +272,18 @@ class RemoteInferenceRun:
                 fields[name] = value
         launch = self._client.sessions.gpu_start(**fields)
         self._launch = launch
+        if launch.launch_id is None:
+            # Never fall back to an unscoped stop: the GPU keeps running (and
+            # idles itself off) rather than risk stopping someone else's.
+            raise self._flow_error(
+                f"GPU start was accepted without a launch_id, so this flow cannot own or scope the "
+                f"cleanup of that launch; it was left running and no robot session was started: "
+                f"{launch.message}. Stop it with client.sessions.gpu_stop() only once you have "
+                "confirmed it is yours; it also stops itself after ~10 idle minutes.",
+                last_state=launch.gpu.state,
+                last_phase=launch.gpu.phase,
+                recovery_call="client.sessions.gpu_status()",
+            )
         if not launch.started or launch.gpu.launch_id != launch.launch_id:
             raise self._flow_error(
                 f"GPU launch was not accepted with one stable identity "
@@ -266,7 +295,9 @@ class RemoteInferenceRun:
         return launch
 
     def _wait_for_gpu(self) -> GpuStatus:
-        assert self._launch is not None
+        # _start_gpu refuses a launch without an id, so every comparison below
+        # is against a real identity, never None == None.
+        assert self._launch is not None and self._launch.launch_id is not None
         started_at = self._clock()
         while True:
             status = self._client.sessions.gpu_status()
@@ -344,6 +375,7 @@ class RemoteInferenceRun:
             raise RuntimeError("A remote-inference flow context cannot be entered twice")
         self._entered = True
         self._check_transport()
+        self._check_launch_identity()
         try:
             self._start_gpu()
             self._wait_for_gpu()
@@ -442,8 +474,11 @@ class RemoteInferenceFlows:
     ) -> RemoteInferenceRun:
         """Launch a matching GPU, start remote inference, and own both lifetimes.
 
-        Composes ``sessions.remote_inference_transport`` → ``gpu_start`` →
-        exact-``launch_id`` ``gpu_status`` reads → ``remote_infer``. The call
+        Composes ``sessions.remote_inference_transport`` → ``gpu_status``
+        (launch-identity preflight) → ``gpu_start`` → exact-``launch_id``
+        ``gpu_status`` reads → ``remote_infer``. A server that predates
+        launch ids is refused before anything starts, because its cleanup
+        could only be an unscoped stop. The call
         itself starts nothing; entering the context performs startup. Exit
         stops the robot session first, then conditionally calls
         ``gpu_stop(launch_id=...)``, so it cannot stop a replacement launch.

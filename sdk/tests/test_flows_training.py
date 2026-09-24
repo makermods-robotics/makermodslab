@@ -17,11 +17,13 @@
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Callable
 
 import httpx
 import pytest
 from helpers import mock_client
+from makermodslab_sdk import CompatibilityWarning
 from makermodslab_sdk.flows_training import (
     PublishWaitTimeout,
     TrainingFlowError,
@@ -310,3 +312,78 @@ def test_invalid_timing_is_rejected_before_job_creation():
         TrainingFlows(client).train_and_publish(
             "maker/pick", train_timeout=5, publish_timeout=5, poll_interval=0
         )
+
+
+def old_server_status(state: str, **kwargs) -> dict:
+    """A publish-status body from a server that predates publish ids: the key is absent."""
+    body = status(state, **kwargs)
+    del body["publish_id"]
+    return body
+
+
+OLD_SERVER_START = {"started": True, "model_id": JOB_ID, "message": "Publish started"}
+
+
+def test_old_server_without_publish_ids_completes_on_job_and_repo_checks_and_warns_once():
+    handler, requests = scripted_handler(
+        jobs=(job_body("done"),),
+        publish_start=OLD_SERVER_START,
+        statuses=(old_server_status("running"), old_server_status("running"), old_server_status("done")),
+    )
+    with mock_client(handler) as client, warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = TrainingFlows(client).train_and_publish(
+            "maker/pick", train_timeout=5, publish_timeout=5, sleep_fn=lambda _: None
+        )
+    assert result.publish.state == "done" and result.publish.publish_id is None
+    skew = [w for w in caught if issubclass(w.category, CompatibilityWarning)]
+    assert len(skew) == 1
+    assert "publish_id" in str(skew[0].message)
+    assert "cannot" in str(skew[0].message)
+    assert paths(requests).count("/api/v1/models/publish-status") == 3
+
+
+def test_old_server_still_refuses_a_slot_taken_by_another_job():
+    handler, _ = scripted_handler(
+        jobs=(job_body("done"),),
+        publish_start=OLD_SERVER_START,
+        statuses=(old_server_status("done", model_id="other"),),
+    )
+    with (
+        mock_client(handler) as client,
+        pytest.warns(CompatibilityWarning),
+        pytest.raises(TrainingFlowError, match="belongs to 'other'"),
+    ):
+        TrainingFlows(client).train_and_publish(
+            "maker/pick", train_timeout=5, publish_timeout=5, sleep_fn=lambda _: None
+        )
+
+
+def test_new_server_publish_ids_never_warn():
+    handler, _ = scripted_handler(jobs=(job_body("done"),))
+    with mock_client(handler) as client, warnings.catch_warnings():
+        warnings.simplefilter("error", CompatibilityWarning)
+        TrainingFlows(client).train_and_publish(
+            "maker/pick", train_timeout=5, publish_timeout=5, sleep_fn=lambda _: None
+        )
+
+
+def test_old_server_publish_timeout_has_no_attempt_id_and_says_what_to_check():
+    handler, _ = scripted_handler(
+        jobs=(job_body("done"),),
+        publish_start=OLD_SERVER_START,
+        statuses=(old_server_status("running"),),
+    )
+    with (
+        mock_client(handler) as client,
+        pytest.warns(CompatibilityWarning),
+        pytest.raises(PublishWaitTimeout) as exc,
+    ):
+        TrainingFlows(client).train_and_publish(
+            "maker/pick", train_timeout=5, publish_timeout=0, sleep_fn=lambda _: None
+        )
+    assert exc.value.publish_id is None
+    text = str(exc.value)
+    assert "None" not in text
+    assert f".model_id == {JOB_ID!r}" in text
+    assert "client.models.publish_status()" in text

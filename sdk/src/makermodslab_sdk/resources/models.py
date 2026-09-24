@@ -439,8 +439,11 @@ class RunCheckpoints(RecordList):
 
 
 class PublishStart(SdkModel):
+    """POST /api/v1/models/publish — ``publish_id`` names this attempt in
+    publish-status; ``None`` from a server that predates attempt ids."""
+
     started: bool
-    publish_id: str
+    publish_id: str | None = None
     model_id: str
     message: str
 

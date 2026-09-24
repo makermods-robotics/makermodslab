@@ -59,6 +59,17 @@ marked _(reference)_ name where the Python implementation lives.
   propagate (the real request would hit them too).
 - Response models are tolerant everywhere: unknown keys are kept, never
   rejected (an older SDK must survive a newer server).
+- The reverse holds too: a newer SDK must survive an older server, and the
+  handshake cannot be relied on to tell them apart (two builds can report
+  the same `version`). A response field the server added after v0 is
+  Optional on the SDK side, so its absence parses as `None` instead of
+  failing validation. A flow that depends on such a field never compares
+  `None` with `None` as if it were a match. It degrades with a
+  `CompatibilityWarning` when the remaining checks still make the result
+  safe to report (`train_and_publish` without `publish_id` falls back to the
+  job and repository checks). It refuses with a clear error, before starting
+  anything, when they do not: `remote_inference` without `launch_id` could
+  only clean up with an unscoped GPU stop, so it never launches.
 - _(reference: `client.py`)_
 
 ## 5. Sessions and the lease

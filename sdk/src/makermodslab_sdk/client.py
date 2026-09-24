@@ -5,7 +5,7 @@ import warnings
 import httpx
 
 from makermodslab_sdk._transport import DEFAULT_TIMEOUT, Transport
-from makermodslab_sdk.errors import ApiError
+from makermodslab_sdk.errors import ApiError, CompatibilityWarning
 from makermodslab_sdk.flows import Flows
 from makermodslab_sdk.resources import (
     CalibrationResource,
@@ -47,10 +47,6 @@ RESOURCE_CLASSES: dict[str, type[Resource]] = {
     "sessions": SessionsResource,
     "system": SystemResource,
 }
-
-
-class CompatibilityWarning(UserWarning):
-    """The server looks older than this SDK targets (warn-only, never fatal)."""
 
 
 def _parse_version(version: str) -> tuple[int, ...] | None:

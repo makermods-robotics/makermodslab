@@ -22,11 +22,12 @@ Use those primitives directly when a run needs a different publish policy.
 from __future__ import annotations
 
 import time
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from makermodslab_sdk.errors import MakerModsError
+from makermodslab_sdk.errors import CompatibilityWarning, MakerModsError
 from makermodslab_sdk.resources.jobs import Job
 from makermodslab_sdk.resources.models import PublishStatus
 
@@ -43,13 +44,23 @@ class TrainingFlowError(MakerModsError):
 
 
 class PublishWaitTimeout(TrainingFlowError, TimeoutError):  # noqa: N818
-    """Publishing is still running; ``publish_id`` identifies its slot attempt."""
+    """Publishing is still running; ``publish_id`` identifies its slot attempt
+    (``None`` when the server predates attempt ids)."""
 
-    def __init__(self, *, job_id: str, publish_id: str, waited: float, last_state: str) -> None:
+    def __init__(self, *, job_id: str, publish_id: str | None, waited: float, last_state: str) -> None:
+        if publish_id is not None:
+            confirm = f"confirm .publish_id == {publish_id!r}"
+        else:
+            # An older server names no attempt: the job is the best identity,
+            # and it cannot tell this attempt from a later publish of the job.
+            confirm = (
+                f"confirm .model_id == {job_id!r} (this server reports no publish attempt id, "
+                "so a later publish of the same job looks identical)"
+            )
         super().__init__(
             f"Publish for job {job_id!r} is still {last_state!r} after {waited:g}s. "
             "The publish remains active; call client.models.publish_status() to keep checking it "
-            f"and confirm .publish_id == {publish_id!r}. Next step: client.models.publish_status().",
+            f"and {confirm}. Next step: client.models.publish_status().",
             job_id=job_id,
         )
         self.publish_id = publish_id
@@ -168,10 +179,21 @@ class TrainingFlows:
                 job_id=job_id,
             )
 
+        if started.publish_id is None:
+            # Server skew: a build before publish attempt ids. Comparing None
+            # with None would pass vacuously, so say plainly what is not checked.
+            warnings.warn(
+                f"the server at {self._client.base_url} returned no publish_id, so this flow cannot "
+                f"verify the publish attempt it started; it checks only that the slot belongs to job "
+                f"{job_id!r} and repository {expected_repo_id!r}. Update the server for attempt identity.",
+                CompatibilityWarning,
+                stacklevel=2,
+            )
+
         started_at = clock()
         while True:
             status = self._client.models.publish_status()
-            if status.publish_id != started.publish_id:
+            if started.publish_id is not None and status.publish_id != started.publish_id:
                 raise TrainingFlowError(
                     f"The publish slot now belongs to attempt {status.publish_id!r}, not "
                     f"{started.publish_id!r} for job {job_id!r}. Next step: inspect "

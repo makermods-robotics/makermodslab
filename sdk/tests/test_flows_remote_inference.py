@@ -96,6 +96,10 @@ class Script:
 def success_routes(*statuses: dict) -> dict:
     return {
         ("GET", "/api/v1/remote-inference/transport"): [(200, transport())],
+        # The first GPU read is the launch-identity preflight: a server that
+        # carries launch_id reports the key even while idle (null).
+        ("GET", "/api/v1/remote-inference/gpu"): [(200, gpu("idle", launch_id=None))]
+        + [(200, item) for item in statuses],
         ("POST", "/api/v1/remote-inference/gpu/start"): [
             (
                 200,
@@ -107,7 +111,6 @@ def success_routes(*statuses: dict) -> dict:
                 },
             )
         ],
-        ("GET", "/api/v1/remote-inference/gpu"): [(200, item) for item in statuses],
         ("POST", "/api/v1/sessions"): [(201, {"session": session(), "warnings": ["camera warning"]})],
         ("POST", f"/api/v1/sessions/{SESSION_ID}/stop"): [
             (200, {"session": session(), "result": {"success": True}})
@@ -153,6 +156,7 @@ def test_context_launches_matching_halves_and_cleans_up_session_before_gpu():
     assert slept == [2]
     assert paths(script) == [
         "/api/v1/remote-inference/transport",
+        "/api/v1/remote-inference/gpu",
         "/api/v1/remote-inference/gpu/start",
         "/api/v1/remote-inference/gpu",
         "/api/v1/remote-inference/gpu",
@@ -160,8 +164,8 @@ def test_context_launches_matching_halves_and_cleans_up_session_before_gpu():
         f"/api/v1/sessions/{SESSION_ID}/stop",
         "/api/v1/remote-inference/gpu/stop",
     ]
-    gpu_start = json.loads(script.requests[1].content)
-    session_start = json.loads(script.requests[4].content)
+    gpu_start = json.loads(script.requests[2].content)
+    session_start = json.loads(script.requests[5].content)
     for key, value in {
         "policy_hub_id": "maker/act-pick",
         "engine": "rtc",
@@ -358,3 +362,54 @@ def test_invalid_timing_starts_nothing(startup_timeout: float, poll_interval: fl
             startup_timeout=startup_timeout,
             poll_interval=poll_interval,
         )
+
+
+def old_server_gpu(state: str) -> dict:
+    """A GPU status from a server that predates launch ids: the key is absent."""
+    body = gpu(state)
+    del body["launch_id"]
+    return body
+
+
+def test_old_server_without_launch_identity_is_refused_before_any_gpu_starts():
+    # Such a server ignores ?launch_id= on stop, so this flow could only clean
+    # up with an unscoped stop that might hit someone else's launch. Refuse
+    # while nothing is billed rather than guess.
+    script = Script(
+        {
+            ("GET", "/api/v1/remote-inference/transport"): [(200, transport())],
+            ("GET", "/api/v1/remote-inference/gpu"): [(200, old_server_gpu("idle"))],
+        }
+    )
+    with (
+        mock_client(script) as client,
+        pytest.raises(RemoteInferenceFlowError, match="launch_id") as error,
+        client.flows.remote_inference("bench", policy_ref="maker/act-pick"),
+    ):
+        pass
+    assert paths(script) == [
+        "/api/v1/remote-inference/transport",
+        "/api/v1/remote-inference/gpu",
+    ]
+    assert error.value.launch_id is None and error.value.session_id is None
+    assert error.value.last_state == "idle"
+    assert "gpu_start" in error.value.recovery_call
+    assert "update" in str(error.value).lower()
+
+
+def test_start_response_without_launch_id_is_never_cleaned_up_unscoped():
+    routes = success_routes()
+    routes[("POST", "/api/v1/remote-inference/gpu/start")] = [
+        (200, {"started": True, "message": "started", "gpu": old_server_gpu("starting")})
+    ]
+    script = Script(routes)
+    with (
+        mock_client(script) as client,
+        pytest.raises(RemoteInferenceFlowError, match="launch_id") as error,
+        client.flows.remote_inference("bench", policy_ref="maker/act-pick"),
+    ):
+        pass
+    assert error.value.launch_id is None
+    assert "gpu_status" in error.value.recovery_call
+    assert "/api/v1/remote-inference/gpu/stop" not in paths(script)
+    assert "/api/v1/sessions" not in paths(script)

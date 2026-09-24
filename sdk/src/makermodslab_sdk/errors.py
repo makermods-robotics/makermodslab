@@ -190,6 +190,13 @@ def suggestion_for(code: str | None) -> str | None:
     return None
 
 
+class CompatibilityWarning(UserWarning):
+    """The server looks older than this SDK targets (warn-only, never fatal).
+
+    Emitted by the first-request handshake, and by a flow that had to skip a
+    check because the server predates a field it relies on (SPEC §4)."""
+
+
 class MakerModsError(Exception):
     """Base for every error this SDK raises on purpose."""
 

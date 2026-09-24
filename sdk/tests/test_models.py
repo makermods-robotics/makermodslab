@@ -293,3 +293,15 @@ def test_policies_listing_shapes():
     # attribute is policy-first
     assert listing.policies[0].deployable is True
     assert listing.policies[0].name == "pick-place v2"
+
+
+def test_publish_start_from_an_older_server_without_publish_id_parses():
+    # A peer on a build before publish attempts had ids answers the old
+    # three-key shape; the publish itself succeeded, so parsing must too.
+    _, started = call_one(
+        {"started": True, "model_id": MODEL_ID, "message": "Publish started"},
+        lambda c: c.models.publish(MODEL_ID, steps=[100]),
+    )
+    assert isinstance(started, PublishStart)
+    assert started.started is True and started.model_id == MODEL_ID
+    assert started.publish_id is None

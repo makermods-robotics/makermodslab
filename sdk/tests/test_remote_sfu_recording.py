@@ -222,3 +222,20 @@ def test_sfu_token_refuses_coded_without_sfu_end_to_end(sdk_client):
         sdk_client.sfu.token()
     assert excinfo.value.code == "sfu.disabled"
     assert "Next step" in str(excinfo.value)
+
+
+def test_gpu_start_from_an_older_server_without_launch_id_parses():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "started": True,
+                "message": "launching",
+                "gpu": {"state": "starting", "elapsed_s": 0.0},
+            },
+        )
+
+    with mock_client(handler) as client:
+        launch = client.sessions.gpu_start(policy_hub_id="me/act-pick")
+    assert launch.started is True
+    assert launch.launch_id is None and launch.gpu.launch_id is None
