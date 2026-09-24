@@ -219,6 +219,9 @@ def test_no_new_routes_outside_api_v1():
 V1_ONLY_ROUTES: frozenset[str] = frozenset(
     [
         "GET /api/v1/system/wandb-credentials",
+        # A checkpoint's policy-config summary addressed by an inference
+        # policy_ref rather than a job id (the SDK's pre-start camera check).
+        "GET /api/v1/policy-config",
         # Live Metal gripper effort-controller status.
         "GET /api/v1/robots/{name}/gripper-status",
         "GET /api/v1/recording-preview/{camera_name}",
