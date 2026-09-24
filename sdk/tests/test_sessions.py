@@ -15,7 +15,7 @@ from __future__ import annotations
 import httpx
 import pytest
 from helpers import mock_client
-from makermodslab_sdk import NotFoundError, SessionHeldError
+from makermodslab_sdk import NotFoundError, ServerTooOldError, SessionHeldError
 from makermodslab_sdk.resources.sessions import (
     CurrentSession,
     SessionInfo,
@@ -225,6 +225,48 @@ def test_stale_recording_status_refused_before_hardware_end_to_end(sdk_client):
     with pytest.raises(NotFoundError) as excinfo:
         sdk_client.sessions.recording_status("__sdk_missing_session__")
     assert excinfo.value.code == "session.not_found"
+
+
+# An older server (same reported version) has no session-scoped recording
+# routes and answers FastAPI's bare, UNCODED 404. That must never read as
+# "session not found" -- the new routes' own refusal is a CODED 404.
+BARE_404 = (404, {"detail": "Not Found"})
+
+
+def test_recording_status_on_server_predating_route_says_server_too_old():
+    script = Script().add("GET", "/api/v1/sessions/sess-1/recording/status", BARE_404)
+    with mock_client(script) as client, pytest.raises(ServerTooOldError) as excinfo:
+        client.sessions.recording_status("sess-1")
+    err = excinfo.value
+    assert not isinstance(err, NotFoundError)
+    assert err.status == 404 and err.code is None
+    text = str(err)
+    assert "predates" in text and "update the server" in text
+    assert "Next step:" in text and "client.recording.status()" in text
+
+
+def test_recording_episode_task_on_server_predating_route_says_server_too_old():
+    script = Script().add("POST", "/api/v1/sessions/sess-1/recording/episode-task", BARE_404)
+    with mock_client(script) as client, pytest.raises(ServerTooOldError) as excinfo:
+        client.sessions.recording_episode_task("sess-1", "pick")
+    text = str(excinfo.value)
+    assert "predates" in text and "Next step:" in text and "web UI" in text
+
+
+def test_coded_session_not_found_on_recording_routes_is_unchanged():
+    gone = (404, {"detail": "No active session with id 'sess-1'.", "code": "session.not_found"})
+    script = (
+        Script()
+        .add("GET", "/api/v1/sessions/sess-1/recording/status", gone)
+        .add("POST", "/api/v1/sessions/sess-1/recording/episode-task", gone)
+    )
+    with mock_client(script) as client:
+        with pytest.raises(NotFoundError) as status_err:
+            client.sessions.recording_status("sess-1")
+        with pytest.raises(NotFoundError) as task_err:
+            client.sessions.recording_episode_task("sess-1", "pick")
+    for err in (status_err.value, task_err.value):
+        assert type(err) is NotFoundError and err.code == "session.not_found"
 
 
 def test_stop_returns_result_verbatim():

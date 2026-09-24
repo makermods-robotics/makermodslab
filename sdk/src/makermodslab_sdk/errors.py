@@ -15,6 +15,7 @@ Catchable hierarchy (everything derives from MakerModsError):
       InvalidRequestError   ``request.*`` codes / HTTP 422
       RobotBusyError        ``robot.busy.*`` (``.busy_with`` names the holder)
       SessionHeldError      ``session.held`` (``.holder`` names the session)
+      ServerTooOldError     a bare uncoded 404 on a route newer than the server
 
 Branch on ``isinstance`` or on ``.code`` — never on the prose, which the
 server is free to reword.
@@ -31,6 +32,7 @@ __all__ = [
     "MakerModsError",
     "NotFoundError",
     "RobotBusyError",
+    "ServerTooOldError",
     "SessionHeldError",
     "build_api_error",
 ]
@@ -259,6 +261,30 @@ class SessionHeldError(ApiError):
             if isinstance(holder, dict):
                 return holder
         return None
+
+
+class ServerTooOldError(ApiError):
+    """The server has no such ROUTE: it predates a call this SDK makes.
+
+    Raised only for a route the SDK marks as newer than some servers, when the
+    answer is FastAPI's bare, uncoded ``{"detail": "Not Found"}``. Deliberately
+    not a NotFoundError: a coded ``*.not_found`` means the named resource is
+    gone, this means the server cannot answer the question at all (SPEC §4)."""
+
+
+def is_bare_route_404(status: int, body: Any) -> bool:
+    """FastAPI's own "no such route" answer: 404 with exactly ``{"detail": "Not Found"}``."""
+    return status == 404 and body == {"detail": "Not Found"}
+
+
+def build_server_too_old_error(action: str, fallback: str) -> ServerTooOldError:
+    suggestion = f"update the server to a build that has this route; until then, {fallback}"
+    message = (
+        f"{action} failed (404): this server predates the route (it answered FastAPI's bare "
+        f"'Not Found', not a coded error). Both builds may report the same version.\n"
+        f"Next step: {suggestion}"
+    )
+    return ServerTooOldError(message, status=404, detail="Not Found", suggestion=suggestion)
 
 
 def _normalize_detail(raw: Any) -> str | None:

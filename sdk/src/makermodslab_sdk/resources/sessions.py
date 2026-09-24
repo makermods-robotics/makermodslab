@@ -793,6 +793,10 @@ class SessionsResource(Resource):
                 f"/api/v1/sessions/{quote(session_id, safe='')}/recording/episode-task",
                 json={"task": task},
                 action="Set recording episode task for session",
+                newer_route_fallback=(
+                    "use the web UI's recording controls to name each episode; this server has "
+                    "no SDK route for per-episode tasks."
+                ),
             )
         )
 
@@ -809,6 +813,10 @@ class SessionsResource(Resource):
                 "GET",
                 f"/api/v1/sessions/{quote(session_id, safe='')}/recording/status",
                 action="Get recording status for session",
+                newer_route_fallback=(
+                    "client.recording.status() reports the live recording's progress, but is not "
+                    "scoped to a session id (check client.sessions.current() is still yours)."
+                ),
             )
         )
 

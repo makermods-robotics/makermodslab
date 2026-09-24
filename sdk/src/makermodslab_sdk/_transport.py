@@ -14,7 +14,7 @@ from typing import Any
 
 import httpx
 
-from .errors import ConnectionFailedError, build_api_error
+from .errors import ConnectionFailedError, build_api_error, build_server_too_old_error, is_bare_route_404
 
 DEFAULT_TIMEOUT = 30.0
 
@@ -40,12 +40,18 @@ class Transport:
         json: Any = None,
         params: dict[str, Any] | None = None,
         action: str | None = None,
+        newer_route_fallback: str | None = None,
     ) -> Any:
         """Perform a request; return the parsed JSON body (None on 204/empty).
 
         ``action`` is the human-readable label errors lead with ("Start
         teleoperation session") — the first thing the reader of a failure
         sees, so callers should always pass one.
+
+        ``newer_route_fallback`` marks a route some servers predate (SPEC §4):
+        FastAPI's bare, uncoded 404 there raises ServerTooOldError whose next
+        step is this text, instead of a generic ApiError. Coded 404s are
+        decoded as usual.
         """
         if self._on_first_request is not None:
             # Cleared BEFORE running so the hook's own SDK calls don't recurse.
@@ -66,6 +72,8 @@ class Transport:
                 body = response.json()
             except Exception:
                 body = None
+            if newer_route_fallback is not None and is_bare_route_404(response.status_code, body):
+                raise build_server_too_old_error(label, newer_route_fallback)
             raise build_api_error(response.status_code, body, label)
         if response.status_code == 204 or not response.content:
             return None

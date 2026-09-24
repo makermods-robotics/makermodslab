@@ -150,3 +150,24 @@ def test_unreachable_server_raises_connection_failed_with_guidance():
     assert err.base_url == "http://mock"
     assert "http://mock" in str(err)
     assert "Next step:" in str(err)
+
+
+def test_bare_404_is_server_too_old_only_on_routes_marked_newer():
+    """FastAPI's uncoded {"detail": "Not Found"} means "no such route" only
+    where the caller marked the route as newer than some servers; elsewhere,
+    and for any coded 404, decoding is unchanged."""
+    from makermodslab_sdk import ServerTooOldError
+
+    def bare(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    err = raise_via(bare, ServerTooOldError, action="Do thing", newer_route_fallback="use the web UI.")
+    assert err.status == 404 and err.code is None
+    assert str(err).startswith("Do thing failed (404): this server predates")
+    assert "Next step: update the server" in str(err) and "use the web UI." in str(err)
+    assert type(raise_via(bare, ApiError)) is ApiError
+
+    def coded(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "Not Found", "code": "session.not_found"})
+
+    assert type(raise_via(coded, NotFoundError, newer_route_fallback="x")) is NotFoundError

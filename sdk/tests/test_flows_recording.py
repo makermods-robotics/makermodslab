@@ -21,6 +21,7 @@ import json
 import httpx
 import pytest
 from helpers import mock_client
+from makermodslab_sdk import ServerTooOldError
 from makermodslab_sdk.flows_recording import RecordingFlowError, RecordingFlowTimeout
 
 
@@ -248,3 +249,21 @@ def test_stale_session_cannot_submit_prompt():
     with mock_client(script) as client, pytest.raises(RecordingFlowError, match="no longer owns"):
         client.flows.record_episodes("bench", "me/dataset", task=["pick"], timeout=1)
     assert not any(r.url.path.endswith("/recording/episode-task") for r in script.requests)
+
+
+def test_server_predating_session_recording_routes_stops_the_session_and_says_so():
+    """An older server starts the recording, then has no session-scoped status
+    route: the flow must surface ServerTooOldError (not "session not found")
+    and stop the session it started on the way out."""
+    script_routes = routes()
+    script_routes[("GET", "/api/v1/sessions/rec-1/recording/status")] = [(404, {"detail": "Not Found"})]
+    script_routes[("POST", "/api/v1/sessions/rec-1/stop")] = [
+        (200, {"session": session(), "result": {"success": True}}),
+    ]
+    script = Script(script_routes)
+    with mock_client(script) as client, pytest.raises(ServerTooOldError) as error:
+        client.flows.record_episodes("bench", "me/dataset", task="pick", episodes=3, timeout=10)
+    assert "predates" in str(error.value)
+    assert [r.url.path for r in script.requests if r.url.path.endswith("/stop")] == [
+        "/api/v1/sessions/rec-1/stop"
+    ]

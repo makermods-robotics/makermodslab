@@ -70,6 +70,15 @@ marked _(reference)_ name where the Python implementation lives.
   job and repository checks). It refuses with a clear error, before starting
   anything, when they do not: `remote_inference` without `launch_id` could
   only clean up with an unscoped GPU stop, so it never launches.
+- A route the server added after v0 can be missing entirely. An older
+  server answers FastAPI's bare, uncoded 404 `{"detail": "Not Found"}`,
+  which must never be read as a coded `*.not_found`. A call on such a route
+  passes `newer_route_fallback` to the transport, and that bare 404 raises
+  `ServerTooOldError` (not a `NotFoundError`) whose next step is "update the
+  server" plus the fallback. Coded 404s decode as usual. The session-scoped
+  recording routes (`sessions.recording_status`,
+  `sessions.recording_episode_task`) are marked this way; a flow that hits
+  one mid-session stops the session it started on the way out.
 - _(reference: `client.py`)_
 
 ## 5. Sessions and the lease

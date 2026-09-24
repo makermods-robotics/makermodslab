@@ -21,6 +21,7 @@ from makermodslab_sdk.errors import (
     MakerModsError,
     NotFoundError,
     RobotBusyError,
+    ServerTooOldError,
     SessionHeldError,
 )
 from makermodslab_sdk.flows_calibration import (
@@ -82,6 +83,7 @@ __all__ = [
     "RemoteInferenceStartupTimeout",
     "RobotBusyError",
     "SavedRobotHardware",
+    "ServerTooOldError",
     "SessionHeldError",
     "SessionLostError",
     "SessionStoppedError",
