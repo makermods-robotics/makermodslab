@@ -309,3 +309,68 @@ def test_a_released_wizard_is_read_through_its_arm_type():
         )
     assert result.status.status == "completed"
     assert seen["steps"] == [{"step": 1}]
+
+
+class FakeClock:
+    """A clock the test moves by hand: the human's think time inside
+    confirm(), and each sleep_fn call, advance it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def test_a_slow_human_is_not_charged_against_the_timeout():
+    """Seen on hardware: the human took ~17 minutes to pose the arm, the
+    server wrote the zero the moment the step was confirmed, and the flow
+    still raised a timeout for a calibration that had succeeded. Waiting on
+    the human is not the server's budget."""
+    handler, seen = scripted([AWAITING, COMPLETED], status_path="/api/v1/calibration-status")
+    clock = FakeClock()
+
+    def slow_confirm(_status):
+        clock.now += 1015.0  # posing the arm by hand
+        return True
+
+    with mock_client(handler) as client:
+        result = client.flows.calibrate_zero(
+            "bench",
+            device_type="robot",
+            confirm=slow_confirm,
+            timeout=300.0,
+            sleep_fn=clock.sleep,
+            clock=clock,
+        )
+    assert result.status.status == "completed"
+    assert seen["steps"] == [{"step": 1}]
+
+
+def test_a_slow_server_still_times_out_after_the_step_and_stops_the_session():
+    """The budget pauses for the human, not for the server: a step accepted
+    and then never finished still times out, quoting the FRESH status."""
+    saving = {**AWAITING, "status": "saving", "message": "Saving calibration…"}
+    handler, seen = scripted([AWAITING, saving], status_path="/api/v1/calibration-status")
+    clock = FakeClock()
+
+    def slow_confirm(_status):
+        clock.now += 1015.0
+        return True
+
+    with mock_client(handler) as client, pytest.raises(CalibrationFlowTimeout) as excinfo:
+        client.flows.calibrate_zero(
+            "bench",
+            device_type="robot",
+            confirm=slow_confirm,
+            timeout=5.0,
+            poll_interval=1.0,
+            sleep_fn=clock.sleep,
+            clock=clock,
+        )
+    assert seen["steps"] == [{"step": 1}]
+    assert "still 'saving' after 5s" in str(excinfo.value)  # the server's 5s, not the human's 1015
+    assert seen["stops"] == 1

@@ -144,7 +144,11 @@ marked _(reference)_ name where the Python implementation lives.
 - A flow that needs a HUMAN act (posing an arm before a calibration step is
   recorded) takes a REQUIRED confirmation callback with no default. An
   automatic confirmation would let a client assert a physical fact it cannot
-  observe; declining is a valid answer that writes nothing.
+  observe; declining is a valid answer that writes nothing. Such a flow's
+  timeout bounds the server's work only: time spent inside the callback is
+  not charged, and a confirmed step is followed by a fresh status read before
+  any timeout verdict, so a step the server accepted and finished is never
+  reported as a timeout.
 - A journey whose loop is continuous and visual — the SO-101 range sweep,
   episode-by-episode recording judgement — gets no flow. The client exposes
   the status so an agent can narrate, and says plainly that the UI is the

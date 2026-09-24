@@ -211,6 +211,15 @@ class CalibrationFlows:
         posed by hand), so there is nothing to return to rest. The Maker and
         Metal families publish exactly one step today; this loop handles more.
 
+        ``timeout`` bounds the SERVER's work — connecting, applying each
+        confirmed step, saving — and NOT the human: the clock is paused while
+        ``confirm`` runs, so posing the arm may take as long as it takes.
+        After every confirmed step the status is read again before any
+        timeout verdict, so a step the server accepted and finished is never
+        reported as a timeout. Raises CalibrationFlowTimeout (and stops the
+        session) once the server's own time exceeds ``timeout``;
+        ``sleep_fn``/``clock`` are test seams.
+
         Example:
             >>> def ask(status):
             ...     print(status.message)  # "Fold the arm and close the gripper…"
@@ -223,6 +232,9 @@ class CalibrationFlows:
             raise ValueError("timeout must be nonnegative and poll_interval positive")
 
         started_at = clock()
+        # Time spent inside confirm() — the human posing the arm — is not
+        # charged against ``timeout``, which bounds the server's work only.
+        human_time = 0.0
         confirmed = 0
         last_step: int | None = None
         # The wizard's session releases the moment the zero is written, and
@@ -248,7 +260,7 @@ class CalibrationFlows:
                             session_id=session.id,
                             robot=robot,
                         )
-                    elapsed = max(0.0, clock() - started_at)
+                    elapsed = max(0.0, clock() - started_at - human_time)
                     ended = session.wait(
                         timeout=max(0.0, timeout - elapsed),
                         poll_interval=poll_interval,
@@ -257,7 +269,10 @@ class CalibrationFlows:
                     )
                     return ZeroCalibrationResult(ended, robot, device_type, status, confirmed)
                 if status.awaiting_step and status.step != last_step:
-                    if not confirm(status):
+                    asked_at = clock()
+                    posed = confirm(status)
+                    human_time += max(0.0, clock() - asked_at)
+                    if not posed:
                         raise StepNotConfirmedError(
                             f"Step {status.step} of {robot!r} ({device_type}) was declined, so no "
                             "calibration was written and the session is being stopped. "
@@ -276,7 +291,11 @@ class CalibrationFlows:
                         )
                     confirmed += 1
                     last_step = status.step
-                elapsed = max(0.0, clock() - started_at)
+                    # Re-read before judging the budget: the step may already
+                    # have finished the wizard, and a timeout must quote the
+                    # status the server holds now, not the pre-confirm one.
+                    continue
+                elapsed = max(0.0, clock() - started_at - human_time)
                 if elapsed >= timeout:
                     raise CalibrationFlowTimeout(
                         f"Calibration of {robot!r} is still {status.status!r} after {elapsed:g}s "
