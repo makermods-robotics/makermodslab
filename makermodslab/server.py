@@ -116,6 +116,7 @@ from .jobs import (
     hub_ref_repo_id,
     hub_ref_step_label,
     job_registry,
+    policy_config_summary_for_ref,
     training_is_active,
 )
 from .merge import (
@@ -3739,6 +3740,38 @@ def get_checkpoint_policy_config(job_id: str, step: int):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@v1_router.get("/policy-config", response_model=CheckpointPolicyConfigResponse, tags=["jobs"])
+def get_policy_config_by_ref(policy_ref: str):
+    """The same config summary as the job-checkpoint policy-config route, for a
+    checkpoint addressed by the opaque ``policy_ref`` inference starts from
+    instead of by a Lab job id — so a caller holding only a ref (the SDK) can
+    learn what the policy expects.
+
+    Accepts exactly the refs the inference start does: an absolute local
+    ``pretrained_model`` directory, ``user/repo@checkpoints/<step_dir>``, or
+    ``user/repo@root``; each resolves the way inference resolves it. Reads only
+    the checkpoint's ``config.json`` (plus ``train_config.json`` for the dataset
+    lineage) — a few KB, never the weights.
+
+    This is what a client checks ``camera_bindings`` coverage against before
+    starting inference: ``image_features`` names every camera the policy reads,
+    by bare name. A ref of any other shape answers 400
+    ``checkpoint.invalid_ref``; a config that can't be read (missing, private
+    repo without a token, offline) answers 404 ``checkpoint.config_unreadable``,
+    which means "unknown", not "camera-less"."""
+    try:
+        summary = policy_config_summary_for_ref(policy_ref)
+    except ValueError as exc:
+        raise ApiError(status_code=400, detail=str(exc), code=ErrorCode.CHECKPOINT_INVALID_REF) from exc
+    if summary is None:
+        raise ApiError(
+            status_code=404,
+            detail=f"Could not read the policy config for {policy_ref!r}",
+            code=ErrorCode.CHECKPOINT_CONFIG_UNREADABLE,
+        )
+    return summary
 
 
 @router.get("/jobs/{job_id}/checkpoints/{step}/download")

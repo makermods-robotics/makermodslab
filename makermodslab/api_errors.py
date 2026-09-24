@@ -138,6 +138,15 @@ class ErrorCode(StrEnum):
     MODEL_NOT_FOUND = "model.not_found"
     CHECKPOINT_NOT_FOUND = "checkpoint.not_found"
     CHECKPOINT_INCOMPLETE = "checkpoint.incomplete"
+    # The by-ref policy-config read (GET /policy-config). `invalid_ref`: the
+    # ref is not a shape inference accepts (an existing local pretrained_model
+    # dir, `repo@checkpoints/<step>`, `repo@root`). `config_unreadable`: the
+    # shape is fine but its config.json could not be read — missing, malformed,
+    # a private repo without a token, or no network. Deliberately one code for
+    # all of those: they are indistinguishable from here, and a client reads it
+    # as "unknown", never as "the policy uses no cameras".
+    CHECKPOINT_INVALID_REF = "checkpoint.invalid_ref"
+    CHECKPOINT_CONFIG_UNREADABLE = "checkpoint.config_unreadable"
 
     # node.* — the peer-node registry (other MakerMods Lab servers on the
     # LAN/tailnet). `unreachable` covers both a dead host and one that answers

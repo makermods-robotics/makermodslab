@@ -12486,6 +12486,49 @@
         "summary": "Open Calibration Folder"
       }
     },
+    "/api/v1/policy-config": {
+      "get": {
+        "description": "The same config summary as the job-checkpoint policy-config route, for a\ncheckpoint addressed by the opaque ``policy_ref`` inference starts from\ninstead of by a Lab job id — so a caller holding only a ref (the SDK) can\nlearn what the policy expects.\n\nAccepts exactly the refs the inference start does: an absolute local\n``pretrained_model`` directory, ``user/repo@checkpoints/<step_dir>``, or\n``user/repo@root``; each resolves the way inference resolves it. Reads only\nthe checkpoint's ``config.json`` (plus ``train_config.json`` for the dataset\nlineage) — a few KB, never the weights.\n\nThis is what a client checks ``camera_bindings`` coverage against before\nstarting inference: ``image_features`` names every camera the policy reads,\nby bare name. A ref of any other shape answers 400\n``checkpoint.invalid_ref``; a config that can't be read (missing, private\nrepo without a token, offline) answers 404 ``checkpoint.config_unreadable``,\nwhich means \"unknown\", not \"camera-less\".",
+        "operationId": "get_policy_config_by_ref",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "policy_ref",
+            "required": true,
+            "schema": {
+              "title": "Policy Ref",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckpointPolicyConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Policy Config By Ref",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
     "/api/v1/policy-optimizer-defaults": {
       "get": {
         "description": "Return each policy's optimizer preset (lr / weight_decay / grad_clip_norm\n+ optimizer type) so the training UI can show the real \"policy default\"\ninstead of a generic placeholder.\n\nEvery frontend policy_type is included. `available` says whether this\nlerobot pin can construct the policy config at all — false means a training\nrun with that type is doomed at policy construction, so the UI disables the\nbutton (e.g. reward_classifier, which isn't a policy in this pin). Policies\nwhose config exists but whose optimizer preset can't be read stay available\nwith a null entry in `defaults`.",

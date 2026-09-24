@@ -2512,6 +2512,172 @@ def read_pretrained_feature_space(
     )
 
 
+def summarize_policy_config(
+    cfg: Mapping[str, Any],
+    train_cfg: Mapping[str, Any],
+    fallback_dataset_repo_id: str | None = None,
+) -> dict[str, object]:
+    """The UX-relevant slice of a checkpoint's parsed ``config.json`` (`cfg`)
+    plus its ``train_config.json`` (`train_cfg`, ``{}`` when unreadable).
+
+    The ONE place the policy-config summary is computed, shared by the
+    job-checkpoint route (JobRegistry.get_policy_config_summary) and the by-ref
+    route (policy_config_summary_for_ref) so the same checkpoint answers the
+    same body whichever way it is addressed. `fallback_dataset_repo_id` is the
+    owning job record's dataset, consulted only when train_config.json names
+    none; the by-ref route has no record and passes None."""
+    policy_type = cfg.get("type")
+    # The dataset this checkpoint was trained on, read from its OWN
+    # train_config.json and only then falling back to the registry record.
+    # That order matters: an import's record carries the "(imported)"
+    # placeholder rather than a repo id (see register_imported), so the
+    # record is exactly the wrong source for the one case that most needs an
+    # answer. The checkpoint knows; the record does not.
+    train_dataset = train_cfg.get("dataset")
+    base_dataset_repo_id = (
+        train_dataset.get("repo_id") if isinstance(train_dataset, dict) else None
+    ) or fallback_dataset_repo_id
+    # "(imported)" is the placeholder an import's config carries — not a real
+    # repo id, so it must never be resolved OR reported as one.
+    dataset_repo_id = (
+        base_dataset_repo_id
+        if isinstance(base_dataset_repo_id, str)
+        and base_dataset_repo_id
+        and base_dataset_repo_id != "(imported)"
+        else None
+    )
+    # The arm the checkpoint was trained on, for the fine-tune panel's
+    # cross-arm warning: the dataset above, then that dataset's
+    # meta/info.json robot_type. read_dataset_robot_type is local-only, so a
+    # dataset that lives only on the Hub still answers None here — reading
+    # train_config.json for Hub checkpoints too widened which checkpoints can
+    # be ASKED, not where the answer comes from.
+    trained_on_robot_type = read_dataset_robot_type(dataset_repo_id) if dataset_repo_id else None
+    input_features = cfg.get("input_features") or {}
+    image_features: dict[str, dict[str, int]] = {}
+    for full_name, feat in input_features.items():
+        if feat.get("type") != "VISUAL":
+            continue
+        shape = feat.get("shape") or []
+        if len(shape) != 3:
+            continue
+        _channels, height, width = shape
+        # The policy keys are 'observation.images.<name>'; the rollout CLI
+        # takes just the suffix.
+        name = full_name.split(".")[-1]
+        image_features[name] = {"height": int(height), "width": int(width)}
+    return {
+        "policy_type": policy_type,
+        "image_features": image_features,
+        "requires_task": policy_requires_task(policy_type),
+        # Whether this architecture can run the Real-Time Chunking engine,
+        # so the launch UI can offer the engine choice only where it works
+        # instead of letting the run die inside the subprocess with the arm
+        # already claimed. null = unknown type (a fork newer than our table)
+        # — the UI must treat that as "offer it", matching the server-side
+        # guard in rollout.handle_start_inference, which only refuses on a
+        # definite False.
+        "supports_rtc": (policy_type_supports_rtc(policy_type) if isinstance(policy_type, str) else None),
+        # Whether the two GPU-launch knobs apply to THIS checkpoint
+        # (S3.8f), so the remote panel can disable a select with a reason
+        # rather than send a value the launcher would drop. Both read off
+        # the same `cfg` every other field here comes from; the rules live
+        # in utils.system so the Lab, the route and the container cannot
+        # disagree about what a checkpoint supports.
+        "supports_model_dtype": policy_supports_model_dtype(cfg),
+        # And whether it has a step count to set at all — which
+        # `flow_steps_default` below CANNOT answer, because null there is
+        # both "no such knob" (ACT) and "the knob exists and this
+        # checkpoint saved nothing we can resolve" (a pi05 with a null
+        # `num_inference_steps`).
+        "supports_flow_steps": policy_flow_steps_field(cfg.get("type")) is not None,
+        # And whether extra camera VIEWS may be declared on it (S3.8g).
+        # Off a table rather than off key presence, because no config.json
+        # field says "this family's vision tower takes any number of
+        # pictures" — that is a fact about its processor, and
+        # `utils.system.VARIABLE_VIEW_POLICY_TYPES` is where it was written
+        # down after reading one.
+        "supports_extra_image_roles": policy_supports_extra_image_roles(cfg.get("type")),
+        # Null when there is no number to show — a policy with no such knob,
+        # or one that saved none and whose applying default this side cannot
+        # see. MolmoAct2 is NOT that case: it saves null and runs at 10, the
+        # pin's backbone default, which `policy_flow_steps_default` fills in.
+        # The client must read null as "no number to show", not "no default".
+        "flow_steps_default": policy_flow_steps_default(cfg),
+        # Flat proprioceptive state / action widths. For an SO-101 arm this
+        # is 6 (one per joint); a bimanual-trained checkpoint carries 12
+        # (two arms). The inference modal compares this against the selected
+        # robot's arm count to explain a single-arm/bimanual mismatch before
+        # the user hits Start. None when the checkpoint omits the feature.
+        "state_dim": _flat_feature_dim(input_features.get("observation.state")),
+        "action_dim": _flat_feature_dim((cfg.get("output_features") or {}).get("action")),
+        # The checkpoint's own chunk geometry, straight off config.json.
+        # `n_action_steps` is how many steps of a predicted chunk the policy
+        # actually returns, so it is the CEILING on a remote-inference
+        # horizon: declare more and the two Portal peers disagree about the
+        # action-chunk shape, the fingerprint stops matching, and every
+        # packet is dropped in silence — a healthy-looking session with zero
+        # chunks. The default the panel prints (50) is a smolvla/pi0 number;
+        # MolmoAct2's published checkpoint is 30, which is exactly the case
+        # this field exists to stop the operator walking into. `chunk_size`
+        # is the width the policy predicts internally (>= n_action_steps),
+        # carried alongside so the two are readable together. Both null when
+        # the checkpoint omits them or saves a non-integer.
+        "n_action_steps": _positive_int_or_none(cfg.get("n_action_steps")),
+        "chunk_size": _positive_int_or_none(cfg.get("chunk_size")),
+        # Raw lerobot robot_type string (e.g. "maker_follower"); the client
+        # normalises it. None when it can't be established.
+        "trained_on_robot_type": trained_on_robot_type,
+        # The dataset this checkpoint was trained on, from its own
+        # train_config.json (see above). None when the lineage offers no real
+        # id — an imported flat model repo with no train_config, or a record
+        # still carrying the "(imported)" placeholder.
+        #
+        # The Deploy panel prefills the task description from this rather
+        # than from the selected JOB's config: a job record is the wrong
+        # source twice over — an import's is a placeholder, and on a resume
+        # chain the tip's record does not describe a checkpoint owned by an
+        # ancestor. Addressed by (owner, step), this is the checkpoint's own
+        # provenance.
+        "dataset_repo_id": dataset_repo_id,
+    }
+
+
+def policy_config_summary_for_ref(policy_ref: str) -> dict[str, object] | None:
+    """summarize_policy_config for a checkpoint addressed by an inference
+    ``policy_ref`` rather than by (job id, step).
+
+    Accepts exactly the refs the inference start does (rollout's
+    ``_policy_ref_is_valid``): an existing local ``pretrained_model``
+    directory, ``user/repo@checkpoints/<step_dir>``, or ``user/repo@root``. The
+    ref resolves the way that path resolves it — a local directory wins, and a
+    ``@root`` ref is unwrapped to the bare repo id whose root holds the config,
+    as the RTC guard in rollout.handle_start_inference does. Anything else
+    (a bare repo id included, which inference refuses too) raises ValueError.
+
+    Reads only ``config.json`` and ``train_config.json`` — a few KB, never the
+    weights. Returns None when the config can't be read (missing file,
+    malformed JSON, private or absent repo, no network): "not established",
+    which the caller must not read as "no cameras"."""
+    if not policy_ref.strip():
+        raise ValueError("Empty policy ref")
+    root = _HUB_ROOT_REF_RE.match(policy_ref)
+    if Path(policy_ref).is_dir():
+        source: Literal["local", "hub"] = "local"
+        config_path = policy_ref
+    elif _HUB_CKPT_REF_RE.match(policy_ref):
+        source, config_path = "hub", policy_ref
+    elif root:
+        source, config_path = "hub", root.group("repo")
+    else:
+        raise ValueError(f"Unrecognised policy ref: {policy_ref!r}")
+    cfg = read_pretrained_config(config_path)
+    if cfg is None:
+        return None
+    train_cfg = read_checkpoint_train_config(JobCheckpoint(step=0, source=source, ref=policy_ref))
+    return summarize_policy_config(cfg, train_cfg)
+
+
 def _camera_features(features: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """The camera entries of a feature map, keyed by BARE camera name.
 
@@ -5560,129 +5726,15 @@ class JobRegistry:
                 f"No checkpoint at step {step} for job {record.id} or the runs it resumed"
             )
         cfg = _read_checkpoint_config(match)
-        policy_type = cfg.get("type")
-        # The dataset this checkpoint was trained on, read from its OWN
-        # train_config.json and only then falling back to the registry record.
-        # That order matters: an import's record carries the "(imported)"
-        # placeholder rather than a repo id (see register_imported), so the
-        # record is exactly the wrong source for the one case that most needs an
-        # answer. The checkpoint knows; the record does not.
-        #
-        # Read for hub checkpoints too. The previous local-only gate was
+        # train_config.json carries the dataset lineage. Read for hub
+        # checkpoints too. The previous local-only gate was
         # justified as "not worth a network round-trip on this synchronous GET",
         # but _read_checkpoint_config above ALREADY downloads config.json from
         # the same repo on this same request — train_config.json is a second
         # small file alongside it, not a new class of cost. It also degrades to
         # {} on any failure, so a miss costs a log line, not the response.
         train_cfg = read_checkpoint_train_config(match)
-        train_dataset = train_cfg.get("dataset")
-        base_dataset_repo_id = (
-            train_dataset.get("repo_id") if isinstance(train_dataset, dict) else None
-        ) or record.config.dataset_repo_id
-        # "(imported)" is the placeholder an import's config carries — not a real
-        # repo id, so it must never be resolved OR reported as one.
-        dataset_repo_id = (
-            base_dataset_repo_id
-            if isinstance(base_dataset_repo_id, str)
-            and base_dataset_repo_id
-            and base_dataset_repo_id != "(imported)"
-            else None
-        )
-        # The arm the checkpoint was trained on, for the fine-tune panel's
-        # cross-arm warning: the dataset above, then that dataset's
-        # meta/info.json robot_type. read_dataset_robot_type is local-only, so a
-        # dataset that lives only on the Hub still answers None here — lifting
-        # the gate above widened which checkpoints can be ASKED, not where the
-        # answer comes from.
-        trained_on_robot_type = read_dataset_robot_type(dataset_repo_id) if dataset_repo_id else None
-        input_features = cfg.get("input_features") or {}
-        image_features: dict[str, dict[str, int]] = {}
-        for full_name, feat in input_features.items():
-            if feat.get("type") != "VISUAL":
-                continue
-            shape = feat.get("shape") or []
-            if len(shape) != 3:
-                continue
-            _channels, height, width = shape
-            # The policy keys are 'observation.images.<name>'; the rollout CLI
-            # takes just the suffix.
-            name = full_name.split(".")[-1]
-            image_features[name] = {"height": int(height), "width": int(width)}
-        return {
-            "policy_type": policy_type,
-            "image_features": image_features,
-            "requires_task": policy_requires_task(policy_type),
-            # Whether this architecture can run the Real-Time Chunking engine,
-            # so the launch UI can offer the engine choice only where it works
-            # instead of letting the run die inside the subprocess with the arm
-            # already claimed. null = unknown type (a fork newer than our table)
-            # — the UI must treat that as "offer it", matching the server-side
-            # guard in rollout.handle_start_inference, which only refuses on a
-            # definite False.
-            "supports_rtc": (policy_type_supports_rtc(policy_type) if isinstance(policy_type, str) else None),
-            # Whether the two GPU-launch knobs apply to THIS checkpoint
-            # (S3.8f), so the remote panel can disable a select with a reason
-            # rather than send a value the launcher would drop. Both read off
-            # the same `cfg` every other field here comes from; the rules live
-            # in utils.system so the Lab, the route and the container cannot
-            # disagree about what a checkpoint supports.
-            "supports_model_dtype": policy_supports_model_dtype(cfg),
-            # And whether it has a step count to set at all — which
-            # `flow_steps_default` below CANNOT answer, because null there is
-            # both "no such knob" (ACT) and "the knob exists and this
-            # checkpoint saved nothing we can resolve" (a pi05 with a null
-            # `num_inference_steps`).
-            "supports_flow_steps": policy_flow_steps_field(cfg.get("type")) is not None,
-            # And whether extra camera VIEWS may be declared on it (S3.8g).
-            # Off a table rather than off key presence, because no config.json
-            # field says "this family's vision tower takes any number of
-            # pictures" — that is a fact about its processor, and
-            # `utils.system.VARIABLE_VIEW_POLICY_TYPES` is where it was written
-            # down after reading one.
-            "supports_extra_image_roles": policy_supports_extra_image_roles(cfg.get("type")),
-            # Null when there is no number to show — a policy with no such knob,
-            # or one that saved none and whose applying default this side cannot
-            # see. MolmoAct2 is NOT that case: it saves null and runs at 10, the
-            # pin's backbone default, which `policy_flow_steps_default` fills in.
-            # The client must read null as "no number to show", not "no default".
-            "flow_steps_default": policy_flow_steps_default(cfg),
-            # Flat proprioceptive state / action widths. For an SO-101 arm this
-            # is 6 (one per joint); a bimanual-trained checkpoint carries 12
-            # (two arms). The inference modal compares this against the selected
-            # robot's arm count to explain a single-arm/bimanual mismatch before
-            # the user hits Start. None when the checkpoint omits the feature.
-            "state_dim": _flat_feature_dim(input_features.get("observation.state")),
-            "action_dim": _flat_feature_dim((cfg.get("output_features") or {}).get("action")),
-            # The checkpoint's own chunk geometry, straight off config.json.
-            # `n_action_steps` is how many steps of a predicted chunk the policy
-            # actually returns, so it is the CEILING on a remote-inference
-            # horizon: declare more and the two Portal peers disagree about the
-            # action-chunk shape, the fingerprint stops matching, and every
-            # packet is dropped in silence — a healthy-looking session with zero
-            # chunks. The default the panel prints (50) is a smolvla/pi0 number;
-            # MolmoAct2's published checkpoint is 30, which is exactly the case
-            # this field exists to stop the operator walking into. `chunk_size`
-            # is the width the policy predicts internally (>= n_action_steps),
-            # carried alongside so the two are readable together. Both null when
-            # the checkpoint omits them or saves a non-integer.
-            "n_action_steps": _positive_int_or_none(cfg.get("n_action_steps")),
-            "chunk_size": _positive_int_or_none(cfg.get("chunk_size")),
-            # Raw lerobot robot_type string (e.g. "maker_follower"); the client
-            # normalises it. None when it can't be established.
-            "trained_on_robot_type": trained_on_robot_type,
-            # The dataset this checkpoint was trained on, from its own
-            # train_config.json (see above). None when the lineage offers no real
-            # id — an imported flat model repo with no train_config, or a record
-            # still carrying the "(imported)" placeholder.
-            #
-            # The Deploy panel prefills the task description from this rather
-            # than from the selected JOB's config: a job record is the wrong
-            # source twice over — an import's is a placeholder, and on a resume
-            # chain the tip's record does not describe a checkpoint owned by an
-            # ancestor. Addressed by (owner, step), this is the checkpoint's own
-            # provenance.
-            "dataset_repo_id": dataset_repo_id,
-        }
+        return summarize_policy_config(cfg, train_cfg, fallback_dataset_repo_id=record.config.dataset_repo_id)
 
     def _queued_dependents_of(self, record: JobRecord) -> builtins.list[str]:
         """Ids of QUEUED runs that will read `record`'s checkpoints when they
