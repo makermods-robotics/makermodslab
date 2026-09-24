@@ -137,6 +137,8 @@ def test_context_launches_matching_halves_and_cleans_up_session_before_gpu():
             fps=20,
             video_codec="MJPEG",
             s_min=6,
+            camera_bindings={"top": "overhead"},
+            camera_dims={"top": {"width": 640, "height": 480}},
             duration_s=120,
             startup_timeout=10,
             poll_interval=2,
@@ -173,6 +175,11 @@ def test_context_launches_matching_halves_and_cleans_up_session_before_gpu():
         assert session_start["options"][key] == value
     assert session_start["options"]["policy_ref"] == "maker/act-pick@checkpoints/002000"
     assert session_start["options"]["duration_s"] == 120
+    # Without the bindings the robot side opens NO cameras; they are the
+    # session's alone — the GPU half never sees them.
+    assert session_start["options"]["camera_bindings"] == {"top": "overhead"}
+    assert session_start["options"]["camera_dims"] == {"top": {"width": 640, "height": 480}}
+    assert "camera_bindings" not in gpu_start and "camera_dims" not in gpu_start
     assert script.requests[-1].url.params["launch_id"] == LAUNCH_ID
 
 

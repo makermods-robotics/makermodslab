@@ -956,8 +956,22 @@ class SessionsResource(Resource):
         """Run or evaluate the trained policy ``policy_ref`` on the follower arm.
 
         ``camera_bindings`` maps policy-expected camera names to the robot
-        record's camera names (the devices themselves come from the record);
-        ``camera_dims`` values are ``{"width": ..., "height": ...}``.
+        record's camera names (the devices themselves come from the record).
+        OMITTING IT RUNS THE POLICY WITH NO CAMERAS, even when the record's
+        camera names match the policy's: nothing is bound by name. That is
+        right only for a camera-less policy; a vision policy energizes the
+        arm and then dies on its first action (``KeyError:
+        'observation.images.<name>'``). Pass the identity map when the names
+        match, e.g. ``{"top": "top", "wrist": "wrist"}``. What the checkpoint
+        expects is ``jobs.checkpoint_policy_config(job_id, step)`` — its
+        ``image_features`` keys are the policy-side names to bind, its values
+        the ``camera_dims`` to pass (``{"width": ..., "height": ...}``; omitted,
+        capture falls back to the record's own size). That lookup needs a
+        Lab job record (local, cloud or imported run), not a bare Hub repo.
+
+        ``duration_s`` defaults to 60 SERVER-side; the run then ends by
+        itself. ``duration_s=0`` runs until stopped (``s.stop()`` / leaving
+        the ``with`` block) — use it for "run until I say stop".
         ``inference_engine`` is ``"sync"`` (server default) or ``"rtc"``.
         ``eval_episodes > 1`` starts a supervised evaluation. The operator
         must mark successful episodes and advance after each scene reset;
@@ -972,7 +986,18 @@ class SessionsResource(Resource):
         ``s.coaching_command("takeover")`` / ``"handback"`` / … while it runs.
 
         Example:
-            >>> with client.sessions.infer("bench", policy_ref="me/act-pick", task="pick the cube") as s:
+            >>> ckpt = client.jobs.checkpoints(job.id).checkpoints[-1]
+            >>> cfg = client.jobs.checkpoint_policy_config(job.id, ckpt.step)
+            >>> list(cfg.image_features)
+            ['top', 'wrist']
+            >>> with client.sessions.infer(
+            ...     "bench",
+            ...     policy_ref=ckpt.ref,
+            ...     task="pick the cube",
+            ...     camera_bindings={"top": "top", "wrist": "wrist"},
+            ...     camera_dims={k: v.model_dump() for k, v in cfg.image_features.items()},
+            ...     duration_s=0,  # until s.stop(); omitted = 60 s
+            ... ) as s:
             ...     wait_for_rollout()
         """
         return self._start_managed(
@@ -1269,6 +1294,11 @@ class SessionsResource(Resource):
         never launches it. Check ``remote_inference_transport()`` first;
         ``engine`` is "sync" or "rtc"; the ``video_*``/``latency_k``/``lpf_*``
         knobs shape the camera uplink and action smoothing.
+
+        ``camera_bindings`` / ``camera_dims`` / ``duration_s`` behave as in
+        ``infer``: omitted bindings run WITHOUT cameras (only right for a
+        camera-less policy), and ``duration_s`` defaults to 60 server-side
+        while ``0`` runs until stopped.
 
         Example:
             >>> client.sessions.gpu_start(policy_hub_id="me/act-pick")

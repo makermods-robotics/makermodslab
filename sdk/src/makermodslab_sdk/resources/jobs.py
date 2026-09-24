@@ -566,11 +566,14 @@ class JobsResource(Resource):
         """What one checkpoint's policy expects as input: per-camera image
         sizes, whether it needs a task string, and state/action dims (6 =
         single arm, 12 = bimanual) — check these before starting inference.
+        ``image_features`` is keyed by the bare camera name (``"front"``,
+        not ``"observation.images.front"``): exactly the keys
+        ``sessions.infer(camera_bindings=...)`` and ``camera_dims`` take.
 
         Example:
             >>> cfg = client.jobs.checkpoint_policy_config(job.id, 20000)
             >>> cfg.policy_type, cfg.action_dim, list(cfg.image_features)
-            ('act', 6, ['observation.images.front'])
+            ('act', 6, ['front'])
         """
         return CheckpointPolicyConfig.model_validate(
             self._transport.request(

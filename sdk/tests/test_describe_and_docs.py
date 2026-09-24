@@ -221,6 +221,19 @@ def test_method_detail_returns_the_full_docstring():
     assert "system.available_ports" in method_detail("flows.inspect_hardware")
 
 
+def test_infer_detail_teaches_the_two_silent_defaults():
+    # Both defaults are server-side and neither fails at start: omitted
+    # camera_bindings energizes the arm and then dies on the first action,
+    # and the 60 s clock ends a run the agent was told to keep going.
+    for path in ("sessions.infer", "sessions.remote_infer", "flows.remote_inference"):
+        text = method_detail(path)
+        assert "no cameras" in text.lower() or "without cameras" in text.lower(), path
+        assert "0`` runs until stopped" in text, path
+    infer = method_detail("sessions.infer")
+    assert 'camera_bindings={"top": "top", "wrist": "wrist"}' in infer
+    assert "jobs.checkpoint_policy_config" in infer
+
+
 def test_method_detail_unknown_namespace_is_helpful_not_raised():
     text = method_detail("bogus.thing")
     assert "Unknown namespace" in text

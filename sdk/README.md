@@ -106,11 +106,17 @@ with client.flows.remote_inference(
     "bench",
     policy_ref="me/act-pick",
     gpu="A10G",
+    camera_bindings={"top": "top"},  # omitted = a camera-less run
     startup_timeout=180,
 ) as run:
     print(run.session_id, run.launch_id, run.start_warnings)
     run.session.wait(timeout=300)
 ```
+
+As with `client.sessions.infer`, `camera_bindings` (policy camera name ->
+robot-record camera name) is never inferred: omit it and the policy runs with
+no cameras, even when the names match. `duration_s` defaults to 60 s on the
+server; `duration_s=0` runs until stopped.
 
 Exiting stops the robot session before conditionally stopping the GPU by its
 `launch_id`; it cannot stop a replacement launch. Use the primitive

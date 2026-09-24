@@ -109,6 +109,8 @@ class RemoteInferenceRun:
         video_codec: Literal["H264", "MJPEG"],
         engine: Literal["sync", "rtc"],
         s_min: int,
+        camera_bindings: dict[str, str] | None,
+        camera_dims: dict[str, dict[str, int]] | None,
         duration_s: int | None,
         owner: str | None,
         lease_timeout_s: float | None,
@@ -131,6 +133,8 @@ class RemoteInferenceRun:
         self._video_codec = video_codec
         self._engine = engine
         self._s_min = s_min
+        self._camera_bindings = camera_bindings
+        self._camera_dims = camera_dims
         self._duration_s = duration_s
         self._owner = owner
         self._lease_timeout_s = lease_timeout_s
@@ -311,6 +315,8 @@ class RemoteInferenceRun:
             policy_ref=self._policy_ref,
             policy_hub_id=self._policy_hub_id,
             task=self._task,
+            camera_bindings=self._camera_bindings,
+            camera_dims=self._camera_dims,
             duration_s=self._duration_s,
             horizon=self._horizon,
             fps=self._fps,
@@ -424,6 +430,8 @@ class RemoteInferenceFlows:
         video_codec: Literal["H264", "MJPEG"] = "H264",
         engine: Literal["sync", "rtc"] = "sync",
         s_min: int = 4,
+        camera_bindings: dict[str, str] | None = None,
+        camera_dims: dict[str, dict[str, int]] | None = None,
         duration_s: int | None = None,
         startup_timeout: float = 180.0,
         poll_interval: float = 2.0,
@@ -447,6 +455,10 @@ class RemoteInferenceFlows:
         and sent identically to both halves, preventing a silent wire mismatch.
         A startup timeout stops only this flow's launch and raises
         ``RemoteInferenceStartupTimeout`` with its ID and last state.
+        ``camera_bindings``, ``camera_dims`` and ``duration_s`` go to
+        ``remote_infer`` only (see ``sessions.infer``): omit the bindings and
+        the run has NO cameras; ``duration_s`` defaults to 60 server-side,
+        ``0`` runs until stopped.
 
         Example:
             >>> with client.flows.remote_inference("bench", policy_ref="me/act-pick", gpu="A10G") as run:
@@ -477,6 +489,8 @@ class RemoteInferenceFlows:
             video_codec=video_codec,
             engine=engine,
             s_min=s_min,
+            camera_bindings=camera_bindings,
+            camera_dims=camera_dims,
             duration_s=duration_s,
             owner=owner,
             lease_timeout_s=lease_timeout_s,
