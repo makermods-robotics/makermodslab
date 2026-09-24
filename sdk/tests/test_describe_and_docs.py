@@ -135,11 +135,11 @@ CARD_HEADROOM = 1.2
 CARD_SHRINK_FLOOR = 0.7
 CARD_SIZES_CHARS = {
     "calibration": 2312,
-    "client": 3908,
+    "client": 4357,
     "datasets": 3581,
     "flows": 1428,
     "inference": 1856,
-    "jobs": 2764,
+    "jobs": 2884,
     "models": 2244,
     "nodes": 1779,
     "realtime": 2686,
@@ -231,7 +231,13 @@ def test_infer_detail_teaches_the_two_silent_defaults():
         assert "0`` runs until stopped" in text, path
     infer = method_detail("sessions.infer")
     assert 'camera_bindings={"top": "top", "wrist": "wrist"}' in infer
-    assert "jobs.checkpoint_policy_config" in infer
+    assert "jobs.policy_config" in infer
+    # ... and the client-side coverage check that now guards the first one.
+    for path in ("sessions.infer", "sessions.remote_infer", "flows.remote_inference"):
+        text = method_detail(path)
+        assert "verify_cameras" in text, path
+        assert 'camera_bindings="auto"' in text, path
+    assert "CameraBindingError" in infer and "UnverifiedCamerasWarning" in infer
 
 
 def test_method_detail_unknown_namespace_is_helpful_not_raised():

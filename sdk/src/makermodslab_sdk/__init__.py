@@ -16,6 +16,7 @@ progressive-disclosure manual: index -> namespace card -> method detail.
 from makermodslab_sdk.client import Client, CompatibilityWarning
 from makermodslab_sdk.errors import (
     ApiError,
+    CameraBindingError,
     ConnectionFailedError,
     InvalidRequestError,
     MakerModsError,
@@ -23,6 +24,7 @@ from makermodslab_sdk.errors import (
     RobotBusyError,
     ServerTooOldError,
     SessionHeldError,
+    UnverifiedCamerasWarning,
 )
 from makermodslab_sdk.flows_calibration import (
     AutoCalibrationFlowResult,
@@ -60,6 +62,7 @@ __all__ = [
     "AutoCalibrationFlowResult",
     "CalibrationFlowError",
     "CalibrationFlowTimeout",
+    "CameraBindingError",
     "CameraAssignment",
     "Client",
     "CompatibilityWarning",
@@ -92,6 +95,7 @@ __all__ = [
     "TrainAndPublishResult",
     "TrainingFlowError",
     "TrainingOptions",
+    "UnverifiedCamerasWarning",
     "WaitTimeoutError",
     "ZeroCalibrationResult",
     "__version__",

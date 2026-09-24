@@ -16,6 +16,12 @@ Catchable hierarchy (everything derives from MakerModsError):
       RobotBusyError        ``robot.busy.*`` (``.busy_with`` names the holder)
       SessionHeldError      ``session.held`` (``.holder`` names the session)
       ServerTooOldError     a bare uncoded 404 on a route newer than the server
+    CameraBindingError      client-side refusal: an inference start whose
+                            camera_bindings miss a camera the policy reads
+                            (nothing was sent; ``.missing`` names them)
+
+``UnverifiedCamerasWarning`` (a UserWarning) is the fail-open side of that
+check: the policy's cameras could not be read, and the start went ahead.
 
 Branch on ``isinstance`` or on ``.code`` — never on the prose, which the
 server is free to reword.
@@ -27,6 +33,7 @@ from typing import Any
 
 __all__ = [
     "ApiError",
+    "CameraBindingError",
     "ConnectionFailedError",
     "InvalidRequestError",
     "MakerModsError",
@@ -34,6 +41,7 @@ __all__ = [
     "RobotBusyError",
     "ServerTooOldError",
     "SessionHeldError",
+    "UnverifiedCamerasWarning",
     "build_api_error",
 ]
 
@@ -163,6 +171,16 @@ REMEDIATIONS: dict[str, str] = {
         "The launch this caller owned is no longer current, so the replacement was left running — "
         "inspect client.sessions.gpu_status() before deciding whether to stop it explicitly."
     ),
+    "checkpoint.invalid_ref": (
+        "policy_ref must be an absolute local pretrained_model directory, "
+        "'<owner>/<repo>@checkpoints/<step_dir>' or '<owner>/<repo>@root' — "
+        "client.jobs.checkpoints(job_id) lists each checkpoint's exact .ref."
+    ),
+    "checkpoint.config_unreadable": (
+        "The server could not read the checkpoint's config.json (private repo without a token, "
+        "offline, or not there) — that is UNKNOWN, not camera-less. Check the ref, "
+        "client.system.hf_login(token=...) for a private repo, then retry."
+    ),
     "internal.unexpected": (
         "Server-side bug — the .detail carries the exception text; check the server logs for the traceback."
     ),
@@ -199,8 +217,46 @@ class CompatibilityWarning(UserWarning):
     check because the server predates a field it relies on (SPEC §4)."""
 
 
+class UnverifiedCamerasWarning(UserWarning):
+    """An inference start went ahead with its camera coverage UNVERIFIED.
+
+    The policy's config could not be read (private/offline/missing, or a
+    server that predates ``GET /api/v1/policy-config``), so the SDK could not
+    check ``camera_bindings`` against the cameras the policy reads. Deliberately
+    not a CompatibilityWarning: an unreadable config is not server skew, and a
+    caller who would rather refuse can say so with
+    ``warnings.simplefilter("error", UnverifiedCamerasWarning)``."""
+
+
 class MakerModsError(Exception):
     """Base for every error this SDK raises on purpose."""
+
+
+class CameraBindingError(MakerModsError, ValueError):
+    """``camera_bindings`` leaves a camera the policy reads unbound.
+
+    A client-side refusal raised BEFORE the start request, so nothing was
+    sent and nothing energized. ``expected`` is every camera the policy reads,
+    ``missing`` the ones the bindings do not cover, ``record_cameras`` the
+    robot record's camera names (None when they could not be read), and
+    ``suggestion`` the literal next call."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        policy_ref: str,
+        expected: tuple[str, ...],
+        missing: tuple[str, ...],
+        record_cameras: tuple[str, ...] | None,
+        suggestion: str,
+    ) -> None:
+        super().__init__(message)
+        self.policy_ref = policy_ref
+        self.expected = expected
+        self.missing = missing
+        self.record_cameras = record_cameras
+        self.suggestion = suggestion
 
 
 class ConnectionFailedError(MakerModsError):

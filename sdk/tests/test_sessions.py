@@ -717,9 +717,23 @@ def test_record_options_mirror_the_contract():
     }
 
 
+def camera_less_policy():
+    """The camera-coverage preflight's config read, answered camera-less so
+    any bindings pass (the preflight itself: test_camera_preflight.py)."""
+    body = {
+        "policy_type": "act",
+        "image_features": {},
+        "requires_task": False,
+        "state_dim": 6,
+        "action_dim": 6,
+    }
+    return (200, body)
+
+
 def test_infer_options_mirror_the_contract():
     script = (
         Script()
+        .add("GET", "/api/v1/policy-config", camera_less_policy())
         .add("POST", "/api/v1/sessions", start_ok(kind="inference"))
         .add("POST", "/api/v1/sessions/sess-1/stop", stop_ok())
     )

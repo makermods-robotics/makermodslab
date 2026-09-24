@@ -15,7 +15,7 @@
 """Managed remote-inference composition, separate from wire operations.
 
 ``remote_inference`` composes ``sessions.remote_inference_transport``,
-``sessions.gpu_start``, ``sessions.gpu_status``, ``sessions.remote_infer``
+``jobs.policy_config`` (the camera-coverage check), ``sessions.gpu_start``, ``sessions.gpu_status``, ``sessions.remote_infer``
 and the matching session/GPU stops. Use those primitives directly when the
 GPU is launched elsewhere or its lifetime should outlive the robot session.
 """
@@ -109,8 +109,9 @@ class RemoteInferenceRun:
         video_codec: Literal["H264", "MJPEG"],
         engine: Literal["sync", "rtc"],
         s_min: int,
-        camera_bindings: dict[str, str] | None,
+        camera_bindings: dict[str, str] | Literal["auto"] | None,
         camera_dims: dict[str, dict[str, int]] | None,
+        verify_cameras: bool,
         duration_s: int | None,
         owner: str | None,
         lease_timeout_s: float | None,
@@ -135,6 +136,7 @@ class RemoteInferenceRun:
         self._s_min = s_min
         self._camera_bindings = camera_bindings
         self._camera_dims = camera_dims
+        self._verify_cameras = verify_cameras
         self._duration_s = duration_s
         self._owner = owner
         self._lease_timeout_s = lease_timeout_s
@@ -252,6 +254,21 @@ class RemoteInferenceRun:
                 recovery_call="client.sessions.gpu_start()",
             )
 
+    def _check_cameras(self) -> None:
+        # Before the GPU launch, not in remote_infer after it: an uncovered
+        # binding would otherwise be discovered with a billed GPU already up.
+        # The resolved map (never the literal "auto") is what the session gets,
+        # with its own re-check switched off so the config is read once.
+        self._camera_bindings, self._camera_dims = self._client.sessions._preflight_cameras(
+            "client.flows.remote_inference",
+            self._robot,
+            self._policy_ref,
+            self._camera_bindings,
+            self._camera_dims,
+            verify_cameras=self._verify_cameras,
+            remote=True,
+        )
+
     def _start_gpu(self) -> GpuLaunch:
         fields: dict[str, object] = {
             "policy_hub_id": self._policy_hub_id,
@@ -348,6 +365,7 @@ class RemoteInferenceRun:
             task=self._task,
             camera_bindings=self._camera_bindings,
             camera_dims=self._camera_dims,
+            verify_cameras=False,  # _check_cameras already ran, before the GPU launch
             duration_s=self._duration_s,
             horizon=self._horizon,
             fps=self._fps,
@@ -376,6 +394,7 @@ class RemoteInferenceRun:
         self._entered = True
         self._check_transport()
         self._check_launch_identity()
+        self._check_cameras()
         try:
             self._start_gpu()
             self._wait_for_gpu()
@@ -462,8 +481,9 @@ class RemoteInferenceFlows:
         video_codec: Literal["H264", "MJPEG"] = "H264",
         engine: Literal["sync", "rtc"] = "sync",
         s_min: int = 4,
-        camera_bindings: dict[str, str] | None = None,
+        camera_bindings: dict[str, str] | Literal["auto"] | None = None,
         camera_dims: dict[str, dict[str, int]] | None = None,
+        verify_cameras: bool = True,
         duration_s: int | None = None,
         startup_timeout: float = 180.0,
         poll_interval: float = 2.0,
@@ -475,7 +495,8 @@ class RemoteInferenceFlows:
         """Launch a matching GPU, start remote inference, and own both lifetimes.
 
         Composes ``sessions.remote_inference_transport`` → ``gpu_status``
-        (launch-identity preflight) → ``gpu_start`` → exact-``launch_id``
+        (launch-identity preflight) → ``jobs.policy_config`` (camera
+        coverage) → ``gpu_start`` → exact-``launch_id``
         ``gpu_status`` reads → ``remote_infer``. A server that predates
         launch ids is refused before anything starts, because its cleanup
         could only be an unscoped stop. The call
@@ -491,12 +512,17 @@ class RemoteInferenceFlows:
         A startup timeout stops only this flow's launch and raises
         ``RemoteInferenceStartupTimeout`` with its ID and last state.
         ``camera_bindings``, ``camera_dims`` and ``duration_s`` go to
-        ``remote_infer`` only (see ``sessions.infer``): omit the bindings and
-        the run has NO cameras; ``duration_s`` defaults to 60 server-side,
-        ``0`` runs until stopped.
+        ``remote_infer`` only (see ``sessions.infer``): the server runs
+        omitted bindings with NO cameras, so the camera-coverage check
+        (``verify_cameras``, ``camera_bindings="auto"``) runs on entry BEFORE
+        the GPU launch — an uncovered binding raises ``CameraBindingError``
+        with nothing billed. ``duration_s`` defaults to 60 server-side;
+        ``duration_s=0`` runs until stopped.
 
         Example:
-            >>> with client.flows.remote_inference("bench", policy_ref="me/act-pick", gpu="A10G") as run:
+            >>> with client.flows.remote_inference(
+            ...     "bench", policy_ref="me/act-pick", gpu="A10G", camera_bindings="auto"
+            ... ) as run:
             ...     print(run.session_id, run.launch_id, run.start_warnings)
             ...     run.session.wait(timeout=300)
         """
@@ -506,6 +532,8 @@ class RemoteInferenceFlows:
             raise ValueError("poll_interval must be positive")
         if not policy_ref.strip():
             raise ValueError("policy_ref must not be empty")
+        if camera_bindings == "auto" and not verify_cameras:
+            raise ValueError('camera_bindings="auto" needs verify_cameras=True (it reads the policy config)')
         hub_id = policy_hub_id if policy_hub_id is not None else policy_ref
         if not hub_id.strip():
             raise ValueError("policy_hub_id must not be empty")
@@ -526,6 +554,7 @@ class RemoteInferenceFlows:
             s_min=s_min,
             camera_bindings=camera_bindings,
             camera_dims=camera_dims,
+            verify_cameras=verify_cameras,
             duration_s=duration_s,
             owner=owner,
             lease_timeout_s=lease_timeout_s,

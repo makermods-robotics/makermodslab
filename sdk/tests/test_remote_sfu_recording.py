@@ -117,6 +117,17 @@ def test_remote_kind_sugars_send_kind_and_options():
     bodies = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/policy-config":  # the camera preflight; camera-less
+            return httpx.Response(
+                200,
+                json={
+                    "policy_type": "act",
+                    "image_features": {},
+                    "requires_task": False,
+                    "state_dim": 6,
+                    "action_dim": 6,
+                },
+            )
         if request.url.path.endswith("/stop"):  # body-less; not under test
             return httpx.Response(
                 200,

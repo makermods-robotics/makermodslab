@@ -21,7 +21,7 @@ import json
 import httpx
 import pytest
 from helpers import mock_client
-from makermodslab_sdk.errors import MakerModsError
+from makermodslab_sdk.errors import CameraBindingError, MakerModsError
 from makermodslab_sdk.flows_remote_inference import (
     RemoteInferenceFlowError,
     RemoteInferenceStartupTimeout,
@@ -93,9 +93,24 @@ class Script:
         return httpx.Response(code, json=body)
 
 
-def success_routes(*statuses: dict) -> dict:
+def policy_config(image_features: dict | None = None) -> dict:
+    return {
+        "policy_type": "act",
+        "image_features": dict(image_features or {}),
+        "requires_task": False,
+        "state_dim": 6,
+        "action_dim": 6,
+    }
+
+
+TOP = {"top": {"height": 480, "width": 640}}
+
+
+def success_routes(*statuses: dict, image_features: dict | None = None) -> dict:
     return {
         ("GET", "/api/v1/remote-inference/transport"): [(200, transport())],
+        # The camera-coverage preflight, read once before the GPU launch.
+        ("GET", "/api/v1/policy-config"): [(200, policy_config(image_features))],
         # The first GPU read is the launch-identity preflight: a server that
         # carries launch_id reports the key even while idle (null).
         ("GET", "/api/v1/remote-inference/gpu"): [(200, gpu("idle", launch_id=None))]
@@ -124,7 +139,9 @@ def paths(script: Script) -> list[str]:
 
 
 def test_context_launches_matching_halves_and_cleans_up_session_before_gpu():
-    script = Script(success_routes(gpu("starting", phase="loading"), gpu("ready", phase="connected")))
+    script = Script(
+        success_routes(gpu("starting", phase="loading"), gpu("ready", phase="connected"), image_features=TOP)
+    )
     slept: list[float] = []
 
     with (
@@ -157,6 +174,7 @@ def test_context_launches_matching_halves_and_cleans_up_session_before_gpu():
     assert paths(script) == [
         "/api/v1/remote-inference/transport",
         "/api/v1/remote-inference/gpu",
+        "/api/v1/policy-config",
         "/api/v1/remote-inference/gpu/start",
         "/api/v1/remote-inference/gpu",
         "/api/v1/remote-inference/gpu",
@@ -164,8 +182,9 @@ def test_context_launches_matching_halves_and_cleans_up_session_before_gpu():
         f"/api/v1/sessions/{SESSION_ID}/stop",
         "/api/v1/remote-inference/gpu/stop",
     ]
-    gpu_start = json.loads(script.requests[2].content)
-    session_start = json.loads(script.requests[5].content)
+    assert script.requests[2].url.params["policy_ref"] == "maker/act-pick@checkpoints/002000"
+    gpu_start = json.loads(script.requests[3].content)
+    session_start = json.loads(script.requests[6].content)
     for key, value in {
         "policy_hub_id": "maker/act-pick",
         "engine": "rtc",
@@ -413,3 +432,69 @@ def test_start_response_without_launch_id_is_never_cleaned_up_unscoped():
     assert "gpu_status" in error.value.recovery_call
     assert "/api/v1/remote-inference/gpu/stop" not in paths(script)
     assert "/api/v1/sessions" not in paths(script)
+
+
+def test_uncovered_cameras_refuse_before_any_gpu_is_billed():
+    routes = success_routes(gpu("ready", phase="connected"), image_features=TOP)
+    routes[("GET", "/api/v1/robots/bench")] = [
+        (200, {"status": "success", "robot": {"name": "bench", "cameras": [{"name": "top"}]}})
+    ]
+    script = Script(routes)
+    with (
+        mock_client(script) as client,
+        pytest.raises(CameraBindingError) as error,
+        client.flows.remote_inference("bench", policy_ref="maker/act-pick"),
+    ):
+        pass
+    assert error.value.missing == ("top",)
+    assert 'client.flows.remote_inference("bench"' in str(error.value)
+    assert paths(script) == [
+        "/api/v1/remote-inference/transport",
+        "/api/v1/remote-inference/gpu",
+        "/api/v1/policy-config",
+        "/api/v1/robots/bench",
+    ]
+    # A bare repo id is read at its root, where its config.json lives.
+    assert script.requests[2].url.params["policy_ref"] == "maker/act-pick@root"
+
+
+def test_auto_bindings_resolve_once_and_reach_only_the_session():
+    routes = success_routes(gpu("ready", phase="connected"), image_features=TOP)
+    routes[("GET", "/api/v1/robots/bench")] = [
+        (200, {"status": "success", "robot": {"name": "bench", "cameras": [{"name": "top"}]}})
+    ]
+    script = Script(routes)
+    with (
+        mock_client(script) as client,
+        client.flows.remote_inference("bench", policy_ref="maker/act-pick", camera_bindings="auto"),
+    ):
+        pass
+    assert paths(script).count("/api/v1/policy-config") == 1  # the session does not re-check
+    start = next(r for r in script.requests if r.url.path == "/api/v1/sessions")
+    options = json.loads(start.content)["options"]
+    assert options["camera_bindings"] == {"top": "top"}
+    assert options["camera_dims"] == {"top": {"width": 640, "height": 480}}
+    gpu_start = next(r for r in script.requests if r.url.path == "/api/v1/remote-inference/gpu/start")
+    assert "camera_bindings" not in json.loads(gpu_start.content)
+
+
+def test_verify_cameras_false_skips_the_config_read():
+    routes = success_routes(gpu("ready", phase="connected"))
+    del routes[("GET", "/api/v1/policy-config")]
+    script = Script(routes)
+    with (
+        mock_client(script) as client,
+        client.flows.remote_inference("bench", policy_ref="maker/act-pick", verify_cameras=False),
+    ):
+        pass
+    assert "/api/v1/policy-config" not in paths(script)
+
+
+def test_auto_without_verification_is_refused_at_construction():
+    def no_requests(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"Unexpected request: {request}")
+
+    with mock_client(no_requests) as client, pytest.raises(ValueError, match="verify_cameras"):
+        client.flows.remote_inference(
+            "bench", policy_ref="maker/act-pick", camera_bindings="auto", verify_cameras=False
+        )

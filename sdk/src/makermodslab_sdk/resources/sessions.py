@@ -42,12 +42,13 @@ import socket
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 from makermodslab_sdk._operations import operation
 from makermodslab_sdk.errors import ApiError, MakerModsError, NotFoundError
 from makermodslab_sdk.resources._base import Resource, SdkModel
+from makermodslab_sdk.resources._cameras import resolve_camera_bindings
 from makermodslab_sdk.resources.recording import RecordingControlResult, RecordingStatus
 
 # Mirrors the server's lease/owner constraints (makermodslab/schemas/sessions.py).
@@ -860,6 +861,41 @@ class SessionsResource(Resource):
         started = self.start(kind, robot, owner=owner, options=options, lease_timeout_s=lease_timeout_s)
         return ActiveSession(self, started, owner=owner)
 
+    def _preflight_cameras(
+        self,
+        method: str,
+        robot: str,
+        policy_ref: str,
+        camera_bindings: dict[str, str] | Literal["auto"] | None,
+        camera_dims: dict[str, dict[str, int]] | None,
+        *,
+        verify_cameras: bool,
+        remote: bool,
+    ) -> tuple[dict[str, str] | None, dict[str, dict[str, int]] | None]:
+        """The camera-coverage preflight (see ``resources/_cameras.py``);
+        the bindings and dims to send. Also the flows' entry point, so a flow
+        can run it before anything billable starts."""
+        if camera_bindings == "auto":
+            if not verify_cameras:
+                raise ValueError(
+                    'camera_bindings="auto" is resolved from the policy\'s config, which '
+                    "verify_cameras=False skips — pass explicit camera_bindings instead, or drop "
+                    "verify_cameras=False."
+                )
+        elif camera_bindings is not None and not isinstance(camera_bindings, dict):
+            raise ValueError(f'camera_bindings must be a dict, "auto" or None, not {camera_bindings!r}')
+        if not verify_cameras:
+            return camera_bindings, camera_dims  # type: ignore[return-value]
+        return resolve_camera_bindings(
+            self._transport,
+            method=method,
+            robot=robot,
+            policy_ref=policy_ref,
+            camera_bindings=camera_bindings,
+            camera_dims=camera_dims,
+            remote=remote,
+        )
+
     def teleoperate(
         self,
         robot: str,
@@ -949,7 +985,7 @@ class SessionsResource(Resource):
         *,
         policy_ref: str,
         task: str | None = None,
-        camera_bindings: dict[str, str] | None = None,
+        camera_bindings: dict[str, str] | Literal["auto"] | None = None,
         camera_dims: dict[str, dict[str, int]] | None = None,
         duration_s: int | None = None,
         checkpoint_state_dim: int | None = None,
@@ -960,6 +996,7 @@ class SessionsResource(Resource):
         target_corrections: int | None = None,
         coaching_dataset_name: str | None = None,
         skip_identity_check: bool | None = None,
+        verify_cameras: bool = True,
         owner: str | None = None,
         lease_timeout_s: float | None = None,
     ) -> ActiveSession:
@@ -967,17 +1004,22 @@ class SessionsResource(Resource):
 
         ``camera_bindings`` maps policy-expected camera names to the robot
         record's camera names (the devices themselves come from the record).
-        OMITTING IT RUNS THE POLICY WITH NO CAMERAS, even when the record's
-        camera names match the policy's: nothing is bound by name. That is
-        right only for a camera-less policy; a vision policy energizes the
-        arm and then dies on its first action (``KeyError:
-        'observation.images.<name>'``). Pass the identity map when the names
-        match, e.g. ``{"top": "top", "wrist": "wrist"}``. What the checkpoint
-        expects is ``jobs.checkpoint_policy_config(job_id, step)`` — its
-        ``image_features`` keys are the policy-side names to bind, its values
-        the ``camera_dims`` to pass (``{"width": ..., "height": ...}``; omitted,
-        capture falls back to the record's own size). That lookup needs a
-        Lab job record (local, cloud or imported run), not a bare Hub repo.
+        The SERVER runs omitted bindings with no cameras, even when the names
+        match — right only for a camera-less policy; a vision policy would
+        energize the arm and die on its first action (``KeyError:
+        'observation.images.<name>'``). So before starting, the SDK reads the
+        policy's cameras (``jobs.policy_config(policy_ref)``) and raises
+        ``CameraBindingError`` — nothing sent — when the bindings miss one.
+        If the config can't be read (private/offline, or an older server) it
+        warns ``UnverifiedCamerasWarning`` and starts anyway;
+        ``verify_cameras=False`` skips the check. Pass the map, e.g.
+        ``camera_bindings={"top": "top", "wrist": "wrist"}``, or
+        ``camera_bindings="auto"``: every policy camera bound to the record
+        camera of the EXACT same name (case-sensitive; any unmatched name
+        raises — same name is the one explicit link, so nothing fuzzier is
+        guessed), with ``camera_dims`` filled from the config when omitted.
+        ``camera_dims`` is ``{name: {"width": ..., "height": ...}}``; omitted,
+        capture uses the record's own size.
 
         ``duration_s`` defaults to 60 SERVER-side; the run then ends by
         itself. ``duration_s=0`` runs until stopped (``s.stop()`` / leaving
@@ -996,20 +1038,29 @@ class SessionsResource(Resource):
         ``s.coaching_command("takeover")`` / ``"handback"`` / … while it runs.
 
         Example:
-            >>> ckpt = client.jobs.checkpoints(job.id).checkpoints[-1]
-            >>> cfg = client.jobs.checkpoint_policy_config(job.id, ckpt.step)
-            >>> list(cfg.image_features)
+            >>> ref = "me/act-pick@checkpoints/020000"
+            >>> sorted(client.jobs.policy_config(ref).image_features)
             ['top', 'wrist']
             >>> with client.sessions.infer(
             ...     "bench",
-            ...     policy_ref=ckpt.ref,
+            ...     policy_ref=ref,
             ...     task="pick the cube",
-            ...     camera_bindings={"top": "top", "wrist": "wrist"},
-            ...     camera_dims={k: v.model_dump() for k, v in cfg.image_features.items()},
+            ...     camera_bindings="auto",  # record has "top" + "wrist"
             ...     duration_s=0,  # until s.stop(); omitted = 60 s
             ... ) as s:
             ...     wait_for_rollout()
+            >>> # names differ? bind explicitly (policy name -> record name):
+            >>> # camera_bindings={"top": "overhead", "wrist": "gripper_cam"}
         """
+        camera_bindings, camera_dims = self._preflight_cameras(
+            "client.sessions.infer",
+            robot,
+            policy_ref,
+            camera_bindings,
+            camera_dims,
+            verify_cameras=verify_cameras,
+            remote=False,
+        )
         return self._start_managed(
             "inference",
             robot,
@@ -1278,7 +1329,7 @@ class SessionsResource(Resource):
         policy_ref: str,
         policy_hub_id: str | None = None,
         task: str | None = None,
-        camera_bindings: dict[str, str] | None = None,
+        camera_bindings: dict[str, str] | Literal["auto"] | None = None,
         camera_dims: dict[str, dict[str, int]] | None = None,
         checkpoint_state_dim: int | None = None,
         duration_s: int | None = None,
@@ -1294,6 +1345,7 @@ class SessionsResource(Resource):
         lpf_hz: float | None = None,
         lpf_order: int | None = None,
         skip_identity_check: bool | None = None,
+        verify_cameras: bool = True,
         owner: str | None = None,
         lease_timeout_s: float | None = None,
     ) -> ActiveSession:
@@ -1305,16 +1357,31 @@ class SessionsResource(Resource):
         ``engine`` is "sync" or "rtc"; the ``video_*``/``latency_k``/``lpf_*``
         knobs shape the camera uplink and action smoothing.
 
-        ``camera_bindings`` / ``camera_dims`` / ``duration_s`` behave as in
-        ``infer``: omitted bindings run WITHOUT cameras (only right for a
-        camera-less policy), and ``duration_s`` defaults to 60 server-side
-        while ``0`` runs until stopped.
+        ``camera_bindings`` / ``camera_dims`` / ``duration_s`` /
+        ``verify_cameras`` behave as in ``infer``: the server runs omitted
+        bindings WITHOUT cameras, so the SDK checks coverage against the
+        policy's config first (a bare ``"<owner>/<repo>"`` ref is read at its
+        root) and ``camera_bindings="auto"`` binds by identical name.
+        ``duration_s`` defaults to 60 server-side;
+        ``duration_s=0`` runs until stopped. Unlike ``infer``, an
+        unrecognised ref shape only warns: the remote start accepts any ref.
 
         Example:
             >>> client.sessions.gpu_start(policy_hub_id="me/act-pick")
-            >>> with client.sessions.remote_infer("bench", policy_ref="me/act-pick") as s:
+            >>> with client.sessions.remote_infer(
+            ...     "bench", policy_ref="me/act-pick", camera_bindings="auto"
+            ... ) as s:
             ...     wait_for_rollout()
         """
+        camera_bindings, camera_dims = self._preflight_cameras(
+            "client.sessions.remote_infer",
+            robot,
+            policy_ref,
+            camera_bindings,
+            camera_dims,
+            verify_cameras=verify_cameras,
+            remote=True,
+        )
         return self._start_managed(
             "remote_inference",
             robot,

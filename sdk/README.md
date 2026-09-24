@@ -106,17 +106,25 @@ with client.flows.remote_inference(
     "bench",
     policy_ref="me/act-pick",
     gpu="A10G",
-    camera_bindings={"top": "top"},  # omitted = a camera-less run
+    camera_bindings="auto",  # or {"top": "overhead"}: policy name -> record name
     startup_timeout=180,
 ) as run:
     print(run.session_id, run.launch_id, run.start_warnings)
     run.session.wait(timeout=300)
 ```
 
-As with `client.sessions.infer`, `camera_bindings` (policy camera name ->
-robot-record camera name) is never inferred: omit it and the policy runs with
-no cameras, even when the names match. `duration_s` defaults to 60 s on the
-server; `duration_s=0` runs until stopped.
+As with `client.sessions.infer`, `camera_bindings` maps policy camera names to
+robot-record camera names, and the server runs omitted bindings with no
+cameras. The SDK checks coverage before starting: it reads the policy's
+cameras with `client.jobs.policy_config(policy_ref)` and raises
+`CameraBindingError`, with nothing sent, when a camera the policy reads is
+unbound. When the config can't be read (a private repo, offline, or a server
+that predates the route), it emits `UnverifiedCamerasWarning` and starts
+anyway. `verify_cameras=False` skips the check. `camera_bindings="auto"`
+binds each policy camera to the record camera with exactly the same name and
+fills `camera_dims`. It refuses when any name has no exact match or the config
+is unknown, so it never guesses. The flow runs the check before it launches the GPU.
+`duration_s` defaults to 60 s on the server; `duration_s=0` runs until stopped.
 
 Exiting stops the robot session before conditionally stopping the GPU by its
 `launch_id`; it cannot stop a replacement launch. Use the primitive

@@ -101,6 +101,27 @@ marked _(reference)_ name where the Python implementation lives.
 - A 201 start response may carry `warnings` (warn-but-allow findings, e.g.
   arm identity). The session RUNS; the warnings must be surfaced verbatim
   (server prose, never localized/reworded).
+- Inference starts (`inference`, `remote_inference`, and any flow that
+  starts them) run a client-side camera-coverage preflight first, because the
+  server reads empty `camera_bindings` as a camera-less policy and a vision
+  policy then energizes the arm and fails on its first action. The client
+  reads `GET /api/v1/policy-config?policy_ref=` (`image_features` keys = the
+  cameras the policy reads) and: refuses before sending the start when any
+  of them is unbound (fail CLOSED, naming the missing cameras, the robot
+  record's camera names when readable, and the literal next call); warns and
+  starts unchanged when the config is unknown — 404
+  `checkpoint.config_unreadable`, or the bare 404 of a server predating the
+  route (fail OPEN). A 400 `checkpoint.invalid_ref` is raised early for
+  `inference`, whose start refuses the same ref shapes, and counts as unknown
+  for `remote_inference`, whose start does not validate them (a bare
+  `<owner>/<repo>` is looked up as `<owner>/<repo>@root`). `"auto"` bindings
+  resolve to the identity map over exact, case-sensitive name matches against
+  the robot record's cameras and fill `camera_dims` from the config when not
+  given; any unmatched name or an unknown config refuses (fail CLOSED — no
+  partial or fuzzy binding), and `"auto"` is never sent to the server. An
+  explicit opt-out (`verify_cameras=False`) skips the read entirely. A flow
+  that also launches billable work (the remote-inference GPU) runs the check
+  before that launch.
 - A heartbeat 404 after a finite session can mean normal completion. Read
   `sessions.current().last_ended`: a matching id with null `reason` is an end
   (including `phase="error"`), while `session.lease_expired` is a loss. A

@@ -23,6 +23,18 @@ from makermodslab_sdk.resources.sessions import SUGAR_BY_KIND, SessionsResource
 # are SessionStartBody-level fields the server reads outside `options`.
 CONTROL_PARAMS = frozenset({"robot", "owner", "lease_timeout_s"})
 
+# Per-method sugar parameters that steer CLIENT-side behaviour and are never
+# sent to the server, each with its reason. Equality-guarded below: every entry
+# must exist on its method and must NOT be a server option field.
+CLIENT_ONLY_PARAMS: dict[str, dict[str, str]] = {
+    "infer": {
+        "verify_cameras": "skips the SDK's camera-coverage preflight (GET /policy-config) before the start",
+    },
+    "remote_infer": {
+        "verify_cameras": "skips the SDK's camera-coverage preflight (GET /policy-config) before the start",
+    },
+}
+
 # Per-kind server option fields the SDK deliberately does NOT expose as sugar
 # kwargs, each with its reason. Equality-guarded below so entries can only be
 # added or removed consciously. Empty today — full parity.
@@ -43,7 +55,7 @@ def server_registries():
 def sugar_option_params(method_name: str) -> set[str]:
     signature = inspect.signature(getattr(SessionsResource, method_name))
     params = {name for name in signature.parameters if name != "self"}
-    return params - CONTROL_PARAMS
+    return params - CONTROL_PARAMS - set(CLIENT_ONLY_PARAMS.get(method_name, {}))
 
 
 def test_every_startable_kind_has_sugar():
@@ -84,6 +96,20 @@ def test_registers_hold_no_stale_entries():
                 f"EXCLUDED_OPTIONS[{kind!r}] names field {field!r} the server no longer has"
             )
             assert reason.strip(), f"EXCLUDED_OPTIONS[{kind!r}][{field!r}] needs a real reason"
+    for method_name, params in CLIENT_ONLY_PARAMS.items():
+        assert method_name in SUGAR_BY_KIND.values(), (
+            f"CLIENT_ONLY_PARAMS names unknown sugar {method_name!r}"
+        )
+        kind = next(k for k, m in SUGAR_BY_KIND.items() if m == method_name)
+        signature = inspect.signature(getattr(SessionsResource, method_name))
+        for param, reason in params.items():
+            assert param in signature.parameters, (
+                f"{method_name}: client-only param {param!r} not in signature"
+            )
+            assert param not in options_models[kind].model_fields, (
+                f"{method_name}: {param!r} is now a server option — thread it into _options() instead"
+            )
+            assert reason.strip(), f"CLIENT_ONLY_PARAMS[{method_name!r}][{param!r}] needs a real reason"
     # Every control param actually appears on every sugar method — a rename
     # there would silently widen the compared set otherwise.
     for method_name in SUGAR_BY_KIND.values():

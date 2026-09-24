@@ -583,6 +583,41 @@ class JobsResource(Resource):
             )
         )
 
+    @operation("get_policy_config_by_ref")
+    def policy_config(self, policy_ref: str) -> CheckpointPolicyConfig:
+        """The same config summary as :meth:`checkpoint_policy_config`, by
+        the ``policy_ref`` inference starts from — no Lab job record needed.
+
+        Accepts exactly the refs inference does: an absolute local
+        ``pretrained_model`` directory, ``"<owner>/<repo>@checkpoints/<step>"``
+        or ``"<owner>/<repo>@root"``; reads only the config (a few KB, never
+        the weights). ``image_features`` keys are the bare camera names
+        ``sessions.infer(camera_bindings=...)`` must cover.
+
+        Raises ApiError 400 ``checkpoint.invalid_ref`` for any other ref
+        shape, and 404 ``checkpoint.config_unreadable`` when the config can't
+        be read (private repo, offline, missing) — that means UNKNOWN, never
+        camera-less. A server that predates the route raises
+        ServerTooOldError.
+
+        Example:
+            >>> cfg = client.jobs.policy_config("me/act-pick@checkpoints/020000")
+            >>> cfg.policy_type, sorted(cfg.image_features)
+            ('act', ['top', 'wrist'])
+        """
+        return CheckpointPolicyConfig.model_validate(
+            self._transport.request(
+                "GET",
+                "/api/v1/policy-config",
+                params={"policy_ref": policy_ref},
+                action=f"Get policy config of {policy_ref!r}",
+                newer_route_fallback=(
+                    "read it per checkpoint with client.jobs.checkpoint_policy_config(job_id, step) "
+                    "(needs a Lab job record for the run)."
+                ),
+            )
+        )
+
     @operation("create_training_job")
     def create_training(
         self,
