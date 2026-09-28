@@ -835,9 +835,9 @@ def teleoperate_arm(request: TeleoperateRequest):
 
 
 @router.post("/stop-teleoperation")
-def stop_teleoperation():
+def stop_teleoperation(release_now: bool = False):
     """Stop the current teleoperation session"""
-    return handle_stop_teleoperation()
+    return handle_stop_teleoperation(release_now=True) if release_now else handle_stop_teleoperation()
 
 
 @router.get("/teleoperation-status")
@@ -1154,13 +1154,15 @@ def heartbeat_session(session_id: str, body: SessionHeartbeatBody):
 
 
 @v1_router.post("/sessions/{session_id}/stop", response_model=SessionStopResponse, tags=["sessions"])
-def stop_session(session_id: str):
+def stop_session(session_id: str, release_now: bool = False):
     """Stop the current session by its own id — 404 session.not_found unless
     `session_id` names the session that is actually running, so a stale stop
     can never hit a session it didn't mean (the operation-identity guarantee).
     Returns the kind's stop-handler result verbatim beside the final
     identity."""
-    return handle_stop_session(session_id)
+    return (
+        handle_stop_session(session_id, release_now=True) if release_now else handle_stop_session(session_id)
+    )
 
 
 @v1_router.post(
