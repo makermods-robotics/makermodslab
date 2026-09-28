@@ -48,8 +48,14 @@ def test_the_maker_jaw_opens_towards_its_negative_limit():
         (-93.4, -120),  # half pull: fully open
         (-140, -120),  # past half: clamped open
         (TRIGGER_FAR_STOP_DEG, -120),  # far hard stop: still clamped open, no branch flip
-        (5, -2),  # a hair past the closed stop: clamped closed
+        (1, -2),  # rest wobble at the closed stop: clamped closed
         (-93.4 - 360, -120),  # an extra full turn on the counter unwraps
+        # A mirrored build turns the servo the other way (measured 0 -> +48 on two
+        # units, 2026-09-27): the same distance pulled gives the same jaw.
+        (46.7, -60),
+        (93.4, -120),
+        (-TRIGGER_FAR_STOP_DEG, -120),
+        (93.4 + 360, -120),
     ],
 )
 def test_real_driver_maps_zeroed_encoder_travel_and_clips(angle, target, tmp_lerobot_home):
@@ -88,6 +94,34 @@ def test_bimanual_driver_preserves_the_trigger_mapping_for_both_leaders(tmp_path
     for arm in (leader.left_arm, leader.right_arm):
         assert arm.config.joint_directions["gripper"] == pytest.approx(TRIGGER_SCALE)
         assert arm.config.joint_ranges["gripper"] == [-120, -2]
+    # Each arm is built inside lerobot's bimanual leader, and still maps its trigger
+    # by distance pulled: one arm of each build, pulled the same distance.
+    for arm, angle in ((leader.left_arm, -46.7), (leader.right_arm, 46.7)):
+        arm.bus = SimpleNamespace(close=lambda: None)
+        arm._read_raw_positions = lambda angle=angle, ids=arm.config.joint_ids: {
+            **dict.fromkeys(ids, 0.0),
+            "gripper": angle,
+        }
+    try:
+        action = leader.get_action()
+        assert action["left_gripper.pos"] == pytest.approx(-60, abs=0.5)
+        assert action["right_gripper.pos"] == pytest.approx(-60, abs=0.5)
+    finally:
+        leader.disconnect()
+
+
+def test_the_stock_lever_keeps_its_signed_mapping(tmp_lerobot_home):
+    """Only the trigger maps by distance: the lever's +60.5 opens, its -60.5 stays closed."""
+    config = MAKER.single_leader_config("fake", "lever-test")
+    leader = make_teleoperator_from_config(config)
+    leader.bus = SimpleNamespace(close=lambda: None)
+    for angle, target in ((60.5, -120), (-60.5, -2)):
+        leader._read_raw_positions = lambda angle=angle: {
+            **dict.fromkeys(config.joint_ids, 0.0),
+            "gripper": angle,
+        }
+        assert leader.get_action()["gripper.pos"] == pytest.approx(target, abs=0.5)
+    leader.disconnect()
 
 
 def test_trigger_choice_is_available_and_persists(client, tmp_lerobot_home):

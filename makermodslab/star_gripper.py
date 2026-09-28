@@ -6,8 +6,10 @@ stock preset in ONE number, the gripper's scale factor, measured on the hardware
 and kept here so a gripper mechanism never moves the lerobot pin:
 
 - ``star_vertical`` (Metal arm): the vertical grip, 41.2 deg of travel.
-- ``star_trigger`` (Maker arm): the trigger, ~187 deg of travel the other way,
-  of which the first half opens the jaw fully (see the trigger constants).
+- ``star_trigger`` (Maker arm): the trigger, ~187 deg of travel, of which the
+  first half opens the jaw fully (see the trigger constants). Trigger builds turn
+  the servo either way from the closed stop, so this kind also replaces the
+  gripper's signed mapping with one on the distance pulled (see the trigger section).
 """
 
 import math
@@ -28,6 +30,9 @@ VERTICAL_OPEN_DEG = 24.0
 # trigger to its far stop is physically awkward. Change TRIGGER_USABLE_TRAVEL_DEG to
 # use more or less of the pull; TRIGGER_FAR_STOP_DEG is the measurement, kept so the
 # tests can prove the far stop still unwraps on the right 360 deg branch.
+# Not every trigger build turns the servo that way: two units measured on 2026-09-27
+# read POSITIVE when pulled (0 -> +48 deg), and the signed mapping held their jaws
+# closed. The closed stop is a hard stop at 0, so the jaw follows |pull| instead.
 STAR_TRIGGER_LEADER_KIND = "star_trigger"
 TRIGGER_CLOSED_DEG = 0.0
 TRIGGER_FAR_STOP_DEG = -186.8
@@ -90,21 +95,75 @@ def vertical_sub_config(**kwargs):
 # --- the Maker arm's trigger grip -----------------------------------------------
 
 
+class TriggerJointDirections(dict):
+    """Marks a Star leader config as the trigger grip.
+
+    lerobot's bimanual leader rebuilds each arm's config from the sub-config's
+    fields, passing this dict through by reference, so the marker reaches every
+    RebotArm102Leader built from a trigger config, single or bimanual.
+    """
+
+
+def trigger_jaw_target(raw_deg: float, scale: float, jaw_range: tuple[float, float]) -> float:
+    """Jaw target for a zeroed trigger reading, whichever way the build turns.
+
+    The distance pulled is the reading's size once unwrapped around the closed
+    stop, and the jaw goes where the measured (negative-turning) unit's same pull
+    takes it: that unit's -93.4 and a mirrored build's +93.4 both open it fully.
+    """
+    pulled = abs(raw_deg - 360.0 * round(raw_deg / 360.0))
+    low, high = jaw_range
+    return max(float(low), min(float(high), -pulled * scale))
+
+
+def _install_trigger_mapping() -> None:
+    """Remap the gripper of trigger leaders after lerobot's own get_action.
+
+    Patched on the class because lerobot builds the leader itself (and the
+    bimanual leader builds its two arms internally); idempotent across re-imports
+    as bus_retry.py is. Any other Star leader passes through untouched.
+    """
+    from lerobot.teleoperators.rebot_102_leader.rebot_102_leader import RebotArm102Leader
+
+    installed = RebotArm102Leader.get_action
+    original = getattr(installed, "_trigger_mapping_original", installed)
+
+    def get_action(self):
+        action = original(self)
+        directions = self.config.joint_directions
+        if isinstance(directions, TriggerJointDirections) and "gripper.pos" in action:
+            # _last_raw_positions is the reading original() just mapped (or its
+            # last good one after a failed read), so both see the same sample.
+            action["gripper.pos"] = trigger_jaw_target(
+                self._last_raw_positions["gripper"],
+                directions["gripper"],
+                self.config.joint_ranges["gripper"],
+            )
+        return action
+
+    get_action._trigger_mapping_original = original
+    RebotArm102Leader.get_action = get_action
+
+
 def trigger_gripper_config(
     config: Any, *, closed_deg: float = TRIGGER_CLOSED_DEG, pulled_deg: float = TRIGGER_USABLE_TRAVEL_DEG
 ) -> Any:
     """Copy the stock Maker mapping, replacing only the gripper scale.
 
     The Maker jaw's open target is the LOW end of its range (-120; raw 0 lands on the
-    -2 end), so that end is the output the pull maps onto.
+    -2 end), so that end is the output the pull maps onto. The directions are marked
+    as the trigger's, so the leader maps the gripper by distance pulled.
     """
+    _install_trigger_mapping()
     open_target, _closed_target = config.joint_ranges["gripper"]
     return replace(
         config,
-        joint_directions={
-            **config.joint_directions,
-            "gripper": measured_gripper_scale(closed_deg, pulled_deg, open_target),
-        },
+        joint_directions=TriggerJointDirections(
+            {
+                **config.joint_directions,
+                "gripper": measured_gripper_scale(closed_deg, pulled_deg, open_target),
+            }
+        ),
     )
 
 
