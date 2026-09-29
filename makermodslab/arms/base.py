@@ -293,6 +293,15 @@ class ArmFamily(ABC):
         """Install family-specific control safeguards before connecting."""
         return None
 
+    def prepare_leader_following(self, robot: Any) -> None:
+        """Bound the follower's motion before a flow that makes it chase a leader.
+
+        Teleoperation and recording both call this on the freshly built
+        follower, before connecting. The default leaves the follower as the
+        driver built it.
+        """
+        return None
+
     def urdf_joint_positions(self, degrees: dict[str, float]) -> dict[str, float]:
         """Map CAN motor degrees to this family's viewer joints, if it ships a model."""
         return {}
