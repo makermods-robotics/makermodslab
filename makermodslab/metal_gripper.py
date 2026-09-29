@@ -5,6 +5,13 @@ MIT driver. All bus transactions, including the independent thermal/holding
 worker, share one lock. No flash writes. Failure is latched, never automatic
 re-enabling. The motor watchdog covers a stopped process; the worker covers
 recording pauses when the normal action loop is idle.
+
+The gripper motor (id 7) answers late. Measured on two arms and two adapters,
+it often emits its reply to request N only when the NEXT frame appears on the
+bus. Sometimes it delivers that held reply twice, and occasionally it never
+answers. Motors 1-6 reply within 0.25 ms. ``_query`` therefore matches replies
+by content and provokes a held one with a harmless refresh of another joint.
+See ``_query`` for how it rejects stale and duplicate frames.
 """
 
 from __future__ import annotations
@@ -27,6 +34,12 @@ _active: dict[str, list[MetalGripperBus]] = {}
 WATCHDOG_TICKS = 10_000  # Damiao 50 us units: 500 ms.
 HOLD_INTERVAL_S = 0.05
 QUERY_TIMEOUT_S = 0.12
+#: Bus silence after which a query puts a flush frame on the bus: a punctual
+#: gripper reply arrives well inside it, a held one needs the next frame.
+FLUSH_AFTER_S = 0.003
+FLUSHES_PER_ATTEMPT = 3
+#: Bound on frames discarded before a request (they answer earlier requests).
+DRAIN_LIMIT = 64
 
 
 class GripperSafetyError(RuntimeError):
@@ -90,6 +103,9 @@ class MetalGripperBus:
         motor = bus.motors["gripper"]
         self._motor_id = motor.id
         self._reply_id = motor.recv_id
+        # A read-only refresh of another joint flushes a held gripper reply
+        # without asking the gripper for yet another (possibly held) answer.
+        self._flush_id = next((m.id for m in bus.motors.values() if m.id != motor.id), motor.id)
 
     def __getattr__(self, name: str):
         target = getattr(self._base, name)
@@ -104,33 +120,82 @@ class MetalGripperBus:
 
         return locked
 
-    def _query(self, arbitration_id: int, data: bytes, matches: Callable[[bytes], bool]) -> can.Message:
-        if self._base.canbus is None:
+    def _query(
+        self,
+        arbitration_id: int,
+        data: bytes,
+        matches: Callable[[bytes], bool],
+        want: Callable[[bytes], bool] | None = None,
+    ) -> can.Message:
+        """Send one gripper request and return the reply that answers it.
+
+        Frames already queued answer earlier requests, so they are dropped
+        first. After ``FLUSH_AFTER_S`` of bus silence a refresh of another
+        joint flushes a held reply. ``matches`` is the reply's identity (a
+        param echo, a state frame). ``want`` optionally narrows that to the
+        content this request must produce (an echoed value, the commanded
+        enable state), so a late duplicate of an earlier answer is skipped.
+        A reply that matches but is not wanted is returned only if nothing
+        better arrives, and the caller's own check then fails closed on it.
+        No matching reply at all still raises.
+        """
+        bus = self._base.canbus
+        if bus is None:
             raise ConnectionError("Gripper CAN bus is closed")
+        for _ in range(DRAIN_LIMIT):
+            if bus.recv(timeout=0) is None:
+                break
+        request = can.Message(arbitration_id=arbitration_id, is_extended_id=False, data=data)
+        flush = can.Message(
+            arbitration_id=0x7FF,
+            is_extended_id=False,
+            data=struct.pack("<HB", self._flush_id, 0xCC) + bytes(5),
+        )
+        unwanted = None
         for _ in range(2):
-            self._base.canbus.send(
-                can.Message(arbitration_id=arbitration_id, is_extended_id=False, data=data)
-            )
-            deadline = time.monotonic() + QUERY_TIMEOUT_S
-            while time.monotonic() < deadline:
-                msg = self._base.canbus.recv(timeout=0.01)
+            bus.send(request)
+            flushes = 0
+            now = quiet_since = time.monotonic()
+            deadline = now + QUERY_TIMEOUT_S
+            while now < deadline:
+                if flushes < FLUSHES_PER_ATTEMPT and now - quiet_since >= FLUSH_AFTER_S:
+                    bus.send(flush)
+                    flushes += 1
+                    quiet_since = now
+                msg = bus.recv(timeout=max(0.0, min(FLUSH_AFTER_S, deadline - now)))
+                now = time.monotonic()
+                if msg is None:
+                    continue
+                quiet_since = now  # Any frame on the bus also releases a held reply.
                 if (
-                    msg is not None
-                    and not msg.is_extended_id
+                    not msg.is_extended_id
                     and msg.arbitration_id == self._reply_id
                     and len(msg.data) == 8
                     and matches(bytes(msg.data))
                 ):
-                    return msg
+                    if want is None or want(bytes(msg.data)):
+                        return msg
+                    unwanted = msg
+        if unwanted is not None:
+            return unwanted
         raise ConnectionError("No fresh gripper response; grip stopped")
 
-    def _param(self, rid: int, value: int | None = None, fmt: str = "I") -> float | int:
+    def _param(
+        self, rid: int, value: int | None = None, fmt: str = "I", expect: int | None = None
+    ) -> float | int:
         op = 0x33 if value is None else 0x55
         header = struct.pack("<HBB", self._motor_id, op, rid)
         payload = bytes(4) if value is None else struct.pack("<" + fmt, value)
-        reply = self._query(0x7FF, header + payload, lambda d: d[:4] == header)
+        # A write echoes its value; its verification read wants that value. A
+        # late duplicate of the register's previous read is skipped, but if
+        # the register really kept another value, that reply is returned.
+        target = payload if value is not None else None
+        if expect is not None:
+            target = struct.pack("<" + fmt, expect)
+        want = None if target is None else lambda d: d[4:] == target
+        reply = self._query(0x7FF, header + payload, lambda d: d[:4] == header, want)
         result = struct.unpack("<" + fmt, reply.data[4:])[0]
-        if value is not None and (result != value or self._param(rid, fmt=fmt) != value):
+        if value is not None and (result != value or self._param(rid, fmt=fmt, expect=value) != value):
             raise GripperSafetyError(f"Gripper register {rid} did not retain requested value {value}")
         return result
 
@@ -156,7 +221,11 @@ class MetalGripperBus:
 
     def _simple(self, command: int) -> None:
         offset = {1: 0, 2: 0x100, 3: 0x200, 4: 0x300}[self._mode]
-        msg = self._query(self._motor_id + offset, bytes([255] * 7 + [command]), self._is_state)
+        # Enable wants any non-disabled status (enabled, or a fault to report);
+        # disable wants any status but enabled. A held earlier state frame is
+        # never taken as the acknowledgement. The callers check the status.
+        want = {0xFC: lambda d: d[0] >> 4 != 0, 0xFD: lambda d: d[0] >> 4 != 1}.get(command)
+        msg = self._query(self._motor_id + offset, bytes([255] * 7 + [command]), self._is_state, want)
         self._state(msg)
 
     def _check(self) -> None:
@@ -322,7 +391,12 @@ class MetalGripperBus:
                                 except Exception as exc:
                                     errors.append(str(exc))
                     # A mode write may have landed even if its reply was lost.
-                    self._mode = int(self._param(10))
+                    # An unreadable mode must not skip the release below; it
+                    # is then sent in the last known mode and still reported.
+                    try:
+                        self._mode = int(self._param(10))
+                    except Exception as exc:
+                        errors.append(f"gripper mode unreadable: {exc}")
                     # Always release the gripper, even when the upstream config
                     # requests leaving arm-joint torque on at disconnect.
                     self.disable_torque("gripper")
