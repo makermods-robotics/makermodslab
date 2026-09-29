@@ -49,7 +49,7 @@ def _install_gripper_open_limit():
         cls.__init__ = make(original)
 
 
-def _install_gs_usb_connect(bus_cls, label, wrap_errors=None):
+def _install_gs_usb_connect(bus_cls, label, wrap_errors=None, trace=False):
     """Route ``bus_cls.connect`` through the exact-serial gs_usb transport.
 
     Only a ``gs_usb:<serial>`` port is diverted; every other port reaches the
@@ -67,7 +67,12 @@ def _install_gs_usb_connect(bus_cls, label, wrap_errors=None):
     @wraps(original)
     def connect(self, handshake=True):
         if not isinstance(self.port, str) or not self.port.startswith("gs_usb:"):
-            return original(self, handshake=handshake)
+            result = original(self, handshake=handshake)
+            if trace:
+                from . import can_trace
+
+                can_trace.wrap(self)
+            return result
         from .gs_usb_transport import open_gs_usb
 
         if self.is_connected:
@@ -82,14 +87,19 @@ def _install_gs_usb_connect(bus_cls, label, wrap_errors=None):
             raise wrap_errors(f"Failed to connect to CAN bus: {exc}") from exc
         self.canbus = bus
         self._is_connected = True
+        if trace:
+            from . import can_trace
+
+            can_trace.wrap(self)
         try:
             if handshake:
                 self._handshake()
         except BaseException as exc:
+            opened = self.canbus if self.canbus is not None else bus  # the trace wrapper, when on
             self._is_connected = False
             self.canbus = None
             try:
-                bus.shutdown()
+                opened.shutdown()
             except Exception as cleanup:
                 exc.add_note(f"USB cleanup also failed: {cleanup}")
             if wrap_errors is None or not isinstance(exc, Exception) or isinstance(exc, wrap_errors):
@@ -108,4 +118,5 @@ def install():
     _install_gs_usb_connect(RobstrideMotorsBus, "RobStride")
     # The Metal follower and the gravity-compensated Metal leader both open
     # DamiaoMotorsBus, so this one hook covers either side on a gs_usb adapter.
-    _install_gs_usb_connect(DamiaoMotorsBus, "Damiao", wrap_errors=ConnectionError)
+    # trace: the TEMPORARY opt-in frame trace (can_trace.py, MAKERMODSLAB_CAN_TRACE=1).
+    _install_gs_usb_connect(DamiaoMotorsBus, "Damiao", wrap_errors=ConnectionError, trace=True)
