@@ -331,6 +331,50 @@ def test_robstride_feedback_still_rejects_silence_and_motor_faults(fault, messag
         remote_can.get_observation(robot)
 
 
+def damiao_double(events, reply=True):
+    robot = robot_double(events)
+    bus = robot.bus
+    bus.use_can_fd = False
+    bus.canbus = SimpleNamespace(send=lambda msg: events.append(("send", list(msg.data))))
+    bus._get_motor_id = {"elbow": 3, "gripper": 7}.get
+    bus._get_motor_recv_id = {"elbow": 0x13, "gripper": 0x17}.get
+
+    def recv(*, expected_recv_id, timeout):
+        # The pinned read() would have given up after 1 ms.
+        assert timeout >= 0.020
+        events.append(("recv", expected_recv_id))
+        return SimpleNamespace(data=expected_recv_id) if reply else None
+
+    bus._recv_motor_response = recv
+    bus._process_response = lambda motor, msg: events.append(("decode", motor, msg.data))
+    return robot
+
+
+def test_damiao_feedback_allows_usb_latency_and_updates_each_motor():
+    events = []
+    robot = damiao_double(events)
+    assert remote_can.get_observation(robot) == {"elbow.pos": 15.0, "gripper.pos": 30.0}
+    assert events == [
+        ("send", [3, 0, 0xCC, 0, 0, 0, 0, 0]),
+        ("recv", 0x13),
+        ("decode", "elbow", 0x13),
+        ("send", [7, 0, 0xCC, 0, 0, 0, 0, 0]),
+        ("recv", 0x17),
+        ("decode", "gripper", 0x17),
+    ]
+
+
+def test_damiao_feedback_still_rejects_silence():
+    robot = damiao_double([], reply=False)
+
+    def stale_observation():
+        raise AssertionError("must not use a cached observation after a failed refresh")
+
+    robot.get_observation = stale_observation
+    with pytest.raises(ConnectionError, match="elbow"):
+        remote_can.get_observation(robot)
+
+
 def test_maker_folded_zero_is_accepted_and_alignment_does_not_snap_to_soft_limit():
     robot = robot_double([])
     robot.bus.position = {"elbow": 0.0, "gripper": 0.0}

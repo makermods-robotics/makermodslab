@@ -74,6 +74,22 @@ def prepare(robot) -> None:
             arm.config.velocity_feedforward = False
 
 
+def _damiao_refresh(bus, motor: str):
+    """The pinned DamiaoMotorsBus._refresh_motor with CAN_FEEDBACK_TIMEOUT_S."""
+    import can
+
+    from lerobot.motors.damiao.tables import CAN_CMD_REFRESH, CAN_PARAM_ID
+
+    motor_id = bus._get_motor_id(motor)
+    data = [motor_id & 0xFF, (motor_id >> 8) & 0xFF, CAN_CMD_REFRESH, 0, 0, 0, 0, 0]
+    bus.canbus.send(
+        can.Message(arbitration_id=CAN_PARAM_ID, data=data, is_extended_id=False, is_fd=bus.use_can_fd)
+    )
+    return bus._recv_motor_response(
+        expected_recv_id=bus._get_motor_recv_id(motor), timeout=CAN_FEEDBACK_TIMEOUT_S
+    )
+
+
 def get_observation(robot) -> dict:
     """Require fresh replies; the CAN drivers' batch reads reuse stale state."""
     for arm, _label in maker_follower_arms(robot):
@@ -89,7 +105,18 @@ def get_observation(robot) -> dict:
                 if fault:
                     raise RuntimeError(f"Motor '{motor}' reported a fault during state update")
                 arm.bus._decode_motor_state(message.data)
-            else:  # Damiao: individual reads fail on missing replies; batch reads do not
+            elif hasattr(arm.bus, "_recv_motor_response"):
+                # Damiao: the pinned read() allows only 1 ms for the refresh
+                # reply, polled against the wall clock. Portal and server
+                # threads holding the GIL overran it on a healthy gs_usb bus
+                # (replies measured at 0.35-1.0 ms). Same request and decoder,
+                # with the RobStride path's deadline. Batch reads reuse stale
+                # state, so a missing reply still fails here.
+                message = _damiao_refresh(arm.bus, motor)
+                if message is None:
+                    raise ConnectionError(f"No fresh feedback from motor '{motor}' within 50 ms")
+                arm.bus._process_response(motor, message)
+            else:
                 arm.bus.read("Present_Position", motor)
     # Use the device's observation for Maker's full-turn zero correction.
     observation = robot.get_observation()
