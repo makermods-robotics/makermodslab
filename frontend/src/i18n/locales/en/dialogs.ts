@@ -191,6 +191,10 @@ export default {
   },
 
   teleop: {
+    restFailed: "Arm did not reach rest",
+    armSupported: "I have physically supported the arm; releasing torque will make it limp.",
+    releaseTorque: "Release torque",
+
     // Used for both the window's aria-label and its visible heading.
     title: "Teleoperation",
     // {{robot}} is the selected robot's name — data.

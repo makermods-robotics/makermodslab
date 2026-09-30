@@ -124,6 +124,10 @@ export default {
   },
 
   teleop: {
+    restFailed: "机械臂未到达休息位置",
+    armSupported: "我已托住机械臂；释放力矩后机械臂会松软下垂。",
+    releaseTorque: "释放力矩",
+
     title: "遥操作",
     titleWithRobot: "遥操作 — {{robot}}",
     done: "完成",

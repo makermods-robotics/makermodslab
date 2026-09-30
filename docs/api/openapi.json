@@ -2264,6 +2264,39 @@
       },
       "GripperStatus": {
         "properties": {
+          "command_kd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command Kd"
+          },
+          "command_kp": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command Kp"
+          },
+          "command_position_deg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command Position Deg"
+          },
           "effective_current_a": {
             "title": "Effective Current A",
             "type": "number"
@@ -2283,6 +2316,28 @@
             ],
             "title": "Fault"
           },
+          "fault_word": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fault Word"
+          },
+          "goal_position_deg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal Position Deg"
+          },
           "hold_torque_nm": {
             "anyOf": [
               {
@@ -2298,6 +2353,28 @@
             "title": "Holding",
             "type": "boolean"
           },
+          "leader_target_deg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader Target Deg"
+          },
+          "legacy_firmware": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Legacy Firmware"
+          },
           "limit_a": {
             "anyOf": [
               {
@@ -2308,6 +2385,17 @@
               }
             ],
             "title": "Limit A"
+          },
+          "measured_position_deg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Measured Position Deg"
           },
           "measured_torque_nm": {
             "anyOf": [
@@ -13629,6 +13717,16 @@
               "title": "Session Id",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "release_now",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Release Now",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -14134,6 +14232,18 @@
       "post": {
         "description": "Stop the current teleoperation session",
         "operationId": "stop_teleoperation",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "release_now",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Release Now",
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -14142,6 +14252,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Stop Teleoperation"
@@ -18192,6 +18312,18 @@
       "post": {
         "description": "Stop the current teleoperation session",
         "operationId": "stop_teleoperation_stop_teleoperation_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "release_now",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Release Now",
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -18200,6 +18332,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Stop Teleoperation"
