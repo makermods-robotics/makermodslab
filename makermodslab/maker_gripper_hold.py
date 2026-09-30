@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 QUERY_TIMEOUT_S = 0.12
 CAN_TIMEOUT_INDEX = 0x7028
+FAULT_POLL_INTERVAL_S = 0.25
 WATCHDOG_TICKS = 10_000  # RS00: 20,000 ticks/s, 500 ms.
 
 
@@ -48,6 +49,8 @@ class MakerHoldingBus(MetalHoldingBus):
         self._legacy_firmware = False
         self._legacy_enabled = False
         self._last_mit_target = None
+        self._fault_word = None
+        self._last_fault_check = 0.0
         self.controller = HoldingController(
             hold_torque_nm,
             tuple(map(math.radians, self.joint_limits)),
@@ -55,7 +58,7 @@ class MakerHoldingBus(MetalHoldingBus):
             cap_closing_torque=True,
         )
 
-    def _query(self, arbitration_id, data, matches):
+    def _query(self, arbitration_id, data, matches, *, response_lengths=(8,)):
         channel = self._base.canbus
         if channel is None:
             raise ConnectionError("Gripper CAN bus is closed")
@@ -77,7 +80,7 @@ class MakerHoldingBus(MetalHoldingBus):
                 and not msg.is_error_frame
                 and not msg.is_remote_frame
                 and msg.arbitration_id == reply_id
-                and len(msg.data) == 8
+                and len(msg.data) in response_lengths
                 and matches(bytes(msg.data))
             ):
                 return msg
@@ -95,6 +98,41 @@ class MakerHoldingBus(MetalHoldingBus):
         if value is not None and (result != value or self._param(index, fmt=fmt) != value):
             raise GripperSafetyError(f"RobStride parameter 0x{index:X} write did not verify")
         return result
+
+    def _read_faults(self):
+        """Read the fault word without clearing it or changing torque/mode.
+
+        Legacy RS00 firmware answers with ID + uint32 (five bytes), without
+        the fault flags in ordinary position feedback used by newer firmware.
+        An enable acknowledgement on that firmware does not prove it can drive.
+        """
+        from .maker_fault_diagnostics import FAULT_BITS
+
+        safety = getattr(self._arm, "teleop_safety", None)
+        diagnostics = safety.diagnostics if safety is not None else None
+        previous_pending = diagnostics.pending_fault_read if diagnostics is not None else None
+        if diagnostics is not None:
+            diagnostics.pending_fault_read = "gripper"
+        try:
+            response = self._query(
+                self._motor_id,
+                bytes([255] * 6 + [0, 251]),
+                lambda data: data[0] == self._feedback_motor_id and not any(data[5:]),
+                response_lengths=(5, 8),
+            )
+        finally:
+            if diagnostics is not None:
+                diagnostics.pending_fault_read = previous_pending
+        self._fault_word = int.from_bytes(response.data[1:5], "little")
+        self._last_fault_check = time.monotonic()
+        if self._fault_word:
+            names = ", ".join(
+                name.replace("_", " ") for bit, name in FAULT_BITS.items() if self._fault_word & (1 << bit)
+            )
+            raise GripperSafetyError(
+                f"RobStride gripper firmware fault 0x{self._fault_word:08X} ({names or 'unknown fault'}). "
+                "Fault was not cleared; check the gripper power supply and driver before restarting."
+            )
 
     def _command_kp(self):
         # MIT Kp is 12 bits over 0..500 N.m/rad. Round a scaled (capped) gain
@@ -142,6 +180,8 @@ class MakerHoldingBus(MetalHoldingBus):
         self._last_mit_target = (kp, kd, goal)
 
     def _refresh(self):
+        if self._enabled and time.monotonic() - self._last_fault_check >= FAULT_POLL_INTERVAL_S:
+            self._read_faults()
         # Keep the last transmitted target AND gains while asking for feedback.
         # Restoring full Kp at the old equivalent target can jerk the jaws open
         # after they advance past that target between feedback samples.
@@ -160,7 +200,9 @@ class MakerHoldingBus(MetalHoldingBus):
             self._legacy_enabled = False
             self._original_timeout = None
             self._last_mit_target = None
+            self._fault_word = None
             try:
+                self._read_faults()
                 self._simple(0xFD)
                 if self._status != 0:
                     raise GripperSafetyError("RobStride gripper stop was not confirmed")
@@ -226,9 +268,9 @@ class MakerHoldingBus(MetalHoldingBus):
 
     def read(self, data_name, motor):
         with self._lock:
-            self._check()
             if motor != "gripper":
                 return self._base.read(data_name, motor)
+            self._check()
             try:
                 self._refresh()
                 return self._base._get_cached_value(motor, data_name)
@@ -249,6 +291,8 @@ class MakerHoldingBus(MetalHoldingBus):
 
     def sync_write(self, data_name, values):
         with self._lock:
+            if "gripper" not in values:
+                return self._base.sync_write(data_name, values)
             if "gripper" in values and data_name != "Goal_Position":
                 expected = {"Kp": self.kp, "Kd": self.kd}
                 if data_name not in expected or values["gripper"] != expected[data_name]:
@@ -265,18 +309,17 @@ class MakerHoldingBus(MetalHoldingBus):
         # silence per call (~20 ms a tick per arm, measured): send the single
         # MIT frame and return on its own reply, as without holding.
         with self._lock:
-            try:
-                self._check()
-                return self._base.write(data_name, motor, value)
-            except Exception as exc:
-                self._trip(exc)
-                raise
+            # The gripper's latched fault must not starve the other joints of
+            # holding/landing commands. Their feedback/faults are checked by
+            # the teleoperation guard independently.
+            return self._base.write(data_name, motor, value)
 
     def sync_write_metal(self, commands):
         # Preserve the shared MIT command API, with RobStride batching for the
         # other joints (the Maker follower normally uses individual writes).
         with self._lock:
-            super().sync_write_metal({k: v for k, v in commands.items() if k == "gripper"})
+            if "gripper" in commands:
+                super().sync_write_metal({"gripper": commands["gripper"]})
             other = {k: v for k, v in commands.items() if k != "gripper"}
             if other:
                 self._base._mit_control_batch(other)
