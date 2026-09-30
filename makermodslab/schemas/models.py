@@ -178,6 +178,7 @@ class ModelPublishStartResponse(BaseModel):
     queue was accepted and runs in the background; poll publish-status."""
 
     started: bool
+    publish_id: str
     model_id: str
     message: str
 
@@ -187,6 +188,7 @@ class ModelPublishStatusResponse(BaseModel):
     `done_steps` stays meaningful on `error` — a queue that fails part-way keeps
     everything it published before it died."""
 
+    publish_id: str | None
     state: Literal["idle", "running", "done", "error"]
     model_id: str | None
     repo_id: str | None

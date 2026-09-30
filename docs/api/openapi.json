@@ -1656,10 +1656,14 @@
         "type": "object"
       },
       "GpuLaunchResponse": {
-        "description": "POST /api/v1/remote-inference/gpu/start — shape authority:\nmodal_launcher.start().\n\n`started` is always true here (every refusal is a coded ApiError raised\nbefore the spawn), and it is kept so the shape matches the install-manager\nsurface this one is modelled on. `gpu` is the status as of the spawn.",
+        "description": "POST /api/v1/remote-inference/gpu/start — shape authority:\nmodal_launcher.start().\n\n`started` is always true here (every refusal is a coded ApiError raised\nbefore the spawn), and it is kept so the shape matches the install-manager\nsurface this one is modelled on. `launch_id` identifies this transient\nattempt even if its pump finishes quickly; `gpu` is the status as of the\nspawn.",
         "properties": {
           "gpu": {
             "$ref": "#/components/schemas/GpuStatusResponse"
+          },
+          "launch_id": {
+            "title": "Launch Id",
+            "type": "string"
           },
           "message": {
             "title": "Message",
@@ -1672,6 +1676,7 @@
         },
         "required": [
           "started",
+          "launch_id",
           "message",
           "gpu"
         ],
@@ -1981,6 +1986,17 @@
             ],
             "title": "Last Line"
           },
+          "launch_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Launch Id"
+          },
           "log_path": {
             "anyOf": [
               {
@@ -2145,6 +2161,7 @@
           }
         },
         "required": [
+          "launch_id",
           "state",
           "phase",
           "engine",
@@ -4840,6 +4857,10 @@
             "title": "Model Id",
             "type": "string"
           },
+          "publish_id": {
+            "title": "Publish Id",
+            "type": "string"
+          },
           "started": {
             "title": "Started",
             "type": "boolean"
@@ -4847,6 +4868,7 @@
         },
         "required": [
           "started",
+          "publish_id",
           "model_id",
           "message"
         ],
@@ -4911,6 +4933,17 @@
             ],
             "title": "Model Id"
           },
+          "publish_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publish Id"
+          },
           "repo_id": {
             "anyOf": [
               {
@@ -4949,6 +4982,7 @@
           }
         },
         "required": [
+          "publish_id",
           "state",
           "model_id",
           "repo_id",
@@ -5494,6 +5528,113 @@
           "single_task"
         ],
         "title": "RecordingRequest",
+        "type": "object"
+      },
+      "RecordingStatusResponse": {
+        "additionalProperties": true,
+        "description": "Core progress fields; preserve the legacy status payload's extras.",
+        "properties": {
+          "current_episode": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Episode"
+          },
+          "current_phase": {
+            "title": "Current Phase",
+            "type": "string"
+          },
+          "dataset_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Repo Id"
+          },
+          "discarded_empty": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discarded Empty"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "recording_active": {
+            "title": "Recording Active",
+            "type": "boolean"
+          },
+          "saved_episodes": {
+            "default": 0,
+            "title": "Saved Episodes",
+            "type": "integer"
+          },
+          "session_ended": {
+            "title": "Session Ended",
+            "type": "boolean"
+          },
+          "total_episodes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Episodes"
+          }
+        },
+        "required": [
+          "recording_active",
+          "current_phase",
+          "session_ended"
+        ],
+        "title": "RecordingStatusResponse",
         "type": "object"
       },
       "ReleaseCanTorqueRequest": {
@@ -11621,7 +11762,7 @@
     },
     "/api/v1/models/publish": {
       "post": {
-        "description": "START publishing a local run's checkpoints to the Hub as ONE PUBLIC,\nMakerModsLab-tagged model repo. MUTATES the Hub (creates/updates the repo).\n\nReturns immediately with {started, model_id, message} — the queue runs\nsequentially in a background thread (a run's worth of checkpoints is\ngigabytes, far past what an inline request should hold open) and\nGET /api/v1/models/publish-status reports progress. 409 when a publish is\nalready running; the per-step failures (400 offline, 403 permission, 404\nunknown step, 502 Hub) surface through that status, not this call.",
+        "description": "START publishing a local run's checkpoints to the Hub as ONE PUBLIC,\nMakerModsLab-tagged model repo. MUTATES the Hub (creates/updates the repo).\n\nReturns immediately with {started, publish_id, model_id, message} — the\ntransient publish_id identifies this attempt in publish-status. The queue runs\nsequentially in a background thread (a run's worth of checkpoints is\ngigabytes, far past what an inline request should hold open) and\nGET /api/v1/models/publish-status reports progress. 409 when a publish is\nalready running; the per-step failures (400 offline, 403 permission, 404\nunknown step, 502 Hub) surface through that status, not this call.",
         "operationId": "models_publish",
         "requestBody": {
           "content": {
@@ -11663,7 +11804,7 @@
     },
     "/api/v1/models/publish-status": {
       "get": {
-        "description": "Poll the single background publish: state (idle/running/done/error),\ntarget repo + url, `done`/`total`/`current_step` for the queue position, and\n`done_steps` — the steps already on the Hub, which stay meaningful after an\nerror because a failed queue keeps everything it published before it died.",
+        "description": "Poll the single background publish: state (idle/running/done/error),\ntransient publish_id, target repo + url, `done`/`total`/`current_step` for\nthe queue position, and `done_steps` — the steps already on the Hub, which\nstay meaningful after an error because a failed queue keeps everything it\npublished before it died.",
         "operationId": "models_publish_status",
         "responses": {
           "200": {
@@ -12433,6 +12574,49 @@
         "summary": "Open Calibration Folder"
       }
     },
+    "/api/v1/policy-config": {
+      "get": {
+        "description": "The same config summary as the job-checkpoint policy-config route, for a\ncheckpoint addressed by the opaque ``policy_ref`` inference starts from\ninstead of by a Lab job id — so a caller holding only a ref (the SDK) can\nlearn what the policy expects.\n\nAccepts exactly the refs the inference start does: an absolute local\n``pretrained_model`` directory, ``user/repo@checkpoints/<step_dir>``, or\n``user/repo@root``; each resolves the way inference resolves it. Reads only\nthe checkpoint's ``config.json`` (plus ``train_config.json`` for the dataset\nlineage) — a few KB, never the weights.\n\nThis is what a client checks ``camera_bindings`` coverage against before\nstarting inference: ``image_features`` names every camera the policy reads,\nby bare name. A ref of any other shape answers 400\n``checkpoint.invalid_ref``; a config that can't be read (missing, private\nrepo without a token, offline) answers 404 ``checkpoint.config_unreadable``,\nwhich means \"unknown\", not \"camera-less\".",
+        "operationId": "get_policy_config_by_ref",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "policy_ref",
+            "required": true,
+            "schema": {
+              "title": "Policy Ref",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckpointPolicyConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Policy Config By Ref",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
     "/api/v1/policy-optimizer-defaults": {
       "get": {
         "description": "Return each policy's optimizer preset (lr / weight_decay / grad_clip_norm\n+ optimizer type) so the training UI can show the real \"policy default\"\ninstead of a generic placeholder.\n\nEvery frontend policy_type is included. `available` says whether this\nlerobot pin can construct the policy config at all — false means a training\nrun with that type is doomed at policy construction, so the UI disables the\nbutton (e.g. reward_classifier, which isn't a policy in this pin). Policies\nwhose config exists but whose optimizer preset can't be read stay available\nwith a null entry in `defaults`.",
@@ -12729,8 +12913,26 @@
     },
     "/api/v1/remote-inference/gpu/stop": {
       "post": {
-        "description": "Stop the GPU policy server (SIGTERM→SIGKILL over its process group).\n\nReturns while the group is still going down, in state `stopping`; the\nlauncher's own stdout pump lands it in `idle`. 409 `gpu.not_running` when\nthere is nothing to stop. Never touches the arm — a live remote-inference\nsession keeps running and its watchdogs report the empty room, which is a\nbetter diagnosis than a stop the user did not ask for.",
+        "description": "Stop the GPU policy server (SIGTERM→SIGKILL over its process group).\n\n`launch_id` makes an SDK-owned cleanup conditional: if another launch has\nreplaced it, the server returns 409 `gpu.launch_replaced` and leaves the\nreplacement running. Omitting it preserves this endpoint's explicit\noperator control: stop whichever GPU is current.\n\nReturns while the group is still going down, in state `stopping`; the\nlauncher's own stdout pump lands it in `idle`. 409 `gpu.not_running` when\nthere is nothing to stop. Never touches the arm — a live remote-inference\nsession keeps running and its watchdogs report the empty room, which is a\nbetter diagnosis than a stop the user did not ask for.",
         "operationId": "stop_remote_inference_gpu",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "launch_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Launch Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -12741,6 +12943,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Stop Remote Inference Gpu",
@@ -13391,6 +13603,102 @@
           }
         },
         "summary": "Heartbeat Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session_id}/recording/episode-task": {
+      "post": {
+        "description": "Submit a recording prompt only if this id still owns the live session.\n\nA stale client gets 404 session.not_found rather than prompting whichever\nrecording replaced it. Phase refusals keep the existing soft 200 shape.",
+        "operationId": "recording_episode_task_for_session",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EpisodeTaskBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordingControlResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recording Episode Task For Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session_id}/recording/status": {
+      "get": {
+        "description": "Recording progress and terminal outcome for this exact session id.\n\nA replacement recording cannot be mistaken for this one; stale ids get\n404 session.not_found instead of another run's global status.",
+        "operationId": "recording_status_for_session",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordingStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recording Status For Session",
         "tags": [
           "sessions"
         ]

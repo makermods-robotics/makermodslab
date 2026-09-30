@@ -43,6 +43,7 @@ import logging
 import shutil
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -2696,6 +2697,7 @@ class ModelUploadManager:
 
     def __init__(self) -> None:
         self.state: str = "idle"  # "idle" | "running" | "done" | "error"
+        self.publish_id: str | None = None
         self.model_id: str | None = None
         self.repo_id: str | None = None
         self.url: str | None = None
@@ -2715,9 +2717,12 @@ class ModelUploadManager:
             if self.state == "running":
                 return {
                     "started": False,
+                    "publish_id": self.publish_id,
                     "model_id": self.model_id,
                     "message": f"A publish is already running for {self.model_id}",
                 }
+            publish_id = uuid.uuid4().hex
+            self.publish_id = publish_id
             self.state = "running"
             self.model_id = model_id
             self.repo_id = repo_id
@@ -2749,11 +2754,17 @@ class ModelUploadManager:
                 self.message = f"Publish failed: {self.error}"
             logger.error("Could not start the publish worker for %s: %s", model_id, exc)
             raise ModelError(500, f"Could not start the publish worker: {exc}") from exc
-        return {"started": True, "model_id": model_id, "message": "Publish started"}
+        return {
+            "started": True,
+            "publish_id": publish_id,
+            "model_id": model_id,
+            "message": "Publish started",
+        }
 
     def get_status(self) -> dict[str, Any]:
         with self._lock:
             return {
+                "publish_id": self.publish_id,
                 "state": self.state,
                 "model_id": self.model_id,
                 "repo_id": self.repo_id,

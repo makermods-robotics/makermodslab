@@ -116,6 +116,7 @@ from .jobs import (
     hub_ref_repo_id,
     hub_ref_step_label,
     job_registry,
+    policy_config_summary_for_ref,
     training_is_active,
 )
 from .merge import (
@@ -303,6 +304,8 @@ from .sessions import (
     handle_coaching_command_for_session,
     handle_current_session,
     handle_heartbeat_session,
+    handle_recording_episode_task_for_session,
+    handle_recording_status_for_session,
     handle_start_session,
     handle_stop_session,
     held_by,
@@ -1455,15 +1458,20 @@ def start_remote_inference_gpu(body: GpuStartBody):
     response_model=GpuStatusResponse,
     tags=["sessions"],
 )
-def stop_remote_inference_gpu():
+def stop_remote_inference_gpu(launch_id: str | None = None):
     """Stop the GPU policy server (SIGTERM→SIGKILL over its process group).
+
+    `launch_id` makes an SDK-owned cleanup conditional: if another launch has
+    replaced it, the server returns 409 `gpu.launch_replaced` and leaves the
+    replacement running. Omitting it preserves this endpoint's explicit
+    operator control: stop whichever GPU is current.
 
     Returns while the group is still going down, in state `stopping`; the
     launcher's own stdout pump lands it in `idle`. 409 `gpu.not_running` when
     there is nothing to stop. Never touches the arm — a live remote-inference
     session keeps running and its watchdogs report the empty room, which is a
     better diagnosis than a stop the user did not ask for."""
-    return modal_launcher.stop()
+    return modal_launcher.stop(launch_id=launch_id)
 
 
 @v1_router.get(
@@ -2349,6 +2357,39 @@ class RecordingControlResponse(BaseModel):
     message: str
 
 
+class RecordingStatusResponse(BaseModel):
+    """Core progress fields; preserve the legacy status payload's extras."""
+
+    model_config = ConfigDict(extra="allow")
+
+    recording_active: bool
+    current_phase: str
+    session_ended: bool
+    dataset_repo_id: str | None = None
+    saved_episodes: int = 0
+    current_episode: int | None = None
+    total_episodes: int | None = None
+    outcome: str | None = None
+    error: str | None = None
+    hint: str | None = None
+    discarded_empty: bool | None = None
+
+
+@v1_router.get(
+    "/sessions/{session_id}/recording/status",
+    response_model=RecordingStatusResponse,
+    response_model_exclude_unset=True,
+    tags=["sessions"],
+)
+def recording_status_for_session(session_id: str):
+    """Recording progress and terminal outcome for this exact session id.
+
+    A replacement recording cannot be mistaken for this one; stale ids get
+    404 session.not_found instead of another run's global status.
+    """
+    return handle_recording_status_for_session(session_id)
+
+
 @v1_router.post(
     "/recording-episode-task",
     response_model=RecordingControlResponse,
@@ -2359,6 +2400,20 @@ def recording_episode_task(body: EpisodeTaskBody):
     reset. An empty description or a submission outside the naming phase
     comes back 200 + {success: false}."""
     return handle_submit_episode_task(body.task)
+
+
+@v1_router.post(
+    "/sessions/{session_id}/recording/episode-task",
+    response_model=RecordingControlResponse,
+    tags=["sessions"],
+)
+def recording_episode_task_for_session(session_id: str, body: EpisodeTaskBody):
+    """Submit a recording prompt only if this id still owns the live session.
+
+    A stale client gets 404 session.not_found rather than prompting whichever
+    recording replaced it. Phase refusals keep the existing soft 200 shape.
+    """
+    return handle_recording_episode_task_for_session(session_id, body.task)
 
 
 # Tagged "datasets": handled in record.py for historical reasons, but this is a
@@ -2514,7 +2569,8 @@ def models_publish(body: ModelPublishBody):
     """START publishing a local run's checkpoints to the Hub as ONE PUBLIC,
     MakerModsLab-tagged model repo. MUTATES the Hub (creates/updates the repo).
 
-    Returns immediately with {started, model_id, message} — the queue runs
+    Returns immediately with {started, publish_id, model_id, message} — the
+    transient publish_id identifies this attempt in publish-status. The queue runs
     sequentially in a background thread (a run's worth of checkpoints is
     gigabytes, far past what an inline request should hold open) and
     GET /api/v1/models/publish-status reports progress. 409 when a publish is
@@ -2534,9 +2590,10 @@ def models_publish(body: ModelPublishBody):
 @v1_router.get("/models/publish-status", response_model=ModelPublishStatusResponse, tags=["models"])
 def models_publish_status():
     """Poll the single background publish: state (idle/running/done/error),
-    target repo + url, `done`/`total`/`current_step` for the queue position, and
-    `done_steps` — the steps already on the Hub, which stay meaningful after an
-    error because a failed queue keeps everything it published before it died."""
+    transient publish_id, target repo + url, `done`/`total`/`current_step` for
+    the queue position, and `done_steps` — the steps already on the Hub, which
+    stay meaningful after an error because a failed queue keeps everything it
+    published before it died."""
     return model_browser.model_upload_manager.get_status()
 
 
@@ -3685,6 +3742,38 @@ def get_checkpoint_policy_config(job_id: str, step: int):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@v1_router.get("/policy-config", response_model=CheckpointPolicyConfigResponse, tags=["jobs"])
+def get_policy_config_by_ref(policy_ref: str):
+    """The same config summary as the job-checkpoint policy-config route, for a
+    checkpoint addressed by the opaque ``policy_ref`` inference starts from
+    instead of by a Lab job id — so a caller holding only a ref (the SDK) can
+    learn what the policy expects.
+
+    Accepts exactly the refs the inference start does: an absolute local
+    ``pretrained_model`` directory, ``user/repo@checkpoints/<step_dir>``, or
+    ``user/repo@root``; each resolves the way inference resolves it. Reads only
+    the checkpoint's ``config.json`` (plus ``train_config.json`` for the dataset
+    lineage) — a few KB, never the weights.
+
+    This is what a client checks ``camera_bindings`` coverage against before
+    starting inference: ``image_features`` names every camera the policy reads,
+    by bare name. A ref of any other shape answers 400
+    ``checkpoint.invalid_ref``; a config that can't be read (missing, private
+    repo without a token, offline) answers 404 ``checkpoint.config_unreadable``,
+    which means "unknown", not "camera-less"."""
+    try:
+        summary = policy_config_summary_for_ref(policy_ref)
+    except ValueError as exc:
+        raise ApiError(status_code=400, detail=str(exc), code=ErrorCode.CHECKPOINT_INVALID_REF) from exc
+    if summary is None:
+        raise ApiError(
+            status_code=404,
+            detail=f"Could not read the policy config for {policy_ref!r}",
+            code=ErrorCode.CHECKPOINT_CONFIG_UNREADABLE,
+        )
+    return summary
 
 
 @router.get("/jobs/{job_id}/checkpoints/{step}/download")
