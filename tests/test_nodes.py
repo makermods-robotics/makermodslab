@@ -1257,7 +1257,10 @@ def _extra_doc(available: bool = False) -> dict:
         "available": available,
         "package": "transformers",
         "install_target": "lerobot[smolvla]",
-        "install_hint": "pip install 'lerobot[smolvla]'",
+        "install_hint": (
+            "Use the in-app Install button — lerobot[smolvla] must be installed at "
+            "MakerMods Lab's pinned lerobot fork, not from PyPI."
+        ),
     }
 
 
