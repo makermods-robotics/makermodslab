@@ -31,6 +31,7 @@ CAN_TRACKING_SPEED_DEG_S = 30.0
 # USB serial delivery and camera/Portal activity can exceed that deadline.
 # This is a maximum wait, not a sleep: healthy replies return immediately.
 CAN_FEEDBACK_TIMEOUT_S = 0.05
+GRIPPERS = ("gripper", "left_gripper", "right_gripper")
 
 
 def checked_pose(values: dict, keys) -> dict[str, float]:
@@ -51,7 +52,7 @@ def rest_pose(pose: dict[str, float]) -> dict[str, float]:
     return {
         key.removesuffix(".pos"): value
         for key, value in pose.items()
-        if key.removesuffix(".pos") not in ("gripper", "left_gripper", "right_gripper")
+        if key.removesuffix(".pos") not in GRIPPERS
     }
 
 
@@ -59,11 +60,18 @@ def limit_action(previous: dict[str, float], action: dict, elapsed_s: float) -> 
     """Limit target travel in degrees per second, including after packet gaps.
 
     A late packet gets at most 100 ms of travel; a network stall must not
-    authorize a large jump. Device soft limits still apply in send_action.
+    authorize a large jump. Grippers follow the operator directly: a capped
+    jaw lags a grasp, and clamp_action has already applied its soft limits.
+    Device soft limits still apply in send_action.
     """
     target = checked_pose(action, previous)
     step = CAN_TRACKING_SPEED_DEG_S * min(0.1, max(0.0, elapsed_s))
-    return {key: value + max(-step, min(step, target[key] - value)) for key, value in previous.items()}
+    return {
+        key: target[key]
+        if key.removesuffix(".pos") in GRIPPERS
+        else value + max(-step, min(step, target[key] - value))
+        for key, value in previous.items()
+    }
 
 
 def prepare(robot) -> None:

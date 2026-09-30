@@ -27,17 +27,31 @@ def test_remote_rest_preserves_both_arm_prefixes_and_excludes_both_grippers():
 @pytest.mark.parametrize("elapsed,step", [(1 / 30, 1), (1 / 60, 0.5), (15, 3), (-1, 0)])
 def test_remote_targets_have_a_rate_limit_even_after_network_gaps(elapsed, step):
     result = remote_can.limit_action(
-        {"left_elbow.pos": 10.0, "right_elbow.pos": -10.0, "left_gripper.pos": 0.0},
-        {"left_elbow.pos": 180.0, "right_elbow.pos": -180.0, "left_gripper.pos": 0.1},
+        {"left_elbow.pos": 10.0, "right_elbow.pos": -10.0, "left_gripper.pos": 0.0, "right_gripper.pos": 5.0},
+        {
+            "left_elbow.pos": 180.0,
+            "right_elbow.pos": -180.0,
+            "left_gripper.pos": 90.0,
+            "right_gripper.pos": -40.0,
+        },
         elapsed,
     )
+    # Arm joints are capped; grippers follow the operator directly.
     assert result == pytest.approx(
         {
             "left_elbow.pos": 10 + step,
             "right_elbow.pos": -10 - step,
-            "left_gripper.pos": min(0.1, step),
+            "left_gripper.pos": 90.0,
+            "right_gripper.pos": -40.0,
         }
     )
+
+
+def test_single_arm_gripper_is_not_rate_limited():
+    result = remote_can.limit_action(
+        {"elbow.pos": 0.0, "gripper.pos": 0.0}, {"elbow.pos": 90.0, "gripper.pos": 60.0}, 1 / 30
+    )
+    assert result == pytest.approx({"elbow.pos": 1.0, "gripper.pos": 60.0})
 
 
 @pytest.mark.parametrize("family", ["maker", "metal"])
@@ -402,7 +416,9 @@ def test_maker_folded_zero_is_accepted_and_alignment_does_not_snap_to_soft_limit
     for _ in range(3):
         action = remote_can.limit_action(pose, goal, 1 / 30)
         remote_can.send_action(robot, action, pose)
-        assert all(abs(sent[-1][key] - pose[key]) <= 1.001 for key in pose)
+        # Arm joints ease inward; the gripper goes straight to its clamped goal.
+        assert abs(sent[-1]["elbow.pos"] - pose["elbow.pos"]) <= 1.001
+        assert sent[-1]["gripper.pos"] == goal["gripper.pos"]
         assert robot.config.joint_limits is original
         pose = action
     assert sent[-1] == goal
