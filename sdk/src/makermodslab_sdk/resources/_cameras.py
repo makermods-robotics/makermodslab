@@ -41,7 +41,7 @@ from __future__ import annotations
 import json
 import re
 import warnings
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from makermodslab_sdk.errors import (
     ApiError,
@@ -97,6 +97,20 @@ def _render(mapping: dict[str, Any]) -> str:
 
 def _call(method: str, robot: str, policy_ref: str, bindings_literal: str) -> str:
     return f"{method}({json.dumps(robot)}, policy_ref={json.dumps(policy_ref)}, camera_bindings={bindings_literal}, ...)"
+
+
+class _Context(TypedDict):
+    """The call identity both camera-preflight reporters need.
+
+    Declared so ``**context`` keeps its field types: a plain dict literal
+    mixing str and bool widens to dict[str, object] and mypy then rejects
+    every unpack into these typed keyword-only parameters.
+    """
+
+    method: str
+    robot: str
+    policy_ref: str
+    auto: bool
 
 
 def _uncovered_error(
@@ -204,7 +218,7 @@ def resolve_camera_bindings(
     auto = camera_bindings == AUTO
     given: dict[str, str] = {} if auto else dict(camera_bindings or {})  # type: ignore[arg-type]
     lookup = _config_lookup_ref(policy_ref, remote=remote)
-    context = {"method": method, "robot": robot, "policy_ref": policy_ref, "auto": auto}
+    context: _Context = {"method": method, "robot": robot, "policy_ref": policy_ref, "auto": auto}
 
     config: CheckpointPolicyConfig
     try:
