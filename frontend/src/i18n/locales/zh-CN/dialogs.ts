@@ -228,6 +228,7 @@ export default {
     noCameras: "该工作站未发布任何相机。",
     cameraAlt: "远程相机 {{name}}",
     cameraFailed: "视频流不可用",
+    cameraFeature: "放大显示 {{name}}",
     latency: "往返延迟",
     latencyLast: "最新",
     latencyMean: "平均",
