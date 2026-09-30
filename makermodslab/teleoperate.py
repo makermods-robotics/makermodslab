@@ -715,6 +715,7 @@ def _connect_can(request: TeleoperateRequest):
         install_metal_gripper(robot, request.robot_name)
 
     arm_family.prepare_teleoperation(robot)
+    arm_family.prepare_leader_following(robot)
 
     try:
         logger.info(f"Connecting to {family} follower arm(s)...")

@@ -378,14 +378,20 @@ def _probe_sync(ports: list[str], arm_type: str = "maker") -> dict:
         if port.startswith("gs_usb:"):
             from .gs_usb_transport import probe_maker
 
-            # The gs_usb probe is a RobStride fault query, so it can only find a
-            # follower of a family whose probe protocol is RobStride (the Maker
-            # arm today); a Damiao follower on such an adapter stays unknown.
-            speaks_robstride = (
-                arm_registry.get(normalize_arm_type(arm_type)).follower_probe_protocol == "robstride"
-            )
+            # A gs_usb adapter is a CAN adapter, never the Star leader's UART,
+            # so only the follower probe runs on it. RobStride has a dedicated
+            # non-clearing fault query; a Damiao follower goes through the same
+            # opener as on slcan (maker_can routes its connect to gs_usb), which
+            # briefly energizes the pan motor exactly as it does there.
+            protocol = arm_registry.get(normalize_arm_type(arm_type)).follower_probe_protocol
             try:
-                found_usb = speaks_robstride and probe_maker(port)
+                if protocol == "robstride":
+                    found_usb = probe_maker(port)
+                else:
+                    opener, releaser, _ = openers["robot"]
+                    bus, _angle = opener(port)
+                    releaser(bus)
+                    found_usb = True
             except Exception as exc:
                 logger.debug("gs_usb motor probe failed for %s: %s", port, exc)
                 found_usb = False

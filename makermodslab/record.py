@@ -2304,6 +2304,9 @@ def record_with_web_events(
 
         install_metal_gripper(robot, getattr(cfg, "_makermodslab_robot_name", ""))
 
+    if teleop is not None:
+        family.prepare_leader_following(robot)
+
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
     publish_preview = observation_tap(robot, family)
 

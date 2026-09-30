@@ -201,14 +201,110 @@ def test_probe_only_fault_query_and_requires_rx(monkeypatch):
     assert bytes(sent[0].data) == b"\xff" * 6 + b"\x00\xfb"
 
 
-def test_gs_probe_skips_leader_and_metal(monkeypatch):
+def test_gs_probe_skips_leader_and_routes_by_protocol(monkeypatch):
     from makermodslab import maker_ports
 
     calls = []
     monkeypatch.setattr(ids, "probe_maker", lambda p: calls.append(p) or True)
+    opened, released = [], []
+    metal = {
+        "robot": (lambda p: opened.append(p) or ("bus", 0.0), released.append, None),
+        # A gs_usb adapter is never the Star leader's UART: this must not run.
+        "teleop": (lambda p: pytest.fail("leader probed on gs_usb"), None, None),
+    }
+    monkeypatch.setitem(maker_ports._OPENERS_BY_PROTOCOL, "damiao", metal)
     assert maker_ports._probe_sync(["gs_usb:A"])["follower_ports"] == ["gs_usb:A"]
-    assert maker_ports._probe_sync(["gs_usb:A"], "metal")["unknown_ports"] == ["gs_usb:A"]
+    assert maker_ports._probe_sync(["gs_usb:B"], "metal")["follower_ports"] == ["gs_usb:B"]
     assert calls == ["gs_usb:A"]
+    assert opened == ["gs_usb:B"] and released == ["bus"]
+
+
+def test_gs_probe_metal_nothing_answering_is_unknown(monkeypatch):
+    from makermodslab import maker_ports
+
+    def refuse(port):
+        raise ConnectionError("no motor")
+
+    metal = {"robot": (refuse, None, None), "teleop": (None, None, None)}
+    monkeypatch.setitem(maker_ports._OPENERS_BY_PROTOCOL, "damiao", metal)
+    assert maker_ports._probe_sync(["gs_usb:B"], "metal")["unknown_ports"] == ["gs_usb:B"]
+
+
+def _damiao_fake(handshake_error=None):
+    def handshake():
+        if handshake_error is not None:
+            raise handshake_error
+
+    return SimpleNamespace(
+        port="gs_usb:A",
+        is_connected=False,
+        use_can_fd=False,
+        bitrate=1000000,
+        _handshake=handshake,
+    )
+
+
+def test_damiao_hook_opens_gs_usb_and_leaves_other_ports_alone(monkeypatch):
+    from lerobot.motors.damiao import DamiaoMotorsBus
+    from makermodslab import maker_can
+
+    maker_can.install()
+    hook = DamiaoMotorsBus.connect
+    maker_can.install()
+    assert DamiaoMotorsBus.connect is hook
+    usb = SimpleNamespace(shutdown=lambda: None)
+    opened = []
+    monkeypatch.setattr(ids, "open_gs_usb", lambda port, bitrate: opened.append((port, bitrate)) or usb)
+    fake = _damiao_fake()
+    hook(fake, handshake=False)
+    assert opened == [("gs_usb:A", 1000000)]
+    assert fake.canbus is usb and fake._is_connected
+
+    # An slcan port goes to the driver's own connect, never the gs_usb
+    # transport; python-can is stubbed so nothing touches a real serial port.
+    monkeypatch.setattr(ids, "open_gs_usb", lambda *a: pytest.fail("gs_usb opened for slcan"))
+    seen = []
+    monkeypatch.setattr(can.interface, "Bus", lambda **kw: seen.append(kw) or usb)
+    fake = SimpleNamespace(
+        port="/dev/cu.usbmodem1",
+        is_connected=False,
+        can_interface="slcan",
+        use_can_fd=False,
+        bitrate=1000000,
+        data_bitrate=None,
+    )
+    hook(fake, handshake=False)
+    assert seen == [{"channel": "/dev/cu.usbmodem1", "bitrate": 1000000, "interface": "slcan"}]
+
+
+def test_damiao_hook_closes_usb_after_partial_handshake(monkeypatch):
+    """A failed Damiao handshake has energized the motors that answered; the
+    USB handle must be free so de_energize_can_bus can reopen and disable."""
+    from lerobot.motors.damiao import DamiaoMotorsBus
+    from makermodslab import maker_can
+
+    maker_can.install()
+    closed = []
+    monkeypatch.setattr(ids, "open_gs_usb", lambda *a: SimpleNamespace(shutdown=lambda: closed.append(True)))
+    fake = _damiao_fake(ValueError("motor 3 silent"))
+    with pytest.raises(ConnectionError, match="motor 3 silent"):
+        DamiaoMotorsBus.connect(fake)
+    assert closed == [True]
+    assert not fake._is_connected and fake.canbus is None
+
+
+def test_damiao_hook_reports_adapter_failure_as_connection_error(monkeypatch):
+    from lerobot.motors.damiao import DamiaoMotorsBus
+    from makermodslab import maker_can
+
+    maker_can.install()
+
+    def missing(*a):
+        raise ids.DiagnosticError("no adapter")
+
+    monkeypatch.setattr(ids, "open_gs_usb", missing)
+    with pytest.raises(ConnectionError, match="no adapter"):
+        DamiaoMotorsBus.connect(_damiao_fake())
 
 
 def test_token_record_roundtrip(tmp_path, monkeypatch):

@@ -642,6 +642,11 @@ const RobotConfigWindow = ({
   const leaderChoice = leaderOptionOf(armInfo, leaderKind);
   const leaderEnergized = !!leaderChoice?.energized;
   const leaderKindParam = multiLeader ? leaderKind : undefined;
+  // A gs_usb token names a CAN adapter, so it fits a CAN follower slot and,
+  // on a family whose leader is itself an energized CAN arm, the leader slot
+  // too. Never a Feetech bus or the Star leader's UART.
+  const gsUsbFits = (field: string): boolean =>
+    !!armInfo && !feetechBus && (!field.includes("leader") || leaderEnergized);
   const [savingLeaderKind, setSavingLeaderKind] = useState(false);
   // Display name for a leader option: the catalog's per-id override for the
   // built-ins (what localizes it), else the manifest's own English label.
@@ -1341,7 +1346,7 @@ const RobotConfigWindow = ({
             : null,
           swapPort:
             conflictingField && currentPort &&
-            !(currentPort.startsWith("gs_usb:") && conflictingField.includes("leader"))
+            !(currentPort.startsWith("gs_usb:") && !gsUsbFits(conflictingField))
               ? currentPort
               : null,
         });
@@ -1456,7 +1461,7 @@ const RobotConfigWindow = ({
         releasedField: conflictingField,
         releasedLabel: portFieldLabel(conflictingField),
         swapPort:
-          currentPort.startsWith("gs_usb:") && conflictingField.includes("leader")
+          currentPort.startsWith("gs_usb:") && !gsUsbFits(conflictingField)
             ? null
             : currentPort || null,
       });
@@ -3321,8 +3326,7 @@ const RobotConfigWindow = ({
                         portDetected={slotPortDetected(slot)}
                         configured={!!(robot?.[slot.cfgField] as string)}
                         availablePorts={availablePorts.filter(
-                          (p) => !p.startsWith("gs_usb:") ||
-                            (armType === "maker" && slot.device === "robot"),
+                          (p) => !p.startsWith("gs_usb:") || gsUsbFits(slot.portField),
                         )}
                         heldByLabel={(p) => {
                           const holder = portFields.find(
