@@ -651,7 +651,29 @@ def handle_start_hosting(request: HostingRequest, websocket_manager=None) -> dic
             role="robot",
             max_participants=ROOM_MAX_PARTICIPANTS,
         )
-        teleop = LiveKitTeleoperator(
+
+        # Room events and RPCs arrive on Portal's loop thread; they only
+        # enqueue — the worker thread is the one that touches the bus.
+        def _rpc_handler(name: str):
+            def _handler(data) -> str:
+                events.put((name, data.caller_identity))
+                return "ok"
+
+            return _handler
+
+        class _HostingTeleoperator(LiveKitTeleoperator):
+            # Portal registers RPC methods only BEFORE connect: afterwards the
+            # FFI call needs a Tokio runtime context no Python thread has and
+            # panics ("there is no reactor running"), failing every hosting
+            # start. The plugin creates and connects its (private) Portal inside
+            # one connect(), so register the moment the Portal is assigned.
+            def __setattr__(self, name, value):
+                super().__setattr__(name, value)
+                if name == "_portal" and value is not None:
+                    for rpc in ("home", "engage", "release"):
+                        value.register_rpc_method(rpc, _rpc_handler(rpc))
+
+        teleop = _HostingTeleoperator(
             LiveKitTeleoperatorConfig(
                 url=sfu.local_url(),
                 token=token,
@@ -662,18 +684,9 @@ def handle_start_hosting(request: HostingRequest, websocket_manager=None) -> dic
             robot=robot,
         )
         teleop.connect()
-        # Room events and RPCs arrive on Portal's loop thread; they only
-        # enqueue — the worker thread is the one that touches the bus.
         portal = teleop._portal  # the plugin keeps it private; see module docstring
         portal.on_operator_joined(lambda identity: events.put(("joined", identity)))
         portal.on_operator_left(lambda identity: events.put(("left", identity)))
-        for rpc in ("home", "engage", "release"):
-
-            def _handler(data, _name=rpc) -> str:
-                events.put((_name, data.caller_identity))
-                return "ok"
-
-            portal.register_rpc_method(rpc, _handler)
         descriptor = build_descriptor(request, room=room, motors=motors, cameras=cameras, ranges_deg=ranges)
 
         # Rest pose = where the arm is now (the station places it resting
