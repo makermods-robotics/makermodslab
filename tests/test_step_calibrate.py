@@ -230,7 +230,9 @@ def test_the_wizard_runs_the_families_steps_to_completion(harness: _Harness, pha
     assert harness.opened == [("robot", "/dev/nine0", "unit")]
     assert harness.calibrated == [(harness.device, "robot")]
 
-    assert manager.complete_step()["success"] is True
+    session_id = sessions.tracker.current()["id"]
+    assert manager._session_id == session_id
+    assert manager.complete_step_for_session(session_id, 1)["success"] is True
     phases.wait_for("awaiting_step", count=2)
     status = manager.get_status()
     assert status.status == "awaiting_step"

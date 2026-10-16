@@ -1142,8 +1142,12 @@ def test_batch_all_launches_fail_returns_failure(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(auto_calibrate.subprocess, "Popen", _popen)
     mgr = auto_calibrate.AutoCalibrationBatchManager()
     arms = [_arm(port="/dev/a", name="a"), _arm(port="/dev/b", name="b")]
+    previous_status = mgr.get_status()
     result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
     assert result["success"] is False
+    assert mgr.get_status() == previous_status
+    assert len(result["failed_arms"]) == 2
+    assert all(arm["error"] == "no serial port" for arm in result["failed_arms"])
 
 
 def test_batch_stop_stops_all_and_releases_each_torque(monkeypatch: pytest.MonkeyPatch) -> None:

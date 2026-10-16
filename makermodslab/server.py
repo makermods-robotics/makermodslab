@@ -4354,6 +4354,26 @@ class CompleteCalibrationStepRequest(BaseModel):
     step: int | None = None
 
 
+class CalibrationStepResponse(BaseModel):
+    success: bool
+    message: str
+
+
+@v1_router.post(
+    "/sessions/{session_id}/calibration/step",
+    response_model=CalibrationStepResponse,
+    tags=["sessions"],
+)
+def calibration_step_for_session(session_id: str, request: CompleteCalibrationStepRequest):
+    """Confirm a CAN wizard step only for its original session identity.
+
+    A stale human confirmation receives 404 session.not_found and cannot
+    advance a replacement wizard. Identity and step checks share the
+    manager's confirmation lock; the global UI route remains available.
+    """
+    return step_calibration_manager.complete_step_for_session(session_id, request.step)
+
+
 @router.post("/complete-calibration-step")
 def complete_calibration_step(request: CompleteCalibrationStepRequest | None = None):
     """Complete the current calibration step (either flow)."""
