@@ -45,8 +45,12 @@ export interface RemoteTeleopDialogProps {
  * node. A dropped stream shows a retry tile (click to retry now) — the
  * lightweight sibling of BackendCameraStream, without its why-probe. Clearing
  * `src` on detach is what makes the browser drop the HTTP connection.
+ * `onSelect` makes it a thumbnail: clicking the frame features it.
  */
-const RemoteCameraTile: React.FC<{ name: string }> = ({ name }) => {
+const RemoteCameraTile: React.FC<{ name: string; onSelect?: () => void }> = ({
+  name,
+  onSelect,
+}) => {
   const { t } = useTranslation();
   const { baseUrl } = useApi();
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -62,6 +66,17 @@ const RemoteCameraTile: React.FC<{ name: string }> = ({ name }) => {
     setAttempt((a) => a + 1);
     setDown(false);
   };
+
+  const frame = (
+    <img
+      key={attempt}
+      ref={attachImg}
+      src={`${remoteCameraUrl(baseUrl, name)}?r=${attempt}`}
+      onError={() => setDown(true)}
+      alt={t("dialogs.remoteTeleop.cameraAlt", { name })}
+      className="block aspect-video w-full rounded-md border border-border bg-black object-contain"
+    />
+  );
 
   return (
     <div className="flex flex-col gap-1">
@@ -80,15 +95,17 @@ const RemoteCameraTile: React.FC<{ name: string }> = ({ name }) => {
             {t("dialogs.remoteTeleop.cameraFailed")}
           </span>
         </button>
+      ) : onSelect ? (
+        <button
+          type="button"
+          onClick={onSelect}
+          title={t("dialogs.remoteTeleop.cameraFeature", { name })}
+          className="rounded-md transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {frame}
+        </button>
       ) : (
-        <img
-          key={attempt}
-          ref={attachImg}
-          src={`${remoteCameraUrl(baseUrl, name)}?r=${attempt}`}
-          onError={() => setDown(true)}
-          alt={t("dialogs.remoteTeleop.cameraAlt", { name })}
-          className="aspect-video w-full rounded-md border border-border bg-black object-contain"
-        />
+        frame
       )}
     </div>
   );
@@ -250,6 +267,12 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
   } | null>(null);
   const stoppedRef = useRef(false);
   const live = sessionId !== null;
+  // One camera is shown large; the rest are thumbnails that swap in on click.
+  // Falls back to the first camera until one is picked (or if it disappears).
+  const [featuredCamera, setFeaturedCamera] = useState<string | null>(null);
+  const cameras = status?.cameras ?? [];
+  const featured =
+    featuredCamera !== null && cameras.includes(featuredCamera) ? featuredCamera : (cameras[0] ?? null);
 
   // The picked station, while it is still listed; its hosted arm type picks
   // the viewer (the remote follower is what the broadcast shows). A station
@@ -479,7 +502,11 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
       role="dialog"
       aria-label={title}
       className={`fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-border bg-background shadow-2xl ${
-        live ? "w-[min(94vw,1000px)]" : "w-[min(92vw,560px)]"
+        live
+          ? cameras.length > 0
+            ? "w-[min(96vw,1280px)]"
+            : "w-[min(94vw,1000px)]"
+          : "w-[min(92vw,560px)]"
       }`}
     >
       <div className="flex items-center gap-2 border-b border-border px-4 py-2">
@@ -705,7 +732,7 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
           </div>
 
           <div className="flex gap-3">
-            <div className={cn("flex gap-3", bimanual ? "flex-[2]" : "flex-1")}>
+            <div className="flex min-w-0 flex-[2] gap-3">
               {bimanual ? (
                 <>
                   <div className="flex-1">
@@ -731,19 +758,35 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
                 </div>
               )}
             </div>
-            <div className="flex w-[min(40%,320px)] shrink-0 flex-col gap-2">
+            <div
+              className={cn(
+                "flex min-w-0 flex-col gap-2",
+                cameras.length > 0 ? "flex-[3]" : "w-[min(40%,320px)] shrink-0",
+              )}
+            >
               <span className="text-xs text-muted-foreground">
                 {t("dialogs.remoteTeleop.cameras")}
               </span>
-              {status && status.cameras.length === 0 ? (
+              {status && cameras.length === 0 ? (
                 <span className="text-xs text-muted-foreground">
                   {t("dialogs.remoteTeleop.noCameras")}
                 </span>
               ) : (
-                <div className="flex max-h-[440px] flex-col gap-2 overflow-auto">
-                  {(status?.cameras ?? []).map((name) => (
-                    <RemoteCameraTile key={name} name={name} />
-                  ))}
+                <div className="flex flex-col gap-2">
+                  {featured !== null && <RemoteCameraTile key={featured} name={featured} />}
+                  {cameras.length > 1 && (
+                    <div className="grid grid-cols-3 gap-2">
+                      {cameras
+                        .filter((name) => name !== featured)
+                        .map((name) => (
+                          <RemoteCameraTile
+                            key={name}
+                            name={name}
+                            onSelect={() => setFeaturedCamera(name)}
+                          />
+                        ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
