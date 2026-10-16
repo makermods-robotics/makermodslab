@@ -211,6 +211,10 @@ marked _(reference)_ name where the Python implementation lives.
   A delayed human callback cannot confirm a replacement. An older server
   without this route raises ServerTooOldError; never fall back to the global
   confirmation route, whose step number alone does not establish ownership.
+- Calibration composites bracket global status reads with fresh current/last-ended
+  session identity checks. A cached session end does not establish ownership of
+  the status slot: a replacement before or during a read raises a flow error
+  rather than reporting another run's result as the original's outcome.
 - A journey whose loop is continuous and visual — the SO-101 range sweep,
   episode-by-episode recording judgement — gets no flow. The client exposes
   the status so an agent can narrate, and says plainly that the UI is the

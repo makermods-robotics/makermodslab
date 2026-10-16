@@ -23,7 +23,7 @@ Two flows, because the two procedures differ in who does the work:
 * :meth:`CalibrationFlows.calibrate_zero` — the CAN families' step wizard.
   The human poses the arm and confirms; the flow only relays. Composes
   ``robots.get``, ``sessions.calibrate``, ``calibration.status`` and
-  ``calibration.complete_step``.
+  ``sessions.calibration_step``.
 
 The SO-101 MANUAL sweep has no flow on purpose: the human sweeps every joint
 while watching ``recorded_ranges`` fill in, which is a continuous visual loop
@@ -36,17 +36,19 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from makermodslab_sdk.errors import MakerModsError
 from makermodslab_sdk.resources.calibration import (
     AutoCalibrationBatchStatus,
     CalibrationStatus,
 )
-from makermodslab_sdk.resources.sessions import EndedSessionInfo
+from makermodslab_sdk.resources.sessions import ActiveSession, EndedSessionInfo
 
 if TYPE_CHECKING:
     from makermodslab_sdk.client import Client
+
+_Status = TypeVar("_Status")
 
 
 class CalibrationFlowError(MakerModsError):
@@ -113,6 +115,38 @@ class CalibrationFlows:
     def __init__(self, client: Client) -> None:
         self._client = client
 
+    def _require_status_owner(self, session: ActiveSession, robot: str) -> None:
+        # Never use ActiveSession's cached end to attribute a global status
+        # slot. That slot may already belong to another completed run.
+        snapshot = self._client.sessions.current()
+        if snapshot.session is not None:
+            matches = snapshot.session.id == session.id and snapshot.session.kind == session.kind
+        else:
+            ended = snapshot.last_ended
+            matches = (
+                ended is not None
+                and ended.id == session.id
+                and ended.kind == session.kind
+                and ended.reason is None
+            )
+        if not matches:
+            raise CalibrationFlowError(
+                f"Calibration {session.id!r} of {robot!r} was replaced or its status is no longer "
+                "attributable; refusing to report another run's result. "
+                "Next step: client.sessions.current() identifies the current or most recent run.",
+                session_id=session.id,
+                robot=robot,
+            )
+
+    def _read_owned_status(self, session: ActiveSession, robot: str, poll: Callable[[], _Status]) -> _Status:
+        # Bracket the global read: a replacement either before the read or
+        # while it is in flight must invalidate the result. Session ids are
+        # never reused, and the server's manager locks cover status resets.
+        self._require_status_owner(session, robot)
+        status = poll()
+        self._require_status_owner(session, robot)
+        return status
+
     def auto_calibrate(
         self,
         robot: str,
@@ -158,7 +192,7 @@ class CalibrationFlows:
             robot, arms=arms, motor_power=motor_power, overwrite=overwrite
         ) as session:
             while True:
-                status = self._client.calibration.auto_batch_status()
+                status = self._read_owned_status(session, robot, self._client.calibration.auto_batch_status)
                 if on_progress is not None:
                     on_progress(status)
                 if status.finished:
@@ -251,7 +285,9 @@ class CalibrationFlows:
             overwrite=overwrite,
         ) as session:
             while True:
-                status = self._client.calibration.status(arm_type=arm_type)
+                status = self._read_owned_status(
+                    session, robot, lambda: self._client.calibration.status(arm_type=arm_type)
+                )
                 if status.finished:
                     if status.status == "error":
                         raise CalibrationFlowError(
