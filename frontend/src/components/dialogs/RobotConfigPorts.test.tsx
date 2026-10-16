@@ -196,6 +196,63 @@ describe("Star to Metal port controls", () => {
 });
 
 
+describe("gs_usb adapters on a Metal arm", () => {
+  const openWith = (leader_kind: string) => {
+    request.mockImplementation(async (url: string) => {
+      let data: object = { active: false, arms: [], logs: [], calibration_active: false, status: "idle" };
+      if (url === "/api/v1/robots/bench") {
+        data = {
+          robot: {
+            name: "bench",
+            arm_type: "metal",
+            mode: "single",
+            leader_kind,
+            leader_port: "",
+            follower_port: "",
+            cameras: [],
+          },
+        };
+      } else if (url.endsWith("available-ports")) {
+        data = { ports: ["/dev/ttyUSB0", "gs_usb:A", "gs_usb:B"] };
+      }
+      return new Response(JSON.stringify(data));
+    });
+    render(<RobotConfigDialog open robotName="bench" onOpenChange={vi.fn()} />);
+  };
+
+  const optionsOf = async (name: string) => {
+    fireEvent.click(await screen.findByRole("combobox", { name }));
+    const labels = (await screen.findAllByRole("option")).map((o) => o.textContent ?? "");
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("option")).not.toBeInTheDocument());
+    return labels;
+  };
+
+  it("offers gs_usb on the follower and on an energized Metal leader", async () => {
+    openWith("metal");
+    await waitFor(async () =>
+      expect(await optionsOf("Port for Follower")).toEqual(
+        expect.arrayContaining(["gs_usb · A", "gs_usb · B"]),
+      ),
+    );
+    expect(await optionsOf("Port for Leader")).toEqual(
+      expect.arrayContaining(["gs_usb · A", "gs_usb · B"]),
+    );
+  });
+
+  it("keeps gs_usb off the Star leader, whose bus is a UART", async () => {
+    openWith("star");
+    await waitFor(async () =>
+      expect(await optionsOf("Port for Follower")).toEqual(
+        expect.arrayContaining(["gs_usb · A"]),
+      ),
+    );
+    const leader = await optionsOf("Port for Leader");
+    expect(leader).toContain("/dev/ttyUSB0");
+    expect(leader.some((label) => label.startsWith("gs_usb"))).toBe(false);
+  });
+});
+
 it("shows the saved Star vertical grip choice and its closed calibration hint", async () => {
   await setup("single", false, "star_vertical");
   expect(screen.getByRole("combobox", { name: "Leader arm" })).toHaveTextContent("Star arm vertical grip");
