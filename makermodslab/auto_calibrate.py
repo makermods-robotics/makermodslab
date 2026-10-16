@@ -789,6 +789,7 @@ class AutoCalibrationBatchManager:
             # subprocess + reader thread, so this loop returns quickly and the
             # arms run in parallel. If a launch fails, that arm is 'failed' and
             # the rest still run. ---
+            previous_robot_name, previous_runners = self._robot_name, self._runners
             self._robot_name = request.robot_name
             self._runners = [_AutoCalArmRunner() for _ in arms]
             launched = 0
@@ -813,7 +814,16 @@ class AutoCalibrationBatchManager:
                     )
 
             if launched == 0:
-                return {"success": False, "message": "No arm could be launched"}
+                failed_arms = [runner.arm_status() for runner in self._runners]
+                # No accepted run means no session claim. Preserve the last
+                # accepted batch's status rather than silently replacing its
+                # result under the same current/last-ended session identity.
+                self._robot_name, self._runners = previous_robot_name, previous_runners
+                return {
+                    "success": False,
+                    "message": "No arm could be launched",
+                    "failed_arms": failed_arms,
+                }
             return {
                 "success": True,
                 "message": f"Auto-calibration started on {launched} arm(s)",

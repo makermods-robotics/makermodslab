@@ -215,6 +215,9 @@ marked _(reference)_ name where the Python implementation lives.
   session identity checks. A cached session end does not establish ownership of
   the status slot: a replacement before or during a read raises a flow error
   rather than reporting another run's result as the original's outcome.
+- A batch attempt that launches zero processes makes no session claim and
+  preserves the previous accepted batch's status. Its failed-arm diagnostics
+  are returned with the refused start, not published as the old run's result.
 - A journey whose loop is continuous and visual — the SO-101 range sweep,
   episode-by-episode recording judgement — gets no flow. The client exposes
   the status so an agent can narrate, and says plainly that the UI is the
