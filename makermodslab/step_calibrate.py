@@ -186,6 +186,7 @@ class StepCalibrationManager:
         self._status_lock = threading.RLock()
         self._step_confirmed = threading.Event()
         self._current_request: StepCalibrationRequest | None = None
+        self._session_id: str | None = None
         self._family: ArmFamily | None = None
         self._cleanup_lock = threading.Lock()
         init_logging()
@@ -293,22 +294,53 @@ class StepCalibrationManager:
                 self._family = family
                 self.stop_requested = False
                 self._step_confirmed.clear()
+                # Bind identity before a worker can publish steps. The same
+                # status -> tracker lock order guards scoped confirmations.
+                from .sessions import tracker
+
+                self._session_id = None
+                notify_session_changed("calibration", True, phase="connecting")
+                current = tracker.current()
+                self._session_id = current["id"] if current else None
                 self.thread = threading.Thread(target=self._worker, args=(request,), daemon=True)
                 self.thread.start()
 
-            notify_session_changed("calibration", True, phase="connecting")
             return {"success": True, "message": "Calibration started"}
 
         except Exception as e:
             logger.error(f"Error starting step calibration: {e}")
-            self._update_status(
-                calibration_active=False,
-                status="error",
-                error=str(e),
-                message="Failed to start calibration",
-            )
-            notify_session_changed("calibration", False, phase="error")
+            with self._status_lock:
+                self._update_status(
+                    calibration_active=False,
+                    status="error",
+                    error=str(e),
+                    message="Failed to start calibration",
+                )
+                notify_session_changed("calibration", False, phase="error")
             return {"success": False, "message": str(e)}
+
+    def complete_step_for_session(self, session_id: str, step: int | None) -> dict[str, Any]:
+        """Confirm only the exact wizard that owns this session, atomically.
+
+        A new run resets status before publishing its session claim. Checking
+        the manager's bound identity as well as the tracker closes that gap.
+        """
+        from .sessions import tracker
+
+        with self._status_lock, tracker._lock:
+            current = tracker._current
+            if (
+                self._session_id != session_id
+                or current is None
+                or current["id"] != session_id
+                or current["kind"] != "calibration"
+            ):
+                raise ApiError(
+                    status_code=404,
+                    detail=f"No active step calibration with session id {session_id!r}.",
+                    code=ErrorCode.SESSION_NOT_FOUND,
+                )
+            return self.complete_step(step)
 
     def complete_step(self, step: int | None = None) -> dict[str, Any]:
         """The user confirmed the current step.
@@ -484,8 +516,10 @@ class StepCalibrationManager:
                 live_positions=False,
             )
             self._current_request = None
-        if was_active:
-            notify_session_changed("calibration", False, phase=status)
+            # Publish the release before a replacement may claim this manager,
+            # so the old release cannot erase the new run's session identity.
+            if was_active:
+                notify_session_changed("calibration", False, phase=status)
 
     def _release_device(self):
         """Release torque (follower only), then disconnect — never raising.
