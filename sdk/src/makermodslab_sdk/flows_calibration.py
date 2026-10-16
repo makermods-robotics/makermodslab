@@ -207,7 +207,8 @@ class CalibrationFlows:
         session stops, nothing is saved, and StepNotConfirmedError is raised.
 
         Composes ``robots.get``, ``sessions.calibrate``, ``calibration.status``
-        and ``calibration.complete_step``. Torque stays off throughout (the arm is
+        and ``sessions.calibration_step`` (identity-scoped confirmation).
+        Torque stays off throughout (the arm is
         posed by hand), so there is nothing to return to rest. The Maker and
         Metal families publish exactly one step today; this loop handles more.
 
@@ -280,7 +281,7 @@ class CalibrationFlows:
                             session_id=session.id,
                             robot=robot,
                         )
-                    answer = self._client.calibration.complete_step(step=status.step)
+                    answer = self._client.sessions.calibration_step(session.id, step=status.step)
                     if not answer.success:
                         raise CalibrationFlowError(
                             f"Step {status.step} of {robot!r} was refused: {answer.message}. "

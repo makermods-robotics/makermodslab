@@ -191,8 +191,10 @@ class RobotsResource(Resource):
     def gripper_status(self, name: str) -> GripperStatusList:
         """Live gripper telemetry for a CAN-arm record (per gripper: enable
         state, current limit and draw, temperature, hold torque, fault).
-        Talks to the hardware — expect a moment, and a refusal while a
-        session holds the bus."""
+        Includes firmware fault words, raw motor goals/positions, commanded
+        gains and the calibrated leader target. Reads cached controller state;
+        it does not probe the bus and is available during a live session.
+        """
         return GripperStatusList.model_validate(
             self._transport.request(
                 "GET", _robot_path(name, "/gripper-status"), action=f"Get gripper status of {name!r}"
@@ -207,6 +209,11 @@ class RobotsResource(Resource):
 
 
 class GripperInfo(SdkModel):
+    """Cached grip telemetry. Motor positions are raw degrees; only
+    ``leader_target_deg`` uses the follower's calibrated command frame.
+    New fields are optional for compatibility with older servers.
+    """
+
     port: str
     enabled: bool
     limit_a: float | None = None
@@ -216,6 +223,14 @@ class GripperInfo(SdkModel):
     hold_torque_nm: float | None = None
     holding: bool = False
     measured_torque_nm: float | None = None
+    fault_word: int | None = None
+    legacy_firmware: bool | None = None
+    goal_position_deg: float | None = None
+    measured_position_deg: float | None = None
+    command_position_deg: float | None = None
+    command_kp: float | None = None
+    command_kd: float | None = None
+    leader_target_deg: float | None = None
 
 
 class GripperStatusList(RecordList):

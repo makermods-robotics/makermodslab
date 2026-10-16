@@ -50,6 +50,35 @@ Run `python -m makermodslab_sdk.docs` and follow its drill-down instructions
 
 `SPEC.md` is the language-agnostic behavior contract.
 
+## Metal arms and recovery
+
+Maker and Metal records accept exact `gs_usb:<serial>` adapter tokens as
+follower ports. A Metal record can also use one for its energized `metal`
+leader; Star leaders use UART ports. Configure records with
+`client.robots.update(...)`, and discover capabilities with
+`client.system.arms()`. The Star `star_trigger` leader kind maps pulls in
+either direction. Metal follower speed limits and remote-hosting reply
+deadlines are applied by the server, including SDK-started sessions.
+
+The SDK exposes the same remote hosting and camera streams as the UI:
+`client.sessions.host(...)`, `client.sessions.remote_teleoperate(...)`,
+`client.remote.home()` / `engage()`, and `client.remote.camera_url(name)`.
+Featured-camera selection is a UI layout choice; SDK callers choose which
+camera URL to consume.
+
+A graceful CAN stop can remain in `rest_failed` while the arm retains torque.
+Read `client.sessions.teleoperation_status()` for `releasing`, `rest_failed`,
+and the server's recovery message. Once a person has physically supported the
+arm, explicitly call `client.sessions.stop(session_id, release_now=True)`.
+An `ActiveSession` also accepts `s.stop(release_now=True)` after an earlier
+graceful stop. Context exit and lease cleanup always use the graceful default.
+
+`client.robots.gripper_status(name)` reads cached diagnostics even during a
+session: fault words, firmware mode, measured/commanded positions and gains.
+Raw motor positions use degrees; `leader_target_deg` uses the calibrated
+follower command frame. Realtime CAN samples expose `joints_deg` and
+`joints_deg_right` separately from the URDF joint radians in `joints`.
+
 ## Layering (port guide)
 
 The SDK is three layers; a port to another language re-implements layer 1
@@ -80,7 +109,10 @@ families' zero-pose wizard is a conversation instead:
 `client.flows.calibrate_zero("bench", device_type="robot", confirm=ask)`
 relays each instruction to `confirm`, which is required and has no default:
 only a human can attest that the arm is physically posed, and confirming an
-unposed arm records a wrong zero. The SO-101 manual sweep has no flow on
+unposed arm records a wrong zero. Confirmations use
+`client.sessions.calibration_step(session_id, step)`, which atomically refuses
+a replaced wizard. Servers predating that route raise `ServerTooOldError`
+instead of falling back to an unscoped confirmation. The SO-101 manual sweep has no flow on
 purpose — watch `client.calibration.status()` and narrate, or use the UI.
 
 Before choosing a robot or discovery operation, get one passive snapshot:

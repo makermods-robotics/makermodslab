@@ -436,8 +436,11 @@ class SystemResource(Resource):
     def probe_maker_arm_ports(
         self, *, arm_type: str | None = None, ports: list[str] | None = None
     ) -> MakerProbeResult:
-        """Classify serial ports into CAN leader / follower / unknown in one
-        sweep (the batch sibling of ``identify_maker_arm``).
+        """Classify serial or exact gs_usb ports as CAN leader/follower/unknown.
+
+        A ``gs_usb:<serial>`` token passes through unchanged and supports Maker
+        and Metal followers. The Metal probe briefly energizes a motor, as on
+        slcan; it is not a passive discovery operation. Star leaders use UART.
 
         Example:
             >>> client.system.probe_maker_arm_ports(arm_type="maker").follower_ports

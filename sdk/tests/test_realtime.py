@@ -87,6 +87,21 @@ def test_parse_teleop_joint_frame():
     assert ev.follower_currents_ma is None
 
 
+@pytest.mark.parametrize("arm_type", ["maker", "metal"])
+def test_actual_can_frames_keep_motor_degrees_distinct_from_urdf_radians(arm_type):
+    from makermodslab.arms.registry import get
+    from makermodslab.teleoperate import get_can_joint_data
+
+    observation = {"left_shoulder_pan.pos": 30.0, "right_shoulder_pan.pos": -20.0}
+    frame = get_can_joint_data(None, get(arm_type), True, 1.0, observation=observation)
+    event = parse_message(frame)
+    assert isinstance(event, JointData)
+    assert event.joints_deg == {"shoulder_pan": 30.0}
+    assert event.joints_deg_right == {"shoulder_pan": -20.0}
+    assert "joints_deg" not in event.model_extra
+    assert event.joints != event.joints_deg
+
+
 def test_parse_bimanual_joint_frame_keeps_right_arm_and_currents():
     ev = parse_message(BIMANUAL_FRAME)
     assert isinstance(ev, JointData)

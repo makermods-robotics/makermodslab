@@ -52,6 +52,14 @@ def server_registries():
     return set(STARTABLE_KINDS), dict(_OPTIONS_MODELS)
 
 
+def test_session_stop_parameters_match_the_server():
+    from makermodslab.server import stop_session
+
+    server_params = set(inspect.signature(stop_session).parameters)
+    sdk_params = set(inspect.signature(SessionsResource.stop).parameters) - {"self"}
+    assert sdk_params == server_params
+
+
 def sugar_option_params(method_name: str) -> set[str]:
     signature = inspect.signature(getattr(SessionsResource, method_name))
     params = {name for name in signature.parameters if name != "self"}

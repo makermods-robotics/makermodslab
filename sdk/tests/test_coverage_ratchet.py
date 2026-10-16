@@ -130,6 +130,8 @@ UNTAGGED_NAMESPACES: dict[str, frozenset[str]] = {
     # system is MIXED: the SO-101 identify/wiggle pair is untagged while its
     # CAN equivalents (identify_maker_arm, wiggle_can_gripper_port) are tagged.
     "system": frozenset({"identify_arm", "wiggle"}),
+    # Local teleoperation recovery status is still an untyped server route.
+    "sessions": frozenset({"teleoperation_status"}),
     "robots": frozenset(
         {
             "delete_robot",

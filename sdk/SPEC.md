@@ -85,7 +85,8 @@ marked _(reference)_ name where the Python implementation lives.
 
 - `POST /api/v1/sessions` starts any robot flow by robot RECORD NAME; the
   server resolves ports/configs/cameras. Kinds: teleoperation, recording,
-  inference, replay, calibration, auto_calibration.
+  inference, replay, calibration, auto_calibration, hosting,
+  remote_teleoperation, remote_inference.
 - Starting with an `owner` attaches a lease. Renewal is the owner's act
   alone: `POST /sessions/{id}/heartbeat` with the owner; reads never renew.
   Miss the heartbeats and the server's watchdog safety-stops the session
@@ -95,6 +96,13 @@ marked _(reference)_ name where the Python implementation lives.
   leave an energized arm running — that is the lease's entire point.
 - Stop is deliberately NEVER owner-gated (safety outranks ownership). A 404
   `session.not_found` on stop means already-gone: treat as success.
+- A stop requests graceful return-to-rest. A failed CAN return can retain
+  torque and the session in `rest_failed`; a stopped control loop does not
+  prove torque is off. Expose `sessions.teleoperation_status()` and the
+  explicit `release_now` query option on `sessions.stop`, `stop_current`, and
+  `ActiveSession.stop`. This bypass is only requested by the caller after
+  physically supporting the arm; context exit and lease cleanup never set it.
+  An explicit release must remain possible after a cached graceful stop.
 - 409 `session.held` carries `details.holder`; the client-side recovery is
   stop-current-then-retry, surfaced through the remediation, never done
   automatically.
@@ -176,6 +184,13 @@ marked _(reference)_ name where the Python implementation lives.
   fixtures generated from the same snapshot.
 - Tests never sleep, never touch the network, and NEVER call endpoints that
   energize hardware, write servo EEPROM, or start subprocesses.
+- The in-process harness redirects server state, training outputs, and the
+  LeRobot cache into temporary directories before importing server singletons.
+  Run its parity checks on backend and OpenAPI changes as well as SDK changes.
+- Typed gripper telemetry mirrors the server's schema, including optional
+  diagnostic fields for older servers. CAN realtime motor degrees stay
+  distinct from URDF radians. Adapter tokens pass through unchanged; the
+  server owns follower motion limits and transport-specific reply deadlines.
 
 ## 10. Client-side flows
 
@@ -190,6 +205,12 @@ marked _(reference)_ name where the Python implementation lives.
   not charged, and a confirmed step is followed by a fresh status read before
   any timeout verdict, so a step the server accepted and finished is never
   reported as a timeout.
+- A managed zero-calibration flow confirms with
+  `sessions.calibration_step(session_id, step)`. The server checks the wizard's
+  bound run identity, current session, and step under the confirmation lock.
+  A delayed human callback cannot confirm a replacement. An older server
+  without this route raises ServerTooOldError; never fall back to the global
+  confirmation route, whose step number alone does not establish ownership.
 - A journey whose loop is continuous and visual — the SO-101 range sweep,
   episode-by-episode recording judgement — gets no flow. The client exposes
   the status so an agent can narrate, and says plainly that the UI is the

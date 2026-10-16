@@ -49,6 +49,7 @@ from makermodslab_sdk._operations import operation
 from makermodslab_sdk.errors import ApiError, MakerModsError, NotFoundError
 from makermodslab_sdk.resources._base import Resource, SdkModel
 from makermodslab_sdk.resources._cameras import resolve_camera_bindings
+from makermodslab_sdk.resources.calibration import StepConfirmation
 from makermodslab_sdk.resources.recording import RecordingControlResult, RecordingStatus
 
 # Mirrors the server's lease/owner constraints (makermodslab/schemas/sessions.py).
@@ -126,6 +127,25 @@ class StoppedSession(SdkModel):
 
     session: SessionInfo
     result: dict[str, Any]
+
+
+class TeleoperationStatus(SdkModel):
+    """Local teleoperation and its return-to-rest recovery, without bus I/O.
+
+    ``teleoperation_active=False`` does not imply torque is off: ``releasing``
+    includes a failed CAN landing. Support the arm before explicitly calling
+    ``sessions.stop(session_id, release_now=True)`` in that state.
+    """
+
+    teleoperation_active: bool
+    releasing: bool = False
+    rest_failed: bool = False
+    available_controls: dict[str, bool] = {}
+    last_cleanup_error: str | None = None
+    outcome: str | None = None
+    error: str | None = None
+    hint: str | None = None
+    message: str | None = None
 
 
 class SessionCoaching(SdkModel):
@@ -313,6 +333,7 @@ class ActiveSession:
         self._sessions = sessions
         self._owner = owner
         self._lock = threading.Lock()
+        self._stop_lock = threading.Lock()
         self._info = started.session
         #: Warn-but-allow findings from the start (backend prose, verbatim).
         self.warnings: list[str] = list(started.warnings or [])
@@ -321,6 +342,10 @@ class ActiveSession:
         self._ended: EndedSessionInfo | None = None
         self._stop_requested = False
         self._stop_result: StoppedSession | None = None
+        self._released_now = False
+        self._stop_completed = False
+        #: A failed cleanup is inspectable even when a context-body error wins.
+        self.cleanup_error: Exception | None = None
         self._stop_event = threading.Event()
         lease = started.session.lease
         #: Seconds between renewals; None when the session has no lease
@@ -546,29 +571,43 @@ class ActiveSession:
 
     # --- lifecycle ------------------------------------------------------------
 
-    def stop(self) -> StoppedSession | None:
+    def stop(self, *, release_now: bool = False) -> StoppedSession | None:
         """Stop the heartbeat, then the session. Idempotent — the second call
         returns the first call's result without another request. Returns None
         when the session was already gone (for a stop, already-gone is
-        success)."""
-        with self._lock:
-            if self._stop_requested:
-                return self._stop_result
-            self._stop_requested = True
-        self._stop_event.set()
-        if self._thread is not None:
-            # The loop exits on the next wait; a tick already in flight ends
-            # harmlessly (its outcome is discarded past _stop_requested).
-            self._thread.join(timeout=5.0)
-        try:
-            result: StoppedSession | None = self._sessions.stop(self._info.id)
-        except NotFoundError:
-            result = None
-        with self._lock:
-            self._stop_result = result
-            if result is not None:
-                self._info = result.session
-        return result
+        success). ``release_now=True`` explicitly bypasses return-to-rest:
+        physically support the arm first. It can escalate an earlier graceful
+        stop, including after leaving the context. Automatic cleanup never
+        requests this bypass.
+        """
+        with self._stop_lock:
+            with self._lock:
+                if self._stop_completed and (not release_now or self._released_now):
+                    return self._stop_result
+                self._stop_requested = True
+            self._stop_event.set()
+            if self._thread is not None:
+                # A heartbeat already in flight discards its outcome.
+                self._thread.join(timeout=5.0)
+            try:
+                result: StoppedSession | None = (
+                    self._sessions.stop(self._info.id, release_now=True)
+                    if release_now
+                    else self._sessions.stop(self._info.id)
+                )
+            except NotFoundError:
+                result = None
+            except Exception as error:
+                self.cleanup_error = error
+                raise  # Failed requests are not cached; callers can retry.
+            with self._lock:
+                self._stop_result = result
+                self._released_now = release_now
+                self._stop_completed = True
+                self.cleanup_error = None
+                if result is not None:
+                    self._info = result.session
+            return result
 
     def __enter__(self) -> ActiveSession:
         return self
@@ -576,7 +615,12 @@ class ActiveSession:
     def __exit__(self, exc_type, exc, tb) -> None:
         with self._lock:
             lost, detail = self._lost_reason, self._lost_detail
-        self.stop()
+        try:
+            self.stop()
+        except Exception:
+            if exc_type is None:
+                raise
+            return  # Preserve the body error; cleanup_error retains the failure.
         if exc_type is None and lost is not None:
             raise SessionLostError(
                 f"The {self.kind} session {self.id} was lost mid-flight ({lost}): "
@@ -726,7 +770,7 @@ class SessionsResource(Resource):
         ).session
 
     @operation("stop_session")
-    def stop(self, session_id: str) -> StoppedSession:
+    def stop(self, session_id: str, *, release_now: bool = False) -> StoppedSession:
         """Stop the session with this id.
 
         Deliberately never owner-gated server-side: a physical arm must
@@ -737,6 +781,11 @@ class SessionsResource(Resource):
         404 means "already gone, nothing left to do" (:meth:`stop_current`
         swallows it for you).
 
+        CAN stops retain ownership after a failed return to rest. Repeating
+        a normal stop does not release torque. Read ``teleoperation_status()``;
+        once the arm is physically supported, explicitly pass
+        ``release_now=True`` to bypass the return. This can make the arm limp.
+
         Example:
             >>> stopped = client.sessions.stop(started.session.id)
             >>> stopped.result.get("success")
@@ -746,7 +795,21 @@ class SessionsResource(Resource):
             self._transport.request(
                 "POST",
                 f"/api/v1/sessions/{quote(session_id, safe='')}/stop",
+                params={"release_now": True} if release_now else None,
                 action="Stop session",
+            )
+        )
+
+    @operation("teleoperation_status")
+    def teleoperation_status(self) -> TeleoperationStatus:
+        """Read local teleoperation recovery (``releasing``, ``rest_failed``).
+
+        A failed CAN landing keeps the arm energized until an explicit
+        supported-arm release. This is cached server state, never a bus probe.
+        """
+        return TeleoperationStatus.model_validate(
+            self._transport.request(
+                "GET", "/api/v1/teleoperation-status", action="Get teleoperation recovery status"
             )
         )
 
@@ -777,6 +840,27 @@ class SessionsResource(Resource):
                 f"/api/v1/sessions/{quote(session_id, safe='')}/coaching",
                 json={"command": command},
                 action=f"Coaching command {command!r}",
+            )
+        )
+
+    @operation("calibration_step_for_session")
+    def calibration_step(self, session_id: str, step: int) -> StepConfirmation:
+        """Confirm a human-posed CAN wizard step for this exact session.
+
+        The server atomically refuses a replaced session before advancing the
+        wizard. Older servers raise ServerTooOldError; never fall back to the
+        global complete_step route in an owned flow.
+        """
+        return StepConfirmation.model_validate(
+            self._transport.request(
+                "POST",
+                f"/api/v1/sessions/{quote(session_id, safe='')}/calibration/step",
+                json={"step": step},
+                action="Confirm calibration step for session",
+                newer_route_fallback=(
+                    "use the web UI for calibration until the server supports session-scoped "
+                    "confirmation; do not retry through the global complete_step route."
+                ),
             )
         )
 
@@ -821,13 +905,16 @@ class SessionsResource(Resource):
             )
         )
 
-    def stop_current(self) -> StoppedSession | None:
+    def stop_current(self, *, release_now: bool = False) -> StoppedSession | None:
         """Stop whatever session is live right now; None when the robot is idle.
 
         The safety hammer: reads the current session and stops it by id,
         whoever owns it. A 404 from the stop (the session ended between the
         read and the stop) is swallowed — for a stop, already-gone is
         success.
+
+        ``release_now=True`` bypasses return-to-rest; physically support the
+        arm before requesting it. Context cleanup uses the graceful default.
 
         Example:
             >>> client.sessions.stop_current()  # idle robot
@@ -837,7 +924,7 @@ class SessionsResource(Resource):
         if now is None:
             return None
         try:
-            return self.stop(now.id)
+            return self.stop(now.id, release_now=True) if release_now else self.stop(now.id)
         except NotFoundError:
             return None
 

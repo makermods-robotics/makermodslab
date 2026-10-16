@@ -221,6 +221,10 @@ class CalibrationResource(Resource):
     def complete_step(self, step: int | None = None) -> StepConfirmation:
         """Confirm the step currently on screen — the human has posed the arm.
 
+        This is the global compatibility control. For an SDK-owned CAN wizard,
+        use ``client.sessions.calibration_step(session_id, step)`` so a delayed
+        human confirmation cannot advance a replacement run.
+
         NEVER call this without a human having actually done the step. The
         confirmation is what tells the server the arm is in the pose it is
         about to record as zero; confirming an unposed arm writes a wrong

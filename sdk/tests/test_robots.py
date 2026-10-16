@@ -23,6 +23,44 @@ RECORD = {
 }
 
 
+def test_gripper_telemetry_fields_match_the_server_schema():
+    from makermodslab_sdk.resources.robots import GripperInfo
+
+    from makermodslab.schemas.gripper import GripperStatus
+
+    assert set(GripperInfo.model_fields) == set(GripperStatus.model_fields)
+
+
+def test_gripper_diagnostics_are_typed_and_older_servers_still_parse():
+    from makermodslab_sdk.resources.robots import GripperInfo
+
+    diagnostics = {
+        "port": "gs_usb:metal-adapter",
+        "enabled": True,
+        "fault_word": 6,
+        "legacy_firmware": True,
+        "goal_position_deg": 12.0,
+        "measured_position_deg": 11.5,
+        "command_position_deg": 12.1,
+        "command_kp": 20.0,
+        "command_kd": 0.5,
+        "leader_target_deg": -60.0,
+    }
+
+    def handler(request):
+        assert request.method == "GET"
+        assert request.url.path == "/api/v1/robots/metal-bench/gripper-status"
+        return httpx.Response(200, json={"grippers": [diagnostics]})
+
+    with mock_client(handler) as client:
+        grip = client.robots.gripper_status("metal-bench").grippers[0]
+    assert grip.model_extra == {}
+    assert grip.fault_word == 6
+    assert grip.command_position_deg == 12.1 and grip.leader_target_deg == -60.0
+    older = GripperInfo.model_validate({"port": "serial", "enabled": False})
+    assert older.fault_word is None and older.command_kp is None
+
+
 def test_create_sends_create_flag_and_fields():
     seen = {}
 

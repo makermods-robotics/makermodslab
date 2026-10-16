@@ -185,6 +185,21 @@ def test_release_can_torque_sends_arm_and_port():
     assert result.success is True
 
 
+@pytest.mark.parametrize("arm_type", ["maker", "metal"])
+def test_gs_usb_probe_preserves_exact_adapter_tokens(arm_type):
+    import httpx
+    from helpers import mock_client
+
+    token = "gs_usb:CANable-serial-ABC123"
+
+    def handler(request):
+        assert json.loads(request.read()) == {"arm_type": arm_type, "ports": [token]}
+        return httpx.Response(200, json={"success": True, "follower_ports": [token]})
+
+    with mock_client(handler) as client:
+        assert client.system.probe_maker_arm_ports(arm_type=arm_type, ports=[token]).follower_ports == [token]
+
+
 def test_maker_probe_and_identify_omit_unset_fields():
     import httpx
     from helpers import mock_client

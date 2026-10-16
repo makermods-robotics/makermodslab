@@ -534,6 +534,24 @@
         "title": "CalibrationRequest",
         "type": "object"
       },
+      "CalibrationStepResponse": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "CalibrationStepResponse",
+        "type": "object"
+      },
       "CameraInfo": {
         "description": "One camera from the platform enumerators in server.py — unique_id is\nthe AVFoundation uniqueID, present on macOS only (absent elsewhere, never\nnull; the route excludes None).",
         "properties": {
@@ -13497,6 +13515,59 @@
           }
         },
         "summary": "Current Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session_id}/calibration/step": {
+      "post": {
+        "description": "Confirm a CAN wizard step only for its original session identity.\n\nA stale human confirmation receives 404 session.not_found and cannot\nadvance a replacement wizard. Identity and step checks share the\nmanager's confirmation lock; the global UI route remains available.",
+        "operationId": "calibration_step_for_session",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteCalibrationStepRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CalibrationStepResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Calibration Step For Session",
         "tags": [
           "sessions"
         ]

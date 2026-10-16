@@ -59,7 +59,9 @@ class JointData(SdkModel):
 
     ``type`` is ``"joint_update"`` (teleoperation; leader-side positions) or
     ``"replay_joint_update"`` (replay; follower observation). ``joints`` maps
-    joint name to position. Bimanual teleoperation adds ``joints_right``, and
+    URDF joint name to radians. CAN followers additionally carry raw motor
+    angles in degrees as ``joints_deg`` / ``joints_deg_right``; use those for
+    numeric Maker/Metal telemetry. Bimanual teleoperation adds ``joints_right``, and
     frames may piggyback ``follower_currents_ma`` (~1 Hz-fresh follower
     current draw, mA) — both absent otherwise.
     """
@@ -68,6 +70,8 @@ class JointData(SdkModel):
     joints: dict[str, float]
     timestamp: float
     joints_right: dict[str, float] | None = None
+    joints_deg: dict[str, float] | None = None
+    joints_deg_right: dict[str, float] | None = None
     follower_currents_ma: dict[str, float] | None = None
 
 

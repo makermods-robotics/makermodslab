@@ -326,6 +326,13 @@ def test_client_docs_makes_zero_http_requests():
     assert calls["count"] == 0
 
 
+def test_recovery_features_are_discoverable_in_the_agent_docs():
+    assert "release_now" in method_detail("sessions.stop")
+    assert "physically supported" in method_detail("sessions.stop")
+    assert "teleoperation_status" in search("recovery")
+    assert "cached" in method_detail("robots.gripper_status").lower()
+
+
 # --- CLI (python -m makermodslab_sdk.docs) ---------------------------------------
 
 

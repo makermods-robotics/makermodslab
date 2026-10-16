@@ -14,9 +14,9 @@
 
 # Runs the makermodslab-sdk suite (sdk/tests) — modeled on tests.yml.
 #
-# DELIBERATELY path-filtered to sdk/**: backend PRs land freely and the SDK
-# catches up progressively (its parity ratchets then name the drift on the
-# next SDK-touching change). The suite still needs the full server installed:
+# Backend and API snapshot changes also run the SDK contract harness so new
+# server features cannot silently leave SDK coverage behind. The suite needs
+# the full server installed:
 # its e2e tests run the SDK against the real FastAPI app in-process, and the
 # parity tests import the server's request models.
 name: SDK Tests
@@ -31,6 +31,9 @@ on:
       - staging
     paths:
       - "sdk/**"
+      - "makermodslab/**"
+      - "docs/api/openapi.json"
+      - "pyproject.toml"
       - ".github/workflows/sdk_tests.yml"
   push:
     branches:
@@ -38,6 +41,9 @@ on:
       - staging
     paths:
       - "sdk/**"
+      - "makermodslab/**"
+      - "docs/api/openapi.json"
+      - "pyproject.toml"
       - ".github/workflows/sdk_tests.yml"
 
 env:

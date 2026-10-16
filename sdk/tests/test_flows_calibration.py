@@ -75,7 +75,7 @@ def scripted(statuses, *, kind="calibration", status_path, extra=None):
             return httpx.Response(200, json={"session": session_body(kind=kind)["session"], "result": {}})
         if path == "/api/v1/sessions/current":
             return httpx.Response(200, json=ended_body(kind=kind))
-        if path == "/api/v1/complete-calibration-step":
+        if path == "/api/v1/sessions/cal-1/calibration/step":
             seen["steps"].append(json.loads(request.read()))
             answer = (extra or {}).get("step_answer", {"success": True, "message": "Step confirmed"})
             return httpx.Response(200, json=answer)

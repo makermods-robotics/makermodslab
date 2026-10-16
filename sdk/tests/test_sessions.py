@@ -339,6 +339,79 @@ def test_stop_current_swallows_the_race_404():
         assert client.sessions.stop_current() is None
 
 
+def test_explicit_release_uses_the_session_id_and_query_flag():
+    script = Script().add(
+        "POST",
+        "/api/v1/sessions/sess-1/stop",
+        (200, {"session": session_body(phase="released"), "result": {"success": True}}),
+    )
+    with mock_client(script) as client:
+        client.sessions.stop("sess-1", release_now=True)
+    assert dict(script.requests[0].url.params) == {"release_now": "true"}
+
+
+def test_stop_current_forwards_explicit_release():
+    script = (
+        Script()
+        .add("GET", "/api/v1/sessions/current", (200, {"session": session_body(), "last_ended": None}))
+        .add(
+            "POST",
+            "/api/v1/sessions/sess-1/stop",
+            (200, {"session": session_body(), "result": {"success": True}}),
+        )
+    )
+    with mock_client(script) as client:
+        client.sessions.stop_current(release_now=True)
+    assert script.requests[-1].url.params["release_now"] == "true"
+
+
+def test_active_session_can_escalate_a_graceful_stop_without_repeating_either():
+    script = Script().add(
+        "POST",
+        "/api/v1/sessions/sess-1/stop",
+        (200, {"session": session_body(phase="rest_failed"), "result": {"releasing": True}}),
+        (200, {"session": session_body(phase="released"), "result": {"success": True}}),
+    )
+    session, client = make_active(script)
+    with client:
+        first = session.stop()
+        assert session.stop() is first
+        released = session.stop(release_now=True)
+        assert released.result["success"]
+        assert session.stop(release_now=True) is released
+        assert session.stop() is released
+    assert len(script.requests) == 2
+    assert not script.requests[0].url.params
+    assert script.requests[1].url.params["release_now"] == "true"
+
+
+def test_explicit_release_of_stale_session_is_not_a_stop_of_the_current_one(sdk_client):
+    with pytest.raises(NotFoundError) as error:
+        sdk_client.sessions.stop("__sdk_missing_session__", release_now=True)
+    assert error.value.code == "session.not_found"
+
+
+def test_teleoperation_recovery_status_reads_cached_state_end_to_end(sdk_client, monkeypatch):
+    from makermodslab import teleoperate
+
+    monkeypatch.setattr(teleoperate, "teleoperation_active", False)
+    monkeypatch.setattr(teleoperate, "releasing", True)
+    monkeypatch.setattr(teleoperate, "rest_failed", True)
+    monkeypatch.setattr(teleoperate, "last_cleanup_error", "Support the arm, then release torque.")
+    status = sdk_client.sessions.teleoperation_status()
+    assert not status.teleoperation_active
+    assert status.rest_failed and status.releasing
+    assert status.available_controls["stop_teleoperation"]
+    assert status.message == "Support the arm, then release torque."
+
+
+def test_teleoperation_status_tolerates_a_server_without_recovery_fields():
+    script = Script().add("GET", "/api/v1/teleoperation-status", (200, {"teleoperation_active": False}))
+    with mock_client(script) as client:
+        status = client.sessions.teleoperation_status()
+    assert not status.rest_failed and not status.releasing
+
+
 # --- ActiveSession: tick classification (no threads, no sleeps) --------------
 
 
@@ -536,6 +609,30 @@ def test_stop_is_idempotent():
     assert len(script.calls("POST", "/api/v1/sessions/sess-1/stop")) == 1
     assert not s.alive
     assert s.info.phase == "released"
+
+
+def test_failed_stop_can_be_retried_instead_of_caching_success():
+    from makermodslab_sdk import ConnectionFailedError
+
+    script = Script().add("POST", "/api/v1/sessions/sess-1/stop", httpx.ConnectError("offline"), stop_ok())
+    session, client = make_active(script)
+    with client:
+        with pytest.raises(ConnectionFailedError):
+            session.stop()
+        assert isinstance(session.cleanup_error, ConnectionFailedError)
+        assert session.stop().result["success"]
+        assert session.cleanup_error is None
+    assert len(script.requests) == 2
+
+
+def test_context_body_error_wins_over_failed_cleanup():
+    from makermodslab_sdk import ConnectionFailedError
+
+    script = Script().add("POST", "/api/v1/sessions/sess-1/stop", httpx.ConnectError("offline"))
+    session, client = make_active(script)
+    with client, pytest.raises(ValueError, match="original body failure"), session:
+        raise ValueError("original body failure")
+    assert isinstance(session.cleanup_error, ConnectionFailedError)
 
 
 def test_stop_swallows_already_gone():
