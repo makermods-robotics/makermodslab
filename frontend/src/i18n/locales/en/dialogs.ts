@@ -330,6 +330,7 @@ export default {
     // {{name}} is the camera's name.
     cameraAlt: "Remote camera {{name}}",
     cameraFailed: "Stream unavailable",
+    cameraFeature: "Show {{name}} large",
     latency: "Round trip",
     latencyLast: "last",
     latencyMean: "mean",
