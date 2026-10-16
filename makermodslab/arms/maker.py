@@ -67,6 +67,13 @@ class MakerFamily(CanArmFamily):
     follower_probe_protocol = "robstride"
     motion_identify_energizes_follower = False
 
+    def prepare_teleoperation(self, robot):
+        from ..maker_rest_pose import maker_follower_arms
+        from ..maker_teleop_safety import MakerTeleopSafety
+
+        for arm, _label in maker_follower_arms(robot):
+            MakerTeleopSafety(arm)
+
     def leader_options(self) -> tuple[LeaderOption, ...]:
         from ..star_gripper import STAR_TRIGGER_LEADER_KIND
 

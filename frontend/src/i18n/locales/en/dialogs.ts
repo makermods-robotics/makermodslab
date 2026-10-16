@@ -191,6 +191,10 @@ export default {
   },
 
   teleop: {
+    restFailed: "Arm did not reach rest",
+    armSupported: "I have physically supported the arm; releasing torque will make it limp.",
+    releaseTorque: "Release torque",
+
     // Used for both the window's aria-label and its visible heading.
     title: "Teleoperation",
     // {{robot}} is the selected robot's name — data.
@@ -326,6 +330,7 @@ export default {
     // {{name}} is the camera's name.
     cameraAlt: "Remote camera {{name}}",
     cameraFailed: "Stream unavailable",
+    cameraFeature: "Show {{name}} large",
     latency: "Round trip",
     latencyLast: "last",
     latencyMean: "mean",

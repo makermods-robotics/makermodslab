@@ -27,6 +27,8 @@ class Device:
         self.effort = 0.0
         self.temperature = 25.0
         self.flags = 0
+        self.fault_word = 0
+        self.fault_padding = 0
         self.drop = False
         self.ignore_stop = False
         self.closed = False
@@ -63,7 +65,13 @@ class Device:
     def send(self, msg):
         self.messages.append(msg)
         mid, payload = msg.arbitration_id, bytes(msg.data)
-        if mid & 0x700 in (0x300, 0x400):
+        if payload == bytes([255] * 6 + [0, 251]):
+            response = can.Message(
+                arbitration_id=0xFD,
+                is_extended_id=False,
+                data=bytes([mid]) + self.fault_word.to_bytes(4, "little") + bytes(self.fault_padding),
+            )
+        elif mid & 0x700 in (0x300, 0x400):
             if self.legacy:
                 return
             index = struct.unpack("<H", payload[:2])[0]
@@ -541,10 +549,12 @@ def test_reenable_starts_at_current_position_without_old_hold_target(rig):
         assert target(mit_commands(device)[-1]) == pytest.approx(-90, abs=0.05)
 
 
-def test_joint_writes_skip_the_batch_quiet_wait_and_still_trip(rig, monkeypatch):
+def test_joint_writes_skip_the_batch_quiet_wait_and_survive_gripper_trip(rig, monkeypatch):
     robot, bus, device = rig
     robot.connect(calibrate=False)
     robot.config.startup_sync_speed_deg = None
+
+    original_batch = bus._base._mit_control_batch
 
     def no_batch(*args, **kwargs):
         raise AssertionError("single-joint write took the batch path")
@@ -556,7 +566,147 @@ def test_joint_writes_skip_the_batch_quiet_wait_and_still_trip(rig, monkeypatch)
         assert any(m.arbitration_id == 6 for m in device.messages)
         assert target(mit_commands(device)[-1]) == pytest.approx(-60, abs=0.03)
     bus._error = "latched"
+    bus.write("Goal_Position", "wrist_roll", 0.0)
+    assert bus.read("Present_Position", "wrist_roll") == pytest.approx(device.positions[6], abs=0.03)
+    monkeypatch.setattr(bus._base, "_mit_control_batch", original_batch)
+    bus.sync_write("Goal_Position", {"wrist_roll": 0.0})
+    bus.sync_write_metal({"wrist_roll": (*robot.config.gains["wrist_roll"], 0.0, 0.0, 0.0)})
     with pytest.raises(grip.GripperSafetyError):
-        bus.write("Goal_Position", "wrist_roll", 0.0)
+        bus.write("Goal_Position", "gripper", -20.0)
     bus._error = None
     robot.disconnect()
+
+
+def test_teleop_guard_preserves_real_driver_targets_and_retains_fault_evidence(rig):
+    from makermodslab.arms import registry
+
+    robot, bus, device = rig
+    registry.get("maker").prepare_teleoperation(robot)
+    robot.connect(calibrate=False)
+    robot.config.startup_sync_speed_deg = None
+    start = robot.get_observation()["shoulder_pan.pos"]
+    result = robot.send_action({"shoulder_pan.pos": start + 100})
+    assert result["shoulder_pan.pos"] == pytest.approx(start + 100)
+    packet = [
+        msg for msg in device.messages if msg.arbitration_id == 1 and bytes(msg.data[:6]) != bytes([255] * 6)
+    ][-1]
+    assert target(packet) == pytest.approx(start + 100, abs=0.03)
+    assert 1 in device.enabled
+    diagnostics = robot.teleop_safety.diagnostics
+    assert diagnostics.recent
+    # A firmware fault received during a command must survive the legacy
+    # decoder's catch-and-log behavior and block subsequent fault clears.
+    device.flags = 0x20
+    with pytest.raises(RuntimeError, match="fault"):
+        robot.send_action({"gripper.pos": -5.0})
+    assert "gripper" in diagnostics.faults
+    assert 1 in device.enabled  # the guard did not disable healthy joints
+
+
+@pytest.mark.parametrize("fault_padding", [0, 3])
+def test_gripper_debug_status_shows_leader_goal_command_and_feedback_without_io(rig, fault_padding):
+    from makermodslab.arms import registry
+    from makermodslab.schemas.gripper import GripperStatus
+
+    robot, bus, device = rig
+    device.fault_padding = fault_padding
+    registry.get("maker").prepare_teleoperation(robot)
+    robot.connect(calibrate=False)
+    robot.config.startup_sync_speed_deg = None
+    with bus._lock:
+        robot.send_action({"gripper.pos": -5.0})
+        diagnostics = robot.teleop_safety.diagnostics
+        feedback = dict(diagnostics.latest["gripper"])
+        bus._read_faults()
+        assert diagnostics.latest["gripper"] == feedback
+        assert not diagnostics.faults
+        assert diagnostics.pending_fault_read is None
+        before = len(device.messages)
+        status = GripperStatus.model_validate(grip.gripper_status("maker-hold")[0])
+        assert len(device.messages) == before
+        assert status.leader_target_deg == -5.0
+        assert status.goal_position_deg == -5.0
+        assert status.command_position_deg == -5.0
+        assert status.measured_position_deg == pytest.approx(device.positions[7], abs=0.03)
+        assert 0 < status.command_kp <= robot.config.gains["gripper"][0]
+        assert status.command_kd > 0
+
+
+@pytest.mark.parametrize("fault_padding", [0, 3])
+def test_legacy_gripper_latched_fault_is_reported_before_enable(rig, fault_padding):
+    robot, bus, device = rig
+    device.legacy = True
+    device.fault_padding = fault_padding
+    device.fault_word = 6
+    with pytest.raises(grip.GripperSafetyError, match="0x00000006.*driver chip.*undervoltage"):
+        robot.connect(calibrate=False)
+    assert not device.enabled
+    assert bus._fault_word == 6
+    assert not any(bytes(msg.data) == bytes([255] * 7 + [0xFB]) for msg in device.messages)
+
+
+@pytest.mark.parametrize("fault_padding", [0, 3])
+def test_legacy_gripper_fault_during_tracking_is_not_missed(rig, fault_padding):
+    robot, bus, device = rig
+    device.legacy = True
+    device.fault_padding = fault_padding
+    robot.connect(calibrate=False)
+    with bus._lock:
+        device.fault_word = 6
+        bus._last_fault_check = 0
+        with pytest.raises(grip.GripperSafetyError, match="0x00000006"):
+            robot.send_action({"gripper.pos": -5.0})
+        assert bus._error is not None
+        assert not bus._enabled
+        assert 1 in device.enabled  # gripper failure must not disable the whole arm
+
+
+@pytest.mark.parametrize("synced", [False, True])
+def test_gripper_fault_allows_real_follower_to_land_and_keep_holding(rig, monkeypatch, synced):
+    import threading
+
+    from makermodslab import teleoperate
+    from makermodslab.arms import registry
+
+    robot, bus, device = rig
+    family = registry.get("maker")
+    family.prepare_teleoperation(robot)
+    robot.connect(calibrate=False)
+    rest_poses = family.capture_rest_poses(robot)
+    guard = robot.teleop_safety
+    with bus._lock:
+        robot._synced = synced
+        # A follower displaced from its captured rest pose when the fault
+        # arrives must actually be driven home, not just declared near rest.
+        device.positions[1] += 9.0
+        robot.send_action({"shoulder_pan.pos": 60, "wrist_roll.pos": 30, "gripper.pos": -20})
+        device.fault_word = 2
+        bus._last_fault_check = 0
+        with pytest.raises(RuntimeError, match="driver chip"):
+            robot.send_action({"shoulder_pan.pos": 60, "wrist_roll.pos": 30, "gripper.pos": -5})
+        original_send = device.send
+
+        def follow_recovery(msg):
+            if msg.arbitration_id in range(1, 7) and bytes(msg.data[:6]) != bytes([255] * 6):
+                device.positions[msg.arbitration_id] = target(msg)
+            original_send(msg)
+
+        monkeypatch.setattr(device, "send", follow_recovery)
+        device.messages.clear()
+        assert teleoperate._return_before_release(family, rest_poses, threading.Event()) is None
+        assert device.positions[1] == pytest.approx(rest_poses[0][1]["shoulder_pan"], abs=0.1)
+        assert {m.arbitration_id for m in device.messages} == set(range(1, 7))
+        assert all(bytes(m.data[:6]) != bytes([255] * 6) for m in device.messages)
+        # The landing updates the fallback target, rather than resuming the
+        # old distant leader command if subsequent recovery needs a hold.
+        assert guard.previous["shoulder_pan.pos"] == pytest.approx(rest_poses[0][1]["shoulder_pan"])
+        # Simulate a return/diagnostic delay beyond the previous freshness cap.
+        bus._base.last_feedback_time = {m: time.time() - 1 for m in bus.motors}
+        device.messages.clear()
+        guard.hold()
+        assert {m.arbitration_id for m in device.messages} == set(range(1, 7))
+        assert all(bytes(m.data[:6]) != bytes([255] * 6) for m in device.messages)
+        assert device.enabled == set(range(1, 7))
+        assert not device.closed
+        assert bus._fault_word == 2
+        assert bus._error

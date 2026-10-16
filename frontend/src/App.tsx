@@ -14,6 +14,7 @@ import Teleoperation from "@/pages/Teleoperation";
 import Training from "@/pages/Training";
 import NotFound from "@/pages/NotFound";
 import UpdateNotice from "@/components/UpdateNotice";
+import TeleopRecoveryNotice from "@/components/TeleopRecoveryNotice";
 import MockHubBanner from "@/components/MockHubBanner";
 import { TooltipProvider } from "@radix-ui/react-tooltip";
 import { ApiProvider } from "./contexts/ApiContext";
@@ -57,6 +58,7 @@ function App() {
                             instead. Multiple tabs are simply allowed now. */}
                         <UpdateNotice />
                         <MockHubBanner />
+                        <TeleopRecoveryNotice />
                         <Routes>
                           <Route path="/" element={<Launchpad />} />
                           <Route path="/teleoperation" element={<Teleoperation />} />

@@ -124,6 +124,10 @@ export default {
   },
 
   teleop: {
+    restFailed: "机械臂未到达休息位置",
+    armSupported: "我已托住机械臂；释放力矩后机械臂会松软下垂。",
+    releaseTorque: "释放力矩",
+
     title: "遥操作",
     titleWithRobot: "遥操作 — {{robot}}",
     done: "完成",
@@ -224,6 +228,7 @@ export default {
     noCameras: "该工作站未发布任何相机。",
     cameraAlt: "远程相机 {{name}}",
     cameraFailed: "视频流不可用",
+    cameraFeature: "放大显示 {{name}}",
     latency: "往返延迟",
     latencyLast: "最新",
     latencyMean: "平均",

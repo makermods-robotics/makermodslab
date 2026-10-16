@@ -41,6 +41,7 @@ downloads the arm's URDF (the fork caches it under HF_LEROBOT_HOME/metal).
 from __future__ import annotations
 
 import importlib.util
+import math
 
 from .base import LeaderOption
 from .can_common import STAR_LEADER_KIND, CanArmFamily, CanDeviceClasses
@@ -74,6 +75,28 @@ def _metal_leader_available() -> bool:
 class MetalFamily(CanArmFamily):
     recording_realign_speed_deg_s = 60.0
     recording_home_speed_deg_s = 400.0 * 360.0 / 4096.0
+    # Limits on a following joint's target, per joint. A CAN trace of a supply
+    # drop-out mid-teleop showed the big joints at up to 321 deg/s and braking
+    # at ~1300 deg/s^2 just before every motor rebooted. 280 deg/s still tracks
+    # fast leader motion. Acceleration is unlimited for now (feel testing); an
+    # 800 deg/s^2 cap was tried and did not by itself prevent the drop-out.
+    follower_max_speed_deg_s = 280.0
+    follower_max_accel_deg_s2 = math.inf
+    # The gripper follows the leader unlimited: it is light, and its grip is
+    # governed by the holding-torque controller (metal_gripper_hold.py), not by
+    # how fast its target moves.
+    follower_speed_cap_exempt = ("gripper",)
+
+    def prepare_leader_following(self, robot):
+        from ..follower_speed_cap import install_follower_speed_cap
+        from ..maker_rest_pose import maker_follower_arms
+
+        install_follower_speed_cap(
+            maker_follower_arms(robot),
+            self.follower_max_speed_deg_s,
+            self.follower_max_accel_deg_s2,
+            exempt=self.follower_speed_cap_exempt,
+        )
 
     # Zero is upright: final teardown still returns to the captured resting pose.
     def hold_recording_home(self, targets):

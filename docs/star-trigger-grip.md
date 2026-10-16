@@ -20,9 +20,15 @@ servo the opposite way to the stock lever, which is why the lever preset barely 
 the jaw: the pull sat outside the lever's mapped band and the jaw only snapped between
 closed and open where the driver's 360° unwrap window flipped branches, near -150°.
 
+Not every trigger build turns the servo that way. Two units measured on September 27,
+2026 read positive when pulled (closed 0°, pulled +40° to +48°), and the signed mapping
+clamped every pull to fully closed: the jaw never moved and nothing reported an error.
+Because the closed stop is a hard stop at 0°, the profile maps the jaw from the distance
+pulled in either direction, so both builds work with no setting to choose between them.
+
 Only the first half of the pull is used. The profile maps 0° to the Maker gripper's
-closed target (-2°) and -93.4° to its open target (-120°), with a scale of
-120 / 93.4 (about 1.2848). The rest of the pull, down to the far stop, clamps at fully
+closed target (-2°) and 93.4° of pull, read as -93.4° or +93.4°, to its open target
+(-120°), with a scale of 120 / 93.4 (about 1.2848). The rest of the pull, down to the far stop, clamps at fully
 open, because pulling the trigger all the way is physically awkward. Change
 `TRIGGER_USABLE_TRAVEL_DEG` in `makermodslab/star_gripper.py` to use more or less of
 the pull. Other joints and the regular Star profile keep their existing mappings.

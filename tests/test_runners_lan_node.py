@@ -260,28 +260,39 @@ def _started_runner(peer, clock, tmp_path, registry=None):
 # ---------------------------------------------------------------------------
 
 
-def test_localize_clears_dataset_root_and_resets_auto_device() -> None:
-    """The peer resolves the dataset from the Hub and detects its own
-    hardware; a host-local dataset root or the host's auto-detected device
-    (mps on a Mac) must never reach it."""
+def test_localize_clears_host_dataset_root() -> None:
+    """The peer resolves the dataset from the Hub; a host-local dataset root
+    must never reach it."""
     from makermodslab.runners.lan_node import localize_config_for_lan_node
 
-    for host_device in ("auto", "mps", "cuda", None):
-        config = _request(dataset_root="/Users/me/.cache/huggingface/lerobot/user/ds")
-        config.policy_device = host_device
-        localize_config_for_lan_node(config)
-        assert config.dataset_root is None
-        assert config.policy_device == "auto"
-
-
-def test_localize_keeps_an_explicit_cpu_choice() -> None:
-    """Force-CPU is the one device choice that is an instruction rather than a
-    hardware detection, so it travels."""
-    from makermodslab.runners.lan_node import localize_config_for_lan_node
-
-    config = _request(policy_device="cpu")
+    config = _request(dataset_root="/Users/me/.cache/huggingface/lerobot/user/ds")
     localize_config_for_lan_node(config)
-    assert config.policy_device == "cpu"
+    assert config.dataset_root is None
+
+
+@pytest.mark.parametrize("device", ["cuda", "mps", "cpu"])
+def test_localize_keeps_an_explicit_device(device: str) -> None:
+    """The host never stores its auto-detected device on the request (it is
+    resolved only into the trainer argv), so a concrete device on the config
+    is always the user's instruction — "cuda" for an RTX peer must travel,
+    not be silently rewritten to "auto"."""
+    from makermodslab.runners.lan_node import localize_config_for_lan_node
+
+    config = _request(policy_device=device)
+    localize_config_for_lan_node(config)
+    assert config.policy_device == device
+
+
+@pytest.mark.parametrize("device", ["auto", None, "", "tpu"])
+def test_localize_normalizes_a_non_explicit_device_to_auto(device: str | None) -> None:
+    """Anything that is not a concrete device the trainer knows becomes "auto",
+    so the peer's own trainer detects its hardware."""
+    from makermodslab.runners.lan_node import localize_config_for_lan_node
+
+    config = _request()
+    config.policy_device = device
+    localize_config_for_lan_node(config)
+    assert config.policy_device == "auto"
 
 
 def test_localize_rejects_resume_from_host_checkpoint() -> None:

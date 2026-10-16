@@ -98,6 +98,10 @@ PEER_LOST_GRACE_S = 120.0
 _SUBMIT_TIMEOUT_S = 30.0
 _POLL_TIMEOUT_S = 5.0
 
+# Concrete devices the trainer accepts as-is (train._resolve_device passes
+# them through); anything else on a lan_node config is normalized to "auto".
+_EXPLICIT_DEVICES = frozenset({"cuda", "mps", "cpu"})
+
 
 def localize_config_for_lan_node(config: TrainingRequest) -> None:
     """Strip host-machine specifics at the node-submission boundary, before
@@ -131,11 +135,14 @@ def localize_config_for_lan_node(config: TrainingRequest) -> None:
     # The peer resolves the dataset from the Hub by repo_id; a host-local
     # dataset root doesn't exist there.
     config.dataset_root = None
-    # The host's auto-detected device (mps on a Mac) is meaningless on the
-    # peer, whose hardware we don't know — reset to "auto" so the peer's own
-    # trainer detects it. An explicit "cpu" is an instruction, not a
-    # detection, so it travels.
-    if config.policy_device != "cpu":
+    # The host never stores a detected device on the request: "auto" is
+    # resolved only into the trainer argv (train._resolve_device), so a
+    # concrete "cuda"/"mps"/"cpu" here is always the user's instruction and
+    # travels unchanged — including one the peer can't honour (mps to a CUDA
+    # box), which the peer's trainer refuses loudly; that beats silently
+    # overriding it. Anything else (None, "auto", an unknown string) becomes
+    # "auto" so the peer's own trainer detects its hardware.
+    if config.policy_device not in _EXPLICIT_DEVICES:
         config.policy_device = "auto"
 
 

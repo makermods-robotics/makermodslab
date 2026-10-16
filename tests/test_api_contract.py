@@ -219,12 +219,19 @@ def test_no_new_routes_outside_api_v1():
 V1_ONLY_ROUTES: frozenset[str] = frozenset(
     [
         "GET /api/v1/system/wandb-credentials",
+        # A checkpoint's policy-config summary addressed by an inference
+        # policy_ref rather than a job id (the SDK's pre-start camera check).
+        "GET /api/v1/policy-config",
         # Live Metal gripper effort-controller status.
         "GET /api/v1/robots/{name}/gripper-status",
         "GET /api/v1/recording-preview/{camera_name}",
         # Per-episode task naming: the "naming" phase control verb. Born
         # versioned — the flat mount was frozen long before this feature.
         "POST /api/v1/recording-episode-task",
+        # Agent flows need an id-checked prompt, so a stale caller cannot
+        # command whichever recording happens to be current now.
+        "POST /api/v1/sessions/{session_id}/recording/episode-task",
+        "GET /api/v1/sessions/{session_id}/recording/status",
         # Multi-checkpoint publish: the training view's picker + background queue.
         # Legacy POST /models/upload stays the single-checkpoint synchronous push.
         "GET /api/v1/models/checkpoints",

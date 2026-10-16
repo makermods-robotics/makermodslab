@@ -1285,6 +1285,72 @@ def test_publish_start_spawn_failure_lands_on_error_not_running(monkeypatch) -> 
     assert "no threads left" in (status["error"] or "")
 
 
+def test_publish_manager_assigns_a_new_uuid_to_each_accepted_attempt(monkeypatch) -> None:
+    """Two publishes of the same job and repo remain distinguishable.
+
+    The manager keeps only the current slot, so no history is implied: the ID
+    changes when a later attempt replaces a terminal attempt and the status
+    response carries only that later ID.
+    """
+    from uuid import UUID
+
+    import makermodslab.models as m
+
+    class DeferredThread:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(m.threading, "Thread", DeferredThread)
+    manager = m.ModelUploadManager()
+
+    first = manager.start("run_same", "maker/same", [100])
+    first_id = first["publish_id"]
+    assert UUID(first_id).version == 4
+    assert manager.get_status()["publish_id"] == first_id
+
+    manager.state = "done"
+    second = manager.start("run_same", "maker/same", [100])
+    second_id = second["publish_id"]
+    assert UUID(second_id).version == 4
+    assert second_id != first_id
+    assert manager.get_status()["publish_id"] == second_id
+
+
+def test_publish_start_returns_its_own_id_if_a_fast_attempt_is_replaced(monkeypatch) -> None:
+    """The start reply must not reread the mutable slot after spawning.
+
+    A worker can finish before ``Thread.start`` yields back to the request
+    thread. Another request may then replace the terminal slot before the
+    first response is built; each caller must still receive its own ID.
+    """
+    import makermodslab.models as m
+
+    manager = m.ModelUploadManager()
+    replacement: dict = {}
+    starts = 0
+
+    class ImmediateReplacementThread:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            nonlocal starts
+            starts += 1
+            if starts == 1:
+                manager.state = "done"
+                replacement.update(manager.start("run_same", "maker/same", [100]))
+
+    monkeypatch.setattr(m.threading, "Thread", ImmediateReplacementThread)
+
+    first = manager.start("run_same", "maker/same", [100])
+
+    assert first["publish_id"] != replacement["publish_id"]
+    assert manager.get_status()["publish_id"] == replacement["publish_id"]
+
+
 def test_upload_defaults_to_final_checkpoint_only(registry, quiet_hub_reads) -> None:
     """No `steps` ⇒ the run's newest checkpoint, and nothing else — the
     pre-multi-checkpoint default an API caller can still rely on."""
@@ -3628,12 +3694,15 @@ def test_models_publish_endpoint_starts_a_queue(client, monkeypatch: pytest.Monk
     hold open."""
     import makermodslab.models as m
 
-    started = MagicMock(return_value={"started": True, "model_id": "run_x", "message": "ok"})
+    started = MagicMock(
+        return_value={"started": True, "publish_id": "publish-123", "model_id": "run_x", "message": "ok"}
+    )
     monkeypatch.setattr(m.model_upload_manager, "start", started)
 
     resp = client.post("/api/v1/models/publish", json={"id": "run_x", "steps": [100, 200]})
     assert resp.status_code == 200
     assert resp.json()["started"] is True
+    assert resp.json()["publish_id"] == "publish-123"
     started.assert_called_once_with("run_x", None, [100, 200])
 
 
@@ -3654,6 +3723,7 @@ def test_models_publish_status_endpoint(client) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["state"] in {"idle", "running", "done", "error"}
+    assert "publish_id" in body
     assert "done_steps" in body and "total" in body
 
 

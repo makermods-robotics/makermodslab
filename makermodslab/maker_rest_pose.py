@@ -334,7 +334,9 @@ def return_maker_to_pose(
         logger.error(f"Could not read the {label} to plan its return: {e}")
         return False, "unreadable"
 
-    targets = {m: v for m, v in pose.items() if m in start}
+    if any(m not in start or not math.isfinite(start[m]) or not math.isfinite(v) for m, v in pose.items()):
+        return False, "missing or invalid joint feedback"
+    targets = dict(pose)
     if not targets:
         logger.warning(f"None of the {label}'s recorded joints are readable; skipping the return")
         return False, "no-pose"
@@ -402,7 +404,9 @@ def return_maker_to_pose(
                 current = _read_pose(device)
             except Exception:
                 continue  # transient CAN read miss; keep holding and re-read
-            deltas = {m: abs(current[m] - v) for m, v in targets.items() if m in current}
+            if any(m not in current or not math.isfinite(current[m]) for m in targets):
+                return False, "missing or invalid joint feedback"
+            deltas = {m: abs(current[m] - v) for m, v in targets.items()}
             if not deltas:
                 return False, "no-pose"
             motor, delta = max(deltas.items(), key=lambda kv: kv[1])
