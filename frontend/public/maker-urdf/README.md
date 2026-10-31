@@ -5,11 +5,9 @@ animate the teleop panel's 3D model for a Maker-arm session.
 
 ## Provenance
 
-Vendored from the official SDK,
+Copied from the official SDK,
 [`makermods-robotics/maker-arm-sdk`](https://github.com/makermods-robotics/maker-arm-sdk),
-`urdf/maker_arm/` at commit `b30d05a` ("Add Maker Arm URDF with symmetric
-sliding gripper", 2026-09-05), content unchanged (only a trailing newline
-added to `robot.urdf`, per this repo's end-of-file hook):
+`urdf/maker_arm/` at the commit pinned in `tools/sync_maker_urdf.py`:
 
 - `robot.urdf` — six revolute arm joints (`link_002_joint`..`link_007_joint`)
   plus a symmetric sliding gripper: `gripper_left_joint` (prismatic, 0 –
@@ -21,8 +19,8 @@ added to `robot.urdf`, per this repo's end-of-file hook):
   inertia estimates, the gripper motor-endpoint capture, and the remaining
   validation checks.
 
-Keep these in sync with the SDK on its next URDF revision rather than editing
-them here.
+Don't edit them here. To take a new SDK revision, bump `SDK_COMMIT` and run
+`python tools/sync_maker_urdf.py`; CI fails if the copy differs.
 
 ## What the app does with it, without touching the file
 
