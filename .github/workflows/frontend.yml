@@ -91,3 +91,6 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Maker URDF matches maker-arm-sdk
+        run: python3 ../tools/sync_maker_urdf.py --check
