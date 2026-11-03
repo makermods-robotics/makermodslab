@@ -27,7 +27,7 @@ import contextlib
 import logging
 import math
 import time
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET  # nosec B405 - only parses the URDF this package ships
 from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
@@ -88,7 +88,7 @@ class GravityModel:
     """The chain and link weights of one URDF."""
 
     def __init__(self, urdf_path: Path) -> None:
-        root = ET.parse(urdf_path).getroot()
+        root = ET.parse(urdf_path).getroot()  # nosec B314 - the URDF this package ships
         joints = {joint.find("child").get("link"): joint for joint in root.findall("joint")}
 
         def inertial(name: str) -> tuple[float, np.ndarray]:
