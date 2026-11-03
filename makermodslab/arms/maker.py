@@ -40,6 +40,7 @@ class MakerFamily(CanArmFamily):
     # https://www.waveshare.com/wiki/ST3215_Servo
     recording_home_speed_deg_s = 400.0 * 360.0 / 4096.0
     recording_home_is_rest_pose = True
+    gravity_feedforward_scale = 1.0
     id = "maker"
     label = "Maker Arm v1"
     short_label = "Maker"

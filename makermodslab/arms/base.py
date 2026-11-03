@@ -323,6 +323,8 @@ class ArmFamily(ABC):
     recording_home_speed_deg_s: float | None = None
     # Upright zero poses must not replace the captured torque-off resting pose.
     recording_home_is_rest_pose: bool = False
+    # Gravity feed-forward on the follower's MIT frames, 0..1.2; 0 sends none.
+    gravity_feedforward_scale: float = 0.0
 
     def hold_recording_home(self, targets):
         """Finalize a completed follower-only home return before no-send reset."""
