@@ -222,6 +222,27 @@ def test_torque_on_restarts_the_ease():
     assert send_frame(bus, RAISED) == [0.0] * 6
 
 
+def test_disabling_one_joint_leaves_the_others_their_torque():
+    bus, clock, _ = rig()
+    warm_up(bus, clock, RAISED)
+    bus.disable_torque("shoulder_pan")
+    clock.now += 0.01
+    sent = send_frame(bus, RAISED)
+    assert sent[0] == 0.0
+    assert sent[2] == pytest.approx(full_nm(RAISED)[2])
+
+
+def test_enabling_one_joint_restarts_only_its_own_ease():
+    bus, clock, _ = rig()
+    warm_up(bus, clock, RAISED)
+    bus.enable_torque("wrist_flex")
+    clock.now += 0.01
+    bus.measure(RAISED, clock.now)
+    sent = send_frame(bus, RAISED)
+    assert sent[2] == pytest.approx(full_nm(RAISED)[2])
+    assert sent[3] == pytest.approx(full_nm(RAISED)[3] * 0.1)
+
+
 def test_frames_sent_before_torque_on_or_after_torque_off_carry_nothing():
     bus, clock, _ = rig(enable=False)
     assert send_frame(bus, RAISED) == [0.0] * 6
@@ -302,12 +323,12 @@ def test_scale_out_of_range_is_refused(scale):
 def test_gripper_frames_carry_nothing_and_do_not_start_a_frame():
     bus, clock, feedforward = rig()
     warm_up(bus, clock, RAISED)
-    level = feedforward._level
+    level = feedforward._levels["elbow_flex"]
     bus.calls.clear()
     for _ in range(3):
         bus.write("Goal_Position", "gripper", -10.0)
     assert [c[0] for c in bus.calls] == ["write"] * 3
-    assert feedforward._level == level
+    assert feedforward._levels["elbow_flex"] == level
     assert "gripper" not in feedforward._retained
 
 
@@ -343,7 +364,7 @@ def test_no_goal_and_no_feedback_means_no_torque():
     clock.now += 0.05
     bus.calls.clear()
     bus.write("Goal_Position", "elbow_flex", 50.0)
-    assert feedforward._level > 0
+    assert feedforward._levels["elbow_flex"] > 0
     assert torques(bus.calls) == [0.0]
 
 
@@ -389,10 +410,10 @@ def test_a_zero_effort_sync_write_leaves_nothing_to_clear():
 def test_gripper_torque_toggles_leave_the_arm_alone():
     bus, clock, feedforward = rig()
     warm_up(bus, clock, RAISED)
-    level = feedforward._level
+    level = feedforward._levels["elbow_flex"]
     bus.enable_torque("gripper")
     bus.disable_torque("gripper")
-    assert feedforward._level == level
+    assert feedforward._levels["elbow_flex"] == level
     assert send_frame(bus, RAISED)[2] != 0.0
 
 

@@ -169,11 +169,10 @@ class GravityFeedforward:
         self.model = model
         self.scale = scale
         self._clock = clock
-        self._energized = False
+        self._levels: dict[str, float] = {}  # the energized arm joints' ease-in, from 0 at their torque-on
         self._goals: dict[str, float] = {}
         self._written: set[str] = set()
         self._retained: dict[str, float] = {}
-        self._level = 0.0
         self._frame_t: float | None = None
         self._frame_nm: np.ndarray | None = None
         self._bus_write = bus.write
@@ -189,7 +188,8 @@ class GravityFeedforward:
         now = self._clock()
         if self._frame_t is not None:
             step = min(RAMP_STEP_S, max(0.0, now - self._frame_t))
-            self._level = min(1.0, self._level + step / RAMP_S)
+            for motor, level in self._levels.items():
+                self._levels[motor] = min(1.0, level + step / RAMP_S)
         self._frame_t = now
         self._written.clear()
         self._frame_nm = None
@@ -221,18 +221,19 @@ class GravityFeedforward:
     def _torques(self, pose: list[float]) -> np.ndarray:
         if not all(math.isfinite(q) for q in pose):
             return np.zeros(6)
-        nm = self.model.holding_nm(pose) * self.scale * self._level
+        levels = np.array([self._levels.get(motor, 0.0) for motor in ARM_JOINTS])
+        nm = self.model.holding_nm(pose) * self.scale * levels
         return np.clip(np.nan_to_num(nm, nan=0.0, posinf=0.0, neginf=0.0), -LIMIT_NM, LIMIT_NM)
 
     def torque(self, motor: str, goal: float) -> float:
         """The torque for this joint's frame, advancing the frame and the ease-in."""
         self._goals[motor] = float(goal)
-        if not self._energized:
+        if motor not in self._levels:
             return 0.0
         if self._frame_t is None or motor in self._written:
             self._start_frame()
         self._written.add(motor)
-        if self._level == 0.0:
+        if self._levels[motor] == 0.0:
             return 0.0
         joint = ARM_JOINTS.index(motor)
         if self._frame_nm is not None:
@@ -262,18 +263,20 @@ class GravityFeedforward:
                 self._retained.pop(motor, None)
         return result
 
-    def _reset_ease(self) -> None:
-        self._level = 0.0
-        self._frame_t = None
+    def _forget_frame(self, motors) -> None:
         self._frame_nm = None
-        self._written.clear()
+        self._written.difference_update(motors)
+        if not self._levels:
+            self._frame_t = None
 
     def _enable_torque(self, motors=None, num_retry: int = 0) -> None:
         result = self._bus_enable_torque(motors, num_retry=num_retry)
-        if any(motor in ARM_JOINTS for motor in self.bus._get_motors_list(motors)):
-            self._reset_ease()
-            self._goals.clear()
-            self._energized = True
+        joints = [motor for motor in self.bus._get_motors_list(motors) if motor in ARM_JOINTS]
+        if joints:
+            for motor in joints:
+                self._levels[motor] = 0.0
+                self._goals.pop(motor, None)
+            self._forget_frame(joints)
         return result
 
     def _disable_torque(self, motors=None, num_retry: int = 0) -> None:
@@ -286,9 +289,11 @@ class GravityFeedforward:
                 gains = self.bus._gains[motor]
                 with contextlib.suppress(Exception):
                     self.bus._mit_control(motor, gains["kp"], gains["kd"], goal, 0, 0)
-        if any(motor in ARM_JOINTS for motor in targets):
-            self._reset_ease()
-            self._energized = False
+        joints = [motor for motor in targets if motor in ARM_JOINTS]
+        if joints:
+            for motor in joints:
+                self._levels.pop(motor, None)
+            self._forget_frame(joints)
         return self._bus_disable_torque(motors, num_retry=num_retry)
 
 
