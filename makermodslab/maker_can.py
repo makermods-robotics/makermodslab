@@ -49,6 +49,25 @@ def _install_gripper_open_limit():
         cls.__init__ = make(original)
 
 
+def _install_gravity_feedforward():
+    """Fit every MakerFollower's bus with gravity feed-forward as it is built."""
+    from lerobot.robots.maker_follower import MakerFollower
+
+    from .maker_gravity import attach_to_follower
+
+    original = MakerFollower.__init__
+    if getattr(original, "_makermodslab_gravity", False):
+        return
+
+    @wraps(original)
+    def init(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        attach_to_follower(self)
+
+    init._makermodslab_gravity = True
+    MakerFollower.__init__ = init
+
+
 def _install_gs_usb_connect(bus_cls, label, wrap_errors=None, trace=False):
     """Route ``bus_cls.connect`` through the exact-serial gs_usb transport.
 
@@ -115,6 +134,7 @@ def install():
     from lerobot.motors.robstride import RobstrideMotorsBus
 
     _install_gripper_open_limit()
+    _install_gravity_feedforward()
     _install_gs_usb_connect(RobstrideMotorsBus, "RobStride")
     # The Metal follower and the gravity-compensated Metal leader both open
     # DamiaoMotorsBus, so this one hook covers either side on a gs_usb adapter.
