@@ -175,12 +175,16 @@ def _spec_extras(spec: str) -> set[str]:
     return set(m.group("extras").split(","))
 
 
-def test_cloud_lerobot_spec_carries_the_pyproject_pinned_ref() -> None:
+def test_cloud_lerobot_spec_carries_the_pyproject_pinned_ref(monkeypatch: pytest.MonkeyPatch) -> None:
     """The container install spec must reference the exact ref pinned in
     pyproject.toml — never a hardcoded second copy, never :latest."""
     from makermodslab.runners.hf_cloud import cloud_lerobot_spec
+    from makermodslab.utils import system
 
     pin = _pyproject_lerobot_pin()
+    # Model metadata for this checkout without relying on the developer venv,
+    # which may be installed from another worktree or an older revision.
+    monkeypatch.setattr(system, "requires", lambda name: [pin])
     ref = pin.rsplit("@", 1)[1]  # the sha at the end of git+https://…@<sha>
     spec = cloud_lerobot_spec("act")
     assert ref in spec
@@ -220,8 +224,12 @@ def test_cloud_lerobot_spec_falls_back_to_pyproject_when_metadata_missing(
     """Running from a source tree without installed MakerMods Lab metadata must still
     derive the pin — from pyproject.toml directly."""
     from makermodslab.runners import hf_cloud
+    from makermodslab.utils import system
 
-    monkeypatch.setattr(hf_cloud, "requires", lambda name: None)
+    # _pinned_lerobot_requirement lives in utils.system (utils.system is a leaf
+    # module; hf_cloud imports it, never the reverse), so the metadata lookup
+    # it resolves is system's, not hf_cloud's.
+    monkeypatch.setattr(system, "requires", lambda name: None)
     pin = _pyproject_lerobot_pin()
     ref = pin.rsplit("@", 1)[1]
     assert ref in hf_cloud.cloud_lerobot_spec("act")
